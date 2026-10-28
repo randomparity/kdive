@@ -145,8 +145,10 @@ def test_recovery_conflict_is_recorded_and_resolution_admitted(
 ) -> None:
     def arm(db_url: str, _call: ToolCall) -> AuthorityBody:
         async def body(system: AuthoritySystem) -> dict[str, object]:
-            await authority_faults.recorded_conflict(system, db_url)
-            raise ScenarioStop(Outcome.BLOCKED, authority_faults.CONFLICT_TEARDOWN_BLOCKED)
+            observed = await authority_faults.recorded_conflict(system, db_url)
+            if provider == "remote-libvirt":
+                raise ScenarioStop(Outcome.BLOCKED, authority_faults.CONFLICT_TEARDOWN_BLOCKED)
+            return observed
 
         return body
 

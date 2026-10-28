@@ -208,6 +208,151 @@ it by byte length, naming that length and the limit. Values this protocol constr
 `release`, the digests, the UUIDs, the nonce — have equal byte and character lengths, so their
 bounds are unaffected.
 
+### Amendment (2026-10-27): PREPARE stops the System, and the proof precedes `createXML` (#3347)
+
+The worker's shut-off proof was only evaluated after the appliance ran, and nothing stopped a
+running System, so a `ready` System made qemu fail with `Failed to get "write" lock` on its
+overlay. The authority-host PREPARE now owns the stop, as ADR-0583 describes for quiescing:
+
+- Before any other provider mutation, PREPARE reads the System's power and records it in the
+  provider-host store, then destroys a running domain and requires it inactive. The record is
+  written ahead of the destroy and the first record wins, so a retry that finds the domain already
+  stopped keeps the power the System had. The record is scoped to the activation, so it is not
+  re-read for a later activation. The remote recovery record takes `prior_power` from this record,
+  falling back to a live read when none exists.
+- The stop is a `destroy`, as the external-boot stop is: verified inactivity, not guest
+  cooperation, is the precondition. A bounded clean shutdown first would spare the guest an unclean
+  stop and is left as a follow-up.
+- Preconditions that need no libvirt write (fixed appliance and root identity, staging, deadline)
+  are checked before the stop. A domain that cannot be read is refused with
+  `refused-before-mutation`, which the preparation operation now maps to `remote-module-refused` as
+  the lifecycle operation already did. A failure after `destroy` was issued is an infrastructure
+  failure instead, because the System's power may have changed.
+- `run_or_adopt_appliance` runs the attachment inspection before `createXML`, so the appliance
+  is unreachable while the owning System is active, whichever caller reaches it.
+
+The stop is provider-private; no journal phase or wire field changes. Restoring a previously
+running System after a failed PREPARE is not part of this amendment (#3348): until it lands, a
+failed PREPARE leaves that System stopped.
+
+### Amendment (2026-10-27): a failed PREPARE restores the System's power and is abandoned (#3348)
+
+The previous amendment left a failed PREPARE with the System stopped, its completion latched
+`failed-after-mutation`, and its authority journal operation unresolved at `mutation-started`.
+The next PREPARE was then refused `provider-conflict` and the System teardown `journal-conflict`.
+The authority host now settles the failure:
+
+- When the appliance run raises, the host reads the power recorded ahead of the stop and starts a
+  System that was `running`. An `inactive` record, or a System that is already running, changes
+  nothing. The start requires the attachment inspection to show the appliance absent and the
+  System shut off and exclusive, so a System is never started while an appliance may hold its
+  root.
+- Every failure of PREPARE after admission is handled this way: a refusal before the stop (no
+  record exists, so there is nothing to restore), a stop that failed after `destroy`, and an
+  appliance failure. A successful restore clears the power record, so the next attempt observes the
+  System again instead of trusting a record the operator may have outlived.
+- A restored System leaves no completion behind, so the failure does not latch. The host raises the
+  failure with `completion` unchanged (`failed-after-mutation` by default, `refused-before-mutation`
+  when the appliance host said so) plus an `abandoned` detail. The wire reason is unchanged.
+- The authority service sees `abandoned` and closes the PREPARE operation through the existing
+  anchors, `provider-returned`, `observed` and `terminal`, with a `source` observation and outcome:
+  nothing was adopted. A replay of the same operation reports `failed-after-mutation` again
+  without running the host. A retry in a new generation then finds no unresolved operation, and the
+  module-attempt obligation keeps its nonce, so it resumes the same attempt.
+- When the restore fails, the failure stays latched, the journal operation stays unresolved, and
+  the System is left stopped for the operator, as before. A settle that fails is logged and never
+  replaces the provider's failure.
+
+A PREPARE the authority refuses at its pre-stop recheck (`system_held`, or `provider_conflict`
+for an unreadable answer) is settled the same way before the refusal is raised, because the
+operation was already anchored; a `superseded` answer is not settled. The refusal reason on the
+wire is unchanged, and a replay of a refused operation is refused again without running the host.
+An execute the host had already started, including one whose stop that same request recorded
+before a crash, is never refused; the power record is per activation and survives a successful
+PREPARE, so a record written by another request does not count. The record is written ahead of the stop, so a
+crash between the record and the `destroy` also counts as started, and a record left by a build
+that predates the owner file counts as not started. A replay of a refused operation
+whose holders have since cleared is answered `provider_conflict`: the host is never run, and
+[ADR-0714](0714-repeated-provider-conflict-ends-the-external-boot-job.md) counts it as a repeat. A cancellation while the stop itself is in flight is not covered and behaves
+as before. A failure with no recorded power (nothing was stopped) is reported
+`refused-before-mutation`.
+
+Two further refusals left the same unresolved operation and are closed the same way. A PREPARE the
+authority itself refuses after anchoring it, because the attempt-receipt gate answers `superseded`,
+is settled before the refusal is raised. Only an operation the same call anchored is settled: an
+idempotent re-begin may belong to a live execute, and a transient `begin` failure (a derive error or
+timeout) stays unresolved and retryable as before. The remote adapter also
+implements `adopt_preparation`, delegating to the coordinator without the admissible-generation
+tracker the local adapter keeps (the rest of the remote adapter has none), so a retry generation adopts the
+first generation's MATERIALIZE receipt instead of being refused `provider-conflict`. A retry
+generation after the first still cannot open its module attempt: the receipt gate requires a
+`materialize`/`result_committed` audit row for the current generation, which an adopted
+materialization does not write. That gate is tracked as #3370; until it lands a failed PREPARE is
+not retried, and the job exhausts with nothing left unresolved.
+
+No journal phase, wire field or schema changes.
+
+### Amendment (2026-10-27): the host formats scratch, the appliance finds a btrfs root, and failures reach the console (#3363)
+
+A live remote PREPARE ended with "did not produce a durable result" and no cause in the log. Three
+gaps in this record's own contract explained it:
+
+- **Scratch was never formatted.** The record said the host provides "a newly created
+  capacity-bounded scratch volume" and the appliance mounts it as ext4, but nothing made it ext4. The
+  host now formats it when it creates the volume: it builds a sparse ext4 image with `mkfs.ext4`
+  and uploads only the allocated extents, with the block that holds the superblock last. A retry
+  never rewrites a scratch whose first block carries the ext4 magic, because it may hold a durable
+  phase. A zero first block proves no phase was ever written (the superblock goes last), so the
+  retry finishes the format after the same detachment proof a volume delete needs; any other first
+  block is a conflict and nothing is written. The format assumes one live preparation per attempt, as
+  the source-volume upload and its repair already do. The filesystem is built without `orphan_file`,
+  so an appliance kernel older than 6.1 can mount it. The result reader is unchanged: a freshly formatted
+  scratch has no `result-v1.json`, which it already reports as absent.
+- **Root discovery missed btrfs subvolume layouts.** The appliance accepted a candidate only when
+  its top level held `lib/modules`. Fedora images keep the System root in a `root` subvolume under
+  an empty top level, so root discovery failed before scratch was mounted. For btrfs the appliance
+  now also tries the `root` subvolume of a candidate whose top level has no `lib/modules`, and the
+  exactly-one-match rule across all candidates is unchanged.
+- **The appliance wrote nothing to its console.** It now writes `phase=accepted` once the operation
+  document is read, and `error_code=<code>` for the failure it reports. These are the keys the host
+  console filter already keeps. When no result is read, the host logs the bounded, redacted,
+  filtered console tail.
+
+Live runs on the remote lane found five more gaps between what the provider rendered and what the
+appliance needs, all fixed here:
+
+- **The root overlay reached the guest as a raw disk.** The domain carried no `<driver>`, so the
+  System's qcow2 overlay was exposed unparsed. The direct-kernel domain now sets the driver as the
+  reference definition does (root `qcow2`, source and scratch `raw`, `cache=none`, `io=native`), and
+  adoption requires exactly that.
+- **The x86_64 domain had ACPI off.** libvirt then starts q35 with `acpi=off`, where the guest sees
+  no virtio devices behind the PCIe root ports and cannot power off. The x86_64 domain now carries
+  `<features><acpi/></features>`, as the reference does, and adoption requires exactly that; ppc64le
+  carries no features.
+- **A usr-merged root has `/lib` as the symlink `usr/lib`.** The appliance walks the module directory
+  with `O_NOFOLLOW`, so it refused such a root. It now resolves exactly the relative target `usr/lib`
+  to `usr/lib/modules`; every other symlink in the walk is still refused.
+- **The appliance start relabelled the shared base.** The System's qcow2 overlay is backed by the
+  authority's staged base, and libvirt relabels a backing file at every domain start, which moves
+  its ctime and trips the authority's staged-base check (ADR-0623). The appliance root disk now
+  names that base explicitly with the same `selinux` `relabel="no"` seclabel the System domain
+  uses; the host reads the base from the root volume's libvirt XML and refuses a path that is not
+  an absolute normalized qcow2 base. Adoption accepts libvirt's empty backing terminator on every
+  disk and, on the root only, exactly that typed backing.
+- **The console wait outlived the appliance.** The console stream of a finished domain keeps
+  answering "would block", so the host waited the full 30 s and then reported no result although the
+  durable result was on scratch. The wait now ends when the domain is gone, and the scratch result is
+  read as designed.
+
+These changes assume two domain settings that the appliance-console change (#3361) renders: a hash
+seed on the kernel command line and an entropy device. Without them the default guest cannot start
+the appliance's Python.
+
+The appliance image changes with `appliance.py`, so its installed manifest digest, which is the
+appliance identity in operation and result documents, changes too; it must be rebuilt and
+re-installed (`deploy/remote_module_appliance/README.md`, "Rebuilding the image"). No wire,
+document schema or journal phase changes.
+
 ## Consequences
 
 - Remote offline mutation gains one operator-provisioned appliance image per supported hypervisor

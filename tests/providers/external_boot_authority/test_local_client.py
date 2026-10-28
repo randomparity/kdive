@@ -422,6 +422,7 @@ async def test_local_transport_rejects_malformed_or_truncated_response(
         ("provider-conflict", ErrorCategory.INFRASTRUCTURE_FAILURE, False),
         ("provider-not-configured", ErrorCategory.INFRASTRUCTURE_FAILURE, False),
         ("provider-failure", ErrorCategory.INFRASTRUCTURE_FAILURE, False),
+        ("system-held", ErrorCategory.TRANSPORT_CONFLICT, True),
         ("configuration-error", ErrorCategory.CONFIGURATION_ERROR, True),
     ],
 )
@@ -460,6 +461,12 @@ async def test_local_sender_preserves_closed_peer_rejections(
             await sender.health(deadline=asyncio.get_running_loop().time() + 2)
     assert caught.value.category is category
     assert caught.value.terminal is terminal
+
+
+def test_a_held_system_refusal_is_reported_as_refused_before_mutation() -> None:
+    from kdive.jobs.authority_sender import _failure
+
+    assert _failure("system-held").details == {"completion": "refused-before-mutation"}
 
 
 def test_sender_rejects_unapproved_host_diagnostic_field() -> None:

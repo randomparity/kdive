@@ -73,3 +73,33 @@ These ADR-0622 properties are unchanged:
 - **Saturate the provider offload pool.** verified: `_OFFLOAD_CAPACITY = 4` is a non-blocking
   admission (`src/kdive/providers/local_libvirt/external_boot_authority.py`, at `b2d93172e`).
   Filling it depends on timing, which ADR-0622 rejected.
+
+### Amendment (2026-10-27): the remote authority finalizes and quarantines cleanup (#3326)
+
+This amendment replaces the Consequences bullet "The remote authority has no finalizer, so this
+checkpoint never fires there". The remote-libvirt authority now fires the checkpoint and
+publishes a quarantine row like the local one.
+
+- After release cleanup, `commit_cleanup` records a private `cleanup-quarantine` receipt in the
+  module store, named by the recovery record's identity. It binds the operation identity, the
+  attempt and the anchored `mutation-started` journal sequence and digest.
+- `finalize` runs for `cleanup` only. It requires the receipt to equal the anchored proof, writes
+  a `cleanup-finalized` marker, then removes the recovery record, the indexes that name it and,
+  last, the receipt. It is repeatable until only the marker remains, and a missing receipt is a
+  no-op. A cleanup for another operation is refused before any provider call while a receipt
+  stands.
+- `cleanup_quarantine_inventory` reports the one unmanaged `recovery-record` observation whose
+  operation identity and attempt equal the request's. Any other receipt is a conflict.
+- The remote adapter serves `observe`, `delete` and `adopt` for `recovery-record` under digest
+  fences. `delete` finalizes the record. Other object kinds are refused, not routed elsewhere.
+- The remote branch of the authority host builds the orphan service over the remote adapter, not
+  the local one.
+- The marker keeps a finalized cleanup distinguishable from a record that never existed, so a
+  later cleanup `observe` classifies `absent`, as it did while the record remained. It also
+  locates the receipt once the recovery index is gone. The object port and inventory report the
+  receipt actually on disk, whatever the marker says, so an interrupted finalize never hides
+  residue. System teardown already treats an absent record as `recovery_absent`.
+
+### Amendment (2026-10-27): remote finalize also removes the activation's other files (#3333)
+
+After the marker, remote `finalize` removes the activation's remaining per-activation files (terminal, restored, prior-power, preparation, materialization, lifecycle and request records) before the recovery record, keeping the System `teardown` record. The marker is canonical JSON carrying the module volumes, the boot artifact refs and the PREPARE nonce, so System teardown proves the same set absent after finalize; a malformed marker, or a marker from before it carried refs once the terminal record is gone, makes teardown refuse rather than prove nothing, and nothing rewrites such a marker (it exists only from the unreleased #3367 build). A later read, stage or prepare for a finalized activation raises `RemoteCleanupFinalizedError`.

@@ -491,6 +491,60 @@ def test_ansible_installs_only_the_selected_supported_architectures() -> None:
     assert "remote_libvirt_module_appliance_enabled | bool" in site
 
 
+def test_appliance_install_dir_carries_a_static_virt_content_label() -> None:
+    """A confined svirt_t qemu cannot read the generic var_lib_t the install tree defaults to."""
+    tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text(encoding="utf-8"))
+    names = [task["name"] for task in tasks]
+    by_name = {task["name"]: task for task in tasks}
+    probe = by_name["Read the SELinux mode for the module-appliance image label"]
+    rule = by_name["Install the module-appliance image virt_content_t fcontext rule"]
+    relabel = by_name["Relabel the module-appliance image tree"]
+    readback = by_name["Read back the module-appliance image labels"]
+    refuse = by_name["Refuse a module-appliance image qemu cannot read"]
+    selinux_enabled = (
+        "remote_libvirt_module_appliance_selinux_mode.stdout | default('') "
+        "in ['Enforcing', 'Permissive']"
+    )
+
+    assert probe["ansible.builtin.command"]["argv"] == ["getenforce"]
+    assert probe["changed_when"] is False
+    assert probe["failed_when"] is False
+    assert rule["community.general.sefcontext"] == {
+        "target": "{{ remote_libvirt_module_appliance_install_dir | regex_escape }}(/.*)?",
+        "setype": "virt_content_t",
+        "state": "present",
+    }
+    assert relabel["ansible.builtin.command"]["argv"] == [
+        "restorecon",
+        "-R",
+        "-v",
+        "{{ remote_libvirt_module_appliance_install_dir }}",
+    ]
+    assert "Relabeled" in relabel["changed_when"]
+    assert readback["ansible.builtin.command"]["argv"] == [
+        "find",
+        "{{ remote_libvirt_module_appliance_install_dir }}",
+        "!",
+        "-context",
+        "*:virt_content_t:*",
+    ]
+    assert readback["changed_when"] is False
+    assert refuse["ansible.builtin.assert"]["that"] == [
+        "remote_libvirt_module_appliance_label_readback.stdout | length == 0"
+    ]
+    for task in (rule, relabel, readback, refuse):
+        assert selinux_enabled in task["when"]
+    assert (
+        names.index(probe["name"])
+        < names.index(rule["name"])
+        < names.index("Create the read-only module-appliance image directory")
+        < names.index("Extract the verified selected module-appliance bundles")
+        < names.index(relabel["name"])
+        < names.index(readback["name"])
+        < names.index(refuse["name"])
+    )
+
+
 def test_installer_and_both_architecture_templates_match_the_fixed_consumer_root() -> None:
     expected = Path("/var/lib/kdive/remote-module-appliance/v1")
     consumer = next(
@@ -564,14 +618,18 @@ def test_appliance_devtmpfs_mount_allows_its_device_nodes(
     assert mounts[0] == ("devtmpfs", Path("/dev"), "devtmpfs", 2 | 8)
 
 
+@pytest.mark.parametrize("usr_merged", [False, True])
 def test_capture_install_and_restore_round_trip(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, usr_merged: bool
 ) -> None:
     appliance = _module()
     root = tmp_path / "root"
     source = tmp_path / "source"
     scratch = tmp_path / "scratch"
     release = str(_operation()["release"])
+    if usr_merged:
+        (root / "usr" / "lib" / "modules").mkdir(parents=True)
+        (root / "lib").symlink_to("usr/lib")
     old_tree = root / "lib" / "modules" / release
     new_tree = source / "modules"
     old_tree.mkdir(parents=True)
@@ -1306,3 +1364,260 @@ def test_preacceptance_shutdown_failure_is_closed_and_identity_free() -> None:
 @pytest.mark.parametrize("name", ["operation-v1.schema.json", "result-v1.schema.json"])
 def test_schema_documents_are_self_valid(name: str) -> None:
     Draft202012Validator.check_schema(_json(name))
+
+
+_Layouts = dict[tuple[str, str, bytes | None], bool]
+
+
+def _root_mount_double(
+    appliance: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    layouts: _Layouts,
+) -> list[tuple[str, str, int, bytes | None]]:
+    """Fake `_mount`: a candidate mounts when listed, and carries lib/modules when True."""
+    live: list[tuple[str, str, bytes | None]] = []
+    mounted: list[tuple[str, str, int, bytes | None]] = []
+
+    def mount(
+        source: str, _target: Path, filesystem: str, flags: int, data: bytes | None = None
+    ) -> None:
+        key = (source, filesystem, data)
+        if key not in layouts:
+            raise OSError(22, "invalid")
+        live[:] = [key]
+        mounted.append((source, filesystem, flags, data))
+
+    monkeypatch.setattr(appliance, "_mount", mount)
+    monkeypatch.setattr(appliance, "_unmount", lambda _target: live.clear())
+    monkeypatch.setattr(
+        Path,
+        "is_dir",
+        lambda path: bool(live) and layouts[live[0]] and path == appliance.ROOT / "lib" / "modules",
+    )
+    return mounted
+
+
+def test_root_discovery_mounts_the_btrfs_root_subvolume(monkeypatch: pytest.MonkeyPatch) -> None:
+    appliance = _module()
+    layouts: _Layouts = {
+        ("/dev/vda3", "btrfs", None): False,
+        ("/dev/vda3", "btrfs", b"subvol=root"): True,
+    }
+    mounted = _root_mount_double(appliance, monkeypatch, layouts)
+
+    appliance._mount_root()
+
+    assert mounted[-1] == ("/dev/vda3", "btrfs", 2 | 4 | 8, b"subvol=root")
+
+
+def test_root_discovery_prefers_a_top_level_btrfs_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    appliance = _module()
+    layouts: _Layouts = {
+        ("/dev/vda3", "btrfs", None): True,
+        ("/dev/vda3", "btrfs", b"subvol=root"): True,
+    }
+    mounted = _root_mount_double(appliance, monkeypatch, layouts)
+
+    appliance._mount_root()
+
+    assert mounted[-1] == ("/dev/vda3", "btrfs", 2 | 4 | 8, None)
+
+
+def test_root_discovery_refuses_a_subvolume_less_btrfs_without_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appliance = _module()
+    layouts: _Layouts = {("/dev/vda3", "btrfs", None): False}
+    _root_mount_double(appliance, monkeypatch, layouts)
+
+    with pytest.raises(appliance.ApplianceError, match="ROOT_DISCOVERY_FAILED"):
+        appliance._mount_root()
+
+
+def test_root_discovery_requires_exactly_one_match_across_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appliance = _module()
+    layouts: _Layouts = {
+        ("/dev/vda2", "ext4", None): True,
+        ("/dev/vda3", "btrfs", b"subvol=root"): True,
+        ("/dev/vda3", "btrfs", None): False,
+    }
+    _root_mount_double(appliance, monkeypatch, layouts)
+
+    with pytest.raises(appliance.ApplianceError, match="ROOT_DISCOVERY_FAILED"):
+        appliance._mount_root()
+
+
+def test_main_announces_the_accepted_phase_and_the_failure_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appliance = _module()
+    lines: list[str] = []
+
+    class PoweredOff(Exception):
+        pass
+
+    monkeypatch.setattr(appliance, "_mount", lambda *_args: None)
+    monkeypatch.setattr(appliance, "_mount_root", lambda: None)
+    monkeypatch.setattr(appliance, "_read_operation", lambda _path: _operation())
+    monkeypatch.setattr(
+        appliance,
+        "execute",
+        lambda _document: (_ for _ in ()).throw(appliance.ApplianceError("DEPMOD_FAILURE")),
+    )
+    monkeypatch.setattr(appliance, "_finish_mounts", lambda _document, error: error)
+    monkeypatch.setattr(appliance, "_announce", lines.append)
+    monkeypatch.setattr(appliance, "_poweroff", lambda _document: (_ for _ in ()).throw(PoweredOff))
+
+    with pytest.raises(PoweredOff):
+        appliance.main()
+
+    assert lines == ["phase=accepted", "error_code=DEPMOD_FAILURE"]
+
+
+def test_main_announces_a_root_discovery_failure_without_a_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appliance = _module()
+    lines: list[str] = []
+
+    class PoweredOff(Exception):
+        pass
+
+    monkeypatch.setattr(appliance, "_mount", lambda *_args: None)
+    monkeypatch.setattr(
+        appliance,
+        "_mount_root",
+        lambda: (_ for _ in ()).throw(appliance.ApplianceError("ROOT_DISCOVERY_FAILED")),
+    )
+    monkeypatch.setattr(appliance, "_finish_mounts", lambda _document, error: error)
+    monkeypatch.setattr(appliance, "_announce", lines.append)
+    monkeypatch.setattr(appliance, "_poweroff", lambda _document: (_ for _ in ()).throw(PoweredOff))
+
+    with pytest.raises(PoweredOff):
+        appliance.main()
+
+    assert lines == ["error_code=ROOT_DISCOVERY_FAILED"]
+
+
+def test_main_stays_silent_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    appliance = _module()
+    lines: list[str] = []
+
+    class PoweredOff(Exception):
+        pass
+
+    monkeypatch.setattr(appliance, "_mount", lambda *_args: None)
+    monkeypatch.setattr(appliance, "_mount_root", lambda: None)
+    monkeypatch.setattr(appliance, "_read_operation", lambda _path: _operation())
+    monkeypatch.setattr(appliance, "execute", lambda _document: {})
+    monkeypatch.setattr(appliance, "_finish_mounts", lambda _document, error: error)
+    monkeypatch.setattr(appliance, "_announce", lines.append)
+    monkeypatch.setattr(appliance, "_poweroff", lambda _document: (_ for _ in ()).throw(PoweredOff))
+
+    with pytest.raises(PoweredOff):
+        appliance.main()
+
+    assert lines == ["phase=accepted"]
+
+
+def test_announce_writes_one_line_to_the_console_and_tolerates_its_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    console = tmp_path / "console"
+    console.write_bytes(b"")
+    monkeypatch.setattr(appliance, "CONSOLE", str(console))
+
+    appliance._announce("error_code=FILESYSTEM_FAILURE")
+    monkeypatch.setattr(appliance, "CONSOLE", str(tmp_path / "absent"))
+    appliance._announce("phase=accepted")
+
+    assert console.read_bytes() == b"error_code=FILESYSTEM_FAILURE\n"
+
+
+def test_every_announced_console_line_survives_the_host_console_filter() -> None:
+    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+        _filter_console,
+    )
+
+    appliance = _module()
+    lines = ["phase=accepted", *[f"error_code={code}" for code in sorted(appliance.ERROR_CODES)]]
+
+    assert _filter_console("".join(f"{line}\n" for line in lines)) == "".join(
+        f"{line}\n" for line in lines
+    )
+
+
+def test_a_failing_announcement_does_not_skip_the_poweroff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appliance = _module()
+    powered: list[bool] = []
+
+    monkeypatch.setattr(appliance, "_mount", lambda *_args: None)
+    monkeypatch.setattr(
+        appliance,
+        "_mount_root",
+        lambda: (_ for _ in ()).throw(appliance.ApplianceError("ROOT_DISCOVERY_FAILED")),
+    )
+    monkeypatch.setattr(appliance, "_finish_mounts", lambda _document, error: error)
+    monkeypatch.setattr(
+        appliance, "_announce", lambda _line: (_ for _ in ()).throw(RuntimeError("console"))
+    )
+    monkeypatch.setattr(appliance, "_poweroff", lambda _document: powered.append(True))
+
+    with pytest.raises(RuntimeError, match="console"):
+        appliance.main()
+
+    assert powered == [True]
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["/usr/lib", "../outside", "usr/lib64", "usr/lib/"],
+)
+def test_module_paths_refuse_any_lib_symlink_but_the_usr_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    appliance = _module()
+    root = tmp_path / "root"
+    (root / "usr" / "lib" / "modules").mkdir(parents=True)
+    (root / "lib").symlink_to(target)
+    monkeypatch.setattr(appliance, "ROOT", root)
+
+    with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
+        appliance._module_paths(appliance._validate_operation(_operation()))
+
+
+def test_module_paths_resolve_the_usr_merged_root_under_usr_lib(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    root = tmp_path / "root"
+    (root / "usr" / "lib" / "modules").mkdir(parents=True)
+    (root / "lib").symlink_to("usr/lib")
+    monkeypatch.setattr(appliance, "ROOT", root)
+
+    destination, staged, _tree, _displaced = appliance._module_paths(
+        appliance._validate_operation(_operation())
+    )
+
+    assert destination.parent == root / "usr" / "lib" / "modules"
+    assert staged.parent == destination.parent
+
+
+def test_module_paths_refuse_a_symlinked_usr_under_a_valid_usr_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance = _module()
+    root = tmp_path / "root"
+    (tmp_path / "elsewhere" / "lib" / "modules").mkdir(parents=True)
+    root.mkdir()
+    (root / "usr").symlink_to(tmp_path / "elsewhere")
+    (root / "lib").symlink_to("usr/lib")
+    monkeypatch.setattr(appliance, "ROOT", root)
+
+    with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
+        appliance._module_paths(appliance._validate_operation(_operation()))

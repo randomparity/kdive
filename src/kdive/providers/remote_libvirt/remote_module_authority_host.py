@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import posixpath
 import stat
 import tempfile
 import xml.etree.ElementTree as ET
@@ -12,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import libvirt
 
@@ -24,6 +27,7 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.providers.ports.external_boot import ExternalBootArtifactStager, OpaqueProviderRef
 from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
+    PriorPower,
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
     RemoteModuleSystemTeardownRequestV1,
@@ -32,6 +36,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationResponseV1,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+    ApplianceOutcome,
     ApplianceRequest,
     run_or_adopt_appliance,
     teardown_remote_module_appliance,
@@ -72,7 +77,36 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     recovery_attempt_volumes,
     render_module_volume_name,
 )
+from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import parse_libvirt_xml
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
+
+_LOG = logging.getLogger(__name__)
+_MAX_BACKING_PATH_BYTES = 4096
+
+
+def _refused(message: str) -> CategorizedError:
+    return CategorizedError(
+        message,
+        category=ErrorCategory.CONFLICT,
+        details={"completion": "refused-before-mutation"},
+    )
+
+
+def _stop_failed(message: str) -> CategorizedError:
+    return CategorizedError(message, category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+
+def _log_missing_result(operation: RemoteModuleOperationV1, outcome: ApplianceOutcome) -> None:
+    """Record the appliance's bounded, redacted, protocol-filtered console tail."""
+    _LOG.warning(
+        "remote module appliance produced no durable result: system=%s run=%s "
+        "timed_out=%s console_tail=%r",
+        operation.system_id,
+        operation.run_id,
+        outcome.timed_out,
+        outcome.console_tail,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +260,9 @@ class ConcreteRemoteModuleAuthorityHost:
                 initrd=(
                     None if appliance.appliance_initrd is None else str(appliance.appliance_initrd)
                 ),
+                root_backing_path=self._root_backing_path(
+                    self._configuration.volumes.pool_name, operation.root_volume.key, absent_ok=True
+                ),
             ),
         )
 
@@ -317,7 +354,9 @@ class ConcreteRemoteModuleAuthorityHost:
         deadline: float,
     ) -> ApplianceRequest:
         configured = self._configuration.appliance
+        pool_name = self._configuration.volumes.pool_name
         return ApplianceRequest(
+            root_backing_path=self._root_backing_path(pool_name, root.name),
             name=f"kdive-module-{operation.system_id}-{operation.run_id}-{operation.operation_nonce}",
             architecture=configured.architecture,
             emulator_path=configured.emulator_path,
@@ -350,13 +389,57 @@ class ConcreteRemoteModuleAuthorityHost:
             invocation_deadline=deadline,
         )
 
-    def _execute(
+    def _root_backing_path(
+        self, pool_name: str, root_name: str, *, absent_ok: bool = False
+    ) -> str | None:
+        """The staged base the System's overlay is backed by, from the root volume's libvirt XML.
+
+        Inspections run during cleanup, when the root volume may already be gone; they pass
+        ``absent_ok`` and get ``None``, which no appliance domain's typed backing can match.
+        """
+        storage = self._configuration.volumes.storage
+        try:
+            volume = storage.storagePoolLookupByName(pool_name).storageVolLookupByName(root_name)
+            document = parse_libvirt_xml(volume.XMLDesc(0))
+        except libvirt.libvirtError as exc:
+            if absent_ok and exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
+                return None
+            raise CategorizedError(
+                "could not read the System root volume's backing store",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            ) from exc
+        except (ET.ParseError, ValueError) as exc:
+            raise CategorizedError(
+                "could not read the System root volume's backing store",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            ) from exc
+        path = document.findtext("./backingStore/path")
+        if path is None:
+            return None
+        if (
+            not path.startswith("/")
+            or path != path.strip()
+            or "\x00" in path
+            or len(path.encode()) > _MAX_BACKING_PATH_BYTES
+            or posixpath.normpath(path) != path
+        ):
+            raise CategorizedError(
+                "the System root volume's backing path is not a normalized absolute path",
+                category=ErrorCategory.CONFLICT,
+            )
+        backing_format = document.find("./backingStore/format")
+        if backing_format is None or backing_format.get("type") != "qcow2":
+            raise CategorizedError(
+                "the System root volume's backing store is not qcow2",
+                category=ErrorCategory.CONFLICT,
+            )
+        return path
+
+    def _preflight(
         self, admitted: AdmittedRemoteModulePreparation
-    ) -> RemoteModuleTerminalPreparationResponseV1:
-        request = admitted.request
-        deadline = admitted.local_deadline
-        operation = request.operation
-        volumes_config = self._configuration.volumes
+    ) -> tuple[ExternalBootArtifactStager, PreparedVolume]:
+        """Refuse what can be known without touching the System, before it is stopped."""
+        operation = admitted.request.operation
         appliance_config = self._configuration.appliance
         root = appliance_config.root(operation)
         if (
@@ -364,16 +447,24 @@ class ConcreteRemoteModuleAuthorityHost:
             or root.name != operation.root_volume.key
             or root.digest != operation.root_volume.identity
         ):
-            raise CategorizedError(
-                "remote module fixed appliance or root identity changed",
-                category=ErrorCategory.CONFLICT,
-            )
-        stager = volumes_config.artifact_stager
+            raise _refused("remote module fixed appliance or root identity changed")
+        stager = self._configuration.volumes.artifact_stager
         if stager is None:
             raise CategorizedError(
                 "remote module artifact staging is not configured",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
+        self._require_deadline(admitted.local_deadline)
+        return stager, root
+
+    def _execute(
+        self, admitted: AdmittedRemoteModulePreparation
+    ) -> RemoteModuleTerminalPreparationResponseV1:
+        request = admitted.request
+        deadline = admitted.local_deadline
+        operation = request.operation
+        volumes_config = self._configuration.volumes
+        stager, root = self._preflight(admitted)
         with tempfile.TemporaryDirectory(
             prefix="kdive-remote-module-", dir=volumes_config.work_dir
         ) as raw:
@@ -401,6 +492,7 @@ class ConcreteRemoteModuleAuthorityHost:
         appliance_request = self._appliance_request(operation, volumes, root, deadline)
         outcome = run_or_adopt_appliance(self._configuration.appliance.appliance, appliance_request)
         if outcome.result is None:
+            _log_missing_result(operation, outcome)
             raise CategorizedError(
                 "remote module appliance did not produce a durable result",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -470,6 +562,87 @@ class ConcreteRemoteModuleAuthorityHost:
         self, admitted: AdmittedRemoteModulePreparation
     ) -> RemoteModuleTerminalPreparationResponseV1:
         return await self._executor.run(lambda: self._execute(admitted))
+
+    def _system_domain(self, admitted: AdmittedRemoteModulePreparation) -> Any:
+        system_id = UUID(admitted.request.operation.system_id)
+        try:
+            return self._configuration.appliance.appliance.lookupByName(domain_name_for(system_id))
+        except libvirt.libvirtError as exc:
+            raise _refused("remote System domain could not be read") from exc
+
+    async def observe_system_power(self, admitted: AdmittedRemoteModulePreparation) -> PriorPower:
+        def observe() -> PriorPower:
+            self._preflight(admitted)
+            domain = self._system_domain(admitted)
+            try:
+                return "running" if domain.isActive() else "inactive"
+            except libvirt.libvirtError as exc:
+                raise _refused("remote System power could not be read") from exc
+
+        return await self._executor.run(observe)
+
+    async def stop_system(self, admitted: AdmittedRemoteModulePreparation) -> None:
+        """Destroy a running System and prove it inactive; a no-op for a stopped one.
+
+        ``destroy`` follows the external-boot stop: verified inactivity, not guest cooperation,
+        is the precondition for the appliance. A destroy whose response was lost but whose
+        effect landed is accepted when the domain reads back inactive. Once ``destroy`` has been
+        issued the System's power is no longer known to be unchanged, so a failure after that is
+        an infrastructure failure, not a refusal before mutation.
+        """
+
+        def stop() -> None:
+            domain = self._system_domain(admitted)
+            try:
+                active = bool(domain.isActive())
+            except libvirt.libvirtError as exc:
+                raise _refused("remote System power could not be read") from exc
+            if not active:
+                return
+            self._require_deadline(admitted.local_deadline)
+            try:
+                try:
+                    domain.destroy()
+                except libvirt.libvirtError:
+                    if domain.isActive():
+                        raise
+                if domain.isActive():
+                    raise _stop_failed("remote System domain remained active after destroy")
+            except libvirt.libvirtError as exc:
+                raise _stop_failed("remote System domain could not be stopped") from exc
+
+        await self._executor.run(stop)
+
+    async def restore_system_power(
+        self, admitted: AdmittedRemoteModulePreparation, prior: PriorPower
+    ) -> None:
+        """Start a System that was running before PREPARE stopped it; nothing else.
+
+        Idempotent: an inactive record, or a System already running, changes nothing. The System
+        is started only once the inspection proves the appliance absent and the System shut off
+        and exclusive, because the appliance may still hold the root volume (ADR-0585). Any
+        other reading raises and the caller keeps the failure latched.
+        """
+
+        def restore() -> None:
+            if prior != "running":
+                return
+            domain = self._system_domain(admitted)
+            try:
+                if domain.isActive():
+                    return
+                inspection = self._inspect(admitted.request.operation, cleanup=True)
+                if inspection.appliance_present or not (
+                    inspection.system_shut_off and inspection.exclusive
+                ):
+                    raise _stop_failed("remote module appliance may still hold the System root")
+                domain.create()
+                if not domain.isActive():
+                    raise _stop_failed("remote System domain did not start")
+            except libvirt.libvirtError as exc:
+                raise _stop_failed("remote System domain could not be started") from exc
+
+        await self._executor.run(restore)
 
     @staticmethod
     def _restore_operation(
@@ -553,6 +726,7 @@ class ConcreteRemoteModuleAuthorityHost:
         appliance_request = self._appliance_request(restore, volumes, root, deadline)
         outcome = run_or_adopt_appliance(self._configuration.appliance.appliance, appliance_request)
         if outcome.result is None:
+            _log_missing_result(restore, outcome)
             raise RuntimeError("remote module restore did not produce durable terminal evidence")
         result = outcome.result
         result.validate_for(restore)
@@ -874,6 +1048,20 @@ class FactoryRemoteModuleAuthorityHost:
     ) -> RemoteModuleTerminalPreparationResponseV1:
         request = admitted.request
         return await self._factory.host(request.authority.plan.architecture).execute(admitted)
+
+    async def observe_system_power(self, admitted: AdmittedRemoteModulePreparation) -> PriorPower:
+        architecture = admitted.request.authority.plan.architecture
+        return await self._factory.host(architecture).observe_system_power(admitted)
+
+    async def stop_system(self, admitted: AdmittedRemoteModulePreparation) -> None:
+        architecture = admitted.request.authority.plan.architecture
+        await self._factory.host(architecture).stop_system(admitted)
+
+    async def restore_system_power(
+        self, admitted: AdmittedRemoteModulePreparation, prior: PriorPower
+    ) -> None:
+        architecture = admitted.request.authority.plan.architecture
+        await self._factory.host(architecture).restore_system_power(admitted, prior)
 
     async def execute_lifecycle(
         self,

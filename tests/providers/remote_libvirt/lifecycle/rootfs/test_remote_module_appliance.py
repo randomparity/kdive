@@ -7,6 +7,8 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import replace
+from pathlib import Path
+from typing import Any
 
 import libvirt
 import pytest
@@ -97,6 +99,53 @@ def test_xml_is_exactly_confined_and_native(architecture: str) -> None:
     ]
 
 
+_REFERENCE_DIR = Path(__file__).resolve().parents[5] / "deploy" / "remote_module_appliance"
+
+
+def _rng_projection(root: ET.Element) -> list[tuple[dict[str, str], str | None, dict[str, str]]]:
+    rngs = []
+    for rng in root.findall("./devices/rng"):
+        backend = rng.find("backend")
+        assert backend is not None
+        rngs.append((dict(rng.attrib), backend.text, dict(backend.attrib)))
+    return rngs
+
+
+def _boot_console_lifecycle_balloon(root: ET.Element) -> dict[str, object]:
+    console = root.find("./devices/console")
+    balloon = root.find("./devices/memballoon")
+    assert console is not None and balloon is not None
+    target = console.find("target")
+    return {
+        "cmdline": root.findtext("./os/cmdline"),
+        "console": console.attrib,
+        "console_target": None if target is None else target.attrib,
+        "lifecycle": [root.findtext(tag) for tag in ("on_poweroff", "on_reboot", "on_crash")],
+        "balloon": balloon.attrib,
+        "rng": _rng_projection(root),
+    }
+
+
+@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
+def test_rendered_boot_console_lifecycle_and_balloon_match_the_reference(
+    architecture: str,
+) -> None:
+    req = replace(
+        request(Clock()),
+        architecture=architecture,
+        appliance_volume=None,
+        appliance_kernel=f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/vmlinuz",
+        appliance_initrd=(
+            f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/initramfs.cpio"
+        ),
+    )
+    reference = ET.parse(_REFERENCE_DIR / f"domain-v1-{architecture}.xml").getroot()
+
+    rendered = ET.fromstring(render_remote_module_appliance(req))
+
+    assert _boot_console_lifecycle_balloon(rendered) == _boot_console_lifecycle_balloon(reference)
+
+
 def test_direct_kernel_appliance_uses_the_installed_three_disk_mapping() -> None:
     req = replace(
         request(Clock()),
@@ -144,6 +193,33 @@ def test_launch_uses_auto_destroy_and_only_scratch_proves_completion() -> None:
     assert outcome.result is not None and outcome.result.phase == "installed"
 
 
+def _after_start_guard(
+    inspect: Callable[[], AttachmentInspection],
+) -> Callable[[], AttachmentInspection]:
+    """Let the pre-start shut-off guard pass, then delegate to the inspection under test."""
+    calls = 0
+
+    def wrapped() -> AttachmentInspection:
+        nonlocal calls
+        calls += 1
+        return request(Clock()).inspect_attachments() if calls == 1 else inspect()
+
+    return wrapped
+
+
+def test_active_system_blocks_appliance_before_create_xml() -> None:
+    clock = Clock()
+    conn = Conn([], clock)
+
+    def inspect() -> AttachmentInspection:
+        raise CategorizedError("owning System is active", category=ErrorCategory.CONFLICT)
+
+    with pytest.raises(CategorizedError, match="owning System is active"):
+        run_or_adopt_appliance(conn, replace(request(clock), inspect_attachments=inspect))
+    assert conn.created_flags is None
+    assert conn.domain is None
+
+
 def test_console_gets_fresh_wait_after_domain_setup_with_shared_cap() -> None:
     clock = Clock()
     req = request(clock)
@@ -157,8 +233,8 @@ def test_console_gets_fresh_wait_after_domain_setup_with_shared_cap() -> None:
     conn = SlowLookupConn([], clock, existing=Domain(render_remote_module_appliance(req)))
     outcome = run_or_adopt_appliance(conn, replace(req, executor=executor))
     assert outcome.timed_out is False
-    assert executor.deadlines[:4] == [30.0, 30.0, 30.0, 30.0]
-    assert executor.deadlines[4] == 50.0
+    assert executor.deadlines[:5] == [30.0, 30.0, 30.0, 30.0, 30.0]
+    assert executor.deadlines[5] == 50.0
     assert outcome.result is None
 
 
@@ -401,7 +477,7 @@ def test_adoption_rejects_unlisted_attributes_on_normalized_devices() -> None:
         "<emulator>/usr/bin/qemu-system-x86_64</emulator>" * 2,
         '<controller type="pci" index="0" />' * 2,
         '<input type="mouse" bus="ps2" />' * 2,
-        '<memballoon model="virtio" />' * 2,
+        '<memballoon model="none" />' * 2,
     ],
 )
 def test_adoption_rejects_altered_or_duplicate_normalized_devices(normalized: str) -> None:
@@ -466,9 +542,12 @@ def test_adoption_uses_exact_configured_native_ppc64le_emulator() -> None:
               <alias name="sata0"/><address type="pci" domain="0x0000" bus="0x00"
                 slot="0x1f" function="0x2"/>
             </controller>
+            <controller type="virtio-serial" index="0">
+              <alias name="virtio-serial0"/>
+            </controller>
             <input type="mouse" bus="ps2"><alias name="input0"/></input>
             <input type="keyboard" bus="ps2"><alias name="input1"/></input>
-            <memballoon model="virtio"><alias name="balloon0"/></memballoon>
+            <memballoon model="none"><alias name="balloon0"/></memballoon>
             """,
         ),
         (
@@ -482,9 +561,12 @@ def test_adoption_uses_exact_configured_native_ppc64le_emulator() -> None:
             <controller type="pci" index="0" model="pci-root">
               <alias name="pci.0"/>
             </controller>
+            <controller type="virtio-serial" index="0">
+              <alias name="virtio-serial0"/>
+            </controller>
             <input type="mouse" bus="usb"><alias name="input0"/></input>
             <input type="keyboard" bus="usb"><alias name="input1"/></input>
-            <memballoon model="virtio"><alias name="balloon0"/></memballoon>
+            <memballoon model="none"><alias name="balloon0"/></memballoon>
             """,
         ),
     ],
@@ -536,7 +618,9 @@ def test_adoption_rejects_extra_normalized_device_for_each_architecture(
 def test_adoption_requires_one_allowlisted_pty_console(console: str) -> None:
     clock = Clock()
     xml = render_remote_module_appliance(request(clock))
-    xml = xml.replace('<console type="pty" />', console)
+    rendered_console = '<console type="pty"><target type="virtio" port="0" /></console>'
+    assert rendered_console in xml
+    xml = xml.replace(rendered_console, console)
     with pytest.raises(CategorizedError):
         run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), request(clock))
 
@@ -860,7 +944,9 @@ def test_genuinely_blocking_evidence_call_never_promotes_success(stage: str) -> 
         request(clock, result=valid_result),
         read_scratch_result=blocking_result if stage == "scratch" else lambda: valid_result,
         inspect_attachments=(
-            blocking_inspection if stage == "inspection" else request(clock).inspect_attachments
+            _after_start_guard(blocking_inspection)
+            if stage == "inspection"
+            else request(clock).inspect_attachments
         ),
         executor=ThreadDeadlineExecutor(),
     )
@@ -923,7 +1009,7 @@ def test_teardown_inspection_failure_does_not_mask_malformed_result() -> None:
 
     req = replace(
         request(clock, result=b"not-json"),
-        inspect_attachments=failed_inspection,
+        inspect_attachments=_after_start_guard(failed_inspection),
     )
     with pytest.raises(ValueError):
         run_or_adopt_appliance(conn, req)
@@ -945,7 +1031,9 @@ def test_resolved_supervision_exception_attempts_teardown(stage: str) -> None:
         request(clock, result=success_result()),
         read_scratch_result=(failed_result if stage == "scratch" else lambda: success_result()),
         inspect_attachments=(
-            failed_inspection if stage == "inspection" else request(clock).inspect_attachments
+            _after_start_guard(failed_inspection)
+            if stage == "inspection"
+            else request(clock).inspect_attachments
         ),
     )
     expected = RuntimeError if stage == "console" else LookupError
@@ -966,7 +1054,7 @@ def test_resolved_destroy_failure_still_inspects_and_preserves_primary_failure()
     conn = FailingDestroyConn([1], clock)
     with pytest.raises(RuntimeError, match="invalid appliance console"):
         run_or_adopt_appliance(conn, replace(request(clock), inspect_attachments=inspect))
-    assert inspections == 1
+    assert inspections == 2
 
 
 def test_rendered_appliance_passes_attachment_inspector() -> None:
@@ -1024,3 +1112,393 @@ def test_teardown_requires_absence_and_all_detach_proofs() -> None:
     assert observed.absent and observed.source_detached and observed.scratch_detached
     unresolved = replace(proof, appliance_present=True)
     assert not observe_appliance_absent_and_detached(expected, lambda: unresolved).complete
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ('<rng model="virtio"><backend model="random">/dev/urandom</backend></rng>', ""),
+        (
+            '<backend model="random">/dev/urandom</backend>',
+            '<backend model="random">/dev/random</backend>',
+        ),
+        ('<backend model="random">', '<backend model="egd">'),
+        ('<rng model="virtio">', '<rng model="virtio" rate="1">'),
+        ("</backend></rng>", '</backend><rate period="1000" /></rng>'),
+        ("</backend></rng>", '</backend><alias name="a" /><alias name="b" /></rng>'),
+        ("</backend></rng>", '</backend><address type="pci" evil="1" /></rng>'),
+        (
+            "</rng>",
+            '</rng><rng model="virtio"><backend model="random">/dev/urandom</backend></rng>',
+        ),
+        (
+            "<cmdline>console=hvc0 panic=-1 PYTHONHASHSEED=0</cmdline>",
+            "<cmdline>console=ttyS0</cmdline>",
+        ),
+        ("<on_poweroff>destroy</on_poweroff>", "<on_poweroff>restart</on_poweroff>"),
+        ("<on_crash>destroy</on_crash>", "<on_crash>preserve</on_crash>"),
+        ("<on_reboot>destroy</on_reboot>", ""),
+        ('<memballoon model="none" />', '<memballoon model="virtio" />'),
+        ('<controller index="0" type="virtio-serial" />', ""),
+        ('<target type="virtio" port="0" />', '<target type="serial" port="0" />'),
+    ],
+)
+def test_adoption_rejects_drift_from_the_reference_boot_console_and_lifecycle(
+    old: str, new: str
+) -> None:
+    clock = Clock()
+    req = replace(
+        request(clock),
+        appliance_volume=None,
+        appliance_kernel="/var/lib/kdive/remote-module-appliance/v1/x86_64/image/vmlinuz",
+        appliance_initrd="/var/lib/kdive/remote-module-appliance/v1/x86_64/image/initramfs.cpio",
+    )
+    xml = render_remote_module_appliance(req)
+    assert old in xml
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml.replace(old, new))), req)
+
+
+def test_rendered_direct_kernel_appliance_is_adopted() -> None:
+    clock = Clock()
+    req = replace(
+        request(clock),
+        appliance_volume=None,
+        appliance_kernel="/var/lib/kdive/remote-module-appliance/v1/x86_64/image/vmlinuz",
+        appliance_initrd="/var/lib/kdive/remote-module-appliance/v1/x86_64/image/initramfs.cpio",
+    )
+    xml = render_remote_module_appliance(req)
+
+    run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+def _direct_kernel_domain_request(architecture: str = "x86_64") -> Any:
+    return replace(
+        request(Clock()),
+        architecture=architecture,
+        appliance_volume=None,
+        appliance_kernel=f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/vmlinuz",
+        appliance_initrd=(
+            f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/initramfs.cpio"
+        ),
+    )
+
+
+def test_adoption_accepts_the_alias_and_address_libvirt_adds_to_the_entropy_device() -> None:
+    clock = Clock()
+    req = _direct_kernel_domain_request()
+    xml = render_remote_module_appliance(req).replace(
+        "</backend></rng>",
+        '</backend><alias name="rng0" />'
+        '<address type="pci" domain="0x0000" bus="0x06" slot="0x00" function="0x0" /></rng>',
+    )
+
+    run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+def test_finished_domain_ends_the_console_wait_instead_of_timing_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FinishedConn(Conn):
+        def createXML(self, xml: str, flags: int = 0) -> Domain:  # noqa: N802
+            self.created_flags = flags
+            self.domain = Domain(xml, active=False)
+            return self.domain
+
+    clock = Clock()
+    conn = FinishedConn([-2] * 50, clock)
+    delays: list[float] = []
+    monkeypatch.setattr(remote_module_appliance.time, "sleep", delays.append)
+
+    outcome = run_or_adopt_appliance(conn, request(clock, result=success_result()))
+
+    assert not outcome.timed_out
+    assert outcome.result is not None
+    assert delays == []
+    assert conn.domain is not None and not conn.domain.destroyed
+
+
+def test_console_bytes_written_just_before_the_domain_ended_are_kept() -> None:
+    class FinishedConn(Conn):
+        def createXML(self, xml: str, flags: int = 0) -> Domain:  # noqa: N802
+            self.created_flags = flags
+            self.domain = Domain(xml, active=False)
+            return self.domain
+
+    clock = Clock()
+    conn = FinishedConn([-2, b"error_code=FILESYSTEM_FAILURE\n", -2, -2], clock)
+
+    outcome = run_or_adopt_appliance(conn, request(clock, result=success_result()))
+
+    assert outcome.console_tail == "error_code=FILESYSTEM_FAILURE\n"
+    assert not outcome.timed_out
+
+
+def test_a_domain_probe_failure_other_than_absence_is_a_console_failure() -> None:
+    class BrokenProbeDomain(Domain):
+        def isActive(self) -> int:  # noqa: N802
+            raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    class BrokenProbeConn(Conn):
+        def createXML(self, xml: str, flags: int = 0) -> Domain:  # noqa: N802
+            self.created_flags = flags
+            self.domain = BrokenProbeDomain(xml)
+            return self.domain
+
+    clock = Clock()
+
+    outcome = run_or_adopt_appliance(BrokenProbeConn([-2] * 5, clock), request(clock))
+
+    assert outcome.timed_out
+    assert outcome.result is None
+
+
+def test_vanished_domain_also_ends_the_console_wait() -> None:
+    class VanishedDomain(Domain):
+        def isActive(self) -> int:  # noqa: N802
+            raise libvirt_error(libvirt.VIR_ERR_NO_DOMAIN)
+
+    class VanishedConn(Conn):
+        def createXML(self, xml: str, flags: int = 0) -> Domain:  # noqa: N802
+            self.created_flags = flags
+            self.domain = VanishedDomain(xml)
+            return self.domain
+
+    clock = Clock()
+
+    outcome = run_or_adopt_appliance(
+        VanishedConn([-2] * 50, clock), request(clock, result=success_result())
+    )
+
+    assert not outcome.timed_out
+    assert outcome.result is not None
+
+
+def _disk_drivers(root: ET.Element) -> dict[str, dict[str, str]]:
+    drivers = {}
+    for disk in root.findall("./devices/disk"):
+        target = disk.find("target")
+        driver = disk.find("driver")
+        assert target is not None and driver is not None
+        drivers[str(target.get("dev"))] = dict(driver.attrib)
+    return drivers
+
+
+def _direct_kernel_request(architecture: str = "x86_64") -> Any:
+    return replace(
+        request(Clock()),
+        architecture=architecture,
+        appliance_volume=None,
+        appliance_kernel=f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/vmlinuz",
+        appliance_initrd=(
+            f"/var/lib/kdive/remote-module-appliance/v1/{architecture}/image/initramfs.cpio"
+        ),
+    )
+
+
+@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
+def test_rendered_disk_drivers_match_the_reference(architecture: str) -> None:
+    reference_dir = Path(__file__).resolve().parents[5] / "deploy" / "remote_module_appliance"
+    reference = ET.parse(reference_dir / f"domain-v1-{architecture}.xml").getroot()
+
+    rendered = ET.fromstring(render_remote_module_appliance(_direct_kernel_request(architecture)))
+
+    assert _disk_drivers(rendered) == _disk_drivers(reference)
+    assert _disk_drivers(rendered)["vda"]["type"] == "qcow2"
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ('<driver name="qemu" type="qcow2" cache="none" io="native" />', ""),
+        ('type="qcow2"', 'type="raw"'),
+        ('<driver name="qemu" type="raw" cache="none" io="native" />', ""),
+    ],
+)
+def test_adoption_rejects_a_missing_or_wrong_disk_driver(old: str, new: str) -> None:
+    clock = Clock()
+    req = _direct_kernel_request()
+    xml = render_remote_module_appliance(req)
+    assert old in xml
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml.replace(old, new, 1))), req)
+
+
+@pytest.mark.parametrize("architecture", ["x86_64", "ppc64le"])
+def test_rendered_features_match_the_reference(architecture: str) -> None:
+    reference_dir = Path(__file__).resolve().parents[5] / "deploy" / "remote_module_appliance"
+    reference = ET.parse(reference_dir / f"domain-v1-{architecture}.xml").getroot()
+
+    rendered = ET.fromstring(render_remote_module_appliance(_direct_kernel_request(architecture)))
+
+    def features(root: ET.Element) -> list[str] | None:
+        node = root.find("features")
+        return None if node is None else [child.tag for child in node]
+
+    assert features(rendered) == features(reference)
+    assert (features(rendered) == ["acpi"]) is (architecture == "x86_64")
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("<features><acpi /></features>", ""),
+        ("<features><acpi /></features>", "<features><acpi /><apic /></features>"),
+        ("<features><acpi /></features>", "<features><pae /></features>"),
+    ],
+)
+def test_adoption_rejects_drift_in_x86_64_features(old: str, new: str) -> None:
+    clock = Clock()
+    req = _direct_kernel_request()
+    xml = render_remote_module_appliance(req)
+    assert old in xml
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml.replace(old, new, 1))), req)
+
+
+_BASE = "/var/lib/kdive/provider-authority/remote-libvirt-pool/base.qcow2"
+
+
+_LIVE_ROOT_DISK = f"""<disk type="volume" device="disk">
+  <driver name="qemu" type="qcow2" cache="none" io="native"/>
+  <source pool="pool" volume="root" index="3"/>
+  <backingStore type="file" index="4">
+    <format type="qcow2"/>
+    <source file="{_BASE}"><seclabel model="selinux" relabel="no"/></source>
+    <backingStore/>
+  </backingStore>
+  <target dev="vda" bus="virtio"/>
+  <alias name="virtio-disk0"/>
+  <address type="pci" domain="0x0000" bus="0x02" slot="0x00" function="0x0"/>
+</disk>"""
+
+
+def _backed_request() -> Any:
+    return replace(_direct_kernel_request(), root_backing_path=_BASE)
+
+
+def _with_root_disk(xml: str, disk: str) -> str:
+    root = ET.fromstring(xml)
+    devices = root.find("devices")
+    assert devices is not None
+    first = devices.find("disk")
+    assert first is not None
+    position = list(devices).index(first)
+    devices.remove(first)
+    devices.insert(position, ET.fromstring(disk))
+    return ET.tostring(root, encoding="unicode")
+
+
+def test_root_disk_names_its_backing_file_with_the_relabel_free_seclabel() -> None:
+    root = ET.fromstring(render_remote_module_appliance(_backed_request()))
+
+    backing = root.find("./devices/disk/backingStore")
+
+    assert backing is not None and backing.get("type") == "file"
+    format_node = backing.find("format")
+    assert format_node is not None and format_node.get("type") == "qcow2"
+    source = backing.find("source")
+    assert source is not None and source.get("file") == _BASE
+    seclabel = source.find("seclabel")
+    assert seclabel is not None
+    assert seclabel.attrib == {"model": "selinux", "relabel": "no"}
+    assert len(root.findall("./devices/disk/backingStore")) == 1
+
+
+def test_root_disk_without_a_known_base_renders_no_backing_store() -> None:
+    root = ET.fromstring(render_remote_module_appliance(_direct_kernel_request()))
+
+    assert root.find("./devices/disk/backingStore") is None
+
+
+def test_adoption_accepts_the_root_disk_as_libvirt_dumps_it() -> None:
+    clock = Clock()
+    req = _backed_request()
+    xml = _with_root_disk(render_remote_module_appliance(req), _LIVE_ROOT_DISK)
+
+    run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+def test_adoption_accepts_libvirts_empty_backing_terminator_on_every_disk() -> None:
+    clock = Clock()
+    req = _direct_kernel_request()
+    xml = render_remote_module_appliance(req).replace(
+        "<target dev=", "<backingStore /><target dev="
+    )
+
+    run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (
+            f'<source file="{_BASE}"><seclabel model="selinux" relabel="no"/></source>',
+            f'<source file="{_BASE}"/>',
+        ),
+        ('relabel="no"', 'relabel="yes"'),
+        (f'file="{_BASE}"', 'file="/var/lib/other/base.qcow2"'),
+        ('<format type="qcow2"/>\n    <source', '<format type="raw"/>\n    <source'),
+        (
+            '<seclabel model="selinux" relabel="no"/>',
+            '<seclabel model="selinux" relabel="no"><label>x</label></seclabel>',
+        ),
+        (
+            '<seclabel model="selinux" relabel="no"/>',
+            '<seclabel model="selinux" relabel="no"/><seclabel model="dac" relabel="no"/>',
+        ),
+        ("<backingStore/>\n  </backingStore>", '<backingStore type="file"/>\n  </backingStore>'),
+    ],
+)
+def test_adoption_rejects_a_root_backing_that_drifts_from_the_staged_base(
+    old: str, new: str
+) -> None:
+    clock = Clock()
+    req = _backed_request()
+    disk = _LIVE_ROOT_DISK
+    assert old in disk
+    xml = _with_root_disk(render_remote_module_appliance(req), disk.replace(old, new, 1))
+
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+def test_adoption_rejects_a_missing_or_empty_backing_when_the_base_is_known() -> None:
+    clock = Clock()
+    req = _backed_request()
+    rendered = render_remote_module_appliance(req)
+    without = _with_root_disk(
+        rendered,
+        _LIVE_ROOT_DISK.split("<backingStore")[0] + _LIVE_ROOT_DISK.split("</backingStore>")[1],
+    )
+    empty = _with_root_disk(
+        rendered,
+        _LIVE_ROOT_DISK.split("<backingStore")[0]
+        + "<backingStore/>"
+        + _LIVE_ROOT_DISK.split("</backingStore>")[1],
+    )
+
+    for xml in (without, empty):
+        with pytest.raises(CategorizedError):
+            run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+def test_adoption_rejects_a_typed_backing_the_request_did_not_expect() -> None:
+    clock = Clock()
+    req = _direct_kernel_request()
+    xml = _with_root_disk(render_remote_module_appliance(req), _LIVE_ROOT_DISK)
+
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)
+
+
+def test_adoption_rejects_a_typed_backing_on_a_non_root_disk() -> None:
+    clock = Clock()
+    req = _backed_request()
+    typed = _LIVE_ROOT_DISK.split("<backingStore", 1)[1].split("</backingStore>")[0]
+    xml = render_remote_module_appliance(req).replace(
+        '<target dev="vdb"', f'<backingStore{typed}</backingStore><target dev="vdb"'
+    )
+
+    with pytest.raises(CategorizedError):
+        run_or_adopt_appliance(Conn([], clock, existing=Domain(xml)), req)

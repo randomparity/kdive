@@ -220,7 +220,7 @@ row covers both configurations and both exposures, so four cells. Owners are unc
 | `ops.force_release` | local | 3112 | `held_teardown_release`; barrier `teardown`/`after-provider` | #3321; D1 | refusal `external_boot_system_teardown_required` while held, with the allocation `active`, the head `mutation-started` and the domain gone; then, after `torn_down` and the head `terminal`, the allocation read `released` and capacity lower than while held; frame cleanup |
 | `ops.force_release` | remote | 3112 | `held_teardown_release`; remote barrier | #3323; remote teardown after release (expected from #3321, unproven) | as local, on the remote daemon |
 | `ops.resolve_recovery_orphan` | local | 3112 | `quarantined_orphan`; barrier `cleanup`/`before-finalize`, abort | #3322 (row-lock privilege); #3321; D1 | one new `quarantined` row naming the observed receipt; release `succeeded` at attempt 2; then that row `deleted` by the cell's job, with every other row unchanged; frame cleanup |
-| `ops.resolve_recovery_orphan` | remote | 3112 | blocked after the gates | product gap: the remote authority publishes no quarantine (#3326) | none: stays `blocked` |
+| `ops.resolve_recovery_orphan` | remote | 3112 | blocked after the gates | remote PREPARE is blocked (#3363); the remote authority now publishes and resolves the quarantine (#3326) | none: stays `blocked` |
 | `systems.resolve_external_boot_conflict` | local | 3112 | blocked after the gates | product gaps: resolution cannot restore the recorded source (#3330); teardown from `recovery_conflict` does not complete (#3341) | none: stays `blocked` |
 | `systems.resolve_external_boot_conflict` | remote | 3112 | blocked after the gates | same as local (#3330, #3341) | none: stays `blocked` |
 

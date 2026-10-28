@@ -108,7 +108,7 @@ def test_a_product_blocked_cell_stops_after_its_gates_and_before_any_mutation(
             authority_cells.run_authority_cell(run, "url", cast(Any, None), "db", body, project="p")
         )
     assert (stop.value.outcome, str(stop.value)) == (Outcome.BLOCKED, reason)
-    assert ("#3326" if "orphan" in tool else "#3341") in reason
+    assert ("#3363" if "orphan" in tool else "#3341") in reason
     remote = provider == "remote-libvirt"
     assert calls == (["observe_host", "gates"] if remote else ["gates"])
 

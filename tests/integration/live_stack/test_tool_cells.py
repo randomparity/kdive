@@ -23,10 +23,11 @@ from kdive.mcp.tools._common import capability_unsupported
 from kdive.providers.ports.traffic import pcap_volume_name
 from kdive.providers.shared.runtime_paths import pcap_dir
 from kdive.serialization import JsonValue
-from scripts.coverage_campaign.contract import Cell, build_contract
-from scripts.coverage_campaign.evidence import Evidence, Outcome
-from scripts.coverage_campaign.results import qualify
+from scripts.coverage_campaign.contract import Cell, build_contract, load_mapping, read_inventory
+from scripts.coverage_campaign.evidence import Context, Evidence, Outcome
+from scripts.coverage_campaign.results import _context_errors, qualify
 from tests.integration.live_stack import scenario, tool_cells
+from tests.integration.live_stack.allocation_accounting_cells import _SYSTEM_BODIES
 from tests.integration.live_stack.evidence import EvidenceWriter, RunIdentity
 from tests.integration.live_stack.remote_lifecycle import RemoteHost, guest_boot_kernel
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
@@ -667,6 +668,56 @@ def test_bindings_cover_bound_tool_cells(tmp_path: Path) -> None:
     assert lane.image_sha256 == hashlib.sha256(b"lane").hexdigest()
 
 
+def test_guest_observing_service_cells_bind_what_their_frame_records(tmp_path: Path) -> None:
+    marked = {t for g in load_mapping().groups for t in g.guest_observing}
+    assert set(_SYSTEM_BODIES) == marked
+    _name, entry = tool_cells.lane_image()
+    cells = [
+        _bound(c)
+        for c in build_contract().cells
+        if c.operation in marked and c.kind == "functional" and c.guest_arch == entry.arch
+    ]
+    assert {c.operation for c in cells} == marked
+    image = tmp_path / "image.qcow2"
+    image.write_bytes(b"lane")
+    inputs = bindings(
+        "a" * 40,
+        host_os="fedora:44",
+        host_arch=entry.arch,
+        matrix=build_contract().matrix_sha256,
+        cells=cells,
+        staged=lambda _name: image,
+    )
+    other_arch = "ppc64le" if entry.arch == "x86_64" else "x86_64"
+    foreign = _bound(_cell("accounting.usage", "service", other_arch))
+    assert (
+        foreign.id
+        not in bindings(
+            "a" * 40,
+            host_os="fedora:44",
+            host_arch=entry.arch,
+            matrix=build_contract().matrix_sha256,
+            cells=[foreign],
+            staged=lambda _name: image,
+        ).cells
+    )
+    inventory = read_inventory()
+    for cell in cells:
+        bound = inputs.cells[cell.id]
+        recorded = Context.model_validate(
+            {
+                "host_os": "fedora:44",
+                "host_arch": entry.arch,
+                "guest_os": f"{entry.distro}:{entry.version}",
+                "guest_arch": entry.arch,
+                "accelerator": cell.accelerator,
+                "image_sha256": hashlib.sha256(b"lane").hexdigest(),
+            }
+        )
+        assert bound == recorded
+        assert _context_errors(cell, bound, recorded, inventory) == []
+
+
 def test_remote_bindings_carry_the_provider_host() -> None:
     remote = _bound(_cell("systems.ssh_info", "remote-libvirt", "x86_64"))
     foreign = _bound(_cell("systems.ssh_info", "remote-libvirt", "ppc64le"))
@@ -1292,8 +1343,13 @@ def test_cli_argv_follows_the_descriptor(
 
 
 def test_cli_argv_names_a_field_the_verb_cannot_carry() -> None:
-    with pytest.raises(tool_cells.CliTranslationGap, match="'limit'"):
-        tool_cells.cli_argv("allocations.list", {"request": {"limit": "many"}})
+    with pytest.raises(tool_cells.CliTranslationGap, match="'resource_id'"):
+        tool_cells.cli_argv("inventory.list", {"request": {"resource_id": "r"}})
+
+
+def test_cli_argv_carries_list_paging_options() -> None:
+    argv = tool_cells.cli_argv("allocations.list", {"request": {"project": "p", "limit": 5}})
+    assert argv == ["allocations", "list", "--project", "p", "--limit", "5", "--json"]
 
 
 def test_cli_exactness_compares_the_parsed_payload() -> None:

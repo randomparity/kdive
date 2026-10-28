@@ -8,6 +8,27 @@ Debug-detach restrictions superseded by [ADR-0617](0617-external-boot-detach-rem
 
 > **Amended by [ADR-0681](0681-external-boot-clean-power-off.md) (#2780):** on local-libvirt KVM,
 > recovery stops a `target-defined` target with a bounded clean shutdown; otherwise it destroys.
+>
+> **Amended (#3353):** the pre-stop recheck is implemented for PREPARE on both providers by the
+> authority-bound SQL function `external_boot_prestop_system_holders` (migration 0179). It applies
+> the preparation resolver's binding conditions, then answers `session_active` when a debug session
+> is `attach` or `live` on any Run of the System, or `job_active` when a queued or running job
+> other than the activation's own names the System or one of its Runs. Passive housekeeping jobs
+> (`console_rotate`, `check_ssh_reachable`) recur and hold nothing, so they are not counted. It is
+> a separate function because the preparation resolver is also the post-mutation recheck, where a
+> late attach must not turn a completed power change into `superseded`. Local PREPARE reads it
+> before the `admitted` anchor, so a refusal writes no journal record and the same operation can be
+> admitted again; an adopted predecessor performs no stop and is not rechecked. Remote PREPARE reads
+> it before the attempt is journaled and again immediately before the host executes, unless the host
+> already holds a result or completion for the request (a resume, which refuses nothing). A refusal at
+> that second read leaves the already-anchored `mutation-started` for takeover to recover. A held System
+> is `system_held` on the wire (`system-held`), which the worker raises as a `transport_conflict`
+> with completion `refused-before-mutation`; an unreadable answer is a `provider_conflict`. Both
+> perform no provider mutation. PREPARE runs outside the bound-failure wrapper, so no `fail` result
+> is committed for either: the job stays running, is reclaimed at lease lapse (ADR-0593) and
+> retried up to `max_attempts`, as for every preparation-phase refusal. The read and the stop are
+> not one atomic step, so a session that commits between them is not seen; the lane lock
+> serializes authority operations, not attaches.
 
 ## Context
 
@@ -812,3 +833,36 @@ not change.
 - **Add a standalone System-profile INITRD input.** verified: closed PR #2104 demonstrates that
   shape and rejects it for remote-libvirt; issue #2105 and epic #1423 explicitly exclude the surface
   in favor of the existing external Run-build lane.
+
+## Amendment (2026-10-28): the teardown identity check reads the persistent definition
+
+The remote System teardown validated both the live and the inactive domain document against the
+recorded source and target (preserved, boot) identity pairs. libvirt expands a running domain's
+live XML (the host-model CPU, ids, aliases, tty and source paths), so its preserved digest never
+equals the one recorded at define time, and the teardown of any activated System was refused with
+`remote teardown domain identity differs from durable recovery` (#3377). The preserved digest is
+defined over the persistent definition. The teardown check now compares the inactive document's
+(preserved, boot) pair to the recorded pairs, and holds the live document to the boot projection
+alone, which must be one of the recorded boot identities. A differing persistent definition or a
+differing live boot projection is still refused. No schema change.
+
+## Amendment (2026-10-28): a btrfs subvolume root carries `rootflags=subvol`
+
+Stage inspection built the root spec from the root filesystem's UUID and type only. For an image
+whose root is a btrfs subvolume (a Fedora Cloud base keeps `/` in subvolume `root`, with `boot`,
+`home` and `var` beside it) the mounted top level has no init tree, so an external boot dropped to
+the initramfs emergency shell and the guest agent never connected (#3379). libguestfs names such a
+root `btrfsvol:<device>/<subvolume>`. The inspected root spec now appends
+`rootflags=subvol=<subvolume>` after `rootfstype`, the same rule the in-guest install helpers
+follow. The device is split only for the `sd*` and `vd*` forms libguestfs attaches, and the
+subvolume must be at most 128 characters of path segments drawn from letters, digits and `._@+-`
+(`.` and `..` excluded); anything else fails inspection with `unsupported_btrfs_root`. That check
+runs wherever the root is inspected, so an image with a subvolume outside those forms cannot be
+staged or built even for a disk boot that never reads the argument; this is a deliberate
+tradeoff, since silently omitting the flag would produce an external boot that cannot reach
+userspace. Non-btrfs and top-level btrfs roots are unchanged, and the root spec contract and its
+validation need no change.
+
+Root specs are stored with the image at stage time, so an image staged before this change keeps
+its old spec. A btrfs-subvolume image staged earlier must be re-staged to gain the argument; no
+migration rewrites stored specs.

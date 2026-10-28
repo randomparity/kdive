@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 import libvirt
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
@@ -30,6 +32,7 @@ from kdive.providers.remote_libvirt.external_boot_materialization import (
     ConcreteRemoteExternalBootMaterializer,
 )
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
+    AcknowledgedDefinition,
     RemoteExternalBootRecovery,
     _AgentRunner,
     activate_definition,
@@ -57,7 +60,14 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     overlay_volume_name,
     supplied_base_volume_name,
 )
+from kdive.providers.shared.guest_agent import GuestDomain
 from kdive.providers.shared.runtime_paths import domain_name_for
+
+# Pause between identity reads while the guest agent is not yet answering, and the most one
+# observation waits: the worker's own deadline spans the whole job, so a longer server-side wait
+# would outlive the caller and hold the System's lane.
+_OBSERVE_POLL_S = 1.0
+_OBSERVE_WAIT_S = 90.0
 
 
 class _Volume(Protocol):
@@ -109,7 +119,9 @@ class ConcreteRemoteExternalBootOperations:
         monotonic: Callable[[], float],
         agent_exec: _AgentRunner,
         identity_port: RemoteDeviceIdentityPort | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        self._sleep = sleep
         self._materializer = materializer
         self._connection = connection
         self._pool_name = pool_name
@@ -285,13 +297,60 @@ class ConcreteRemoteExternalBootOperations:
         with self._connection() as connection:
             self._validate_owned_artifacts(connection, recovery)
             domain = connection.lookupByName(domain_name_for(UUID(recovery.binding.system_id)))
-            return observe_guest_identity(self._agent_exec, domain, recovery.definition)
+            return self._observe_when_ready(domain, recovery, deadline)
+
+    def _observe_when_ready(
+        self,
+        domain: GuestDomain,
+        recovery: RemoteExternalBootRecoveryRecord,
+        deadline: float,
+    ) -> RunningKernelObservation:
+        """Retry the one-shot identity read while the guest agent is not yet answering (#3376).
+
+        ``observe_guest_identity`` leaves the wait to its caller. Only ``TRANSPORT_FAILURE`` is
+        waited out; any other category is a real answer and propagates. The wait ends at the call's
+        own deadline, capped at ``_OBSERVE_WAIT_S``, with ``READINESS_FAILURE``, chained to the last
+        transport failure.
+        """
+        deadline = min(deadline, self._monotonic() + _OBSERVE_WAIT_S)
+        while True:
+            try:
+                return observe_guest_identity(self._agent_exec, domain, recovery.definition)
+            except CategorizedError as exc:
+                if exc.category is not ErrorCategory.TRANSPORT_FAILURE:
+                    raise
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    raise CategorizedError(
+                        "the guest agent did not answer before the observation deadline",
+                        category=ErrorCategory.READINESS_FAILURE,
+                        details={"system_id": recovery.binding.system_id},
+                    ) from exc
+                self._sleep(min(_OBSERVE_POLL_S, remaining))
 
     def recover(
         self,
         recovery: RemoteExternalBootRecoveryRecord,
         authority: OpaqueProviderRef,
         deadline: float,
+    ) -> None:
+        self._recover(recovery, authority, deadline, None)
+
+    def recover_acknowledged(
+        self,
+        recovery: RemoteExternalBootRecoveryRecord,
+        authority: OpaqueProviderRef,
+        acknowledged: AcknowledgedDefinition,
+        deadline: float,
+    ) -> None:
+        self._recover(recovery, authority, deadline, acknowledged)
+
+    def _recover(
+        self,
+        recovery: RemoteExternalBootRecoveryRecord,
+        authority: OpaqueProviderRef,
+        deadline: float,
+        acknowledged: AcknowledgedDefinition | None,
     ) -> None:
         del authority
         if self._monotonic() >= deadline:
@@ -302,6 +361,7 @@ class ConcreteRemoteExternalBootOperations:
                 RemoteExternalBootRecovery(
                     definition=recovery.definition, prior_power=recovery.prior_power
                 ),
+                acknowledged,
             )
 
     def observe_state(
@@ -399,6 +459,44 @@ class ConcreteRemoteExternalBootOperations:
                 return None
             raise
 
+    def _module_volume_names(
+        self, operation_nonce: str, system_id: str, run_id: str
+    ) -> set[tuple[str, str]]:
+        return {
+            (
+                self._pool_name,
+                render_module_volume_name(system_id, run_id, operation_nonce, purpose),
+            )
+            for purpose in ("source.ext4", "scratch.ext4")
+        }
+
+    @staticmethod
+    def _boot_artifact_facts(
+        state: RemoteSystemTeardownState,
+    ) -> list[tuple[str, Literal["kernel", "initrd"], str | None]]:
+        """Boot artifacts to protect, from the live materialization or the finalized marker."""
+        if state.finalized is not None:
+            return [(item.ref, item.kind, item.sha256) for item in state.finalized.boot_artifacts]
+        if state.materialization is None:
+            return []
+        materialization = state.materialization.materialization
+        facts: list[tuple[str, Literal["kernel", "initrd"], str | None]] = [
+            (
+                materialization.artifacts.kernel.ref,
+                "kernel",
+                materialization.extracted_vmlinuz_sha256,
+            )
+        ]
+        if materialization.artifacts.initrd is not None:
+            facts.append(
+                (
+                    materialization.artifacts.initrd.ref,
+                    "initrd",
+                    materialization.verified_initrd_sha256,
+                )
+            )
+        return facts
+
     def _protected_teardown_volumes(
         self, state: RemoteSystemTeardownState
     ) -> frozenset[tuple[str, str]]:
@@ -406,14 +504,14 @@ class ConcreteRemoteExternalBootOperations:
             (self._pool_name, overlay_volume_name(state.binding.system_id)),
             (self._pool_name, supplied_base_volume_name(state.binding.system_id)),
         }
-        materialization = state.materialization
-        if materialization is not None:
-            artifacts = materialization.materialization.artifacts
-            protected.add((self._pool_name, artifacts.kernel.ref))
-            if artifacts.initrd is not None:
-                protected.add((self._pool_name, artifacts.initrd.ref))
+        protected.update(
+            (self._pool_name, ref) for ref, _kind, _digest in self._boot_artifact_facts(state)
+        )
+        finalized = state.finalized
         terminal = state.terminal
-        if terminal is not None:
+        if finalized is not None and finalized.module_volumes:
+            protected.update(finalized.module_volumes)
+        elif terminal is not None:
             module = terminal.response.recovery
             protected.update(
                 {
@@ -421,42 +519,27 @@ class ConcreteRemoteExternalBootOperations:
                     (module.pool.ref, module.scratch_volume.ref),
                 }
             )
+        elif finalized is not None and finalized.operation_nonce is not None:
+            protected.update(
+                self._module_volume_names(
+                    finalized.operation_nonce, state.binding.system_id, state.binding.run_id
+                )
+            )
         elif state.preparation is not None:
             operation = state.preparation.operation
             protected.update(
-                {
-                    (
-                        self._pool_name,
-                        render_module_volume_name(
-                            operation.system_id,
-                            operation.run_id,
-                            operation.operation_nonce,
-                            purpose,
-                        ),
-                    )
-                    for purpose in ("source.ext4", "scratch.ext4")
-                }
+                self._module_volume_names(
+                    operation.operation_nonce, operation.system_id, operation.run_id
+                )
             )
         return frozenset(protected)
 
     def _teardown_boot_volumes(
         self, state: RemoteSystemTeardownState
     ) -> frozenset[tuple[str, str]]:
-        materialization_record = state.materialization
-        if materialization_record is None:
-            return frozenset()
-        materialization = materialization_record.materialization
-        candidates = [(materialization.artifacts.kernel, "kernel")]
-        if materialization.artifacts.initrd is not None:
-            candidates.append((materialization.artifacts.initrd, "initrd"))
         boot: set[tuple[str, str]] = set()
-        for reference, kind in candidates:
-            parsed = parse_boot_artifact_name(reference.ref)
-            digest = (
-                materialization.extracted_vmlinuz_sha256
-                if kind == "kernel"
-                else materialization.verified_initrd_sha256
-            )
+        for ref, kind, digest in self._boot_artifact_facts(state):
+            parsed = parse_boot_artifact_name(ref)
             if (
                 parsed is None
                 or parsed.partial
@@ -466,7 +549,7 @@ class ConcreteRemoteExternalBootOperations:
                 or parsed.digest != digest
             ):
                 raise ValueError("remote teardown boot artifact identity differs")
-            boot.add((self._pool_name, reference.ref))
+            boot.add((self._pool_name, ref))
         return frozenset(boot)
 
     def _validate_teardown_domain(
@@ -475,12 +558,13 @@ class ConcreteRemoteExternalBootOperations:
         domain: _Domain,
         state: RemoteSystemTeardownState,
     ) -> None:
-        documents = [domain.XMLDesc(0), domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)]
         recovery = state.recovery
         pool = connection.storagePoolLookupByName(self._pool_name)
         overlay = pool.storageVolLookupByName(overlay_volume_name(state.binding.system_id)).path()
+        inactive = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+        live = domain.XMLDesc(0)
         if recovery is None:
-            for document in documents:
+            for document in (live, inactive):
                 require_disk_grub_source(
                     document,
                     system_id=UUID(state.binding.system_id),
@@ -492,13 +576,13 @@ class ConcreteRemoteExternalBootOperations:
             (recovery.definition.source_definition, recovery.definition.source_boot),
             (recovery.definition.target_definition, recovery.definition.target_boot),
         }
-        for document in documents:
-            observed = (
-                preserved_definition_identity(document),
-                boot_projection_identity(document),
-            )
-            if observed not in allowed:
-                raise ValueError("remote teardown domain identity differs from durable recovery")
+        # libvirt expands a running domain's XML (host-model CPU, ids, aliases, tty paths), so
+        # its preserved digest never equals the recorded one: the persistent document carries the
+        # full identity and the live one only the boot projection (ADR-0583 amendment, #3377).
+        allowed_boots = {boot for _definition, boot in allowed}
+        observed = (preserved_definition_identity(inactive), boot_projection_identity(inactive))
+        if observed not in allowed or boot_projection_identity(live) not in allowed_boots:
+            raise ValueError("remote teardown domain identity differs from durable recovery")
 
     def _prove_teardown_graph(
         self, connection: RemoteExternalBootPreparationConn, state: RemoteSystemTeardownState
@@ -576,24 +660,27 @@ class ConcreteRemoteExternalBootOperations:
             )
 
     def unfinished_preparation_absent(self, state: RemoteSystemTeardownState) -> bool:
-        preparation = state.preparation
-        if preparation is None:
-            return True
-        operation = preparation.operation
-        names = (
-            render_module_volume_name(
-                operation.system_id,
-                operation.run_id,
-                operation.operation_nonce,
-                "source.ext4",
-            ),
-            render_module_volume_name(
-                operation.system_id,
-                operation.run_id,
-                operation.operation_nonce,
-                "scratch.ext4",
-            ),
-        )
+        if state.finalized is not None:
+            nonce = state.finalized.operation_nonce
+            if nonce is None:
+                return True
+            names = {
+                name
+                for _pool, name in self._module_volume_names(
+                    nonce, state.binding.system_id, state.binding.run_id
+                )
+            }
+        else:
+            preparation = state.preparation
+            if preparation is None:
+                return True
+            operation = preparation.operation
+            names = {
+                name
+                for _pool, name in self._module_volume_names(
+                    operation.operation_nonce, operation.system_id, operation.run_id
+                )
+            }
         with self._connection() as connection:
             self._prove_teardown_graph(connection, state)
             return all(

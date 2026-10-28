@@ -507,3 +507,30 @@ def test_preparation_observation_enforces_phase_and_exact_binding() -> None:
             operation_identity="prepare-1",
             materialization=materialization,
         )
+
+
+def test_plan_keeps_the_root_subvolume_flag_through_a_direct_root_device() -> None:
+    data = _plan_data()
+    root = cast("dict[str, object]", data["root"])
+    arguments = ["root=UUID=x", "rootfstype=btrfs", "rootflags=subvol=root"]
+    data["root"] = {**root, "arguments": arguments}
+    data["platform_arguments"] = ["root=/dev/vda", "rootfstype=btrfs", "rootflags=subvol=root"]
+    data["cmdline"] = "root=/dev/vda rootfstype=btrfs rootflags=subvol=root"
+
+    plan = ExternalBootPlan.model_validate(data)
+
+    assert plan.cmdline.endswith("rootflags=subvol=root")
+
+
+def test_plan_with_initrd_carries_the_inspected_subvolume_flag() -> None:
+    data = _plan_data()
+    root = cast("dict[str, object]", data["root"])
+    arguments = ["root=UUID=x", "rootfstype=btrfs", "rootflags=subvol=root"]
+    data["root"] = {**root, "arguments": arguments}
+    data["platform_arguments"] = arguments
+    data["cmdline"] = " ".join(arguments)
+    data["initrd"] = {"key": "i", "sha256": ZERO_DIGEST, "size_bytes": 1, "version": "v1"}
+
+    plan = ExternalBootPlan.model_validate(data)
+
+    assert plan.cmdline == "root=UUID=x rootfstype=btrfs rootflags=subvol=root"

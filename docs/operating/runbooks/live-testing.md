@@ -2165,13 +2165,16 @@ image then carries no `ld.so.cache`, and glibc's built-in search path finds the 
   the activation in `recovery_conflict`. The frame's project admin then calls
   `systems.resolve_external_boot_conflict` with the head's composite. Restoring over a third
   identity is #3330, so the arm requires that job to end with `conflict` too and the activation
-  back in `recovery_conflict`. The arm then stops `blocked` (#3341): teardown from
-  `recovery_conflict` does not complete, so the frame's cleanup fails after its 600 s wait and the
-  System stays `ready` with its allocation held. Run the killed-run cleanup above, or roll the lane
-  host back.
+  back in `recovery_conflict`. The frame's cleanup then tears the System down from
+  `recovery_conflict`, which the local authority settles by discarding the retained recovery point
+  ([ADR-0620](../../adr/0620-authority-owned-system-teardown.md), #3341). The remote arm still
+  stops `blocked` there: that fix changed the local provider only, so the remote cleanup is
+  unproven, and the killed-run cleanup above or a lane-host rollback clears a stranded System.
 - **Blocked arm.** The remote orphan passes the lane gates and skips with `blocked:` and its
-  reason before any mutation: the remote-libvirt authority publishes no cleanup quarantine. It is a
-  narrower blocker, not a pass.
+  reason before any mutation: the arm needs an activated remote System, and remote PREPARE is
+  blocked (#3363). The remote authority now publishes and resolves the quarantine (#3326), and the
+  arm reads the remote store's receipt, but that path is unproven live. It is a narrower blocker,
+  not a pass.
 
   The deletion of a still-present receipt by `ops.resolve_recovery_orphan` stays unproven, because
   a receipt survives to resolution only if the release job ends terminally, whose recovery is
@@ -2210,7 +2213,7 @@ configurations, both exposures, both providers) run in this frame through
 - `ops.resolve_recovery_orphan` (local): the recovery-orphan arm above, called the same way. The
   tool admits a local row when its publishing authority is the server's fixed route; the server
   composes no local recovery-object port.
-- The remote `ops.resolve_recovery_orphan` cells (#3326) and every
+- The remote `ops.resolve_recovery_orphan` cells (#3363) and every
   `systems.resolve_external_boot_conflict` cell (#3330, #3341) pass their lane gates and stop `blocked`
   before any mutation.
 - A local record's `effect` discloses its fixture-mode System: provisioned through the worker

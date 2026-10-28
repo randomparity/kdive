@@ -516,7 +516,7 @@ class BootPayload(RunPayload):
     @classmethod
     def _decode_module_attempt(cls, value: object) -> object:
         if isinstance(value, dict):
-            return ModuleAttemptPreparationRequestV1.model_validate_json(json.dumps(value))
+            return ModuleAttemptPreparationRequestV1.from_payload(value)
         return value
 
     @model_validator(mode="after")
@@ -564,7 +564,7 @@ class TeardownPayload(SystemPayload):
     @classmethod
     def _decode_module_attempt(cls, value: object) -> object:
         if isinstance(value, dict):
-            return ModuleAttemptPreparationRequestV1.model_validate_json(json.dumps(value))
+            return ModuleAttemptPreparationRequestV1.from_payload(value)
         return value
 
     @model_validator(mode="after")

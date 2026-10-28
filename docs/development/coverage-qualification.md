@@ -75,6 +75,11 @@ input names override that optionality.
 | `kernel_config_sha256`, `compiler_id` | SHA-256 identities of configuration and compiler/toolchain. |
 | `kernel_build_id` | Lowercase hexadecimal ELF build ID, 16–128 characters. |
 
+A service tool marked `guest_observing` in `scripts/coverage_campaign/obligations.toml` boots a
+lane System in its functional scenario. Its functional cells are per architecture and bind the
+lane's `host_arch`, `guest_os`, `guest_arch`, `accelerator` and `image_sha256`; its rejection cells
+stay host-only.
+
 OS names are restricted to `ubuntu`, `debian`, `fedora`, `rhel`, `rocky`, `almalinux`,
 `centos-stream`, `opensuse-leap`, `opensuse-tumbleweed` and `sles`, followed by a numeric dotted version. Use a public platform
 identity, never a host name, address or private path. This schema does not declare new VM targets.
