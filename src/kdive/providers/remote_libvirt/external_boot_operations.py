@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Literal, Protocol
@@ -110,7 +111,9 @@ class ConcreteRemoteExternalBootOperations:
         monotonic: Callable[[], float],
         agent_exec: _AgentRunner,
         identity_port: RemoteDeviceIdentityPort | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        self._sleep = sleep
         self._materializer = materializer
         self._connection = connection
         self._pool_name = pool_name
