@@ -905,8 +905,8 @@ def observe_guest_identity(
     """Return the running kernel identity and exact saved command-line bytes.
 
     One bounded attempt, no waiting: an agent that is not yet answering raises a retryable
-    ``TRANSPORT_FAILURE`` from the seam, and the caller's readiness deadline and its retry are the
-    wait (#2118 owns both).
+    ``TRANSPORT_FAILURE`` from the seam. The wait belongs to the caller; the remote adapter's
+    observation retries that category within its deadline (ADR-0584 amendment, #3376).
 
     ADR-0583 requires the observation to return the newline-stripped ``/proc/cmdline`` bytes and
     core to compare them with the target definition's expected bytes. This provider validates the
