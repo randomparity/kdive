@@ -18,7 +18,7 @@ def _refused(reason: str = "superseded") -> CategorizedError:
     return CategorizedError(
         f"authority: {reason}",
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-        details={"admission": "refused", "authority_reason": reason},
+        details={"admission": "refused"},
     )
 
 
@@ -26,7 +26,7 @@ def _journal_conflict() -> CategorizedError:
     return CategorizedError(
         "authority: journal-conflict",
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-        details={"admission": "unknown", "authority_reason": "journal-conflict"},
+        details={"admission": "unknown"},
     )
 
 
@@ -93,7 +93,6 @@ def test_a_definite_rejection_on_first_sight_ends_the_wait_as_refused(
     error = raised.value
     assert error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert error.details["completion"] == "refused-before-mutation"
-    assert error.details["authority_reason"] == "superseded"
     assert (harness.calls, harness.sleeps) == (1, [])
     assert any("superseded" in record.getMessage() for record in caplog.records)
 
