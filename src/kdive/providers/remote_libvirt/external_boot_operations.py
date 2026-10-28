@@ -518,12 +518,13 @@ class ConcreteRemoteExternalBootOperations:
         domain: _Domain,
         state: RemoteSystemTeardownState,
     ) -> None:
-        documents = [domain.XMLDesc(0), domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)]
         recovery = state.recovery
         pool = connection.storagePoolLookupByName(self._pool_name)
         overlay = pool.storageVolLookupByName(overlay_volume_name(state.binding.system_id)).path()
+        inactive = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+        live = domain.XMLDesc(0)
         if recovery is None:
-            for document in documents:
+            for document in (live, inactive):
                 require_disk_grub_source(
                     document,
                     system_id=UUID(state.binding.system_id),
@@ -535,13 +536,14 @@ class ConcreteRemoteExternalBootOperations:
             (recovery.definition.source_definition, recovery.definition.source_boot),
             (recovery.definition.target_definition, recovery.definition.target_boot),
         }
-        for document in documents:
-            observed = (
-                preserved_definition_identity(document),
-                boot_projection_identity(document),
-            )
-            if observed not in allowed:
-                raise ValueError("remote teardown domain identity differs from durable recovery")
+        # libvirt expands a running domain's XML (host-model CPU, ids, aliases, tty paths), so
+        # its preserved digest never equals the recorded one: the persistent document carries the
+        # full identity and the live one only the boot projection (ADR-0583 amendment, #3377).
+        observed = (preserved_definition_identity(inactive), boot_projection_identity(inactive))
+        if observed not in allowed or boot_projection_identity(live) not in {
+            boot for _definition, boot in allowed
+        }:
+            raise ValueError("remote teardown domain identity differs from durable recovery")
 
     def _prove_teardown_graph(
         self, connection: RemoteExternalBootPreparationConn, state: RemoteSystemTeardownState
