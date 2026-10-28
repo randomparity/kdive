@@ -20,6 +20,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from kdive.services.external_boot.admission import (
     AUTHORITY_PREACTIVATION_DENIAL_REASON,
+    DENIAL_REASON,
     ExternalBootDenied,
     ExternalBootOperation,
     check_external_boot_admission,
@@ -191,9 +192,12 @@ def test_an_unclaimed_activation_row_left_by_a_blocked_claim_still_denies_releas
     """
     case = _torn_down_owner(migrated_url, activated=False, orphan_row=True)
 
-    with pytest.raises(ExternalBootDenied):
+    with pytest.raises(ExternalBootDenied) as denied:
         _admit(
             authority_role_dsns("kdive_server"),
             case.system_id,
             ExternalBootOperation.ALLOCATION_RELEASE,
         )
+
+    assert denied.value.details["reason"] == DENIAL_REASON
+    assert denied.value.details["activation_state"] == "preparing"

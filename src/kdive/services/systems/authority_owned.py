@@ -109,9 +109,10 @@ async def torn_down_after_activation(conn: AsyncConnection, system_id: UUID) -> 
 
     The owner ends ``torn-down`` and, unlike a never-activated one, has an activation row: the
     first activation is claimed in the transaction that creates it, so that row is the activation
-    history. A claim blocked by a requested teardown can leave an unclaimed row behind; the
-    activation policy denies release while such a row is live. The pre-activation fence does not
-    apply to the activated case (#3382), so its allocation can be released.
+    history. A claim blocked by a requested teardown can leave an unclaimed row behind: the
+    activation policy denies release while it is live, but once it is cleaned a never-activated
+    torn-down owner reads as activated here. The pre-activation fence does not apply to the
+    activated case (#3382), so its allocation can be released.
     """
     binding = await authority_system_binding(conn, system_id)
     if binding is None or binding.ownership_state != "torn-down":
