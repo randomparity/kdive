@@ -477,11 +477,6 @@ def test_recover_commits_attempt_before_provider_and_reuses_it(
 def test_expired_activation_deadline_returns_a_committable_failure_before_provider(
     migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
-    operation = "activate"
-    activation_state = "activating"
-    attempt_state = "recovering"
-    category: Literal["source", "target"] = "target"
-
     async def main() -> None:
         vehicle = build_vehicle()
         now = datetime(2027, 1, 1, tzinfo=UTC)
@@ -489,30 +484,16 @@ def test_expired_activation_deadline_returns_a_committable_failure_before_provid
             case = await seed_case(
                 seed,
                 vehicle,
-                purpose=operation,
-                activation_state=activation_state,
-                system_state="crashed" if operation == "recover" else "ready",
-                attempt_state=attempt_state,
-                with_reservation=operation == "recover",
-                with_pre_recovery=operation == "recover",
-            )
-            column = (
-                "activation_readiness_deadline"
-                if operation == "activate"
-                else "recovery_readiness_deadline"
-            )
-            table = (
-                "external_boot_activations"
-                if operation == "activate"
-                else "external_boot_recovery_attempts"
+                purpose="activate",
+                activation_state="activating",
+                attempt_state="recovering",
             )
             await seed.execute(
-                f"UPDATE {table} SET {column} = %s WHERE activation_id = %s"
-                if operation == "recover"
-                else f"UPDATE {table} SET {column} = %s WHERE id = %s",
+                "UPDATE external_boot_activations SET activation_readiness_deadline = %s "
+                "WHERE id = %s",
                 (now, vehicle.activation_id),
             )
-            executor = RecordingExecutor(category)
+            executor = RecordingExecutor("target")
             ports = ExternalBootHandlerPorts(
                 resolver=resolver_for(vehicle),
                 incarnation_credential=SecretStr(case.credential),
@@ -521,7 +502,7 @@ def test_expired_activation_deadline_returns_a_committable_failure_before_provid
                 authority_executor=executor,
                 clock=lambda: now,
             )
-            handler = build_operations(ports).get(operation)
+            handler = build_operations(ports).get("activate")
             assert handler is not None
             marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
             job = build_job(
@@ -549,13 +530,10 @@ def test_expired_activation_deadline_returns_a_committable_failure_before_provid
             )
             activation_row = await row.fetchone()
             assert activation_row is not None
-            state, recovery_point, pre_recovery, recovery_deadline = activation_row
-            assert state == ("recovering" if operation == "activate" else "recovery_failed")
+            state, recovery_point, _pre_recovery, recovery_deadline = activation_row
+            assert state == "recovering"
             assert recovery_point is not None
-            if operation == "activate":
-                assert recovery_deadline == now + ports.recovery_readiness_timeout
-            if operation == "recover":
-                assert pre_recovery is not None
+            assert recovery_deadline == now + ports.recovery_readiness_timeout
 
     asyncio.run(main())
 

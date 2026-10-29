@@ -117,5 +117,7 @@ before the authority was called. A remote `resolve-conflict` therefore never rea
 mutation.
 
 Both handlers now skip that check on re-entry and proceed to the authority call, which is
-bounded by its own transport deadline, the job's attempts and its leases. The first pass is
+bounded by its own transport deadline, the job's attempts and its leases. A local-libvirt
+authority client still derives its transport deadline from the request's recorded deadline;
+that path is unchanged. The first pass is
 unchanged: it still refuses a request whose deadline already elapsed before it stamps an attempt.
