@@ -2,8 +2,8 @@
 
 Decision records: [ADR-0805](../../adr/0805-authority-observed-conflict-is-recorded-from-its-journal-head.md)
 and [ADR-0620](../../adr/0620-authority-owned-system-teardown.md), each amended by the chosen
-option. Status: DESIGN ONLY. Implementation waits for the operator's choice in
-[Decision needed](#decision-needed).
+option. Status: the operator chose Option A and kept the host idempotent-reap fix in this change.
+Option B is retained below as the rejected alternative.
 
 ## Problem
 
