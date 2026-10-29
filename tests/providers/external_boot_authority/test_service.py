@@ -363,14 +363,23 @@ async def test_authenticated_cleanup_resolves_subject_evidence_before_commit(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("purpose", ["release", "recover"])
-async def test_recover_commits_without_cleanup_evidence(tmp_path: Path, purpose: str) -> None:
-    """A RECOVER restores the definition and deletes nothing, so it needs no cleanup evidence."""
+@pytest.mark.parametrize(
+    ("purpose", "operation"),
+    [
+        ("release", AuthorityOperation.RECOVER),
+        ("recover", AuthorityOperation.RECOVER),
+        ("resolve-conflict", AuthorityOperation.RESOLVE_CONFLICT),
+    ],
+)
+async def test_recover_commits_without_cleanup_evidence(
+    tmp_path: Path, purpose: str, operation: AuthorityOperation
+) -> None:
+    """A recovery restores the definition and deletes nothing, so it needs no cleanup evidence."""
     peer = AuthenticatedPeer(uuid4())
     takeover = _takeover().model_copy(
         update={
             "purpose": purpose,
-            "operation": AuthorityOperation.RECOVER,
+            "operation": operation,
             "provider_kind": "remote-libvirt",
         }
     )
@@ -397,7 +406,7 @@ async def test_recover_commits_without_cleanup_evidence(tmp_path: Path, purpose:
     await service.execute_mutation(peer, _mutation(takeover))
 
     assert repository.cleanup_nonces == []
-    assert adapter.calls == ["commit:recover", "observe"]
+    assert adapter.calls == [f"commit:{operation.value}", "observe"]
 
 
 @pytest.mark.anyio

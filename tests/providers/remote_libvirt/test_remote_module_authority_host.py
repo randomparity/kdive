@@ -386,6 +386,7 @@ def _lifecycle_authority(
     *,
     purpose: str,
     operation: str,
+    identity: str | None = None,
 ) -> AuthorityMutationRequestV1:
     authority = request.authority
     return AuthorityMutationRequestV1.model_validate(
@@ -397,7 +398,7 @@ def _lifecycle_authority(
             ),
             "purpose": purpose,
             "operation": operation,
-            "operation_identity": f"{operation}-op",
+            "operation_identity": identity or f"{operation}-op",
         }
     )
 
@@ -407,7 +408,6 @@ def _lifecycle_authority(
     ("restore_first", "reap_purpose", "reap_operation"),
     [
         (True, "release", "cleanup"),
-        (True, "resolve-conflict", "resolve-conflict"),
         (False, "teardown", "teardown"),
     ],
 )
@@ -775,12 +775,16 @@ class _Quiesce:
             )
         )
 
-    async def reap(self, operation: str) -> RemoteModuleLifecycleResponseV1:
+    async def reap(
+        self, operation: str, identity: str | None = None
+    ) -> RemoteModuleLifecycleResponseV1:
         """Run a module reap with the purpose and operation of a release CLEANUP or a teardown."""
         purpose = "release" if operation == "cleanup" else operation
         return await self.durable.execute_lifecycle(
             RemoteModuleLifecycleRequestV1(
-                authority=_lifecycle_authority(self.request, purpose=purpose, operation=operation),
+                authority=_lifecycle_authority(
+                    self.request, purpose=purpose, operation=operation, identity=identity
+                ),
                 action="reap",
                 budget_seconds=300,
             )
@@ -1046,17 +1050,69 @@ async def test_release_cleanup_reap_proceeds_while_the_recovered_system_runs(
     stack.close()
 
 
+def _sweep_journal_markers(stack: _Quiesce) -> None:
+    """Delete the reap markers as the module-volume sweep does once the obligation discharged."""
+    operation = stack.request.operation
+    for kind in ("reaping.journal", "reaped.journal"):
+        name = render_module_volume_name(
+            operation.system_id, operation.run_id, operation.operation_nonce, kind
+        )
+        stack.storage.pool.volumes.pop(name)
+
+
 @pytest.mark.anyio
-async def test_resolve_conflict_reap_proceeds_while_the_recovered_system_runs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("operation", ["cleanup", "teardown"])
+async def test_reap_after_the_sweep_removed_the_markers_reports_the_volumes_absent(
+    tmp_path: Path, operation: str
 ) -> None:
-    """#3412: the resolve-conflict reap is admitted exactly as a release CLEANUP reap is."""
-    stack, system, _inspection = await _restored_stack_with_a_running_system(tmp_path, monkeypatch)
+    """#3414: with no markers and no attempt volumes the reap's post-condition already holds."""
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    installed = stack.scratch
+    await stack.durable.execute(stack.request)
+    await stack.restore()
 
-    reaped = await stack.reap("resolve-conflict")
+    async def reap(identity: str) -> RemoteModuleLifecycleResponseV1:
+        if operation == "teardown":
+            return await stack.system_teardown()
+        return await stack.reap(operation, identity)
 
-    assert reaped.volumes_absent
-    assert system.active and not system.destroyed
+    first = await reap("first")
+    _sweep_journal_markers(stack)
+    # The scratch volume is gone with the sweep, so nothing can still prove the restored result.
+    stack.scratch = installed
+    markers = set(stack.storage.pool.volumes)
+
+    again = await reap("re-entered")
+
+    assert again.volumes_absent
+    assert again.result == first.result
+    assert set(stack.storage.pool.volumes) == markers
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_reap_with_a_volume_present_and_no_markers_still_verifies_the_result(
+    tmp_path: Path,
+) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    installed = stack.scratch
+    await stack.durable.execute(stack.request)
+    await stack.restore()
+    stack.scratch = installed
+
+    with pytest.raises(ValueError, match="differs before reap"):
+        await stack.reap("cleanup")
+
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_resolve_conflict_authority_no_longer_admits_a_reap(tmp_path: Path) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+
+    with pytest.raises(ValueError, match="differs from authority operation"):
+        await stack.reap("resolve-conflict")
+
     stack.close()
 
 

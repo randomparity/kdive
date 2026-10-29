@@ -524,7 +524,6 @@ class RemoteModuleLifecycleRequestV1(BaseModel):
             if self.action == "restore"
             else {
                 AuthorityOperation.CLEANUP,
-                AuthorityOperation.RESOLVE_CONFLICT,
                 AuthorityOperation.TEARDOWN,
             }
         )
@@ -2852,6 +2851,8 @@ class RemoteExternalBootAuthorityAdapter:
             )
             return self._preparation_observation(receipt)
         operation = self._require_commit_point(request, context)
+        if operation is AuthorityOperation.RESOLVE_CONFLICT:
+            return await self._resolve_conflict(request)
         mutation: Callable[[RecoveryPoint, OpaqueProviderRef], None] | None
         if operation is AuthorityOperation.ACTIVATE:
             mutation = self._coordinator.activate
@@ -2860,8 +2861,8 @@ class RemoteExternalBootAuthorityAdapter:
         elif operation in _BOOKKEEPING_COMMITS:
             mutation = None
         else:
-            # Deleting and recovery commit points reach the provider only through
-            # commit_cleanup, behind the service's cleanup-evidence gate.
+            # Deleting commit points reach the provider only through commit_cleanup, behind the
+            # service's cleanup-evidence gate.
             raise ValueError(f"remote external-boot commit point {operation.value} is not admitted")
         authority = authority_reference(request)
 
@@ -2871,6 +2872,20 @@ class RemoteExternalBootAuthorityAdapter:
                 mutation(point, authority)
 
         await self._executor.run(apply)
+        return await self.observe(request)
+
+    async def _resolve_conflict(
+        self, request: AuthorityMutationRequestV1
+    ) -> AuthorityObservationV1:
+        """Recover from the acknowledged identity and leave the recovery objects for the release.
+
+        The module restore already ran on the worker, as for RECOVER; nothing is deleted here, so
+        the System observes `source` and its release CLEANUP reaps and deletes later (#3414).
+        """
+        point = await self._executor.run(lambda: self._matched_point(request))
+        acknowledged = await self._acknowledged_definition(request, point)
+        authority = authority_reference(request)
+        await self._executor.run(lambda: self._coordinator.recover(point, authority, acknowledged))
         return await self.observe(request)
 
     @staticmethod

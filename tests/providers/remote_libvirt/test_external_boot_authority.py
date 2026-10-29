@@ -1137,23 +1137,16 @@ async def _resolve_after_observing(
             "expected_observed_composite": acknowledged,
         }
     )
-    evidence = AuthorityCleanupEvidenceContextV1(
-        operation_identity=request.operation_identity,
-        attempt_id=request.attempt_id,
-        operation_nonce=record.module_recovery.operation_nonce,
-        cleanup_state="discharged",
-        recovery_reference_json=record.module_recovery.model_dump_json(),
-    )
-    return operations, adapter, (request, _native_context(request), evidence)
+    return operations, adapter, (request, _native_context(request))
 
 
 @pytest.mark.anyio
 async def test_remote_resolve_restores_the_acknowledged_third_definition(tmp_path: Path) -> None:
     operations, adapter, args = await _resolve_after_observing(tmp_path, definition="other")
 
-    await adapter.commit_cleanup(*args)
+    await adapter.commit(*args)
 
-    assert operations.calls == ["recover-acknowledged", "cleanup"]
+    assert operations.calls == ["recover-acknowledged"]
     assert operations.acknowledged == [
         (operations.state.preserved, operations.state.boot),
     ]
@@ -1161,12 +1154,33 @@ async def test_remote_resolve_restores_the_acknowledged_third_definition(tmp_pat
 
 
 @pytest.mark.anyio
+async def test_remote_resolve_retains_the_recovery_objects_and_observes_the_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3414: a resolve recovers and leaves the objects for the release CLEANUP, as RECOVER does."""
+    operations, adapter, args = await _resolve_after_observing(tmp_path, definition="other")
+    recover = operations.recover_acknowledged
+
+    def recover_to_source(*values: Any) -> None:
+        recover(*values)
+        operations.state = replace(operations.state, definition="source", active=False)
+
+    monkeypatch.setattr(operations, "recover_acknowledged", recover_to_source)
+
+    observed = await adapter.commit(*args)
+
+    assert "cleanup" not in operations.calls
+    assert observed.category == "source"
+    adapter.close()
+
+
+@pytest.mark.anyio
 async def test_remote_resolve_from_a_recorded_side_uses_ordinary_recovery(tmp_path: Path) -> None:
     operations, adapter, args = await _resolve_after_observing(tmp_path, definition="target")
 
-    await adapter.commit_cleanup(*args)
+    await adapter.commit(*args)
 
-    assert operations.calls == ["recover", "cleanup"]
+    assert operations.calls == ["recover"]
     adapter.close()
 
 
@@ -1179,7 +1193,7 @@ async def test_remote_resolve_refuses_a_definition_changed_since_the_acknowledge
     )
 
     with pytest.raises(ValueError, match="changed before restore"):
-        await adapter.commit_cleanup(*args)
+        await adapter.commit(*args)
 
     assert operations.calls == []
     adapter.close()
@@ -2232,23 +2246,6 @@ async def _worker_cleanup_retry(
 @pytest.mark.anyio
 async def test_cleanup_retry_after_the_reap_discharged_the_obligation_succeeds() -> None:
     response, calls = await _worker_cleanup_retry(discharged=True)
-
-    assert response.volumes_absent
-    assert calls == ["dispatch", "discharge"]
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("discharged", [True, False])
-async def test_resolve_conflict_reaps_the_restored_attempt_like_a_release_cleanup(
-    discharged: bool,
-) -> None:
-    """#3412: a resolve-conflict reap reads the restored evidence and discharges the obligation."""
-    response, calls = await _worker_cleanup_retry(
-        discharged=discharged,
-        open_=not discharged,
-        purpose="resolve-conflict",
-        operation="resolve-conflict",
-    )
 
     assert response.volumes_absent
     assert calls == ["dispatch", "discharge"]
