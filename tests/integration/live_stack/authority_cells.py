@@ -164,7 +164,11 @@ def _authority_state(system: AuthoritySystem) -> dict[str, object]:
     config = system.config
     if isinstance(config, RemoteAuthorityProofConfig):
         remote = remote_authority_inventory(config, system.system_id)
-        owned = sorted(v for v in remote.volumes if system.system_id in v)
+        # The module-volume reaper keeps `*.journal` volumes for its own bookkeeping and runs on its
+        # own schedule, so they come and go independently of the release under test.
+        owned = sorted(
+            v for v in remote.volumes if system.system_id in v and not v.endswith(".journal")
+        )
         return {"volumes": owned, "domain": remote.system is not None}
     local = authority_inventory(system.system_id)
     rootfs = local.roots[authority_lane._AUTHORITY_ROOTFS]

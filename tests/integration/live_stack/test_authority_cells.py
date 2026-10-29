@@ -273,3 +273,14 @@ def test_a_failed_release_settles_from_the_database(
     with pytest.raises(TimeoutError, match="lost reply"):
         _released(tmp_path, TimeoutError("lost reply"))
     assert calls[1:] == expected
+
+
+def test_the_remote_authority_state_ignores_the_reaper_journals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owned = f"kdive-{_SYSTEM}-overlay.qcow2"
+    volumes = [owned, f"kdive-module-{_SYSTEM}-x-reaping.journal", "kdive-other-overlay.qcow2"]
+    inventory = type("Inventory", (), {"volumes": volumes, "system": object()})()
+    monkeypatch.setattr(authority_cells, "remote_authority_inventory", lambda *_a: inventory)
+    state = authority_cells._authority_state(_system(remote=True))
+    assert state == {"volumes": [owned], "domain": True}
