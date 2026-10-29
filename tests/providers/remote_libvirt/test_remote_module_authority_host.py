@@ -403,10 +403,19 @@ def _lifecycle_authority(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("restore_first", [True, False])
+@pytest.mark.parametrize(
+    ("restore_first", "reap_purpose", "reap_operation"),
+    [
+        (True, "release", "cleanup"),
+        (True, "resolve-conflict", "resolve-conflict"),
+        (False, "teardown", "teardown"),
+    ],
+)
 async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
     tmp_path: Path,
     restore_first: bool,
+    reap_purpose: str,
+    reap_operation: str,
 ) -> None:
     request = _request()
     operation = request.operation
@@ -601,9 +610,6 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
     else:
         current_result[0] = durable_result
 
-    reap_purpose, reap_operation = (
-        ("release", "cleanup") if restore_first else ("teardown", "teardown")
-    )
     reap_request = RemoteModuleLifecycleRequestV1(
         authority=_lifecycle_authority(request, purpose=reap_purpose, operation=reap_operation),
         action="reap",
@@ -1034,6 +1040,20 @@ async def test_release_cleanup_reap_proceeds_while_the_recovered_system_runs(
     stack, system, _inspection = await _restored_stack_with_a_running_system(tmp_path, monkeypatch)
 
     reaped = await stack.reap("cleanup")
+
+    assert reaped.volumes_absent
+    assert system.active and not system.destroyed
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_resolve_conflict_reap_proceeds_while_the_recovered_system_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3412: the resolve-conflict reap is admitted exactly as a release CLEANUP reap is."""
+    stack, system, _inspection = await _restored_stack_with_a_running_system(tmp_path, monkeypatch)
+
+    reaped = await stack.reap("resolve-conflict")
 
     assert reaped.volumes_absent
     assert system.active and not system.destroyed

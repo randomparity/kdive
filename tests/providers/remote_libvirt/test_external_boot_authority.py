@@ -2238,6 +2238,23 @@ async def test_cleanup_retry_after_the_reap_discharged_the_obligation_succeeds()
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("discharged", [True, False])
+async def test_resolve_conflict_reaps_the_restored_attempt_like_a_release_cleanup(
+    discharged: bool,
+) -> None:
+    """#3412: a resolve-conflict reap reads the restored evidence and discharges the obligation."""
+    response, calls = await _worker_cleanup_retry(
+        discharged=discharged,
+        open_=not discharged,
+        purpose="resolve-conflict",
+        operation="resolve-conflict",
+    )
+
+    assert response.volumes_absent
+    assert calls == ["dispatch", "discharge"]
+
+
+@pytest.mark.anyio
 async def test_cleanup_retry_needs_the_host_to_report_the_volumes_absent() -> None:
     with pytest.raises(CategorizedError, match="volumes reaped") as refused:
         await _worker_cleanup_retry(

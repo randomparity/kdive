@@ -524,6 +524,7 @@ class RemoteModuleLifecycleRequestV1(BaseModel):
             if self.action == "restore"
             else {
                 AuthorityOperation.CLEANUP,
+                AuthorityOperation.RESOLVE_CONFLICT,
                 AuthorityOperation.TEARDOWN,
             }
         )
