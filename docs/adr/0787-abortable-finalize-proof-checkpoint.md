@@ -103,3 +103,12 @@ publishes a quarantine row like the local one.
 ### Amendment (2026-10-27): remote finalize also removes the activation's other files (#3333)
 
 After the marker, remote `finalize` removes the activation's remaining per-activation files (terminal, restored, prior-power, preparation, materialization, lifecycle and request records) before the recovery record, keeping the System `teardown` record. The marker is canonical JSON carrying the module volumes, the boot artifact refs and the PREPARE nonce, so System teardown proves the same set absent after finalize; a malformed marker, or a marker from before it carried refs once the terminal record is gone, makes teardown refuse rather than prove nothing, and nothing rewrites such a marker (it exists only from the unreleased #3367 build). A later read, stage or prepare for a finalized activation raises `RemoteCleanupFinalizedError`.
+
+### Amendment (2026-10-29): an adopted cleanup finalizes under the proof it ran with (#3416)
+
+A retried release generation adopts the earlier generation's terminal cleanup, so `commit_cleanup`
+does not run again and the receipt keeps that cleanup's operation identity, attempt and anchored
+journal position. The service therefore builds the `finalize` context from the adopted operation's
+`mutation-started` record (the oldest, when several retries were interrupted), not the retry's, and the remote adapter's exact comparison with the
+receipt holds. The receipt is not rewritten, so the published quarantine row and the object port's
+digest fences keep naming what the first attempt recorded.

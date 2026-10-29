@@ -906,6 +906,20 @@ class ExternalBootAuthorityService:
             and record.local_timing == getattr(request, "local_timing", None)
         )
 
+    @staticmethod
+    def _prior_release_terminals(
+        records: list[JournalRecordV1], request: AuthorityMutationRequestV1
+    ) -> list[JournalRecordV1]:
+        """Earlier generations' terminal records of this release phase, oldest first."""
+        return [
+            record
+            for record in records
+            if record.phase is JournalPhase.TERMINAL
+            and record.operation == request.operation
+            and record.activation_id == request.activation_id
+            and record.generation < request.generation
+        ]
+
     async def _finalize_adapter(
         self,
         request: AuthorityMutationRequestV1,
@@ -915,11 +929,22 @@ class ExternalBootAuthorityService:
             return
         if not isinstance(self._adapter, AuthorityMutationFinalizer):
             return
+        # A release adopted from an earlier generation ran no commit of its own, so the proof
+        # its provider receipt holds is that of the oldest adopted cleanup, the one that ran: a
+        # retry that adopted it and was itself interrupted leaves a later terminal (#3416).
+        terminals = (
+            self._prior_release_terminals(records, request)
+            if request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
+            else []
+        )
+        adopted = terminals[0] if terminals else None
+        proven_identity = adopted.operation_identity if adopted else request.operation_identity
         started = next(
             (
                 record
                 for record in reversed(records)
-                if record.operation_identity == request.operation_identity
+                if record.operation_identity == proven_identity
                 and record.phase is JournalPhase.MUTATION_STARTED
             ),
             None,
@@ -1853,16 +1878,9 @@ class ExternalBootAuthorityService:
                         AuthorityOperation.RECOVER,
                         AuthorityOperation.CLEANUP,
                     }:
-                        prior_release_phase = next(
-                            (
-                                record
-                                for record in reversed(records)
-                                if record.phase is JournalPhase.TERMINAL
-                                and record.operation == request.operation
-                                and record.activation_id == request.activation_id
-                                and record.generation < request.generation
-                            ),
-                            None,
+                        prior_release_terminals = self._prior_release_terminals(records, request)
+                        prior_release_phase = (
+                            prior_release_terminals[-1] if prior_release_terminals else None
                         )
                         if prior_release_phase is not None:
                             candidate = request.model_copy(
