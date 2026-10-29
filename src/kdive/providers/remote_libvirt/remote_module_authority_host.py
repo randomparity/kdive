@@ -917,9 +917,10 @@ class ConcreteRemoteModuleAuthorityHost:
         self,
         request: RemoteModuleSystemTeardownRequestV1,
         terminal: RemoteModuleTerminalRecord,
+        restored: RemoteModuleLifecycleResponseV1 | None,
         deadline: float,
     ) -> RemoteModuleLifecycleResponseV1:
-        return await self._executor.run(lambda: self._reap(request, terminal, None, deadline))
+        return await self._executor.run(lambda: self._reap(request, terminal, restored, deadline))
 
 
 class RemoteModuleAuthorityHostFactory:
@@ -1103,9 +1104,10 @@ class FactoryRemoteModuleAuthorityHost:
         self,
         request: RemoteModuleSystemTeardownRequestV1,
         terminal: RemoteModuleTerminalRecord,
+        restored: RemoteModuleLifecycleResponseV1 | None,
         deadline: float,
     ) -> RemoteModuleLifecycleResponseV1:
         architecture = terminal.request.authority.plan.architecture
         return await self._factory.host(architecture).execute_system_teardown(
-            request, terminal, deadline
+            request, terminal, restored, deadline
         )
