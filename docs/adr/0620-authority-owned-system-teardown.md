@@ -478,8 +478,8 @@ Admission required a retained PREP receipt for every remote teardown except a pr
 activation's, and the receipt exists only while a reap obligation is open. A System torn down
 after a completed release has had its reap obligation discharged by the release's CLEANUP, so its
 teardown was refused at dispatch (#3406). Admission now also accepts a teardown with no receipt
-when the run has module attempts and every one has its reap discharged
-(`reap_discharged_for_run`). An open reap obligation still puts its receipt on the job, an
+when the activation's run has module attempts and every one has its reap discharged
+(`reap_discharged_for_run`, one statement, per run like `read_reap_preparation`). An open reap obligation still puts its receipt on the job, an
 ambiguous read still refuses, and an activated System with no obligation, or with an attempt that
 never reached a discharged reap, is still refused. The teardown handler already skips the discharge
 when it carries no receipt. No schema change.

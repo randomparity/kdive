@@ -1688,3 +1688,11 @@ def test_a_cleanup_job_parses_a_plain_json_receipt_for_the_module_lifecycle(
         ]
 
     _drive(migrated_url, authority_role_dsns, "cleanup", body)
+
+
+def test_teardown_without_a_module_receipt_discharges_nothing() -> None:
+    """#3406: a teardown admitted after a completed release has no reap obligation to discharge."""
+    from types import SimpleNamespace
+
+    context = SimpleNamespace(job=SimpleNamespace(payload={}))
+    asyncio.run(lifecycle_module._discharge_module_reap_after_teardown(cast(Any, context)))

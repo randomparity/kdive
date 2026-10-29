@@ -575,6 +575,7 @@ def test_the_built_payload_survives_dump_and_load(migrated_url: str) -> None:
         (("open", "open"), "PREP evidence is ambiguous", None),
         (("discharged", "unfinished"), "no retained PREP evidence", None),
         (("unfinished",), "no retained PREP evidence", None),
+        (("evidence-only",), "no retained PREP evidence", None),
     ],
     ids=[
         "released",
@@ -585,6 +586,7 @@ def test_the_built_payload_survives_dump_and_load(migrated_url: str) -> None:
         "ambiguous",
         "released-beside-unfinished",
         "unfinished",
+        "evidence-only",
     ],
 )
 def test_remote_activated_teardown_after_release_needs_no_receipt(
@@ -618,6 +620,8 @@ def test_remote_activated_teardown_after_release_needs_no_receipt(
             if state == "unfinished":
                 continue
             await repository.record_terminal_evidence(conn, attempt, _evidence(attempt))
+            if state == "evidence-only":
+                continue
             await repository.open_reap_obligation(conn, attempt)
             if state == "discharged":
                 await repository.discharge_reap_obligation(conn, attempt)
