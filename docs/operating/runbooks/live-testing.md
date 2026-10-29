@@ -2163,19 +2163,14 @@ image then carries no `ld.so.cache`, and glibc's built-in search path finds the 
   authority account. It then calls `runs.release_external_boot` and requires the job `failed`
   with category `conflict`, the journal head `terminal` for `recover` with outcome `conflict`, and
   the activation in `recovery_conflict`. The frame's project admin then calls
-  `systems.resolve_external_boot_conflict` with the head's composite. Restoring over a third
-  identity is #3330, so the arm requires that job to end with `conflict` too and the activation
-  back in `recovery_conflict`. The frame's cleanup then tears the System down from
-  `recovery_conflict`, which the local authority settles by discarding the retained recovery point
-  ([ADR-0620](../../adr/0620-authority-owned-system-teardown.md), #3341). The remote arm still
-  stops `blocked` there: that fix changed the local provider only, so the remote cleanup is
-  unproven, and the killed-run cleanup above or a lane-host rollback clears a stranded System.
-- **Blocked arm.** The remote orphan passes the lane gates and skips with `blocked:` and its
-  reason before any mutation: the arm needs an activated remote System, and remote PREPARE is
-  blocked (#3363). The remote authority now publishes and resolves the quarantine (#3326), and the
-  arm reads the remote store's receipt, but that path is unproven live. It is a narrower blocker,
-  not a pass.
-
+  `systems.resolve_external_boot_conflict` with the head's composite. The added token is a third
+  identity the resolution acknowledges, so it restores the recorded source
+  ([ADR-0805](../../adr/0805-authority-observed-conflict-is-recorded-from-its-journal-head.md),
+  #3330): the arm requires that job to succeed, the journal head `terminal` for `resolve-conflict`
+  with outcome `source`, and the activation `recovered`. The frame's teardown then runs from
+  `recovered`. Teardown straight from an unresolved remote conflict is not covered: the remote
+  provider refuses a definition that is neither the recorded source nor target
+  ([ADR-0620](../../adr/0620-authority-owned-system-teardown.md)).
   The deletion of a still-present receipt by `ops.resolve_recovery_orphan` stays unproven, because
   a receipt survives to resolution only if the release job ends terminally, whose recovery is
   #3143.
@@ -2213,9 +2208,9 @@ configurations, both exposures, both providers) run in this frame through
 - `ops.resolve_recovery_orphan` (local): the recovery-orphan arm above, called the same way. The
   tool admits a local row when its publishing authority is the server's fixed route; the server
   composes no local recovery-object port.
-- The remote `ops.resolve_recovery_orphan` cells (#3363) and every
-  `systems.resolve_external_boot_conflict` cell (#3330, #3341) pass their lane gates and stop `blocked`
-  before any mutation.
+- Remote `ops.resolve_recovery_orphan` runs the recovery-orphan arm and every
+  `systems.resolve_external_boot_conflict` cell runs the recovery-conflict arm above, each on the
+  frame's own client.
 - A local record's `effect` discloses its fixture-mode System: provisioned through the worker
   and moved onto the authority by the fixture script, because of #3144/#3148. Every operation
   under test runs against the real authority.

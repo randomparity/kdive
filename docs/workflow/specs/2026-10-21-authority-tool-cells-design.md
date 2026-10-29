@@ -106,8 +106,8 @@ records `guest_os` from that representative. The remote frame records only `imag
 remote record would fail `input-context-mismatch` against its binding. A blocked remote body runs
 `observe_host` and the lane gates without a frame.
 
-A blocked body runs `blocked_after_gates`. A blocked cell records `blocked` with its narrower
-reason. It is never a pass.
+A cell whose lane cannot construct its state records `blocked` with that reason. It is never a
+pass.
 
 ### `runs.release_external_boot` body (`_release`)
 
@@ -220,23 +220,18 @@ row covers both configurations and both exposures, so four cells. Owners are unc
 | `ops.force_release` | local | 3112 | `held_teardown_release`; barrier `teardown`/`after-provider` | #3321; D1 | refusal `external_boot_system_teardown_required` while held, with the allocation `active`, the head `mutation-started` and the domain gone; then, after `torn_down` and the head `terminal`, the allocation read `released` and capacity lower than while held; frame cleanup |
 | `ops.force_release` | remote | 3112 | `held_teardown_release`; remote barrier | #3323; remote teardown after release (expected from #3321, unproven) | as local, on the remote daemon |
 | `ops.resolve_recovery_orphan` | local | 3112 | `quarantined_orphan`; barrier `cleanup`/`before-finalize`, abort | #3322 (row-lock privilege); #3321; D1 | one new `quarantined` row naming the observed receipt; release `succeeded` at attempt 2; then that row `deleted` by the cell's job, with every other row unchanged; frame cleanup |
-| `ops.resolve_recovery_orphan` | remote | 3112 | blocked after the gates | remote PREPARE is blocked (#3363); the remote authority now publishes and resolves the quarantine (#3326) | none: stays `blocked` |
-| `systems.resolve_external_boot_conflict` | local | 3112 | blocked after the gates | product gaps: resolution cannot restore the recorded source (#3330); teardown from `recovery_conflict` does not complete (#3341) | none: stays `blocked` |
-| `systems.resolve_external_boot_conflict` | remote | 3112 | blocked after the gates | same as local (#3330, #3341) | none: stays `blocked` |
+| `ops.resolve_recovery_orphan` | remote | 3112 | `quarantined_orphan`; remote barrier | #3323; remote teardown after release | as local, reading the remote module store's receipt |
+| `systems.resolve_external_boot_conflict` | local | 3112 | `recorded_conflict`; out-of-band definition change | #3321; D1 | release job `failed` with category `conflict`; head `terminal`/`recover`/`conflict`; the resolution job `succeeded`, head `terminal`/`resolve-conflict`/`source`, activation `recovered`; frame cleanup |
+| `systems.resolve_external_boot_conflict` | remote | 3112 | `recorded_conflict`; remote authority account | #3323; remote teardown after release | as local, on the remote daemon |
 
-The ceiling is 20 qualified and 12 blocked:
+Every cell has a construction path, so the ceiling is 32 qualified:
 
-- 12 local cells can qualify after #3324 and #3325 merge (D1 accepted);
-- 8 remote cells can qualify only after #3323 merges, and only if the remote teardown after a
-  released activation works. PR #3325 fixes #3321 in the provider-independent job handlers
-  (`src/kdive/jobs/handlers/external_boot/evidence.py` and `lifecycle.py`), so the remote path is
-  expected to be covered, but no live run has shown it. If the remote teardown still fails after
-  #3325 merges, that failure becomes routing item F3;
-- 12 cells stay `blocked` until #3326 (4) and #3327 (8) land. The ceiling rises if they land
-  before the live run and add a construction path.
+- 16 local cells can qualify after #3324 and #3325 merge (D1 accepted);
+- 16 remote cells can qualify only after #3323 merges, and only if the remote teardown after a
+  released activation works. If it still fails, that failure becomes routing item F3.
 
 A local cell also depends on #3138 not adopting a durable-binding ownership rule. If #3138 adopts
-one, the authority refuses fixture-mode bodies, and the 12 local cells move to `blocked` under
+one, the authority refuses fixture-mode bodies, and the 16 local cells move to `blocked` under
 #3144/#3148.
 
 ### Operator decisions (2026-10-21)
@@ -251,10 +246,9 @@ one, the authority refuses fixture-mode bodies, and the 12 local cells move to `
 - **D3. Sequencing: approved.** Implement now. The live session follows #3324 and #3325. If
   #3323 has not merged by then, the 8 remote cells run and record `blocked` from the observed
   initrd refusal.
-- **Owners.** The remote quarantine publication gap is #3326 and the `recovery_conflict` entry gap
-  is #3327; the blocked reasons cite them. The 12 cells are wired through the same entry point as
-  the runnable ones, so only the product reason (`authority_cells.PRODUCT_BLOCKERS`) holds them.
-  F3 exists only if the remote teardown after a released activation still fails once #3325 has
+- **Owners.** The remote quarantine publication gap (#3326), the `recovery_conflict` entry gap
+  (#3327) and their follow-ups (#3330, #3341, #3363) have closed, so the former blocked cells run
+  their arms through the same entry point as the others. F3 exists only if the remote teardown after a released activation still fails once #3325 has
   merged.
 
 ### Implementation notes

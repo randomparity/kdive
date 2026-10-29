@@ -471,3 +471,46 @@ reclaims the System's core rows and finalizes the teardown receipt. A teardown w
 nothing to discharge. A discharge the function refuses fails the job as stale, as the module
 lifecycle path does, so a leaked obligation is never reported as a clean teardown. The discharge
 is idempotent, so a retried teardown repeats it harmlessly. No schema change.
+
+## Amendment (2026-10-28): A teardown after a completed release carries no receipt
+
+Admission required a retained PREP receipt for every remote teardown except a preparing
+activation's, and the receipt exists only while a reap obligation is open. A System torn down after
+a completed release has had its reap obligation discharged by the release's CLEANUP, so its teardown
+was refused at dispatch (#3406). Admission now also accepts a teardown with no receipt when the
+activation's run has module attempts and every one has its reap discharged
+(`reap_discharged_for_run`, one statement, per run like `read_reap_preparation`). An open reap
+obligation still puts its receipt on the job, an ambiguous read still refuses, and an activated
+System with no obligation, or with an attempt that never reached a discharged reap, is still
+refused. The teardown handler already skips the discharge when it carries no receipt. No schema
+change.
+
+## Amendment (2026-10-29): A resolve-conflict reaps the restore's module volumes
+
+A remote `resolve-conflict` commits through the authority's cleanup path, which refuses while the
+attempt's module source or scratch volume is present. The worker restored the module attempt for
+the resolve but never reaped it, and the release that recorded the conflict ended before its own
+CLEANUP, so the volumes were always present and the resolve failed at the authority (#3412). The
+resolve's module lifecycle now runs the restore and then the reap, both against the resolve's own
+authority request, before the authority mutation. The reap follows the release CLEANUP rules: it
+requires the retained restored evidence, the host admits it while the System runs, and the worker
+discharges the reap obligation through the worker evidence function, with the same tolerance for a
+retry whose reap already discharged. A re-entered resolve repeats both steps harmlessly: the host
+returns its retained restore and a reaped attempt reports its volumes absent. The lifecycle wire
+validator admits a reap under a resolve-conflict authority. No schema change.
+
+## Amendment (2026-10-29): A resolve-conflict no longer reaps, and a swept reap is idempotent (#3414)
+
+This supersedes the reap step the #3412 amendment gave a remote `resolve-conflict`. The resolve now
+commits as a recovery that leaves the recovery objects ([ADR-0805](0805-authority-observed-conflict-is-recorded-from-its-journal-head.md)),
+so its module lifecycle is the restore alone and the release `cleanup` reaps once. The wire
+validator no longer admits a reap under a resolve-conflict authority, and the host no longer
+admits one while the System runs.
+
+The host's reap is also idempotent after the module-volume sweep. The sweep deletes a discharged
+attempt's `reaping`/`reaped` markers, so a reap that finds no marker and none of the attempt's
+volumes reports the volumes absent without re-reading the scratch result, for a release `cleanup`
+retried after its discharge and for a System teardown alike. A teardown with no restored evidence
+whose attempt volumes were never created, or are already gone, therefore completes instead of
+raising "restored result differs before reap". A reap with any volume present still verifies the
+scratch result first. No schema change.

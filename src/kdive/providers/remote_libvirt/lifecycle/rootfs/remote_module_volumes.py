@@ -1174,9 +1174,16 @@ def delete_owned_attempt_volume(
     *,
     inspection: AttachmentInspection,
     admit_mutation: Callable[[], None] | None = None,
+    allow_active_system: bool = False,
 ) -> None:
-    """Delete only an exactly owned, detached volume and verify absence."""
-    if not inspection.proves_detached(volume.pool, volume.name):
+    """Delete only an exactly owned, detached volume and verify absence.
+
+    ``allow_active_system`` accepts proof that the volume is attached to no domain even while
+    the owning System runs: a release CLEANUP deletes attempt volumes after RECOVER restored the
+    System's power.
+    """
+    proof = inspection.proves_unattached if allow_active_system else inspection.proves_detached
+    if not proof(volume.pool, volume.name):
         raise _conflict("volume lacks exact detached attachment proof", volume=volume.name)
     pool = _lookup_pool(conn, volume.pool)
     found = _lookup(pool, volume.name)

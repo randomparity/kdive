@@ -10,13 +10,11 @@ from typing import Any, cast
 import pytest
 
 from kdive.mcp.responses import ToolResponse
-from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack import authority_faults
 from tests.integration.live_stack.authority_faults import Barrier
 from tests.integration.live_stack.authority_lane import AuthoritySystem
-from tests.integration.live_stack.evidence import EvidenceWriter
-from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.integration.live_stack.scenario import ScenarioStop
 from tests.integration.live_stack.spine import SpinePhaseError
 from tests.live_vm.installed_local_authority_support import (
     ActivationJob,
@@ -494,33 +492,19 @@ def test_remote_orphan_arm_observes_the_remote_receipt_and_row(
     assert observed["resolved"] == "deleted"
 
 
-@pytest.mark.parametrize("provider", ["local-libvirt", "remote-libvirt"])
-def test_blocked_arm_passes_the_lane_gates_first(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: str
-) -> None:
-    gates: list[str] = []
-    lane = authority_faults.authority_lane
-    monkeypatch.setattr(lane, "select_lane", lambda: gates.append("select") or "lane")
-    monkeypatch.setattr(lane, "select_remote_lane", lambda: gates.append("select") or "lane")
-    monkeypatch.setattr(lane, "require_lane", lambda *_a: gates.append("gate"))
-    monkeypatch.setattr(lane, "require_remote_lane", lambda *_a: gates.append("gate"))
-    cell = Cell("c", "tool/c", 3185, "c", "c", ("effect",), provider=provider, guest_arch="x86_64")
-    run = CellRun(cell, EvidenceWriter(tmp_path))
-    with pytest.raises(ScenarioStop) as stop:
-        authority_faults.blocked_after_gates(run, "u", authority_faults.REMOTE_ORPHAN_BLOCKED)
-    assert gates == ["select", "gate"]
-    assert str(stop.value) == authority_faults.REMOTE_ORPHAN_BLOCKED
-
-
 _COMPOSITE = "sha256:" + "c" * 64
 
 
 def _fake_conflict_arm(
-    monkeypatch: pytest.MonkeyPatch, failures: dict[str, str], heads: list[tuple[object, ...]]
+    monkeypatch: pytest.MonkeyPatch,
+    failures: dict[str, str],
+    heads: list[tuple[object, ...]],
+    states: tuple[str, ...] = ("recovery_conflict", "recovered"),
 ) -> list[str]:
     """Fake every boundary of the conflict arm; return the ordered calls it made."""
     calls: list[str] = []
     remaining = iter(heads)
+    activation_states = iter(states)
 
     async def drain(_op: object, phase: str, _job: str, **_kwargs: object) -> ToolResponse:
         calls.append(f"drain:{phase}")
@@ -541,7 +525,7 @@ def _fake_conflict_arm(
         "release_external_boot": _async(ToolResponse(object_id="release-job", status="queued")),
         "drain_job": drain,
         "conflict_head": lambda *_a: _async(next(remaining))(),
-        "_activation_state": _async("recovery_conflict"),
+        "_activation_state": lambda *_a: _async(next(activation_states))(),
         "scalar": scalar,
     }
     for name, value in patches.items():
@@ -549,15 +533,15 @@ def _fake_conflict_arm(
     return calls
 
 
-def test_conflict_arm_records_then_resolves_by_the_head_composite(
+def test_conflict_arm_records_then_resolves_by_restoring_the_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _fake_conflict_arm(
         monkeypatch,
-        {"release": "conflict", "resolve-conflict": "conflict"},
+        {"release": "conflict"},
         [
             ("terminal", "recover", "conflict", "conflict", _COMPOSITE),
-            ("terminal", "resolve-conflict", "conflict", "conflict", _COMPOSITE),
+            ("terminal", "resolve-conflict", "source", "source", _COMPOSITE),
         ],
     )
     observed = asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
@@ -568,7 +552,7 @@ def test_conflict_arm_records_then_resolves_by_the_head_composite(
         "drain:resolve-conflict",
     ]
     assert observed["recorded"] == "recovery_conflict"
-    assert observed["restore_from_third_identity"] == authority_faults.CONFLICT_RESTORE_BLOCKED
+    assert observed["activation"] == "recovered"
 
 
 def test_conflict_arm_refuses_a_release_that_succeeded(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -595,20 +579,45 @@ def test_conflict_arm_requires_the_authority_conflict_head(
         asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
 
 
-@pytest.mark.parametrize(
-    ("primary", "skips"),
-    [
-        (ScenarioStop(Outcome.BLOCKED, "teardown"), True),
-        (ScenarioStop(Outcome.FAILURE, "other"), False),
-        (AssertionError("a real failure"), False),
-        (KeyboardInterrupt(), False),
-    ],
-)
-def test_a_failed_cleanup_after_a_blocked_body_is_still_blocked(
-    primary: BaseException, skips: bool
+def test_conflict_arm_refuses_a_resolution_that_stays_conflicted(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    group = BaseExceptionGroup("frame and cleanup failures", [primary, RuntimeError("cleanup")])
-    assert (authority_faults.blocked_primary(group) is not None) is skips
+    _fake_conflict_arm(
+        monkeypatch,
+        {"release": "conflict", "resolve-conflict": "conflict"},
+        [("terminal", "recover", "conflict", "conflict", _COMPOSITE)],
+    )
+    with pytest.raises(SpinePhaseError, match="resolve-conflict"):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+
+
+def test_conflict_arm_requires_the_resolution_head_to_be_the_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_conflict_arm(
+        monkeypatch,
+        {"release": "conflict"},
+        [
+            ("terminal", "recover", "conflict", "conflict", _COMPOSITE),
+            ("terminal", "resolve-conflict", "conflict", "conflict", _COMPOSITE),
+        ],
+    )
+    with pytest.raises(AssertionError, match="resolve-conflict"):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+
+
+def test_conflict_arm_requires_the_activation_recovered(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_conflict_arm(
+        monkeypatch,
+        {"release": "conflict"},
+        [
+            ("terminal", "recover", "conflict", "conflict", _COMPOSITE),
+            ("terminal", "resolve-conflict", "source", "source", _COMPOSITE),
+        ],
+        states=("recovery_conflict", "recovery_conflict"),
+    )
+    with pytest.raises(AssertionError):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
 
 
 @pytest.mark.parametrize("arm", ["held_teardown_release", "quarantined_orphan"])
@@ -627,6 +636,23 @@ def test_arms_upload_the_kernel_tree_they_are_given(
     body = getattr(authority_faults, arm)
     with pytest.raises(RuntimeError, match="stop after activation"):
         asyncio.run(body(_system(), "db", _async(), kernel_tree=tree))
+    assert seen == [tree]
+
+
+def test_the_conflict_arm_uploads_the_kernel_tree_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    async def activate(_system: AuthoritySystem, **kwargs: object) -> ActivationJob:
+        seen.append(kwargs.get("kernel_tree"))
+        raise RuntimeError("stop after activation")
+
+    monkeypatch.setattr(authority_faults, "require_evidence_read_access", _async())
+    monkeypatch.setattr(authority_faults, "activate", activate)
+    tree = Path("/fixture/tree")
+    with pytest.raises(RuntimeError, match="stop after activation"):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db", kernel_tree=tree))
     assert seen == [tree]
 
 

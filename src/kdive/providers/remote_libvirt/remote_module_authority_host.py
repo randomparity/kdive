@@ -272,6 +272,7 @@ class ConcreteRemoteModuleAuthorityHost:
         present_attempt_volumes: frozenset[str] | None = None,
         *,
         cleanup: bool = False,
+        allow_active_system: bool = False,
     ) -> AttachmentInspection:
         if not self._configuration.fixed_inspection:
             return self._configuration.volumes.inspect_attachments(
@@ -283,6 +284,7 @@ class ConcreteRemoteModuleAuthorityHost:
             self._expected_attachments(operation),
             present_attempt_volumes,
             allow_cleanup_partial=cleanup,
+            allow_active_system=allow_active_system,
         )
 
     async def derive_operation(
@@ -352,6 +354,8 @@ class ConcreteRemoteModuleAuthorityHost:
         volumes: PreparedModuleVolumes,
         root: PreparedVolume,
         deadline: float,
+        *,
+        allow_active_system: bool = False,
     ) -> ApplianceRequest:
         configured = self._configuration.appliance
         pool_name = self._configuration.volumes.pool_name
@@ -379,7 +383,7 @@ class ConcreteRemoteModuleAuthorityHost:
             read_scratch_result=lambda: configured.read_scratch_result(volumes.scratch, deadline),
             inspect_attachments=(
                 lambda: (
-                    self._inspect(operation)
+                    self._inspect(operation, allow_active_system=allow_active_system)
                     if self._configuration.fixed_inspection
                     else configured.inspect_attachments()
                 )
@@ -564,7 +568,9 @@ class ConcreteRemoteModuleAuthorityHost:
         return await self._executor.run(lambda: self._execute(admitted))
 
     def _system_domain(self, admitted: AdmittedRemoteModulePreparation) -> Any:
-        system_id = UUID(admitted.request.operation.system_id)
+        return self._domain_of(UUID(admitted.request.operation.system_id))
+
+    def _domain_of(self, system_id: UUID) -> Any:
         try:
             return self._configuration.appliance.appliance.lookupByName(domain_name_for(system_id))
         except libvirt.libvirtError as exc:
@@ -591,27 +597,31 @@ class ConcreteRemoteModuleAuthorityHost:
         an infrastructure failure, not a refusal before mutation.
         """
 
-        def stop() -> None:
-            domain = self._system_domain(admitted)
-            try:
-                active = bool(domain.isActive())
-            except libvirt.libvirtError as exc:
-                raise _refused("remote System power could not be read") from exc
-            if not active:
-                return
-            self._require_deadline(admitted.local_deadline)
-            try:
-                try:
-                    domain.destroy()
-                except libvirt.libvirtError:
-                    if domain.isActive():
-                        raise
-                if domain.isActive():
-                    raise _stop_failed("remote System domain remained active after destroy")
-            except libvirt.libvirtError as exc:
-                raise _stop_failed("remote System domain could not be stopped") from exc
+        system_id = UUID(admitted.request.operation.system_id)
+        await self._executor.run(
+            lambda: self._stop_system_domain(system_id, admitted.local_deadline)
+        )
 
-        await self._executor.run(stop)
+    def _stop_system_domain(self, system_id: UUID, deadline: float) -> None:
+        """Destroy the System's domain if it is running and prove it inactive (synchronous)."""
+        domain = self._domain_of(system_id)
+        try:
+            active = bool(domain.isActive())
+        except libvirt.libvirtError as exc:
+            raise _refused("remote System power could not be read") from exc
+        if not active:
+            return
+        self._require_deadline(deadline)
+        try:
+            try:
+                domain.destroy()
+            except libvirt.libvirtError:
+                if domain.isActive():
+                    raise
+            if domain.isActive():
+                raise _stop_failed("remote System domain remained active after destroy")
+        except libvirt.libvirtError as exc:
+            raise _stop_failed("remote System domain could not be stopped") from exc
 
     async def restore_system_power(
         self, admitted: AdmittedRemoteModulePreparation, prior: PriorPower
@@ -717,6 +727,10 @@ class ConcreteRemoteModuleAuthorityHost:
                 os.close(descriptor)
             if evidence.get("module_source_manifest") != restore.source_manifest:
                 raise ValueError("remote module restore source differs from baseline")
+            # ADR-0585: the appliance never starts unless the System is shut off. A release
+            # restores after ACTIVATE, so the activated guest is stopped here; the provider
+            # RECOVER that follows restores the power PREPARE recorded.
+            self._stop_system_domain(UUID(restore.system_id), deadline)
             volumes = prepare_attempt_volumes(
                 configured.storage,
                 self._volume_request(terminal.request.authority, restore, directory / "modules"),
@@ -781,34 +795,54 @@ class ConcreteRemoteModuleAuthorityHost:
                 result=result,
                 volumes_absent=True,
             )
+        if state == "absent" and not self._present_attempt_volumes(volumes):
+            # The sweep removes the markers of a discharged attempt along with its volumes, so a
+            # re-entered reap meets neither; the post-condition already holds (#3414).
+            return RemoteModuleLifecycleResponseV1(
+                action="reap",
+                recovery=recovery,
+                operation=operation,
+                result=result,
+                volumes_absent=True,
+            )
         if state == "absent":
             raw = self._configuration.appliance.read_scratch_result(volumes.scratch, deadline)
             if raw is None or RemoteModuleResultV1.from_wire_bytes(raw) != result:
                 raise ValueError("remote module restored result differs before reap")
+        # A release CLEANUP follows a RECOVER that restored the System's power, so the System may
+        # be running. The reap deletes only attempt volumes it has proven attached to no domain,
+        # which does not need the System off; a teardown still requires it.
+        active_ok = request.authority.operation is AuthorityOperation.CLEANUP
         root = self._configuration.appliance.root(restore)
-        appliance_request = self._appliance_request(restore, volumes, root, deadline)
+        appliance_request = self._appliance_request(
+            restore, volumes, root, deadline, allow_active_system=active_ok
+        )
         teardown = teardown_remote_module_appliance(
-            self._configuration.appliance.appliance, appliance_request
+            self._configuration.appliance.appliance,
+            appliance_request,
+            allow_active_system=active_ok,
         )
         if not teardown.complete:
             raise RuntimeError("remote module reap teardown is incomplete")
         if state == "absent":
             self._record_reap_marker(recovery, "reaping", deadline)
         present = self._present_attempt_volumes(volumes)
-        inspection = self._inspect(restore, present, cleanup=True)
+        inspection = self._inspect(restore, present, cleanup=True, allow_active_system=active_ok)
         delete_owned_attempt_volume(
             self._configuration.volumes.storage,
             volumes.source,
             inspection=inspection,
             admit_mutation=lambda: self._require_deadline(deadline),
+            allow_active_system=active_ok,
         )
         present = self._present_attempt_volumes(volumes)
-        inspection = self._inspect(restore, present, cleanup=True)
+        inspection = self._inspect(restore, present, cleanup=True, allow_active_system=active_ok)
         delete_owned_attempt_volume(
             self._configuration.volumes.storage,
             volumes.scratch,
             inspection=inspection,
             admit_mutation=lambda: self._require_deadline(deadline),
+            allow_active_system=active_ok,
         )
         self._record_reap_marker(recovery, "reaped", deadline)
         return RemoteModuleLifecycleResponseV1(
@@ -893,9 +927,10 @@ class ConcreteRemoteModuleAuthorityHost:
         self,
         request: RemoteModuleSystemTeardownRequestV1,
         terminal: RemoteModuleTerminalRecord,
+        restored: RemoteModuleLifecycleResponseV1 | None,
         deadline: float,
     ) -> RemoteModuleLifecycleResponseV1:
-        return await self._executor.run(lambda: self._reap(request, terminal, None, deadline))
+        return await self._executor.run(lambda: self._reap(request, terminal, restored, deadline))
 
 
 class RemoteModuleAuthorityHostFactory:
@@ -1079,9 +1114,10 @@ class FactoryRemoteModuleAuthorityHost:
         self,
         request: RemoteModuleSystemTeardownRequestV1,
         terminal: RemoteModuleTerminalRecord,
+        restored: RemoteModuleLifecycleResponseV1 | None,
         deadline: float,
     ) -> RemoteModuleLifecycleResponseV1:
         architecture = terminal.request.authority.plan.architecture
         return await self._factory.host(architecture).execute_system_teardown(
-            request, terminal, deadline
+            request, terminal, restored, deadline
         )

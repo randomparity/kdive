@@ -7,7 +7,6 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
-from uuid import uuid4
 
 import psycopg
 import pytest
@@ -37,32 +36,8 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, seed_case
-from tests.jobs.handlers.external_boot.support import CASES, build_job
+from tests.jobs.handlers.external_boot.support import CASES, RecordingExecutor, build_job
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
-
-
-class RecordingExecutor:
-    def __init__(
-        self, category: Literal["absent", "source", "target", "mixed", "unreadable", "conflict"]
-    ) -> None:
-        self.category = category
-        self.requests: list[AuthorityMutationRequestV1] = []
-
-    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
-        return AuthorityObservationV1(
-            observation_id=uuid4(), category=self.category, composite_state="sha256:" + "8" * 64
-        )
-
-    async def execute_conflict_resolution(
-        self, request: AuthorityMutationRequestV1
-    ) -> AuthorityObservationV1:
-        return await self.execute(request)
-
-    async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
-        self.requests.append(request)
-        return AuthorityObservationV1(
-            observation_id=uuid4(), category=self.category, composite_state="sha256:" + "8" * 64
-        )
 
 
 class _DisconnectedAuthorityTransport:
@@ -474,20 +449,8 @@ def test_recover_commits_attempt_before_provider_and_reuses_it(
     asyncio.run(main())
 
 
-@pytest.mark.parametrize(
-    ("operation", "activation_state", "attempt_state", "category"),
-    [
-        ("activate", "activating", "recovering", "target"),
-        ("recover", "recovering", "recovering", "source"),
-    ],
-)
-def test_expired_deadline_returns_a_committable_failure_before_provider(
-    migrated_url: str,
-    authority_role_dsns: Callable[[str], str],
-    operation: str,
-    activation_state: str,
-    attempt_state: str,
-    category: Literal["source", "target"],
+def test_expired_activation_deadline_returns_a_committable_failure_before_provider(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
     async def main() -> None:
         vehicle = build_vehicle()
@@ -496,30 +459,16 @@ def test_expired_deadline_returns_a_committable_failure_before_provider(
             case = await seed_case(
                 seed,
                 vehicle,
-                purpose=operation,
-                activation_state=activation_state,
-                system_state="crashed" if operation == "recover" else "ready",
-                attempt_state=attempt_state,
-                with_reservation=operation == "recover",
-                with_pre_recovery=operation == "recover",
-            )
-            column = (
-                "activation_readiness_deadline"
-                if operation == "activate"
-                else "recovery_readiness_deadline"
-            )
-            table = (
-                "external_boot_activations"
-                if operation == "activate"
-                else "external_boot_recovery_attempts"
+                purpose="activate",
+                activation_state="activating",
+                attempt_state="recovering",
             )
             await seed.execute(
-                f"UPDATE {table} SET {column} = %s WHERE activation_id = %s"
-                if operation == "recover"
-                else f"UPDATE {table} SET {column} = %s WHERE id = %s",
+                "UPDATE external_boot_activations SET activation_readiness_deadline = %s "
+                "WHERE id = %s",
                 (now, vehicle.activation_id),
             )
-            executor = RecordingExecutor(category)
+            executor = RecordingExecutor("target")
             ports = ExternalBootHandlerPorts(
                 resolver=resolver_for(vehicle),
                 incarnation_credential=SecretStr(case.credential),
@@ -528,7 +477,7 @@ def test_expired_deadline_returns_a_committable_failure_before_provider(
                 authority_executor=executor,
                 clock=lambda: now,
             )
-            handler = build_operations(ports).get(operation)
+            handler = build_operations(ports).get("activate")
             assert handler is not None
             marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
             job = build_job(
@@ -556,13 +505,10 @@ def test_expired_deadline_returns_a_committable_failure_before_provider(
             )
             activation_row = await row.fetchone()
             assert activation_row is not None
-            state, recovery_point, pre_recovery, recovery_deadline = activation_row
-            assert state == ("recovering" if operation == "activate" else "recovery_failed")
+            state, recovery_point, _pre_recovery, recovery_deadline = activation_row
+            assert state == "recovering"
             assert recovery_point is not None
-            if operation == "activate":
-                assert recovery_deadline == now + ports.recovery_readiness_timeout
-            if operation == "recover":
-                assert pre_recovery is not None
+            assert recovery_deadline == now + ports.recovery_readiness_timeout
 
     asyncio.run(main())
 

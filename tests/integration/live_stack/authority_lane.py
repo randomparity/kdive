@@ -878,6 +878,32 @@ async def _cleanup(frame: _Frame) -> dict[str, object]:
     }
 
 
+# The module-volume sweep removes a torn-down System's reap markers on its own cadence (30 s), so
+# the frame waits up to four sweeps for the pool to stop naming the System.
+VOLUME_SWEEP_DEADLINE_S = 120.0
+VOLUME_SWEEP_POLL_S = 10.0
+
+
+async def _await_volumes_swept(
+    left: RemoteAuthorityInventory,
+    read: Callable[[], Awaitable[RemoteAuthorityInventory]],
+    system_id: str,
+    *,
+    deadline_s: float,
+    poll_s: float,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> list[str]:
+    """Poll the pool until no volume names the System; return what remains at the bound."""
+    deadline = clock() + deadline_s
+    while True:
+        stranded = [volume for volume in left.volumes if system_id in volume]
+        if not stranded or clock() >= deadline:
+            return stranded
+        await sleep(poll_s)
+        left = await read()
+
+
 async def _remote_cleanup(frame: _Frame, config: RemoteAuthorityProofConfig) -> dict[str, object]:
     """Drain, close, tear down through the authority, prove absence, release, compare."""
     op = frame.op
@@ -890,7 +916,14 @@ async def _remote_cleanup(frame: _Frame, config: RemoteAuthorityProofConfig) -> 
         await _teardown(op, frame.system_id)
         left = await asyncio.to_thread(remote_authority_inventory, config, frame.system_id)
         assert left.system is None, "the System's domain remains on the remote authority daemon"
-        stranded = [volume for volume in left.volumes if frame.system_id in volume]
+        system_id = frame.system_id
+        stranded = await _await_volumes_swept(
+            left,
+            lambda: asyncio.to_thread(remote_authority_inventory, config, system_id),
+            system_id,
+            deadline_s=VOLUME_SWEEP_DEADLINE_S,
+            poll_s=VOLUME_SWEEP_POLL_S,
+        )
         assert not stranded, f"the System's volumes remain in the authority pool: {stranded}"
         owned += [frame.system_id, domain_name_for(UUID(frame.system_id))]
     released = await _release(frame)

@@ -107,6 +107,14 @@ class AttachmentInspection:
         """Return whether this inspection names the exact detached pool/volume pair."""
         return self.system_shut_off and self.exclusive and (pool, volume) in self.detached_volumes
 
+    def proves_unattached(self, pool: str, volume: str) -> bool:
+        """Return whether the pair is attached to no domain, whatever the System's power.
+
+        Only deleting an attempt volume may rely on this: it needs the volume unreferenced, not
+        the System off. Starting the appliance or restoring still needs ``proves_detached``.
+        """
+        return self.exclusive and (pool, volume) in self.detached_volumes
+
 
 class Domain(Protocol):
     def XMLDesc(self, flags: int = 0) -> str: ...  # noqa: N802
@@ -164,8 +172,14 @@ def inspect_module_attachments(
     present_attempt_volumes: frozenset[str] | None = None,
     *,
     allow_cleanup_partial: bool = False,
+    allow_active_system: bool = False,
 ) -> AttachmentInspection:
-    """Prove the System is stopped and all three volumes have exclusive owners."""
+    """Prove the System is stopped and all three volumes have exclusive owners.
+
+    ``allow_active_system`` admits a running owning System for a cleanup that only deletes
+    attempt volumes. The inspection then reports ``system_shut_off=False`` and still refuses a
+    System whose definition references any of those volumes.
+    """
     protected_identities = _protected_volume_identities(
         conn,
         identity_port,
@@ -178,6 +192,7 @@ def inspect_module_attachments(
     except libvirt.libvirtError as exc:
         raise _infrastructure("could not enumerate remote module attachments") from exc
     owner_domains: set[int] = set()
+    system_active = False
     xml_budget = XmlEnumerationBudget()
     appliance_present = False
     seen_names: dict[str, int] = {}
@@ -208,8 +223,10 @@ def inspect_module_attachments(
                 domain_active,
                 expected,
                 protected_identities,
+                allow_active_system=allow_active_system,
             ):
                 owner_domains.add(domain_index)
+                system_active = system_active or domain_active
             if name == expected.appliance.name:
                 appliance_present = True
     if len(owner_domains) != 1:
@@ -222,7 +239,7 @@ def inspect_module_attachments(
         if not appliance_present
         else set()
     )
-    return AttachmentInspection(True, True, appliance_present, detached)
+    return AttachmentInspection(not system_active, True, appliance_present, detached)
 
 
 def volume_references(root: ET.Element) -> list[tuple[str, str]]:
@@ -514,6 +531,8 @@ def _inspect_definition(
     domain_active: bool,
     expected: ExpectedAttachmentState,
     protected_identities: dict[str, RemoteDeviceIdentity],
+    *,
+    allow_active_system: bool = False,
 ) -> bool:
     name = root.findtext("name")
     protected = {expected.root_volume, expected.source_volume, expected.scratch_volume}
@@ -538,7 +557,7 @@ def _inspect_definition(
         protected_references = (set(resolved_identities) | direct_identities) & set(
             protected_identities.values()
         )
-        if domain_active:
+        if domain_active and not allow_active_system:
             raise _conflict("owning System is active", domain=name)
         owning_root = (expected.pool, expected.root_volume)
         root_identity = protected_identities[expected.root_volume]

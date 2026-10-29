@@ -164,6 +164,7 @@ def test_worker_persists_immutable_prep_then_restore_before_cleanup(
             assert await repo.read_terminal_evidence(worker, attempt) == terminal
             assert await repo.read_restored_evidence(worker, attempt) is None
             assert await repo.reap_obligation_is_open(worker, attempt)
+            assert not await repo.reap_obligation_is_discharged(worker, attempt)
 
             with pytest.raises(
                 psycopg.errors.RaiseException, match="terminal evidence is immutable"
@@ -211,6 +212,7 @@ def test_worker_persists_immutable_prep_then_restore_before_cleanup(
             assert await repo.worker_discharge_reap_obligation(worker, context, attempt)
             await worker.commit()
             assert not await repo.reap_obligation_is_open(worker, attempt)
+            assert await repo.reap_obligation_is_discharged(worker, attempt)
             assert await repo.read_terminal_evidence(worker, attempt) == terminal
             assert await repo.read_restored_evidence(worker, attempt) == restored
 

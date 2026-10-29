@@ -28,6 +28,7 @@ from kdive.domain.remote_module_attempt_preparation import (
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityPreparationMutationRequestV1,
+    AuthorityTeardownMutationRequestV1,
 )
 from kdive.providers.ports.external_boot import ExternalBootActivationBinding
 from kdive.providers.remote_libvirt.authority_client import (
@@ -39,6 +40,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
     RemoteModulePreparationBeginResponseV1,
+    RemoteModuleSystemTeardownRequestV1,
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
     RemoteModuleVolumePreparationStore,
@@ -384,6 +386,7 @@ def _lifecycle_authority(
     *,
     purpose: str,
     operation: str,
+    identity: str | None = None,
 ) -> AuthorityMutationRequestV1:
     authority = request.authority
     return AuthorityMutationRequestV1.model_validate(
@@ -395,16 +398,24 @@ def _lifecycle_authority(
             ),
             "purpose": purpose,
             "operation": operation,
-            "operation_identity": f"{operation}-op",
+            "operation_identity": identity or f"{operation}-op",
         }
     )
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("restore_first", [True, False])
+@pytest.mark.parametrize(
+    ("restore_first", "reap_purpose", "reap_operation"),
+    [
+        (True, "release", "cleanup"),
+        (False, "teardown", "teardown"),
+    ],
+)
 async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
     tmp_path: Path,
     restore_first: bool,
+    reap_purpose: str,
+    reap_operation: str,
 ) -> None:
     request = _request()
     operation = request.operation
@@ -599,9 +610,6 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
     else:
         current_result[0] = durable_result
 
-    reap_purpose, reap_operation = (
-        ("release", "cleanup") if restore_first else ("teardown", "teardown")
-    )
     reap_request = RemoteModuleLifecycleRequestV1(
         authority=_lifecycle_authority(request, purpose=reap_purpose, operation=reap_operation),
         action="reap",
@@ -665,9 +673,11 @@ class _Quiesce:
         deadline: float = 10_000.0,
         fail: bool = False,
         appliance_present: bool = False,
+        fixed_inspection: bool = False,
     ) -> None:
         self.request = _request()
         operation = self.request.operation
+        self.scratch = _result(operation)
         names = [
             render_module_volume_name(
                 operation.system_id, operation.run_id, operation.operation_nonce, purpose
@@ -721,7 +731,7 @@ class _Quiesce:
                 4096,
             ),
             read_scratch_result=lambda volume, deadline: (
-                None if fail else _result(operation).to_wire_bytes()
+                None if fail else self.scratch.to_wire_bytes()
             ),
             inspect_attachments=inspect,
             secret_registry=SecretRegistry(),
@@ -730,7 +740,9 @@ class _Quiesce:
         )
         self.executor = RemoteModulePreparationExecutor()
         host = self.host = ConcreteRemoteModuleAuthorityHost(
-            RemoteModuleAuthorityHostConfiguration(volume_config, appliance_config, _Identity()),
+            RemoteModuleAuthorityHostConfiguration(
+                volume_config, appliance_config, _Identity(), fixed_inspection=fixed_inspection
+            ),
             self.executor,
         )
         evidence_root = tmp_path / "evidence"
@@ -747,6 +759,60 @@ class _Quiesce:
             activation_id=str(authority.activation_id),
         )
         return self.store.prior_power(binding, authority.plan_identity)
+
+    async def restore(self) -> RemoteModuleLifecycleResponseV1:
+        """Run the release RECOVER module restore after a completed PREPARE."""
+        self.scratch = self.scratch.model_copy(
+            update={"phase": "restored", "entry_count": None, "content_bytes": None}
+        )
+        return await self.durable.execute_lifecycle(
+            RemoteModuleLifecycleRequestV1(
+                authority=_lifecycle_authority(
+                    self.request, purpose="release", operation="recover"
+                ),
+                action="restore",
+                budget_seconds=300,
+            )
+        )
+
+    async def reap(
+        self, operation: str, identity: str | None = None
+    ) -> RemoteModuleLifecycleResponseV1:
+        """Run a module reap with the purpose and operation of a release CLEANUP or a teardown."""
+        purpose = "release" if operation == "cleanup" else operation
+        return await self.durable.execute_lifecycle(
+            RemoteModuleLifecycleRequestV1(
+                authority=_lifecycle_authority(
+                    self.request, purpose=purpose, operation=operation, identity=identity
+                ),
+                action="reap",
+                budget_seconds=300,
+            )
+        )
+
+    async def system_teardown(self) -> RemoteModuleLifecycleResponseV1:
+        """Run the System teardown's module reap, as the authority does after destroying it."""
+        values = self.request.authority.model_dump(
+            mode="python",
+            by_alias=True,
+            exclude={
+                "schema_",
+                "plan",
+                "purpose",
+                "operation",
+                "operation_identity",
+                "expected_source_identity",
+                "intended_target_identity",
+                "recovery_objects",
+                "local_timing",
+            },
+        )
+        authority = AuthorityTeardownMutationRequestV1.model_validate(
+            values | {"purpose": "teardown", "operation": "teardown", "operation_identity": "td"}
+        )
+        return await self.durable.execute_system_teardown(
+            RemoteModuleSystemTeardownRequestV1(authority=authority, budget_seconds=300)
+        )
 
     def close(self) -> None:
         self.store.close()
@@ -803,6 +869,263 @@ async def test_destroy_whose_response_was_lost_is_accepted_when_the_domain_is_in
 
     assert isinstance(response, RemoteModuleTerminalPreparationResponseV1)
     assert stack.appliance.created_while_system_active == [False]
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_restore_stops_the_activated_system_before_the_appliance(tmp_path: Path) -> None:
+    """A release restores modules offline, so the running activated guest is stopped first."""
+    system = _SystemDomain(active=False)
+    stack = _Quiesce(tmp_path, system)
+    await stack.durable.execute(stack.request)
+    system.active = True
+
+    restored = await stack.restore()
+
+    assert restored.result.phase == "restored"
+    assert system.destroyed and not system.active
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_restore_never_destroys_a_stopped_system(tmp_path: Path) -> None:
+    system = _SystemDomain(active=False)
+    stack = _Quiesce(tmp_path, system)
+    await stack.durable.execute(stack.request)
+
+    restored = await stack.restore()
+
+    assert restored.result.phase == "restored"
+    assert not system.destroyed
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_restore_accepts_a_destroy_whose_response_was_lost(tmp_path: Path) -> None:
+    system = _LostResponseDomain(active=False)
+    stack = _Quiesce(tmp_path, system)
+    await stack.durable.execute(stack.request)
+    system.active = True
+
+    restored = await stack.restore()
+
+    assert restored.result.phase == "restored"
+    assert not system.active
+    stack.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("domain_type", [_StuckDomain, _IgnoredDestroyDomain])
+async def test_restore_refuses_a_system_that_cannot_be_stopped(
+    tmp_path: Path, domain_type: type[_SystemDomain]
+) -> None:
+    system = domain_type(active=False)
+    stack = _Quiesce(tmp_path, system)
+    await stack.durable.execute(stack.request)
+    system.active = True
+
+    with pytest.raises(CategorizedError, match="System domain") as failed:
+        await stack.restore()
+
+    assert failed.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert system.active
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_after_a_restore_reaps_against_the_restored_result(
+    tmp_path: Path,
+) -> None:
+    """A release that failed after RECOVER leaves the restored result in the scratch volume."""
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    await stack.durable.execute(stack.request)
+    await stack.restore()
+
+    reaped = await stack.system_teardown()
+
+    assert reaped.volumes_absent
+    assert reaped.result.phase == "restored"
+    assert await stack.system_teardown() == reaped
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_without_a_restore_reaps_against_the_installed_result(
+    tmp_path: Path,
+) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    await stack.durable.execute(stack.request)
+
+    reaped = await stack.system_teardown()
+
+    assert reaped.volumes_absent
+    assert reaped.result.phase == "installed"
+    stack.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("restore_first", [True, False])
+async def test_system_teardown_refuses_a_scratch_result_that_is_not_the_stored_evidence(
+    tmp_path: Path, restore_first: bool
+) -> None:
+    """With a stored restore only the restored result is acceptable; without, the installed one."""
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    installed = stack.scratch
+    await stack.durable.execute(stack.request)
+    if restore_first:
+        await stack.restore()
+        stack.scratch = installed
+    else:
+        stack.scratch = installed.model_copy(update={"entry_count": 99, "content_bytes": 99})
+
+    with pytest.raises(ValueError, match="differs before reap"):
+        await stack.system_teardown()
+
+    assert stack.storage.pool.volumes
+    stack.close()
+
+
+class _PowerAwareInspection:
+    """Fixed attachment inspection over a fake System; an active owner needs the allow flag."""
+
+    def __init__(self, stack: _Quiesce, system: _SystemDomain) -> None:
+        operation = stack.request.operation
+        self.detached = frozenset(
+            (
+                "systems",
+                render_module_volume_name(
+                    operation.system_id, operation.run_id, operation.operation_nonce, purpose
+                ),
+            )
+            for purpose in ("source.ext4", "scratch.ext4")
+        )
+        self.system = system
+        self.allowed: list[bool] = []
+
+    def __call__(
+        self,
+        conn: object,
+        identity: object,
+        expected: object,
+        present: object = None,
+        *,
+        allow_cleanup_partial: bool = False,
+        allow_active_system: bool = False,
+    ) -> AttachmentInspection:
+        del conn, identity, expected, present, allow_cleanup_partial
+        self.allowed.append(allow_active_system)
+        active = bool(self.system.active)
+        if active and not allow_active_system:
+            raise CategorizedError("owning System is active", category=ErrorCategory.CONFLICT)
+        return AttachmentInspection(not active, True, False, self.detached)
+
+
+async def _restored_stack_with_a_running_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[_Quiesce, _SystemDomain, _PowerAwareInspection]:
+    from kdive.providers.remote_libvirt import remote_module_authority_host as host_module
+
+    system = _SystemDomain(active=False)
+    stack = _Quiesce(tmp_path, system, fixed_inspection=True)
+    _seed_root(stack, _root_volume_xml("/pool/base.qcow2"))
+    inspection = _PowerAwareInspection(stack, system)
+    monkeypatch.setattr(host_module, "inspect_module_attachments", inspection)
+    await stack.durable.execute(stack.request)
+    await stack.restore()
+    system.active = True
+    return stack, system, inspection
+
+
+@pytest.mark.anyio
+async def test_release_cleanup_reap_proceeds_while_the_recovered_system_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RECOVER restores the System's power, so the reap that follows meets a running System."""
+    stack, system, _inspection = await _restored_stack_with_a_running_system(tmp_path, monkeypatch)
+
+    reaped = await stack.reap("cleanup")
+
+    assert reaped.volumes_absent
+    assert system.active and not system.destroyed
+    stack.close()
+
+
+def _sweep_journal_markers(stack: _Quiesce) -> None:
+    """Delete the reap markers as the module-volume sweep does once the obligation discharged."""
+    operation = stack.request.operation
+    for kind in ("reaping.journal", "reaped.journal"):
+        name = render_module_volume_name(
+            operation.system_id, operation.run_id, operation.operation_nonce, kind
+        )
+        stack.storage.pool.volumes.pop(name)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["cleanup", "teardown"])
+async def test_reap_after_the_sweep_removed_the_markers_reports_the_volumes_absent(
+    tmp_path: Path, operation: str
+) -> None:
+    """#3414: with no markers and no attempt volumes the reap's post-condition already holds."""
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    installed = stack.scratch
+    await stack.durable.execute(stack.request)
+    await stack.restore()
+
+    async def reap(identity: str) -> RemoteModuleLifecycleResponseV1:
+        if operation == "teardown":
+            return await stack.system_teardown()
+        return await stack.reap(operation, identity)
+
+    first = await reap("first")
+    _sweep_journal_markers(stack)
+    # The scratch volume is gone with the sweep, so nothing can still prove the restored result.
+    stack.scratch = installed
+    markers = set(stack.storage.pool.volumes)
+
+    again = await reap("re-entered")
+
+    assert again.volumes_absent
+    assert again.result == first.result
+    assert set(stack.storage.pool.volumes) == markers
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_reap_with_a_volume_present_and_no_markers_still_verifies_the_result(
+    tmp_path: Path,
+) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    installed = stack.scratch
+    await stack.durable.execute(stack.request)
+    await stack.restore()
+    stack.scratch = installed
+
+    with pytest.raises(ValueError, match="differs before reap"):
+        await stack.reap("cleanup")
+
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_resolve_conflict_authority_no_longer_admits_a_reap(tmp_path: Path) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+
+    with pytest.raises(ValueError, match="differs from authority operation"):
+        await stack.reap("resolve-conflict")
+
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_teardown_reap_still_refuses_a_running_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack, system, _inspection = await _restored_stack_with_a_running_system(tmp_path, monkeypatch)
+
+    with pytest.raises(CategorizedError, match="owning System is active"):
+        await stack.reap("teardown")
+
+    assert system.active
     stack.close()
 
 

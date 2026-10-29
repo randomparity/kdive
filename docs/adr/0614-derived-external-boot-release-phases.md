@@ -50,6 +50,20 @@ Fresh adoption rejects a missing source receipt, a different phase identity, a n
 observation, or any stale root binding. Re-entry after recovery therefore performs cleanup under
 the new root, while re-entry after cleanup reuses only verified terminal evidence.
 
+### Amendment (2026-10-28)
+
+The remote cleanup-evidence read (ADR-0592's accounted-cleanup evidence; migration 0145) is another
+resolution of a derived phase and follows the same rule: a release `cleanup` request is matched
+against the root `release` authority row, never against a row of its own. Migration 0182 admits
+the derived pair only when the request's identity and digest equal what the phase derivation
+yields from that root row; the other admitted pairs, and a standalone `release`/`cleanup` root,
+keep their exact match. A CLEANUP retried after its module reap discharged the obligation reaches the
+host, whose reap is idempotent, and proceeds only if the host reports the volumes reaped and the
+response matches the retained restored evidence; the retry therefore reaches the gate instead of
+stopping at an obligation that was deliberately closed. The read recomputes each stored
+evidence identity over the document without its null members, the form `identity_for` derives the
+identity from; the stored documents keep explicit nulls.
+
 ## Consequences
 
 Provider deletion and verified absence precede capacity credit. One public job remains running for

@@ -13,13 +13,10 @@ import pytest
 
 from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import Cell
-from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack import authority_cells
-from tests.integration.live_stack.authority_faults import CONFLICT_BLOCKED, REMOTE_ORPHAN_BLOCKED
 from tests.integration.live_stack.authority_lane import AuthoritySystem
 from tests.integration.live_stack.evidence import EvidenceWriter
-from tests.integration.live_stack.remote_lifecycle import RemoteHost
-from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.integration.live_stack.scenario import CellRun
 from tests.integration.live_stack.tool_cells import Grants, tool_cells
 from tests.live_vm.installed_local_authority_support import (
     ActivationJob,
@@ -60,12 +57,6 @@ def _system(remote: bool = False) -> AuthoritySystem:
 
 
 def _fake_lanes(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
-    host = RemoteHost("operator@provider", "pool", "fedora:44", "x86_64", "kvm")
-
-    def gates(_run: CellRun, _url: str, reason: str) -> None:
-        calls.append("gates")
-        raise ScenarioStop(Outcome.BLOCKED, reason)
-
     def fixture() -> tuple[Path, dict[str, Any]]:
         calls.append("fixture")
         return _TREE, _MANIFEST
@@ -77,40 +68,9 @@ def _fake_lanes(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     async def observe_remote(*_args: object) -> None:
         calls.append("observe_remote_authority")
 
-    monkeypatch.setattr(authority_cells, "blocked_after_gates", gates)
     monkeypatch.setattr(authority_cells, "_fixture", fixture)
     monkeypatch.setattr(authority_cells, "on_authority_system", frame)
     monkeypatch.setattr(authority_cells, "observe_remote_authority", observe_remote)
-    monkeypatch.setattr(authority_cells, "remote_host", lambda: host)
-    monkeypatch.setattr(authority_cells, "observe_host", lambda *_a: calls.append("observe_host"))
-
-
-@pytest.mark.parametrize(
-    ("tool", "provider", "reason"),
-    [
-        ("ops.resolve_recovery_orphan", "remote-libvirt", REMOTE_ORPHAN_BLOCKED),
-        ("systems.resolve_external_boot_conflict", "local-libvirt", CONFLICT_BLOCKED),
-        ("systems.resolve_external_boot_conflict", "remote-libvirt", CONFLICT_BLOCKED),
-    ],
-)
-def test_a_product_blocked_cell_stops_after_its_gates_and_before_any_mutation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str, provider: str, reason: str
-) -> None:
-    calls: list[str] = []
-    _fake_lanes(monkeypatch, calls)
-    run = CellRun(_cell(tool, provider), EvidenceWriter(tmp_path))
-
-    async def body(*_args: object) -> dict[str, object]:
-        raise AssertionError("a blocked cell must not run its body")
-
-    with pytest.raises(ScenarioStop) as stop:
-        asyncio.run(
-            authority_cells.run_authority_cell(run, "url", cast(Any, None), "db", body, project="p")
-        )
-    assert (stop.value.outcome, str(stop.value)) == (Outcome.BLOCKED, reason)
-    assert ("#3363" if "orphan" in tool else "#3341") in reason
-    remote = provider == "remote-libvirt"
-    assert calls == (["observe_host", "gates"] if remote else ["gates"])
 
 
 @pytest.mark.parametrize(
@@ -121,6 +81,9 @@ def test_a_product_blocked_cell_stops_after_its_gates_and_before_any_mutation(
         ("ops.force_release", "local-libvirt"),
         ("ops.force_release", "remote-libvirt"),
         ("ops.resolve_recovery_orphan", "local-libvirt"),
+        ("ops.resolve_recovery_orphan", "remote-libvirt"),
+        ("systems.resolve_external_boot_conflict", "local-libvirt"),
+        ("systems.resolve_external_boot_conflict", "remote-libvirt"),
     ],
 )
 def test_a_runnable_cell_frames_its_body_with_the_bound_fixture(

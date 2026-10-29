@@ -81,6 +81,17 @@ def _request_deadline(context: OperationContext, fallback: datetime) -> datetime
     return RecoveryRequestV1.model_validate(raw).readiness_deadline
 
 
+def _starts_fresh_readiness_budget(context: OperationContext) -> bool:
+    """Whether a release is re-entering a recovery that an earlier job attempt began.
+
+    A request's readiness deadline is stamped once at admission, five minutes ahead, and a later
+    job attempt only starts after the lease (also five minutes) has lapsed. Beginning the derived
+    RECOVER against that deadline is always refused, so a re-entered release gets its own budget
+    (ADR-0684 amendment, #3395).
+    """
+    return context.job.attempt > 1 or context.activation.state is State.RECOVERING
+
+
 _ACTIVATION_EVIDENCE: Final = frozenset({"materialization", "recovery_point"})
 _RECOVERY_STATES: Final = frozenset(
     {State.ACTIVE, State.RECOVERED, State.ABANDONED, State.RECOVERY_CONFLICT, State.RECOVERY_FAILED}
@@ -129,26 +140,28 @@ async def _execute_remote_module_lifecycle(
     if raw_preparation is None:
         raise _refuse("remote module lifecycle authority inputs are incomplete")
     preparation = ModuleAttemptPreparationRequestV1.from_payload(raw_preparation)
-    action: Literal["restore", "reap"] = (
-        "restore"
-        if request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.RESOLVE_CONFLICT}
-        else "reap"
-    )
-    await execute_remote_module_lifecycle_on_authority_host(
-        connection=context.connection,
-        repository=RemoteModuleAttemptObligationRepository(),
-        sender=cast(Any, executor),
-        authority=request,
-        preparation=preparation,
-        worker_context=ModuleAttemptWorkerWriteContext(
-            job_id=context.job.id,
-            job_attempt=context.job.attempt,
-            incarnation_credential=context.incarnation_credential,
+    steps: dict[AuthorityOperation, tuple[Literal["restore", "reap"], ...]] = {
+        AuthorityOperation.RECOVER: ("restore",),
+        # A resolve recovers like RECOVER and leaves the volumes for the release CLEANUP (#3414).
+        AuthorityOperation.RESOLVE_CONFLICT: ("restore",),
+        AuthorityOperation.CLEANUP: ("reap",),
+    }
+    for action in steps[request.operation]:
+        await execute_remote_module_lifecycle_on_authority_host(
+            connection=context.connection,
+            repository=RemoteModuleAttemptObligationRepository(),
+            sender=cast(Any, executor),
+            authority=request,
             preparation=preparation,
-        ),
-        action=action,
-        deadline=asyncio.get_running_loop().time() + 300.0,
-    )
+            worker_context=ModuleAttemptWorkerWriteContext(
+                job_id=context.job.id,
+                job_attempt=context.job.attempt,
+                incarnation_credential=context.incarnation_credential,
+                preparation=preparation,
+            ),
+            action=action,
+            deadline=asyncio.get_running_loop().time() + 300.0,
+        )
 
 
 async def _derived_release_status(
@@ -821,13 +834,6 @@ def recover_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
 
     def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
         if context.activation.state is not State.ACTIVE:
-            deadline = context.prerequisites.get("attempt_deadline")
-            if deadline is not None and ports.clock() >= deadline:
-                raise CategorizedError(
-                    "recovery readiness deadline expired",
-                    category=ErrorCategory.READINESS_FAILURE,
-                    terminal=True,
-                )
             return None
         deadline = _request_deadline(context, ports.clock() + ports.recovery_readiness_timeout)
         if ports.clock() >= deadline:
@@ -888,13 +894,6 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
 
     async def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
         if context.activation.state is State.RECOVERING:
-            deadline = context.prerequisites.get("attempt_deadline")
-            if deadline is not None and ports.clock() >= deadline:
-                raise CategorizedError(
-                    "recovery readiness deadline expired",
-                    category=ErrorCategory.READINESS_FAILURE,
-                    terminal=True,
-                )
             return None
         executor = context.authority_executor
         if executor is None:
@@ -964,13 +963,18 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     async def complete(
         context: OperationContext,
     ) -> ExternalBootDerivedReleaseCompletion | ExternalBootAuthorityConflictV1:
+        fresh = ports.clock() + ports.recovery_readiness_timeout
         prerequisites = dict(context.prerequisites)
         prerequisites.update(
             connection=context.prerequisites["connection"],
             incarnation_credential=hashlib.sha256(
                 ports.incarnation_credential.get_secret_value().encode("utf-8")
             ).digest(),
-            deadline=_request_deadline(context, ports.clock() + ports.recovery_readiness_timeout),
+            deadline=(
+                fresh
+                if _starts_fresh_readiness_budget(context)
+                else _request_deadline(context, fresh)
+            ),
         )
         return await _run_active_release(replace(context, prerequisites=prerequisites))
 

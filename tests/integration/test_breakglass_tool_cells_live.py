@@ -10,8 +10,8 @@ outside that project, and proves the owned domain and disks gone while the provi
 domains and the lane's staged base stay. The other functional cells run on the installed
 authority lanes through :func:`~tests.integration.live_stack.authority_cells.run_authority_cell`
 (#3186): ``force_release`` and ``resolve_recovery_orphan`` run their #3185 fault arm, called by an
-outside platform admin through the cell's exposure; the remote orphan (#3363) and both conflict
-cells (#3330, #3341) stop ``blocked`` after their lane gates. A rejection cell aims at the stack's
+outside platform admin through the cell's exposure; ``resolve_external_boot_conflict`` runs its
+conflict arm on the frame's own client. A rejection cell aims at the stack's
 :func:`~tests.integration.live_stack.tool_cells.lane_target` for its provider.
 ``docs/operating/runbooks/live-testing.md`` covers both lanes.
 """
@@ -42,6 +42,7 @@ from tests.integration.live_stack.authority_cells import (
     platform_admin_grants,
     run_authority_cell,
 )
+from tests.integration.live_stack.authority_faults import ToolCall
 from tests.integration.live_stack.authority_lane import AuthoritySystem
 from tests.integration.live_stack.image_smoke import staged_image
 from tests.integration.live_stack.remote_lifecycle import (
@@ -86,11 +87,19 @@ _TEARDOWN = "ops.force_teardown"
 _CONFLICT = "systems.resolve_external_boot_conflict"
 _REMOTE = "remote-libvirt"
 _REASON = "coverage #3112"
-# The #3185 fault arm that constructs each tool's state; a tool without one is product-blocked
-# (authority_cells.PRODUCT_BLOCKERS) and never reaches its body.
+
+
+async def _conflict_arm(
+    system: AuthoritySystem, db_url: str, _call: ToolCall, *, kernel_tree: Path
+) -> dict[str, object]:
+    return await authority_faults.recorded_conflict(system, db_url, kernel_tree=kernel_tree)
+
+
+# The #3185 fault arm that constructs each tool's state.
 _ARMS: dict[str, Callable[..., Awaitable[dict[str, object]]]] = {
     _RELEASE: authority_faults.held_teardown_release,
     "ops.resolve_recovery_orphan": authority_faults.quarantined_orphan,
+    _CONFLICT: _conflict_arm,
 }
 
 

@@ -2,11 +2,9 @@
 
 The run and break-glass carriers frame the functional cells of ``runs.release_external_boot``,
 ``ops.force_release``, ``ops.resolve_recovery_orphan`` and
-``systems.resolve_external_boot_conflict`` through :func:`run_authority_cell`. A cell whose
-construction waits on a product change stops ``blocked`` after its lane gates and before any
-mutation, with that change's reason. Every other cell runs its body inside
-:func:`~tests.integration.live_stack.authority_lane.on_authority_system`, uploading the bound
-``longterm`` fixture, and calls the tool under test through the cell's exposure.
+``systems.resolve_external_boot_conflict`` through :func:`run_authority_cell`. Every cell runs its
+body inside :func:`~tests.integration.live_stack.authority_lane.on_authority_system`, uploading
+the bound ``longterm`` fixture, and calls the tool under test through the cell's exposure.
 """
 
 from __future__ import annotations
@@ -24,12 +22,9 @@ from kdive.mcp.dev_harness import OidcIssuer
 from kdive.mcp.responses import ToolResponse
 from tests.integration.live_stack import authority_lane
 from tests.integration.live_stack.authority_faults import (
-    CONFLICT_BLOCKED,
-    REMOTE_ORPHAN_BLOCKED,
     ToolCall,
     activate,
     activation_of,
-    blocked_after_gates,
     job_claim,
     receipt_state,
 )
@@ -40,7 +35,6 @@ from tests.integration.live_stack.authority_lane import (
     on_authority_system,
 )
 from tests.integration.live_stack.deep_lifecycle import uploaded_kernel_inputs
-from tests.integration.live_stack.remote_lifecycle import observe_host, remote_host
 from tests.integration.live_stack.scenario import CellRun
 from tests.integration.live_stack.service_cells import _fixture
 from tests.integration.live_stack.spine import drain_job, ok
@@ -57,12 +51,6 @@ from tests.live_vm.installed_remote_authority_support import (
 
 _REMOTE = "remote-libvirt"
 _RELEASE = "runs.release_external_boot"
-# Cells whose construction waits on a product change; the reason names its owner.
-PRODUCT_BLOCKERS: dict[tuple[str, str], str] = {
-    ("ops.resolve_recovery_orphan", _REMOTE): REMOTE_ORPHAN_BLOCKED,
-    ("systems.resolve_external_boot_conflict", "local-libvirt"): CONFLICT_BLOCKED,
-    ("systems.resolve_external_boot_conflict", _REMOTE): CONFLICT_BLOCKED,
-}
 _ADMISSION_ATTEMPTS = 3
 _RELEASE_JOBS: LiteralString = (
     "SELECT id::text FROM jobs WHERE payload->'external_boot_authority_v1'->>'run_id' = %s "
@@ -108,14 +96,8 @@ async def run_authority_cell(
     *,
     project: str,
 ) -> None:
-    """Stop a product-blocked cell after its lane gates; frame ``project``'s System otherwise."""
-    reason = PRODUCT_BLOCKERS.get((run.cell.operation, run.cell.provider))
+    """Frame ``project``'s authority System and run ``body`` inside it."""
     remote = run.cell.provider == _REMOTE
-    if reason is not None:
-        if remote:
-            # A read-only probe, so the blocked record carries the provider host like the rest.
-            observe_host(run, await asyncio.to_thread(remote_host))
-        blocked_after_gates(run, base_url, reason)
     tree, manifest = _fixture()
 
     async def framed(system: AuthoritySystem) -> dict[str, object]:

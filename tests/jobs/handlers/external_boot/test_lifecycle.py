@@ -68,6 +68,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityOperation,
     AuthorityTakeoverRequestV1,
     AuthorityTeardownMutationRequestV1,
     AuthorityTeardownProofV1,
@@ -1688,3 +1689,55 @@ def test_a_cleanup_job_parses_a_plain_json_receipt_for_the_module_lifecycle(
         ]
 
     _drive(migrated_url, authority_role_dsns, "cleanup", body)
+
+
+def test_teardown_without_a_module_receipt_discharges_nothing() -> None:
+    """#3406: a teardown admitted after a completed release has no reap obligation to discharge."""
+    from types import SimpleNamespace
+
+    context = SimpleNamespace(job=SimpleNamespace(payload={}))
+    asyncio.run(lifecycle_module._discharge_module_reap_after_teardown(cast(Any, context)))
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        (AuthorityOperation.RECOVER, ["restore"]),
+        (AuthorityOperation.RESOLVE_CONFLICT, ["restore"]),
+        (AuthorityOperation.CLEANUP, ["reap"]),
+    ],
+)
+def test_remote_module_lifecycle_steps_per_operation(
+    monkeypatch: pytest.MonkeyPatch, operation: AuthorityOperation, expected: list[str]
+) -> None:
+    """#3414: a resolve-conflict restores only; the later release CLEANUP reaps the volumes."""
+    from types import SimpleNamespace
+
+    actions: list[tuple[str, AuthorityOperation]] = []
+
+    async def record(**values: Any) -> None:
+        actions.append((values["action"], values["authority"].operation))
+
+    monkeypatch.setattr(
+        lifecycle_module, "execute_remote_module_lifecycle_on_authority_host", record
+    )
+    attempt = _module_attempt(uuid4(), uuid4())
+    context = SimpleNamespace(
+        binding=SimpleNamespace(
+            runtime=SimpleNamespace(authority=SimpleNamespace(modules=object()))
+        ),
+        job=SimpleNamespace(
+            id=uuid4(), attempt=1, payload={"remote_module_attempt_v1": _receipt(attempt)}
+        ),
+        connection=object(),
+        incarnation_credential=SecretStr("worker-credential"),
+    )
+    request = SimpleNamespace(operation=operation)
+
+    asyncio.run(
+        lifecycle_module._execute_remote_module_lifecycle(
+            cast(Any, context), cast(Any, request), cast(Any, object())
+        )
+    )
+
+    assert actions == [(action, operation) for action in expected]

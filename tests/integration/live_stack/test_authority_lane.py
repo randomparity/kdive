@@ -582,6 +582,8 @@ def _fake_remote_lane(
     inventory = tmp_path / "systems.toml"
     inventory.write_text("", encoding="utf-8")
     monkeypatch.setenv(authority_lane.SYSTEMS_TOML_ENV, str(inventory))
+    monkeypatch.setattr(authority_lane, "VOLUME_SWEEP_DEADLINE_S", 0.2)
+    monkeypatch.setattr(authority_lane, "VOLUME_SWEEP_POLL_S", 0.0)
 
     def arecord(name: str, result: object = None) -> Any:
         async def coroutine(*_args: object, **_kwargs: object) -> object:
@@ -771,6 +773,30 @@ def test_remote_leftover_after_teardown_fails_before_release(
         _frame(run, body)
     assert "allocations.release" not in calls
     assert "cleanup" not in run.assertions
+
+
+def test_remote_reap_markers_that_the_sweep_removes_do_not_fail_the_frame(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The marker volumes outlive the teardown until the sweep runs, so the frame waits."""
+    calls, body = _fake_remote_lane(monkeypatch, tmp_path, [])
+    observe = authority_lane.remote_authority_inventory
+    markers = [f"kdive-module-{_SYSTEM}-run-nonce-reaping.journal"]
+    pending = [True, True]
+
+    def sweeping(config: Any, system_id: str | None = None) -> RemoteAuthorityInventory:
+        if system_id is not None and "systems.teardown" in calls and pending:
+            pending.pop()
+            return RemoteAuthorityInventory("x86_64", ["kdive-other"], markers, None)
+        return observe(config, system_id)
+
+    monkeypatch.setattr(authority_lane, "remote_authority_inventory", sweeping)
+    run = _remote(tmp_path)
+
+    _frame(run, body)
+
+    assert pending == []
+    assert set(run.assertions) == {"effect", "cleanup"}
 
 
 def test_remote_inventory_drift_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1063,3 +1089,80 @@ def test_another_remote_root_image_stops_blocked(
         _observe_remote(tmp_path, monkeypatch, "lane-private-image")
     assert stop.value.outcome is Outcome.BLOCKED
     assert "lane-private-image" not in str(stop.value)
+
+
+class _Clock:
+    """A clock the fake sleep advances, so the polling bound is exercised without waiting."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _pool(*volumes: str) -> RemoteAuthorityInventory:
+    return RemoteAuthorityInventory("x86_64", [], list(volumes), None)
+
+
+def _sweep(
+    first: RemoteAuthorityInventory,
+    reads: list[RemoteAuthorityInventory],
+    clock: _Clock,
+    *,
+    deadline_s: float = 120.0,
+    poll_s: float = 10.0,
+) -> list[str]:
+    async def read() -> RemoteAuthorityInventory:
+        return reads.pop(0) if len(reads) > 1 else reads[0]
+
+    return asyncio.run(
+        authority_lane._await_volumes_swept(
+            first,
+            read,
+            _SYSTEM,
+            deadline_s=deadline_s,
+            poll_s=poll_s,
+            clock=clock,
+            sleep=clock.sleep,
+        )
+    )
+
+
+def test_volume_sweep_wait_returns_at_once_when_the_pool_is_already_clear() -> None:
+    clock = _Clock()
+
+    assert _sweep(_pool("kdive-other-overlay.qcow2"), [_pool()], clock) == []
+    assert clock.sleeps == []
+
+
+def test_volume_sweep_wait_passes_when_the_markers_clear_within_the_bound() -> None:
+    clock = _Clock()
+    markers = _pool(f"kdive-module-{_SYSTEM}-run-nonce-reaping.journal")
+
+    stranded = _sweep(markers, [markers, markers, _pool()], clock)
+
+    assert stranded == []
+    assert clock.sleeps == [10.0, 10.0, 10.0]
+
+
+def test_volume_sweep_wait_reports_what_remains_when_the_bound_passes() -> None:
+    clock = _Clock()
+    markers = _pool(f"kdive-module-{_SYSTEM}-run-nonce-reaped.journal")
+
+    stranded = _sweep(markers, [markers], clock, deadline_s=30.0)
+
+    assert stranded == [f"kdive-module-{_SYSTEM}-run-nonce-reaped.journal"]
+    assert clock.now == 30.0
+
+
+def test_volume_sweep_wait_ignores_volumes_that_do_not_name_the_system() -> None:
+    clock = _Clock()
+
+    assert _sweep(_pool("kdive-22222222-overlay.qcow2"), [_pool()], clock) == []
+    assert clock.sleeps == []

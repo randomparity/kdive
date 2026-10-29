@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from pydantic import SecretStr, ValidationError
 
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
+    ModuleAttemptRestoredEvidence,
     ModuleAttemptWorkerWriteContext,
     RemoteModuleAttemptObligationRepository,
 )
@@ -1135,23 +1137,16 @@ async def _resolve_after_observing(
             "expected_observed_composite": acknowledged,
         }
     )
-    evidence = AuthorityCleanupEvidenceContextV1(
-        operation_identity=request.operation_identity,
-        attempt_id=request.attempt_id,
-        operation_nonce=record.module_recovery.operation_nonce,
-        cleanup_state="discharged",
-        recovery_reference_json=record.module_recovery.model_dump_json(),
-    )
-    return operations, adapter, (request, _native_context(request), evidence)
+    return operations, adapter, (request, _native_context(request))
 
 
 @pytest.mark.anyio
 async def test_remote_resolve_restores_the_acknowledged_third_definition(tmp_path: Path) -> None:
     operations, adapter, args = await _resolve_after_observing(tmp_path, definition="other")
 
-    await adapter.commit_cleanup(*args)
+    await adapter.commit(*args)
 
-    assert operations.calls == ["recover-acknowledged", "cleanup"]
+    assert operations.calls == ["recover-acknowledged"]
     assert operations.acknowledged == [
         (operations.state.preserved, operations.state.boot),
     ]
@@ -1159,12 +1154,33 @@ async def test_remote_resolve_restores_the_acknowledged_third_definition(tmp_pat
 
 
 @pytest.mark.anyio
+async def test_remote_resolve_retains_the_recovery_objects_and_observes_the_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3414: a resolve recovers and leaves the objects for the release CLEANUP, as RECOVER does."""
+    operations, adapter, args = await _resolve_after_observing(tmp_path, definition="other")
+    recover = operations.recover_acknowledged
+
+    def recover_to_source(*values: Any) -> None:
+        recover(*values)
+        operations.state = replace(operations.state, definition="source", active=False)
+
+    monkeypatch.setattr(operations, "recover_acknowledged", recover_to_source)
+
+    observed = await adapter.commit(*args)
+
+    assert "cleanup" not in operations.calls
+    assert observed.category == "source"
+    adapter.close()
+
+
+@pytest.mark.anyio
 async def test_remote_resolve_from_a_recorded_side_uses_ordinary_recovery(tmp_path: Path) -> None:
     operations, adapter, args = await _resolve_after_observing(tmp_path, definition="target")
 
-    await adapter.commit_cleanup(*args)
+    await adapter.commit(*args)
 
-    assert operations.calls == ["recover", "cleanup"]
+    assert operations.calls == ["recover"]
     adapter.close()
 
 
@@ -1177,7 +1193,7 @@ async def test_remote_resolve_refuses_a_definition_changed_since_the_acknowledge
     )
 
     with pytest.raises(ValueError, match="changed before restore"):
-        await adapter.commit_cleanup(*args)
+        await adapter.commit(*args)
 
     assert operations.calls == []
     adapter.close()
@@ -2152,6 +2168,121 @@ async def test_worker_reap_requires_retained_terminal_evidence_before_dispatch(
             action="reap",
             deadline=asyncio.get_running_loop().time() + 10,
         )
+
+
+async def _worker_cleanup_retry(
+    *,
+    discharged: bool,
+    open_: bool = False,
+    purpose: str = "release",
+    operation: str = "cleanup",
+    reap_response: Callable[[RemoteModuleLifecycleResponseV1], RemoteModuleLifecycleResponseV1]
+    | None = None,
+) -> tuple[ModuleCompletion, list[str]]:
+    """Run a worker reap whose obligation is open or already discharged by a first pass."""
+    preparation_request = _remote_preparation_request()
+    preparation = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=preparation_request.authority.system_id,
+            run_id=preparation_request.authority.run_id,
+            operation_nonce=preparation_request.operation.operation_nonce,
+        )
+    )
+    restored = _restored_response(preparation_request)
+    reaped = restored.model_copy(update={"action": "reap", "volumes_absent": True})
+    if reap_response is not None:
+        reaped = reap_response(reaped)
+    retained = module_completion(restored.operation, restored)
+    evidence = ModuleAttemptRestoredEvidence(
+        restored_operation=retained.operation.evidence.document,
+        restored_operation_identity=retained.operation.evidence.identity,
+        restored_result=retained.result.document,
+        restored_result_identity=retained.result.identity,
+    )
+    calls: list[str] = []
+
+    class Repository:
+        async def reap_obligation_is_open(self, *_args: object) -> bool:
+            return open_
+
+        async def reap_obligation_is_discharged(self, *_args: object) -> bool:
+            return discharged
+
+        async def read_restored_evidence(self, *_args: object) -> ModuleAttemptRestoredEvidence:
+            return evidence
+
+        async def read_terminal_evidence(self, *_args: object) -> None:
+            return None
+
+        async def worker_discharge_reap_obligation(self, *_args: object) -> bool:
+            calls.append("discharge")
+            return True
+
+    class Sender:
+        async def execute_remote_module_lifecycle(self, *_args: object, **_kwargs: object) -> Any:
+            calls.append("dispatch")
+            return module_completion(reaped.operation, reaped)
+
+    response = await execute_remote_module_lifecycle_on_authority_host(
+        connection=cast(Any, object()),
+        repository=cast(Any, Repository()),
+        sender=cast(Any, Sender()),
+        authority=_module_lifecycle_request(
+            preparation_request, purpose=purpose, operation=operation, action="reap"
+        ).authority,
+        preparation=preparation,
+        worker_context=ModuleAttemptWorkerWriteContext(
+            job_id=uuid4(),
+            job_attempt=1,
+            incarnation_credential=SecretStr("worker-credential"),
+            preparation=preparation,
+        ),
+        action="reap",
+        deadline=asyncio.get_running_loop().time() + 10,
+    )
+    return response, calls
+
+
+@pytest.mark.anyio
+async def test_cleanup_retry_after_the_reap_discharged_the_obligation_succeeds() -> None:
+    response, calls = await _worker_cleanup_retry(discharged=True)
+
+    assert response.volumes_absent
+    assert calls == ["dispatch", "discharge"]
+
+
+@pytest.mark.anyio
+async def test_cleanup_retry_needs_the_host_to_report_the_volumes_absent() -> None:
+    with pytest.raises(CategorizedError, match="volumes reaped") as refused:
+        await _worker_cleanup_retry(
+            discharged=True,
+            reap_response=lambda response: response.model_copy(update={"volumes_absent": False}),
+        )
+
+    assert refused.value.category is ErrorCategory.CONFLICT
+
+
+@pytest.mark.anyio
+async def test_cleanup_retry_needs_the_host_response_to_match_the_restored_evidence() -> None:
+    with pytest.raises(CategorizedError, match="differs from restored evidence"):
+        await _worker_cleanup_retry(
+            discharged=True,
+            reap_response=lambda response: response.model_copy(
+                update={"result": response.result.model_copy(update={"entry_count": 7})}
+            ),
+        )
+
+
+@pytest.mark.anyio
+async def test_cleanup_without_an_open_or_discharged_obligation_is_refused() -> None:
+    with pytest.raises(CategorizedError, match="reap obligation is not retained"):
+        await _worker_cleanup_retry(discharged=False)
+
+
+@pytest.mark.anyio
+async def test_teardown_reap_of_a_discharged_obligation_is_still_refused() -> None:
+    with pytest.raises(CategorizedError, match="reap obligation is not retained"):
+        await _worker_cleanup_retry(discharged=True, purpose="teardown", operation="teardown")
 
 
 @pytest.mark.anyio

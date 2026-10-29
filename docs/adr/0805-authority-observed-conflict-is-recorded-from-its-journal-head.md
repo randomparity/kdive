@@ -158,3 +158,14 @@ compare-and-swap, and the providers now do that. This amendment records how.
 - **Record `preparing` and `prepared` conflicts too.** verified: those states are refused
   through preparation and the `deadline` commit, not through the mutation path that this changes,
   so the branch would have no producer.
+
+### Amendment (2026-10-29): a remote resolution retains the recovery objects (#3414)
+
+This clarifies item 3 of the #3330 amendment. A remote `resolve-conflict` was committed through the
+authority's cleanup path only because that path forwarded the acknowledged definition. It also
+deleted the boot artifacts, so the adapter observed `absent`, and the worker, which expects the
+`source` that a local resolution returns, dropped the terminal commit. The remote resolution now
+commits like `recover`: the module restore runs on the worker, the adapter recovers from the
+acknowledged definition, nothing is deleted, and the observation is `source`. The activation ends
+`recovered` and the later release's `cleanup` deletes the boot artifacts and reaps the module
+volumes, as after an ordinary recover. The local and remote resolutions now agree. No schema change.

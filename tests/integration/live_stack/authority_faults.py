@@ -13,8 +13,6 @@ caller it is handed, so a carrier chooses the exposure and role (#3186).
 - :func:`recorded_conflict` changes the System's persistent definition out of band, as a host
   administrator would (ADR-0584), so the release refuses and the activation is recorded in
   ``recovery_conflict`` from the authority's journal head (ADR-0805); it then resolves it.
-- The remaining faults are product gaps; :func:`blocked_after_gates` records their narrower
-  reasons after the lane gates and before any mutation.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Literal, LiteralString, NoReturn
+from typing import Literal, LiteralString
 from uuid import UUID
 
 import psycopg
@@ -38,7 +36,7 @@ from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack import authority_lane
 from tests.integration.live_stack.authority_lane import AuthoritySystem
 from tests.integration.live_stack.cleanup import capacity_in_use
-from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.integration.live_stack.scenario import ScenarioStop
 from tests.integration.live_stack.spine import (
     SpinePhaseError,
     await_system_state,
@@ -58,19 +56,6 @@ from tests.live_vm.installed_local_authority_support import (
 )
 from tests.live_vm.installed_remote_authority_support import RemoteAuthorityProofConfig
 
-REMOTE_ORPHAN_BLOCKED = (
-    "the remote-libvirt recovery-orphan arm needs an activated remote System, and remote "
-    "PREPARE is blocked (#3363)"
-)
-CONFLICT_RESTORE_BLOCKED = (
-    "resolution cannot restore the recorded source over a third identity; the resolution job "
-    "re-records the conflict (#3330)"
-)
-CONFLICT_TEARDOWN_BLOCKED = (
-    "teardown from recovery_conflict is unproven on the remote-libvirt authority: #3341 changed "
-    "the local provider only"
-)
-CONFLICT_BLOCKED = f"{CONFLICT_RESTORE_BLOCKED}; {CONFLICT_TEARDOWN_BLOCKED}"
 LOCAL_PRESENT_ORPHAN_BLOCKED = (
     "a quarantined receipt survives to resolution only if the release job ends terminally "
     "(ADR-0714), whose recovery is #3143"
@@ -735,11 +720,13 @@ async def quarantined_orphan(
     }
 
 
-async def recorded_conflict(system: AuthoritySystem, db_url: str) -> dict[str, object]:
+async def recorded_conflict(
+    system: AuthoritySystem, db_url: str, *, kernel_tree: Path | None = None
+) -> dict[str, object]:
     """Record a real ``recovery_conflict`` from a host change, then resolve it by its composite."""
     op, system_id = system.op, system.system_id
     await require_evidence_read_access(db_url, FAULT_READ_TABLES)
-    activation = await activate(system)
+    activation = await activate(system, kernel_tree=kernel_tree)
     activation_id = await activation_of(db_url, activation.run_id)
     await asyncio.to_thread(perturb_definition, system)
     release = await release_external_boot(op, activation.run_id)
@@ -758,36 +745,16 @@ async def recorded_conflict(system: AuthoritySystem, db_url: str) -> dict[str, o
         ),
         "resolve-conflict",
     )
-    await _drain_conflict(system, "resolve-conflict", resolution.object_id)
+    await drain_job(op, "resolve-conflict", resolution.object_id)
     head = await conflict_head(db_url, system_id)
-    assert head is not None and head[:4] == (
-        "terminal",
-        "resolve-conflict",
-        "conflict",
-        "conflict",
-    ), head
-    assert await _activation_state(db_url, activation_id) == "recovery_conflict"
+    assert head is not None and head[:4] == ("terminal", "resolve-conflict", "source", "source"), (
+        head
+    )
+    assert await _activation_state(db_url, activation_id) == "recovered"
     return {
         "recorded": "recovery_conflict",
         "release": "failed: conflict",
         "resolution_admitted": resolution.object_id,
-        "resolution": "failed: conflict",
-        "restore_from_third_identity": CONFLICT_RESTORE_BLOCKED,
+        "resolution": "succeeded: restored the recorded source",
+        "activation": "recovered",
     }
-
-
-def blocked_primary(failure: BaseExceptionGroup[BaseException]) -> ScenarioStop | None:
-    """The blocked stop a frame cleanup failure joined, which the frame lists first."""
-    primary = failure.exceptions[0]
-    if isinstance(primary, ScenarioStop) and primary.outcome is Outcome.BLOCKED:
-        return primary
-    return None
-
-
-def blocked_after_gates(run: CellRun, base_url: str, reason: str) -> NoReturn:
-    """Pass the lane's revision gates, then stop ``blocked`` before any mutation."""
-    if run.cell.provider == "remote-libvirt":
-        authority_lane.require_remote_lane(authority_lane.select_remote_lane(), base_url)
-    else:
-        authority_lane.require_lane(authority_lane.select_lane(), base_url)
-    raise ScenarioStop(Outcome.BLOCKED, reason)
