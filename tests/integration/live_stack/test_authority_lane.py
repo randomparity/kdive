@@ -575,6 +575,8 @@ def _fake_remote_lane(
     inventory = tmp_path / "systems.toml"
     inventory.write_text("", encoding="utf-8")
     monkeypatch.setenv(authority_lane.SYSTEMS_TOML_ENV, str(inventory))
+    monkeypatch.setattr(authority_lane, "VOLUME_SWEEP_DEADLINE_S", 0.2)
+    monkeypatch.setattr(authority_lane, "VOLUME_SWEEP_POLL_S", 0.0)
 
     def arecord(name: str, result: object = None) -> Any:
         async def coroutine(*_args: object, **_kwargs: object) -> object:
@@ -764,6 +766,30 @@ def test_remote_leftover_after_teardown_fails_before_release(
         _frame(run, body)
     assert "allocations.release" not in calls
     assert "cleanup" not in run.assertions
+
+
+def test_remote_reap_markers_that_the_sweep_removes_do_not_fail_the_frame(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The marker volumes outlive the teardown until the sweep runs, so the frame waits."""
+    calls, body = _fake_remote_lane(monkeypatch, tmp_path, [])
+    observe = authority_lane.remote_authority_inventory
+    markers = [f"kdive-module-{_SYSTEM}-run-nonce-reaping.journal"]
+    pending = [True, True]
+
+    def sweeping(config: Any, system_id: str | None = None) -> RemoteAuthorityInventory:
+        if system_id is not None and "systems.teardown" in calls and pending:
+            pending.pop()
+            return RemoteAuthorityInventory("x86_64", ["kdive-other"], markers, None)
+        return observe(config, system_id)
+
+    monkeypatch.setattr(authority_lane, "remote_authority_inventory", sweeping)
+    run = _remote(tmp_path)
+
+    _frame(run, body)
+
+    assert pending == []
+    assert set(run.assertions) == {"effect", "cleanup"}
 
 
 def test_remote_inventory_drift_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
