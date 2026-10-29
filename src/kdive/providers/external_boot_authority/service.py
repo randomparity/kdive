@@ -932,12 +932,13 @@ class ExternalBootAuthorityService:
         # A release adopted from an earlier generation ran no commit of its own, so the proof
         # its provider receipt holds is that of the oldest adopted cleanup, the one that ran: a
         # retry that adopted it and was itself interrupted leaves a later terminal (#3416).
-        adopted = (
-            next(iter(self._prior_release_terminals(records, request)), None)
+        terminals = (
+            self._prior_release_terminals(records, request)
             if request.purpose == "release"
             and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
-            else None
+            else []
         )
+        adopted = terminals[0] if terminals else None
         proven_identity = adopted.operation_identity if adopted else request.operation_identity
         started = next(
             (

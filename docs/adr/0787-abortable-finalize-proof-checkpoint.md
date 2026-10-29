@@ -109,6 +109,6 @@ After the marker, remote `finalize` removes the activation's remaining per-activ
 A retried release generation adopts the earlier generation's terminal cleanup, so `commit_cleanup`
 does not run again and the receipt keeps that cleanup's operation identity, attempt and anchored
 journal position. The service therefore builds the `finalize` context from the adopted operation's
-`mutation-started` record, not the retry's, and the remote adapter's exact comparison with the
+`mutation-started` record (the oldest, when several retries were interrupted), not the retry's, and the remote adapter's exact comparison with the
 receipt holds. The receipt is not rewritten, so the published quarantine row and the object port's
 digest fences keep naming what the first attempt recorded.
