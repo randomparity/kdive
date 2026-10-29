@@ -7,7 +7,6 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
-from uuid import uuid4
 
 import psycopg
 import pytest
@@ -37,32 +36,8 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, seed_case
-from tests.jobs.handlers.external_boot.support import CASES, build_job
+from tests.jobs.handlers.external_boot.support import CASES, RecordingExecutor, build_job
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
-
-
-class RecordingExecutor:
-    def __init__(
-        self, category: Literal["absent", "source", "target", "mixed", "unreadable", "conflict"]
-    ) -> None:
-        self.category = category
-        self.requests: list[AuthorityMutationRequestV1] = []
-
-    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
-        return AuthorityObservationV1(
-            observation_id=uuid4(), category=self.category, composite_state="sha256:" + "8" * 64
-        )
-
-    async def execute_conflict_resolution(
-        self, request: AuthorityMutationRequestV1
-    ) -> AuthorityObservationV1:
-        return await self.execute(request)
-
-    async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
-        self.requests.append(request)
-        return AuthorityObservationV1(
-            observation_id=uuid4(), category=self.category, composite_state="sha256:" + "8" * 64
-        )
 
 
 class _DisconnectedAuthorityTransport:

@@ -17,8 +17,7 @@ from kdive.jobs.models import ExternalBootAuthorityMarkerV1, ExternalBootAuthori
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, seed_case
-from tests.jobs.handlers.external_boot.support import build_job
-from tests.jobs.handlers.external_boot.test_reentry import RecordingExecutor
+from tests.jobs.handlers.external_boot.support import RecordingExecutor, build_job
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
 
 # The seeded recovering attempt's stamped deadline is 2027-01-01; this clock is long past it.
