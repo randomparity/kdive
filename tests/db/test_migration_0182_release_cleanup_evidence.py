@@ -35,6 +35,11 @@ def _identity(document: Mapping[str, object]) -> str:
     )
 
 
+def _stored(document: Mapping[str, object]) -> dict[str, object]:
+    """The form the worker stores: the identity's canonical document plus explicit nulls."""
+    return {**document, "capture_absent": None}
+
+
 def _recovery(case: _AuthorityCase) -> dict[str, object]:
     return {
         "protocol": "remote-module-recovery-ref-v2",
@@ -80,16 +85,16 @@ def _insert_obligation(admin: psycopg.Connection, case: _AuthorityCase) -> dict[
             case.system_id,
             case.run_id,
             _NONCE,
-            Jsonb(terminal_operation),
+            Jsonb(_stored(terminal_operation)),
             _identity(terminal_operation),
-            Jsonb(result),
+            Jsonb(_stored(result)),
             _identity(result),
             _DIGEST,
             _DIGEST,
             Jsonb(recovery),
-            Jsonb(restored_operation),
+            Jsonb(_stored(restored_operation)),
             _identity(restored_operation),
-            Jsonb(restored_result),
+            Jsonb(_stored(restored_result)),
             _identity(restored_result),
         ),
     )

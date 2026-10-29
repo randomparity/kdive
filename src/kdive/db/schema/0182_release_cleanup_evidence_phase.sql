@@ -9,6 +9,11 @@
 -- root release row, with the request's identity and digest equal to the 0143 derivation. The
 -- other admitted pairs keep their exact match, and the standalone (release, cleanup) root keeps
 -- its exact match too.
+--
+-- The four evidence-identity recomputations also hash the stored document with its null members
+-- removed. The worker stores the documents with explicit nulls (for example capture_absent) and
+-- derives each identity from the null-free canonical form, so 0145's recomputation over the
+-- stored form could never equal a real identity; with the nulls stripped it does.
 
 CREATE OR REPLACE FUNCTION public.read_authorized_remote_module_cleanup_evidence(
     p_peer_incarnation text,
@@ -155,14 +160,16 @@ BEGIN
         AND v_obligation.terminal_operation_identity = 'sha256:' || encode(sha256(
             convert_to(v_obligation.terminal_operation->>'protocol', 'UTF8') ||
             decode('00', 'hex') || convert_to(
-                public.canonical_external_boot_authority_json(v_obligation.terminal_operation),
+                public.canonical_external_boot_authority_json(
+                    pg_catalog.jsonb_strip_nulls(v_obligation.terminal_operation)),
                 'UTF8'
             )
         ), 'hex')
         AND v_obligation.terminal_result_identity = 'sha256:' || encode(sha256(
             convert_to(v_obligation.terminal_result->>'protocol', 'UTF8') ||
             decode('00', 'hex') || convert_to(
-                public.canonical_external_boot_authority_json(v_obligation.terminal_result),
+                public.canonical_external_boot_authority_json(
+                    pg_catalog.jsonb_strip_nulls(v_obligation.terminal_result)),
                 'UTF8'
             )
         ), 'hex')
@@ -177,14 +184,15 @@ BEGIN
                 convert_to(v_obligation.restored_operation->>'protocol', 'UTF8') ||
                 decode('00', 'hex') || convert_to(
                     public.canonical_external_boot_authority_json(
-                        v_obligation.restored_operation
+                        pg_catalog.jsonb_strip_nulls(v_obligation.restored_operation)
                     ), 'UTF8'
                 )
             ), 'hex')
             AND v_obligation.restored_result_identity = 'sha256:' || encode(sha256(
                 convert_to(v_obligation.restored_result->>'protocol', 'UTF8') ||
                 decode('00', 'hex') || convert_to(
-                    public.canonical_external_boot_authority_json(v_obligation.restored_result),
+                    public.canonical_external_boot_authority_json(
+                        pg_catalog.jsonb_strip_nulls(v_obligation.restored_result)),
                     'UTF8'
                 )
             ), 'hex')
