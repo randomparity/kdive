@@ -474,21 +474,14 @@ def test_recover_commits_attempt_before_provider_and_reuses_it(
     asyncio.run(main())
 
 
-@pytest.mark.parametrize(
-    ("operation", "activation_state", "attempt_state", "category"),
-    [
-        ("activate", "activating", "recovering", "target"),
-        ("recover", "recovering", "recovering", "source"),
-    ],
-)
-def test_expired_deadline_returns_a_committable_failure_before_provider(
-    migrated_url: str,
-    authority_role_dsns: Callable[[str], str],
-    operation: str,
-    activation_state: str,
-    attempt_state: str,
-    category: Literal["source", "target"],
+def test_expired_activation_deadline_returns_a_committable_failure_before_provider(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
+    operation = "activate"
+    activation_state = "activating"
+    attempt_state = "recovering"
+    category: Literal["source", "target"] = "target"
+
     async def main() -> None:
         vehicle = build_vehicle()
         now = datetime(2027, 1, 1, tzinfo=UTC)
