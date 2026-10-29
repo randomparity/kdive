@@ -2,7 +2,7 @@
 
 Gated ``live_stack``. Each arm is dormant unless its lane config is named:
 ``LOCAL_AUTHORITY_LANE_CONFIG`` for the local authority, ``KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG``
-for the remote one. A blocked arm passes its lane gates, records its narrower reason and skips
+for the remote one. A remote activation the lane cannot complete stops ``blocked`` and skips
 with ``blocked:`` in the reason; it never reports a pass.
 """
 

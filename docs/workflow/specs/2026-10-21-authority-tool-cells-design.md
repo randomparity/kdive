@@ -81,8 +81,8 @@ following, with no change:
 |---|---|---|---|
 | `runs.release_external_boot` | `_release` (new, run carrier) | `_release` | `contributor` of the frame's project |
 | `ops.force_release` | `held_teardown_release` | `held_teardown_release` | `platform_admin` with no role in the project |
-| `ops.resolve_recovery_orphan` | `quarantined_orphan` | `REMOTE_ORPHAN_BLOCKED` after the lane gates | `platform_admin` with no role in the project |
-| `systems.resolve_external_boot_conflict` | `CONFLICT_BLOCKED` after the lane gates | `CONFLICT_BLOCKED` after the lane gates | none |
+| `ops.resolve_recovery_orphan` | `quarantined_orphan` | `quarantined_orphan` | `platform_admin` with no role in the project |
+| `systems.resolve_external_boot_conflict` | `recorded_conflict` | `recorded_conflict` | none: the frame's own client |
 
 A `ToolCall` binds the cell's `HttpCaller` and token:
 
@@ -103,8 +103,7 @@ host's. It reads the frame's root image again with `remote_root`, and requires t
 `REMOTE_REPRESENTATIVES["fedora"]`; otherwise it stops `blocked` and names the mismatch. It then
 records `guest_os` from that representative. The remote frame records only `image_sha256` and
 `guest_arch` (`authority_lane.py`, `_on_remote_authority_system`). Without this helper, every
-remote record would fail `input-context-mismatch` against its binding. A blocked remote body runs
-`observe_host` and the lane gates without a frame.
+remote record would fail `input-context-mismatch` against its binding.
 
 A cell whose lane cannot construct its state records `blocked` with that reason. It is never a
 pass.
@@ -248,14 +247,13 @@ one, the authority refuses fixture-mode bodies, and the 16 local cells move to `
   initrd refusal.
 - **Owners.** The remote quarantine publication gap (#3326), the `recovery_conflict` entry gap
   (#3327) and their follow-ups (#3330, #3341, #3363) have closed, so the former blocked cells run
-  their arms through the same entry point as the others. F3 exists only if the remote teardown after a released activation still fails once #3325 has
-  merged.
+  their arms through the same entry point as the others. F3 exists only if the remote teardown
+  after a released activation still fails once #3325 has merged.
 
 ### Implementation notes
 
 - The shared framing lives in `tests/integration/live_stack/authority_cells.py`:
-  `PRODUCT_BLOCKERS`, `exposed` (the `ToolCall` above), `run_authority_cell` (blocker, then
-  fixture, `observe_remote_authority` on remote, then the frame) and the release body
+  `exposed` (the `ToolCall` above), `run_authority_cell` (fixture, `observe_remote_authority` on remote, then the frame) and the release body
   `released_external_boot` with its database-driven `settle_release`. The carriers only choose
   the caller's grants and the body.
 - The local release comparison covers the private rootfs root and the domain. The console root

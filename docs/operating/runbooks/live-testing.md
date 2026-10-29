@@ -2147,7 +2147,7 @@ image then carries no `ld.so.cache`, and glibc's built-in search path finds the 
   `active`, and `ops.force_release` refused with `external_boot_system_teardown_required`. After
   the barrier is released and the System is `torn_down`, `ops.force_release` must release. A
   remote activation that fails stops the arm `blocked` with the job's phase.
-- **Recovery orphan (local).** The arm activates, arms `cleanup`/`before-finalize`, and calls
+- **Recovery orphan (local and remote).** The arm activates, arms `cleanup`/`before-finalize`, and calls
   `runs.release_external_boot`. While held it requires the head `terminal` for the cleanup, the
   private `cleanup-quarantine.json` present (a fixed read-only root program under
   `/var/lib/kdive/provider-authority/recovery`), and no quarantine row. It then aborts and requires
@@ -2156,6 +2156,9 @@ image then carries no `ld.so.cache`, and glibc's built-in search path finds the 
   the disposition of an already-absent object; the arm requires that row `deleted` by that job and
   every other quarantine row unchanged. If the arm fails after the abort it resolves the rows it
   published before the frame tears down, and names any it could not as residue on the failure.
+  The deletion of a still-present receipt by `ops.resolve_recovery_orphan` stays unproven, because
+  a receipt survives to resolution only if the release job ends terminally, whose recovery is
+  #3143.
 - **Recovery conflict (local and remote, #3327).** The arm activates, then appends one token to
   the System's persistent kernel command line on the authority daemon, as a host administrator
   would ([ADR-0805](../../adr/0805-authority-observed-conflict-is-recorded-from-its-journal-head.md)).
@@ -2171,9 +2174,6 @@ image then carries no `ld.so.cache`, and glibc's built-in search path finds the 
   `recovered`. Teardown straight from an unresolved remote conflict is not covered: the remote
   provider refuses a definition that is neither the recorded source nor target
   ([ADR-0620](../../adr/0620-authority-owned-system-teardown.md)).
-  The deletion of a still-present receipt by `ops.resolve_recovery_orphan` stays unproven, because
-  a receipt survives to resolution only if the release job ends terminally, whose recovery is
-  #3143.
 
 Every hold waits at most 120 s and checks that the held job is still `running` at the same attempt
 with a live lease before the fault, because the worker's authority deadline is five minutes per
@@ -2205,7 +2205,8 @@ configurations, both exposures, both providers) run in this frame through
 - `ops.force_release`: the held-teardown arm above, called by an outside platform admin through
   the cell's exposure. After the refusal and the quiescent teardown it requires the allocation
   read `released` and the capacity in use lower than while the effect was held.
-- `ops.resolve_recovery_orphan` (local): the recovery-orphan arm above, called the same way. The
+- `ops.resolve_recovery_orphan`: the recovery-orphan arm above, called the same way; remotely it
+  reads the remote module store's receipt. The
   tool admits a local row when its publishing authority is the server's fixed route; the server
   composes no local recovery-object port.
 - Remote `ops.resolve_recovery_orphan` runs the recovery-orphan arm and every
