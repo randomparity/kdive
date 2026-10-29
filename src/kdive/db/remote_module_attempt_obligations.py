@@ -268,11 +268,11 @@ class RemoteModuleAttemptObligationRepository:
 
         Admission does not know the attempt's nonce, so this reads every attempt of the run in one
         statement. An attempt with no terminal evidence, no opened reap or an undischarged reap
-        makes the answer false.
+        makes the answer false, as does a run with no attempts (``bool_and`` of no rows is NULL).
         """
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT count(*) > 0 AND bool_and("
+                "SELECT bool_and("
                 "terminal_operation IS NOT NULL AND reap_opened_at IS NOT NULL "
                 "AND reap_discharged_at IS NOT NULL) "
                 "FROM remote_module_attempt_obligations WHERE system_id = %s AND run_id = %s",
