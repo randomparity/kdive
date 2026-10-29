@@ -1703,14 +1703,14 @@ def test_teardown_without_a_module_receipt_discharges_nothing() -> None:
     ("operation", "expected"),
     [
         (AuthorityOperation.RECOVER, ["restore"]),
-        (AuthorityOperation.RESOLVE_CONFLICT, ["restore", "reap"]),
+        (AuthorityOperation.RESOLVE_CONFLICT, ["restore"]),
         (AuthorityOperation.CLEANUP, ["reap"]),
     ],
 )
 def test_remote_module_lifecycle_steps_per_operation(
     monkeypatch: pytest.MonkeyPatch, operation: AuthorityOperation, expected: list[str]
 ) -> None:
-    """#3412: a resolve-conflict reaps the restore's volumes before its cleanup commit."""
+    """#3414: a resolve-conflict restores only; the later release CLEANUP reaps the volumes."""
     from types import SimpleNamespace
 
     actions: list[tuple[str, AuthorityOperation]] = []
