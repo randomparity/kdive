@@ -1041,6 +1041,20 @@ async def test_release_cleanup_reap_proceeds_while_the_recovered_system_runs(
 
 
 @pytest.mark.anyio
+async def test_resolve_conflict_reap_proceeds_while_the_recovered_system_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3412: the resolve-conflict reap is admitted exactly as a release CLEANUP reap is."""
+    stack, system, _inspection = await _restored_stack_with_a_running_system(tmp_path, monkeypatch)
+
+    reaped = await stack.reap("resolve-conflict")
+
+    assert reaped.volumes_absent
+    assert system.active and not system.destroyed
+    stack.close()
+
+
+@pytest.mark.anyio
 async def test_teardown_reap_still_refuses_a_running_system(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
