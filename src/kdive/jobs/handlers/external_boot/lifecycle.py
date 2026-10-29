@@ -832,13 +832,6 @@ def recover_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
 
     def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
         if context.activation.state is not State.ACTIVE:
-            deadline = context.prerequisites.get("attempt_deadline")
-            if deadline is not None and ports.clock() >= deadline:
-                raise CategorizedError(
-                    "recovery readiness deadline expired",
-                    category=ErrorCategory.READINESS_FAILURE,
-                    terminal=True,
-                )
             return None
         deadline = _request_deadline(context, ports.clock() + ports.recovery_readiness_timeout)
         if ports.clock() >= deadline:
@@ -899,13 +892,6 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
 
     async def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
         if context.activation.state is State.RECOVERING:
-            deadline = context.prerequisites.get("attempt_deadline")
-            if deadline is not None and ports.clock() >= deadline:
-                raise CategorizedError(
-                    "recovery readiness deadline expired",
-                    category=ErrorCategory.READINESS_FAILURE,
-                    terminal=True,
-                )
             return None
         executor = context.authority_executor
         if executor is None:
