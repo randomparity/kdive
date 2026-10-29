@@ -333,9 +333,10 @@ async def execute_remote_module_lifecycle_on_authority_host(
     retained_terminal: ModuleAttemptTerminalEvidence | None = None
     retry_after_discharge = False
     if action == "reap" and not await repository.reap_obligation_is_open(connection, attempt):
-        # A CLEANUP retried after its reap already discharged the obligation (the worker's
-        # commit_cleanup failed afterwards) reaches the host, whose reap is idempotent, and must
-        # come back with the volumes reaped; no other reap proceeds without a retained obligation.
+        # A CLEANUP or resolve-conflict retried after its reap already discharged the obligation
+        # (the worker's commit failed afterwards) reaches the host, whose reap is idempotent, and
+        # must come back with the volumes reaped; no other reap proceeds without a retained
+        # obligation.
         if (
             authority.operation.value not in _RESTORED_REAP_OPERATIONS
             or not await repository.reap_obligation_is_discharged(connection, attempt)

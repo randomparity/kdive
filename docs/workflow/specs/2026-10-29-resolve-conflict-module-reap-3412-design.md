@@ -47,6 +47,12 @@ that discharged is re-reported through the CLEANUP retry rule.
   recovered, the conflict stands and the resolve can be retried.
 - Authority mutation fails after the reap: the volumes are gone and the obligation is discharged;
   the retried job repeats both steps harmlessly and the mutation proceeds.
+- The authority mutation is refused after the reap (for example the observed composite went
+  stale): the volumes are gone and the obligation is discharged while the conflict stands. A later
+  restore is served from the retained evidence, a CLEANUP takes the discharged-retry path and
+  teardown is admitted.
+- An authority older than the worker rejects the reap at its wire validator, before any mutation;
+  the resolve fails retryably until the authority is upgraded, so deploy the authority first.
 - No restored evidence on the host: the reap is refused before mutation ("requires restored
   evidence").
 
