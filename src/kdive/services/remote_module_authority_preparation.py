@@ -301,6 +301,11 @@ async def await_authority_dispatch[Value](
         await wait_before_retry()
 
 
+# A reap after a restore compares the host's completion with the retained restored evidence;
+# only a System teardown reaps the PREP baseline.
+_RESTORED_REAP_OPERATIONS = frozenset({"cleanup", "resolve-conflict"})
+
+
 async def execute_remote_module_lifecycle_on_authority_host(
     *,
     connection: AsyncConnection,
@@ -328,11 +333,12 @@ async def execute_remote_module_lifecycle_on_authority_host(
     retained_terminal: ModuleAttemptTerminalEvidence | None = None
     retry_after_discharge = False
     if action == "reap" and not await repository.reap_obligation_is_open(connection, attempt):
-        # A CLEANUP retried after its reap already discharged the obligation (the worker's
-        # commit_cleanup failed afterwards) reaches the host, whose reap is idempotent, and must
-        # come back with the volumes reaped; no other reap proceeds without a retained obligation.
+        # A CLEANUP or resolve-conflict retried after its reap already discharged the obligation
+        # (the worker's commit failed afterwards) reaches the host, whose reap is idempotent, and
+        # must come back with the volumes reaped; no other reap proceeds without a retained
+        # obligation.
         if (
-            authority.operation.value != "cleanup"
+            authority.operation.value not in _RESTORED_REAP_OPERATIONS
             or not await repository.reap_obligation_is_discharged(connection, attempt)
         ):
             raise CategorizedError(
@@ -340,7 +346,7 @@ async def execute_remote_module_lifecycle_on_authority_host(
                 category=ErrorCategory.CONFLICT,
             )
         retry_after_discharge = True
-    if action == "reap" and authority.operation.value == "cleanup":
+    if action == "reap" and authority.operation.value in _RESTORED_REAP_OPERATIONS:
         retained_restored = await repository.read_restored_evidence(connection, attempt)
         if retained_restored is None:
             raise CategorizedError(
@@ -422,7 +428,7 @@ async def execute_remote_module_lifecycle_on_authority_host(
                 "remote module cleanup retry needs the host to report the volumes reaped",
                 category=ErrorCategory.CONFLICT,
             )
-        if authority.operation.value == "cleanup":
+        if authority.operation.value in _RESTORED_REAP_OPERATIONS:
             if retained_restored != _restored_evidence(response):
                 raise CategorizedError(
                     "remote module cleanup completion differs from restored evidence",
