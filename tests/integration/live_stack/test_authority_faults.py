@@ -470,11 +470,15 @@ _COMPOSITE = "sha256:" + "c" * 64
 
 
 def _fake_conflict_arm(
-    monkeypatch: pytest.MonkeyPatch, failures: dict[str, str], heads: list[tuple[object, ...]]
+    monkeypatch: pytest.MonkeyPatch,
+    failures: dict[str, str],
+    heads: list[tuple[object, ...]],
+    states: tuple[str, ...] = ("recovery_conflict", "recovered"),
 ) -> list[str]:
     """Fake every boundary of the conflict arm; return the ordered calls it made."""
     calls: list[str] = []
     remaining = iter(heads)
+    activation_states = iter(states)
 
     async def drain(_op: object, phase: str, _job: str, **_kwargs: object) -> ToolResponse:
         calls.append(f"drain:{phase}")
@@ -495,7 +499,7 @@ def _fake_conflict_arm(
         "release_external_boot": _async(ToolResponse(object_id="release-job", status="queued")),
         "drain_job": drain,
         "conflict_head": lambda *_a: _async(next(remaining))(),
-        "_activation_state": _async("recovery_conflict"),
+        "_activation_state": lambda *_a: _async(next(activation_states))(),
         "scalar": scalar,
     }
     for name, value in patches.items():
@@ -503,15 +507,15 @@ def _fake_conflict_arm(
     return calls
 
 
-def test_conflict_arm_records_then_resolves_by_the_head_composite(
+def test_conflict_arm_records_then_resolves_by_restoring_the_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _fake_conflict_arm(
         monkeypatch,
-        {"release": "conflict", "resolve-conflict": "conflict"},
+        {"release": "conflict"},
         [
             ("terminal", "recover", "conflict", "conflict", _COMPOSITE),
-            ("terminal", "resolve-conflict", "conflict", "conflict", _COMPOSITE),
+            ("terminal", "resolve-conflict", "source", "source", _COMPOSITE),
         ],
     )
     observed = asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
@@ -522,7 +526,7 @@ def test_conflict_arm_records_then_resolves_by_the_head_composite(
         "drain:resolve-conflict",
     ]
     assert observed["recorded"] == "recovery_conflict"
-    assert observed["restore_from_third_identity"] == authority_faults.CONFLICT_RESTORE_BLOCKED
+    assert observed["activation"] == "recovered"
 
 
 def test_conflict_arm_refuses_a_release_that_succeeded(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -549,17 +553,42 @@ def test_conflict_arm_requires_the_authority_conflict_head(
         asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
 
 
-@pytest.mark.parametrize(
-    ("primary", "skips"),
-    [
-        (ScenarioStop(Outcome.BLOCKED, "teardown"), True),
-        (ScenarioStop(Outcome.FAILURE, "other"), False),
-        (AssertionError("a real failure"), False),
-        (KeyboardInterrupt(), False),
-    ],
-)
-def test_a_failed_cleanup_after_a_blocked_body_is_still_blocked(
-    primary: BaseException, skips: bool
+def test_conflict_arm_refuses_a_resolution_that_stays_conflicted(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    group = BaseExceptionGroup("frame and cleanup failures", [primary, RuntimeError("cleanup")])
-    assert (authority_faults.blocked_primary(group) is not None) is skips
+    _fake_conflict_arm(
+        monkeypatch,
+        {"release": "conflict", "resolve-conflict": "conflict"},
+        [("terminal", "recover", "conflict", "conflict", _COMPOSITE)],
+    )
+    with pytest.raises(SpinePhaseError, match="resolve-conflict"):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+
+
+def test_conflict_arm_requires_the_resolution_head_to_be_the_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_conflict_arm(
+        monkeypatch,
+        {"release": "conflict"},
+        [
+            ("terminal", "recover", "conflict", "conflict", _COMPOSITE),
+            ("terminal", "resolve-conflict", "conflict", "conflict", _COMPOSITE),
+        ],
+    )
+    with pytest.raises(AssertionError, match="resolve-conflict"):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+
+
+def test_conflict_arm_requires_the_activation_recovered(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_conflict_arm(
+        monkeypatch,
+        {"release": "conflict"},
+        [
+            ("terminal", "recover", "conflict", "conflict", _COMPOSITE),
+            ("terminal", "resolve-conflict", "source", "source", _COMPOSITE),
+        ],
+        states=("recovery_conflict", "recovery_conflict"),
+    )
+    with pytest.raises(AssertionError):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db"))

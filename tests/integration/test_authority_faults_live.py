@@ -94,11 +94,6 @@ def _prove(run: CellRun, config_env: str, arm: Callable[[str, ToolCall], Authori
     except ScenarioStop as stop:
         assert stop.outcome is Outcome.BLOCKED, str(stop)
         pytest.skip(f"blocked: {stop}")
-    except BaseExceptionGroup as failure:
-        stop = authority_faults.blocked_primary(failure)
-        if stop is None:
-            raise
-        pytest.skip(f"blocked: {stop}; the frame cleanup failed, see the runbook")
     assert set(run.assertions) == {"effect", "cleanup"}
 
 
@@ -145,10 +140,7 @@ def test_recovery_conflict_is_recorded_and_resolution_admitted(
 ) -> None:
     def arm(db_url: str, _call: ToolCall) -> AuthorityBody:
         async def body(system: AuthoritySystem) -> dict[str, object]:
-            observed = await authority_faults.recorded_conflict(system, db_url)
-            if provider == "remote-libvirt":
-                raise ScenarioStop(Outcome.BLOCKED, authority_faults.CONFLICT_TEARDOWN_BLOCKED)
-            return observed
+            return await authority_faults.recorded_conflict(system, db_url)
 
         return body
 
