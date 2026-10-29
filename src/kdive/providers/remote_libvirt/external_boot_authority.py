@@ -813,25 +813,6 @@ def _parse_finalized_marker(
     return marker.receipt, marker.teardown
 
 
-def _receipt_proves_cleanup(
-    receipt: RemoteCleanupQuarantineV1, context: AuthorityCommitContextV1
-) -> bool:
-    """Whether the standing receipt is this operation's cleanup proof, from any earlier attempt.
-
-    A retried release generation adopts the earlier generation's terminal cleanup, so only
-    ``finalize`` runs for it and the receipt keeps the attempt that recorded it. Such a retry
-    anchors a later journal record under a new attempt; the same attempt must match exactly.
-    """
-    if receipt.operation_identity != context.operation_identity:
-        return False
-    if receipt.attempt_id == context.attempt_id:
-        return (
-            receipt.journal_sequence == context.journal_sequence
-            and receipt.journal_digest == context.journal_digest
-        )
-    return context.journal_sequence > receipt.journal_sequence
-
-
 def _quarantine_observation(receipt: RemoteCleanupQuarantineV1) -> RecoveryObjectObservation:
     reference = receipt.recovery_ref
     binding = RecoveryObjectBinding(
@@ -3286,7 +3267,12 @@ class RemoteExternalBootAuthorityAdapter:
         )
         if receipt is None:
             return
-        if not _receipt_proves_cleanup(receipt, context):
+        if (
+            receipt.operation_identity != context.operation_identity
+            or receipt.attempt_id != context.attempt_id
+            or receipt.journal_sequence != context.journal_sequence
+            or receipt.journal_digest != context.journal_digest
+        ):
             raise ValueError("remote cleanup proof differs from the quarantine receipt")
         await self._executor.run(lambda: self._coordinator.finalize_cleanup_quarantine(receipt))
 

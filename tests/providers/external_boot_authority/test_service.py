@@ -2457,6 +2457,82 @@ async def test_takeover_recovered_local_timed_release_phase_is_adopted_by_succes
 
 
 @pytest.mark.anyio
+async def test_adopted_release_cleanup_finalizes_against_the_proof_that_ran(
+    tmp_path: Path,
+) -> None:
+    """An adopted cleanup finalizes under the proof it ran with, not the retry's (#3416)."""
+    peer = AuthenticatedPeer(uuid4())
+    root = _takeover().model_copy(
+        update={"purpose": "release", "operation": AuthorityOperation.RELEASE}
+    )
+    repository = _Repository(peer, root)
+    contexts: list[Any] = []
+
+    class ReleaseAdapter(_FinalizingAdapter):
+        async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+            await super().observe(request)
+            return AuthorityObservationV1(
+                observation_id=uuid4(), category="absent", composite_state=_DIGEST_A
+            )
+
+        async def finalize(self, request: object, context: object) -> None:
+            await super().finalize(request, context)
+            contexts.append(context)
+
+    adapter = ReleaseAdapter()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+        proof_checkpoint=_FinalizeFault(adapter.calls, ProofBarrierAbort("aborted")),
+    )
+    await service.acknowledge_takeover(peer, root)
+    repository.current = True
+    first = _mutation(root).model_copy(
+        update={"operation": AuthorityOperation.CLEANUP, "operation_identity": "release-cleanup-1"}
+    )
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, first)
+    started = next(
+        record
+        for record in repository.records
+        if record.phase is JournalPhase.MUTATION_STARTED
+        and record.operation_identity == first.operation_identity
+    )
+
+    successor = root.model_copy(
+        update={"authority_id": uuid4(), "generation": 2, "operation_identity": "takeover-b"}
+    )
+    repository.allocating_request = successor
+    repository.current = False
+    await service.acknowledge_takeover(peer, successor)
+    repository.request = successor
+    repository.current = True
+    retry = first.model_copy(
+        update={
+            "authority_id": successor.authority_id,
+            "generation": 2,
+            "attempt_id": uuid4(),
+            "operation_identity": "release-cleanup-2",
+            "operation_digest": _DIGEST_A,
+        }
+    )
+    await service.execute_mutation(peer, retry)
+
+    assert adapter.calls.count("commit:cleanup") == 1
+    assert [
+        (c.operation_identity, c.attempt_id, c.journal_sequence, c.journal_digest) for c in contexts
+    ] == [
+        (
+            started.operation_identity,
+            started.attempt_id,
+            started.sequence,
+            record_digest(started),
+        )
+    ]
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("divergence", ["missing", "operation", "phase"])
 async def test_restart_rejects_divergent_trusted_continuation_before_recovery_access(
     tmp_path: Path, divergence: str

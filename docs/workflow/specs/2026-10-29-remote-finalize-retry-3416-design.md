@@ -1,7 +1,7 @@
-# Remote finalize accepts the receipt an earlier attempt recorded (#3416)
+# Finalize an adopted release cleanup under the proof it ran with (#3416)
 
 Decision record: [ADR-0787](../../adr/0787-abortable-finalize-proof-checkpoint.md), amended. No new
-decision, migration, wire or interface change.
+decision, migration, wire or adapter-interface change.
 
 ## Problem
 
@@ -10,45 +10,50 @@ before finalize, fails on retry with `remote cleanup proof differs from the quar
 
 ## Facts verified in source (main 5c3686fd6)
 
-- The service gives a retried release generation the earlier generation's terminal CLEANUP
-  (`adopted_release_phase` in `external_boot_authority/service.py`), so it skips the provider commit.
-  `commit_cleanup` does not run on the retry, so nothing re-records the receipt.
-  Where `commit_cleanup` does run, `record_cleanup_quarantine` already replaces a same-operation
-  receipt.
-- The retry still anchors its own `mutation-started` record and calls `finalize` with a context
-  built from it: same `operation_identity`, new `attempt_id`, later `journal_sequence`, new digest.
-- `finalize` required all four receipt fields to equal that context, so it always raised.
+- A release phase's `operation_identity` hashes the authority generation and the worker
+  incarnation (`jobs/handlers/external_boot/lifecycle.py` `_release_phase`), and its `attempt_id` is
+  derived from it. A retry under a later generation has a new identity and attempt.
+- The service adopts the earlier generation's terminal CLEANUP for that retry
+  (`adopted_release_phase`), so the provider commit does not run again. `commit_cleanup`
+  never re-records the receipt; it keeps the identity, attempt, journal sequence and digest
+  of the cleanup that ran.
+- The service then calls `finalize` with a context built from the retry's own `mutation-started`
+  record. Every receipt field differs, so the remote check fails. The same-generation replay path
+  already matches, because it reuses the original record.
 - The local finalizer compares the tombstone's owner and point digest, not the journal position
-  (`finalize_tombstone`), so a retry finalizes there.
+  (`finalize_tombstone`), so it is unaffected.
 
 ## Options
 
 - **Re-anchor the receipt on the retry.** Rejected. The quarantine row published from attempt 1
-  carries the receipt's journal digest, and the object port fences `delete`/`adopt` on that
-  digest. Rewriting the receipt would invalidate the evidence the resolver acts on. It also
-  writes a receipt that `finalize` deletes straight away.
-- **Accept the recorded proof for the same operation (chosen).** The receipt stays as attempt 1
-  wrote it, so published evidence and digest fences are unchanged, and finalize completes.
+  carries the receipt's journal digest and the object port fences `delete`/`adopt` on it.
+  Rewriting the receipt invalidates the evidence the resolver acts on, and `commit_cleanup`
+  is not on this path to do it.
+- **Loosen the remote `finalize` comparison.** Rejected. The retry's identity is a hash the adapter
+  cannot relate to the receipt's, so the only available rule is to accept another operation's
+  receipt.
+- **Give `finalize` the proof of the cleanup that ran (chosen).** The service already knows which
+  record it adopted. `_finalize_adapter` selects the `mutation-started` record of the adopted
+  operation instead of the retry's, so the context equals the receipt and the adapter's exact
+  check is unchanged.
 
 ## Design
 
-`finalize` accepts the receipt when `operation_identity` is equal and either:
+`_finalize_adapter` looks for the earlier generation's terminal record of the same release phase
+(the lookup that decides adoption, now one helper `_prior_release_terminal`). When there is one
+for a release RECOVER or CLEANUP, the context is built from that operation's `mutation-started`
+record. Otherwise nothing changes. The remote adapter and the `AuthorityMutationFinalizer`
+protocol are untouched; the local finalizer ignores the journal fields.
 
-- the attempt is the same and journal sequence and digest are equal (unchanged rule), or
-- the attempt differs and the context's `journal_sequence` is later than the receipt's, which is
-  what a retry anchored after the recording attempt looks like.
+## Not changed (reported as follow-ups)
 
-A different operation, a same-attempt mismatch, and a different attempt at an equal or earlier
-position are refused as before.
-
-## Not changed
-
-`cleanup_quarantine_inventory` still requires the request's attempt to equal the receipt's. A
-retry that is aborted again before `finalize` publishes against the earlier receipt and answers
-`provider_conflict`. That second-abort case is outside #3416 and is reported as a follow-up.
+- `cleanup_quarantine_inventory` still requires the request's attempt to equal the receipt's, so a
+  retry aborted again before `finalize` publishes against attempt 1's receipt and answers
+  `provider_conflict`.
+- `finalize` ignores `receipt.managed`; a resolver-adopted receipt can be finalized by a retry.
 
 ## Tests
 
-`tests/providers/remote_libvirt/test_external_boot_authority.py`: a receipt recorded by one attempt
-finalizes under a later attempt's context; the refusal cases above stay red-on-regression.
+`tests/providers/external_boot_authority/test_service.py`: an adopted cleanup finalizes with the
+first generation's operation identity, attempt, sequence and digest.
 The live cells are re-proved by the #3339 worker.

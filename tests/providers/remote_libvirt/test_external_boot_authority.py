@@ -4210,49 +4210,22 @@ async def test_remote_finalize_removes_the_receipt_and_recovery_record_idempoten
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"journal_digest": "sha256:" + "b" * 64},
-        {"journal_sequence": 4},
-        {"operation_identity": "another-operation"},
-        {"attempt_id": uuid4(), "journal_sequence": 3},
-        {"attempt_id": uuid4(), "journal_sequence": 2},
-    ],
-    ids=["digest", "sequence", "operation", "retry-not-later", "retry-earlier"],
-)
+@pytest.mark.parametrize("field", ["journal_digest", "journal_sequence", "attempt_id"])
 async def test_remote_finalize_refuses_a_proof_that_differs_from_the_receipt(
-    tmp_path: Path, changes: dict[str, object]
+    tmp_path: Path, field: str
 ) -> None:
     adapter, record, request, context = await _cleaned_release(tmp_path)
+    changed = {
+        "journal_digest": "sha256:" + "b" * 64,
+        "journal_sequence": context.journal_sequence + 1,
+        "attempt_id": uuid4(),
+    }[field]
 
     with pytest.raises(ValueError, match="differs from the quarantine receipt"):
-        await adapter.finalize(request, context.model_copy(update=changes))
+        await adapter.finalize(request, context.model_copy(update={field: changed}))
 
     assert len(await adapter.cleanup_quarantine_inventory(request)) == 1
     assert adapter._coordinator.recovery_point(record.binding, record.plan_identity)
-    adapter.close()
-
-
-@pytest.mark.anyio
-async def test_remote_finalize_accepts_the_receipt_an_earlier_attempt_recorded(
-    tmp_path: Path,
-) -> None:
-    """The service adopts an earlier generation's terminal cleanup, so the retry commits nothing."""
-    adapter, record, request, context = await _cleaned_release(tmp_path)
-    retry = context.model_copy(
-        update={
-            "attempt_id": uuid4(),
-            "journal_sequence": context.journal_sequence + 4,
-            "journal_digest": "sha256:" + "c" * 64,
-        }
-    )
-
-    await adapter.finalize(request.model_copy(update={"attempt_id": retry.attempt_id}), retry)
-
-    assert await adapter.cleanup_quarantine_inventory(request) == ()
-    with pytest.raises(FileNotFoundError):
-        adapter._coordinator.recovery_point(record.binding, record.plan_identity)
     adapter.close()
 
 
