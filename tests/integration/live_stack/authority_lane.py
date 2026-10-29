@@ -882,7 +882,14 @@ async def _remote_cleanup(frame: _Frame, config: RemoteAuthorityProofConfig) -> 
         await _teardown(op, frame.system_id)
         left = await asyncio.to_thread(remote_authority_inventory, config, frame.system_id)
         assert left.system is None, "the System's domain remains on the remote authority daemon"
-        stranded = [volume for volume in left.volumes if frame.system_id in volume]
+        system_id = frame.system_id
+        stranded = await _await_volumes_swept(
+            left,
+            lambda: asyncio.to_thread(remote_authority_inventory, config, system_id),
+            system_id,
+            deadline_s=VOLUME_SWEEP_DEADLINE_S,
+            poll_s=VOLUME_SWEEP_POLL_S,
+        )
         assert not stranded, f"the System's volumes remain in the authority pool: {stranded}"
         owned += [frame.system_id, domain_name_for(UUID(frame.system_id))]
     released = await _release(frame)
