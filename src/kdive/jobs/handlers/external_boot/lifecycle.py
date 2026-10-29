@@ -140,26 +140,31 @@ async def _execute_remote_module_lifecycle(
     if raw_preparation is None:
         raise _refuse("remote module lifecycle authority inputs are incomplete")
     preparation = ModuleAttemptPreparationRequestV1.from_payload(raw_preparation)
-    action: Literal["restore", "reap"] = (
-        "restore"
-        if request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.RESOLVE_CONFLICT}
-        else "reap"
-    )
-    await execute_remote_module_lifecycle_on_authority_host(
-        connection=context.connection,
-        repository=RemoteModuleAttemptObligationRepository(),
-        sender=cast(Any, executor),
-        authority=request,
-        preparation=preparation,
-        worker_context=ModuleAttemptWorkerWriteContext(
-            job_id=context.job.id,
-            job_attempt=context.job.attempt,
-            incarnation_credential=context.incarnation_credential,
+    steps: dict[AuthorityOperation, tuple[Literal["restore", "reap"], ...]] = {
+        AuthorityOperation.RECOVER: ("restore",),
+        # The resolve's own cleanup commit refuses while the restore's module volumes stand, and
+        # nothing else reaps them, so it reaps as a release CLEANUP does (#3412). Both steps are
+        # idempotent for a re-entered job: the host returns its retained restore, and a reap whose
+        # obligation is already discharged re-reports the volumes reaped.
+        AuthorityOperation.RESOLVE_CONFLICT: ("restore", "reap"),
+        AuthorityOperation.CLEANUP: ("reap",),
+    }
+    for action in steps[request.operation]:
+        await execute_remote_module_lifecycle_on_authority_host(
+            connection=context.connection,
+            repository=RemoteModuleAttemptObligationRepository(),
+            sender=cast(Any, executor),
+            authority=request,
             preparation=preparation,
-        ),
-        action=action,
-        deadline=asyncio.get_running_loop().time() + 300.0,
-    )
+            worker_context=ModuleAttemptWorkerWriteContext(
+                job_id=context.job.id,
+                job_attempt=context.job.attempt,
+                incarnation_credential=context.incarnation_credential,
+                preparation=preparation,
+            ),
+            action=action,
+            deadline=asyncio.get_running_loop().time() + 300.0,
+        )
 
 
 async def _derived_release_status(
