@@ -60,7 +60,9 @@ yields from that root row; the other admitted pairs, and a standalone `release`/
 keep their exact match. A CLEANUP retried after its module reap discharged the obligation reaches the
 host, whose reap is idempotent, and proceeds only if the host reports the volumes reaped and the
 response matches the retained restored evidence; the retry therefore reaches the gate instead of
-stopping at an obligation that was deliberately closed.
+stopping at an obligation that was deliberately closed. The read recomputes each stored
+evidence identity over the document without its null members, the form `identity_for` derives the
+identity from; the stored documents keep explicit nulls.
 
 ## Consequences
 
