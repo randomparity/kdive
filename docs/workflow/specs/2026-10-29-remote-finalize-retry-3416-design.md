@@ -40,9 +40,10 @@ before finalize, fails on retry with `remote cleanup proof differs from the quar
 ## Design
 
 `_finalize_adapter` looks for the earlier generation's terminal record of the same release phase
-(the lookup that decides adoption, now one helper `_prior_release_terminal`). When there is one
-for a release RECOVER or CLEANUP, the context is built from that operation's `mutation-started`
-record. Otherwise nothing changes. The remote adapter and the `AuthorityMutationFinalizer`
+(the lookup that decides adoption, now one helper `_prior_release_terminals`). When there is one
+for a release RECOVER or CLEANUP, the context is built from the `mutation-started` record of the
+oldest such terminal: a retry that adopted the cleanup and was itself interrupted leaves a later
+terminal, but only the oldest ran the commit that wrote the receipt. Otherwise nothing changes. The remote adapter and the `AuthorityMutationFinalizer`
 protocol are untouched; the local finalizer ignores the journal fields.
 
 ## Not changed (reported as follow-ups)
