@@ -124,9 +124,16 @@ async def build_external_boot_payload(
         # A preparing activation's teardown may predate its module attempt, so it carries no
         # receipt. The authority host reaps or quarantines module volumes from its own records;
         # a teardown that does carry the receipt discharges the reap obligation once that reap
-        # is done (ADR-0620 amendment, #3383).
+        # is done (ADR-0620 amendment, #3383). A teardown after a completed release finds every
+        # reap obligation already discharged, so there is nothing left to carry (#3406).
         if remote_module_attempt is None and not (
-            purpose == "teardown" and activation.state.value == "preparing"
+            purpose == "teardown"
+            and (
+                activation.state.value == "preparing"
+                or await _MODULE_ATTEMPTS.reap_discharged_for_run(
+                    conn, activation.system_id, activation.run_id
+                )
+            )
         ):
             raise _refuse("remote module lifecycle has no retained PREP evidence")
 
