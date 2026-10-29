@@ -1155,11 +1155,17 @@ async def test_remote_resolve_restores_the_acknowledged_third_definition(tmp_pat
 
 @pytest.mark.anyio
 async def test_remote_resolve_retains_the_recovery_objects_and_observes_the_source(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#3414: a resolve recovers and leaves the objects for the release CLEANUP, as RECOVER does."""
     operations, adapter, args = await _resolve_after_observing(tmp_path, definition="other")
-    operations.state = replace(operations.state, definition="source", active=False)
+    recover = operations.recover_acknowledged
+
+    def recover_to_source(*values: Any) -> None:
+        recover(*values)
+        operations.state = replace(operations.state, definition="source", active=False)
+
+    monkeypatch.setattr(operations, "recover_acknowledged", recover_to_source)
 
     observed = await adapter.commit(*args)
 

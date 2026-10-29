@@ -142,11 +142,8 @@ async def _execute_remote_module_lifecycle(
     preparation = ModuleAttemptPreparationRequestV1.from_payload(raw_preparation)
     steps: dict[AuthorityOperation, tuple[Literal["restore", "reap"], ...]] = {
         AuthorityOperation.RECOVER: ("restore",),
-        # The resolve's own cleanup commit refuses while the restore's module volumes stand, and
-        # nothing else reaps them, so it reaps as a release CLEANUP does (#3412). Both steps are
-        # idempotent for a re-entered job: the host returns its retained restore, and a reap whose
-        # obligation is already discharged re-reports the volumes reaped.
-        AuthorityOperation.RESOLVE_CONFLICT: ("restore", "reap"),
+        # A resolve recovers like RECOVER and leaves the volumes for the release CLEANUP (#3414).
+        AuthorityOperation.RESOLVE_CONFLICT: ("restore",),
         AuthorityOperation.CLEANUP: ("reap",),
     }
     for action in steps[request.operation]:

@@ -795,18 +795,24 @@ class ConcreteRemoteModuleAuthorityHost:
                 result=result,
                 volumes_absent=True,
             )
+        if state == "absent" and not self._present_attempt_volumes(volumes):
+            # The sweep removes the markers of a discharged attempt along with its volumes, so a
+            # re-entered reap meets neither; the post-condition already holds (#3414).
+            return RemoteModuleLifecycleResponseV1(
+                action="reap",
+                recovery=recovery,
+                operation=operation,
+                result=result,
+                volumes_absent=True,
+            )
         if state == "absent":
             raw = self._configuration.appliance.read_scratch_result(volumes.scratch, deadline)
             if raw is None or RemoteModuleResultV1.from_wire_bytes(raw) != result:
                 raise ValueError("remote module restored result differs before reap")
         # A release CLEANUP follows a RECOVER that restored the System's power, so the System may
-        # be running, and a resolve-conflict reap meets whatever power the conflicting release
-        # left. The reap deletes only attempt volumes it has proven attached to no domain, which
-        # does not need the System off; a teardown still requires it.
-        active_ok = request.authority.operation in {
-            AuthorityOperation.CLEANUP,
-            AuthorityOperation.RESOLVE_CONFLICT,
-        }
+        # be running. The reap deletes only attempt volumes it has proven attached to no domain,
+        # which does not need the System off; a teardown still requires it.
+        active_ok = request.authority.operation is AuthorityOperation.CLEANUP
         root = self._configuration.appliance.root(restore)
         appliance_request = self._appliance_request(
             restore, volumes, root, deadline, allow_active_system=active_ok

@@ -303,7 +303,7 @@ async def await_authority_dispatch[Value](
 
 # A reap after a restore compares the host's completion with the retained restored evidence;
 # only a System teardown reaps the PREP baseline.
-_RESTORED_REAP_OPERATIONS = frozenset({"cleanup", "resolve-conflict"})
+_RESTORED_REAP_OPERATIONS = frozenset({"cleanup"})
 
 
 async def execute_remote_module_lifecycle_on_authority_host(
@@ -333,10 +333,9 @@ async def execute_remote_module_lifecycle_on_authority_host(
     retained_terminal: ModuleAttemptTerminalEvidence | None = None
     retry_after_discharge = False
     if action == "reap" and not await repository.reap_obligation_is_open(connection, attempt):
-        # A CLEANUP or resolve-conflict retried after its reap already discharged the obligation
-        # (the worker's commit failed afterwards) reaches the host, whose reap is idempotent, and
-        # must come back with the volumes reaped; no other reap proceeds without a retained
-        # obligation.
+        # A CLEANUP retried after its reap already discharged the obligation (the worker's commit
+        # failed afterwards) reaches the host, whose reap is idempotent, and must come back with
+        # the volumes reaped; no other reap proceeds without a retained obligation.
         if (
             authority.operation.value not in _RESTORED_REAP_OPERATIONS
             or not await repository.reap_obligation_is_discharged(connection, attempt)
