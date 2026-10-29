@@ -21,7 +21,7 @@ import sys
 from collections.abc import Generator
 from contextvars import ContextVar, Token
 
-from kdive.security.secrets.redaction import SecretRedactionFilter
+from kdive.security.secrets.redaction import LOG_EXTRA_FIELDS, SecretRedactionFilter
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 CONTEXT_FIELDS: tuple[str, ...] = ("request_id", "job_id", "principal", "object_id", "transition")
@@ -32,6 +32,7 @@ _CONTEXT: dict[str, ContextVar[str | None]] = {
 }
 
 _CTX_RECORD_ATTR = "_kdive_ctx"
+_EXTRA_MAX = 256
 
 
 @contextlib.contextmanager
@@ -83,6 +84,10 @@ class JsonFormatter(logging.Formatter):
             "msg": record.getMessage(),
         }
         payload.update(getattr(record, _CTX_RECORD_ATTR, {}))
+        for name in sorted(LOG_EXTRA_FIELDS):
+            value = getattr(record, name, None)
+            if name not in payload and isinstance(value, str | int):
+                payload[name] = value[:_EXTRA_MAX] if isinstance(value, str) else value
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
         elif record.exc_text:

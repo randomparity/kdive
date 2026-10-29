@@ -132,7 +132,7 @@ def test_unavailable_or_mismatched_runtime_route_is_refused(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("reason", ["provider-conflict", "provider-failure", "journal-conflict"])
-async def test_sender_marks_only_provider_conflict(reason: str) -> None:
+async def test_sender_marks_only_provider_conflict_with_an_authority_reason(reason: str) -> None:
     class Backend:
         async def _request_frame(self, envelope: bytes, *, deadline: float) -> bytes:
             return json.dumps(
@@ -144,5 +144,9 @@ async def test_sender_marks_only_provider_conflict(reason: str) -> None:
         await sender.health(deadline=1.0)
 
     assert str(caught.value) == f"authority: {reason}"
-    expected = {"authority_reason": "provider-conflict"} if reason == "provider-conflict" else {}
-    assert caught.value.details == expected
+    expected: dict[str, dict[str, object]] = {
+        "provider-conflict": {"authority_reason": "provider-conflict"},
+        # ADR-0808: not provably unadmitted, so a wait cannot treat it as refused.
+        "journal-conflict": {"admission": "unknown"},
+    }
+    assert caught.value.details == expected.get(reason, {})
