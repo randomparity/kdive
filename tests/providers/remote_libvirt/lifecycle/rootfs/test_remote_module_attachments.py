@@ -372,6 +372,76 @@ def test_inactive_owner_definition_still_observes_active_domain() -> None:
         inspect_module_attachments(Conn([domain]), state)
 
 
+def test_active_owner_is_refused_unless_a_cleanup_allows_it() -> None:
+    state = expected()
+    conn = Conn([Domain(system_xml(state.system_id), active=True)])
+
+    with pytest.raises(CategorizedError, match="owning System is active"):
+        _inspect_module_attachments(conn, IdentityPort(), state)
+
+
+def test_cleanup_admits_an_active_owner_that_references_no_attempt_volume() -> None:
+    state = expected()
+    conn = Conn([Domain(system_xml(state.system_id), active=True)])
+
+    result = _inspect_module_attachments(conn, IdentityPort(), state, allow_active_system=True)
+
+    assert not result.system_shut_off
+    assert result.exclusive and not result.appliance_present
+    assert result.proves_unattached(state.pool, state.source_volume)
+    assert result.proves_unattached(state.pool, state.scratch_volume)
+    assert not result.proves_detached(state.pool, state.source_volume)
+
+
+@pytest.mark.parametrize("volume", ["source", "scratch"])
+@pytest.mark.parametrize("attribute", ["file", "dev"])
+def test_cleanup_still_refuses_an_active_owner_that_references_an_attempt_volume(
+    attribute: str, volume: str
+) -> None:
+    state = expected()
+    xml = system_xml(state.system_id).replace(
+        "</devices>",
+        f"<disk type='file'><source {attribute}='/pool/{volume}'/></disk></devices>",
+    )
+
+    with pytest.raises(CategorizedError, match="attempt-scoped"):
+        _inspect_module_attachments(
+            Conn([Domain(xml, active=True)]), IdentityPort(), state, allow_active_system=True
+        )
+
+
+def test_cleanup_with_an_active_owner_still_refuses_a_different_root() -> None:
+    state = expected()
+    xml = system_xml(state.system_id).replace(
+        "<disk><source pool='systems' volume='root'/></disk>",
+        "<disk type='file'><source file='/overlay'/>"
+        "<backingStore type='volume'><source pool='systems' volume='root'/>"
+        "<format type='raw'/><backingStore/></backingStore></disk>",
+    )
+
+    with pytest.raises(CategorizedError, match="different root volume"):
+        _inspect_module_attachments(
+            Conn([Domain(xml, active=True)]), IdentityPort(), state, allow_active_system=True
+        )
+
+
+def test_cleanup_with_an_active_owner_cannot_prove_a_volume_detached_while_the_appliance_runs() -> (
+    None
+):
+    state = expected()
+    domains = [
+        Domain(system_xml(state.system_id), active=True),
+        Domain(appliance_xml(state), active=True),
+    ]
+
+    result = _inspect_module_attachments(
+        Conn(domains), IdentityPort(), state, allow_active_system=True
+    )
+
+    assert result.appliance_present
+    assert not result.proves_unattached(state.pool, state.source_volume)
+
+
 def test_active_appliance_rejects_identical_persistent_definition() -> None:
     state = expected()
     xml = appliance_xml(state)

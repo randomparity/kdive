@@ -471,3 +471,16 @@ reclaims the System's core rows and finalizes the teardown receipt. A teardown w
 nothing to discharge. A discharge the function refuses fails the job as stale, as the module
 lifecycle path does, so a leaked obligation is never reported as a clean teardown. The discharge
 is idempotent, so a retried teardown repeats it harmlessly. No schema change.
+
+## Amendment (2026-10-28): A teardown after a completed release carries no receipt
+
+Admission required a retained PREP receipt for every remote teardown except a preparing
+activation's, and the receipt exists only while a reap obligation is open. A System torn down after
+a completed release has had its reap obligation discharged by the release's CLEANUP, so its teardown
+was refused at dispatch (#3406). Admission now also accepts a teardown with no receipt when the
+activation's run has module attempts and every one has its reap discharged
+(`reap_discharged_for_run`, one statement, per run like `read_reap_preparation`). An open reap
+obligation still puts its receipt on the job, an ambiguous read still refuses, and an activated
+System with no obligation, or with an attempt that never reached a discharged reap, is still
+refused. The teardown handler already skips the discharge when it carries no receipt. No schema
+change.
