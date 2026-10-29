@@ -261,6 +261,26 @@ class RemoteModuleAttemptObligationRepository:
             and state["reap_discharged_at"] is not None
         )
 
+    async def reap_discharged_for_run(
+        self, conn: AsyncConnection, system_id: UUID, run_id: UUID
+    ) -> bool:
+        """Return whether the run has module attempts and every one's reap is discharged.
+
+        Admission does not know the attempt's nonce, so this reads every attempt of the run in one
+        statement. An attempt with no terminal evidence, no opened reap or an undischarged reap
+        makes the answer false, as does a run with no attempts (``bool_and`` of no rows is NULL).
+        """
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT bool_and("
+                "terminal_operation IS NOT NULL AND reap_opened_at IS NOT NULL "
+                "AND reap_discharged_at IS NOT NULL) "
+                "FROM remote_module_attempt_obligations WHERE system_id = %s AND run_id = %s",
+                (system_id, run_id),
+            )
+            row = await cur.fetchone()
+        return bool(row and row[0])
+
     async def read_reap_preparation(
         self, conn: AsyncConnection, system_id: UUID, run_id: UUID
     ) -> ModuleAttemptPreparationRequestV1 | None:
