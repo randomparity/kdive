@@ -326,11 +326,20 @@ async def execute_remote_module_lifecycle_on_authority_host(
     attempt = ModuleAttempt(receipt.system_id, receipt.run_id, receipt.operation_nonce)
     retained_restored: ModuleAttemptRestoredEvidence | None = None
     retained_terminal: ModuleAttemptTerminalEvidence | None = None
+    retry_after_discharge = False
     if action == "reap" and not await repository.reap_obligation_is_open(connection, attempt):
-        raise CategorizedError(
-            "remote module reap obligation is not retained",
-            category=ErrorCategory.CONFLICT,
-        )
+        # A CLEANUP retried after its reap already discharged the obligation (the worker's
+        # commit_cleanup failed afterwards) reaches the host, whose reap is idempotent, and must
+        # come back with the volumes reaped; no other reap proceeds without a retained obligation.
+        if (
+            authority.operation.value != "cleanup"
+            or not await repository.reap_obligation_is_discharged(connection, attempt)
+        ):
+            raise CategorizedError(
+                "remote module reap obligation is not retained",
+                category=ErrorCategory.CONFLICT,
+            )
+        retry_after_discharge = True
     if action == "reap" and authority.operation.value == "cleanup":
         retained_restored = await repository.read_restored_evidence(connection, attempt)
         if retained_restored is None:
@@ -408,6 +417,11 @@ async def execute_remote_module_lifecycle_on_authority_host(
                 category=ErrorCategory.STALE_HANDLE,
             )
     else:
+        if retry_after_discharge and not response.volumes_absent:
+            raise CategorizedError(
+                "remote module cleanup retry needs the host to report the volumes reaped",
+                category=ErrorCategory.CONFLICT,
+            )
         if authority.operation.value == "cleanup":
             if retained_restored != _restored_evidence(response):
                 raise CategorizedError(
