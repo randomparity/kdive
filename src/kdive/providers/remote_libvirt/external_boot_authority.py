@@ -1863,8 +1863,9 @@ class RemoteModuleVolumePreparationStore:
             return None
         raise ValueError(
             "remote cleanup finalized marker has no teardown refs and the activation's terminal "
-            "record is gone, so teardown is refused; confirm none of this activation's module "
-            f"volumes remains in the storage pool, then remove "
+            "record is gone, so teardown is refused; confirm no module volume of System "
+            f"{binding.system_id} run {binding.run_id} (plan {plan_identity}) remains in the "
+            "storage pool, then remove "
             f"{self._finalized_name(binding, plan_identity)} and retry teardown"
         )
 

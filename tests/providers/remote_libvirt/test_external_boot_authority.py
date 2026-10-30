@@ -4971,7 +4971,11 @@ async def test_remote_legacy_finalized_marker_serves_teardown_only_while_files_r
         record.plan_identity,
     )
     os.unlink(f"{key}.terminal", dir_fd=store._root_fd)
-    with pytest.raises(ValueError, match="no teardown refs.*remove .*and retry teardown"):
+    with pytest.raises(
+        ValueError,
+        match=f"no teardown refs.*System {record.binding.system_id} run {record.binding.run_id}"
+        ".*remove .*and retry teardown",
+    ):
         store.finalized_teardown_refs(record.binding, record.plan_identity)
     adapter.close()
 
