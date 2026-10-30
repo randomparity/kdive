@@ -93,8 +93,11 @@ class RecoveryOrphanAuthorityService:
         connections: AuthorityConnectionFactory,
         ports: ExternalBootRecoveryObjectPorts,
         executor: RecoveryObjectExecutor | None = None,
+        *,
+        authority_instance: str,
     ) -> None:
         self._connections = connections
+        self._authority_instance = authority_instance
         self._ports = ports
         self._executor = executor
         self._lanes: dict[UUID, asyncio.Lock] = {}
@@ -142,7 +145,7 @@ class RecoveryOrphanAuthorityService:
         if not rows:
             raise AuthorityServiceError("superseded")
         try:
-            return tuple(
+            selections = tuple(
                 _Selection(
                     object_id=row["object_id"],
                     system_id=row["system_id"],
@@ -167,6 +170,11 @@ class RecoveryOrphanAuthorityService:
             raise AuthorityServiceError(
                 "journal_conflict", reason="orphan_selection_malformed"
             ) from None
+        # A row another host published must not reach this host's provider (ADR-0615, #3439).
+        own = self._authority_instance
+        if any(selection.authority_instance != own for selection in selections):
+            raise AuthorityServiceError("configuration_error")
+        return selections
 
     async def _commit(
         self,

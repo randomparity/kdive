@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,12 +39,10 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.providers.assembly.authority import (
     authority_sender_factory,
     local_authority_sender_factory,
-    recovery_orphan_authority_sender_factory,
 )
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.infra.reaping import ModuleVolumeReaper
-from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import secret_backend_from_env
 from kdive.store.assembly import ObjectStoreAssembly
@@ -64,7 +61,6 @@ class WorkerHandlerAssembly:
     module_volume_reaper: ModuleVolumeReaper
     pool: AsyncConnectionPool | None = None
     external_boot_client_factory: ExternalBootClientFactory | None = None
-    recovery_orphan_authority_sender_factory: Callable[[], AuthorityRequestSender] | None = None
     authority_system_sender_factory: AuthoritySystemSenderFactory | None = None
 
 
@@ -112,10 +108,6 @@ def build_worker_handler_assembly(
         ),
         pool=pool,
         external_boot_client_factory=external_boot_client_factory(),
-        recovery_orphan_authority_sender_factory=recovery_orphan_authority_sender_factory(
-            secret_backend_from_env(registry=composition.secret_registry),
-            lambda: assembly.incarnation_credential,
-        ),
         authority_system_sender_factory=authority_system_sender_factory(),
     )
     return assembly
@@ -175,7 +167,7 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
     )
     orphan.register_handlers(
         registry,
-        sender_factory=assembly.recovery_orphan_authority_sender_factory,
+        resolver=assembly.resolver,
     )
     systems.register_handlers(
         registry,
