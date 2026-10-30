@@ -1398,13 +1398,15 @@ class RemoteModuleVolumePreparationStore:
         self, binding: ExternalBootActivationBinding, plan_identity: str
     ) -> RemoteModuleVolumePreparationRequestV1 | None:
         """Find one exact durable PREPARE request without trusting a caller-selected path."""
-        names = os.listdir(self._root_fd)
+        names = [
+            name
+            for name in os.listdir(self._root_fd)
+            if len(name) == 64 + len(".request") and name.endswith(".request")
+        ]
         if len(names) > _MAX_STORE_SCAN_NAMES:
             raise ValueError("remote preparation store exceeds teardown scan bound")
         matches: list[RemoteModuleVolumePreparationRequestV1] = []
         for name in names:
-            if len(name) != 64 + len(".request") or not name.endswith(".request"):
-                continue
             digest = name.removesuffix(".request")
             if any(character not in "0123456789abcdef" for character in digest):
                 raise ValueError("remote preparation request name is malformed")
@@ -1735,21 +1737,26 @@ class RemoteModuleVolumePreparationStore:
 
         A file that does not parse cannot be proven foreign. The deleting scan leaves it in
         place; a ``strict`` scan, which captures what teardown must still prove, refuses it.
+        Only names of this suffix count toward the bound: finalized markers accumulate for the
+        life of the store and must not stop a later finalize.
         """
-        names = os.listdir(self._root_fd)
+        names = [
+            name
+            for name in os.listdir(self._root_fd)
+            if len(name) == 64 + len(suffix)
+            and name.endswith(suffix)
+            and all(character in "0123456789abcdef" for character in name.removesuffix(suffix))
+        ]
         if len(names) > _MAX_STORE_SCAN_NAMES:
             raise ValueError(
-                f"remote preparation store holds more than {_MAX_STORE_SCAN_NAMES} files, so "
-                "finalize cannot scan it; remove leftover temporary and foreign files from the "
-                "store directory, then retry finalize"
+                f"remote preparation store holds more than {_MAX_STORE_SCAN_NAMES} {suffix} "
+                "files, so finalize will not read them all; release or tear down this host's "
+                "other activations, which removes their files, then retry finalize"
             )
         return [
             name
             for name in names
-            if len(name) == 64 + len(suffix)
-            and name.endswith(suffix)
-            and all(character in "0123456789abcdef" for character in name.removesuffix(suffix))
-            and (data := self._read(name)) is not None
+            if (data := self._read(name)) is not None
             and (self._strictly_owns(name, owns, data) if strict else self._owns(name, owns, data))
         ]
 
@@ -1760,8 +1767,8 @@ class RemoteModuleVolumePreparationStore:
         except ValueError as error:
             raise ValueError(
                 f"remote finalize cannot parse {name}, so it cannot prove which activation owns "
-                "it; restore the file from its owner's copy or remove it if it is residue, then "
-                "retry finalize"
+                "it; keep a copy of the file, confirm that no module volume of this activation's "
+                "System and run remains in the storage pool, then remove it and retry finalize"
             ) from error
 
     @staticmethod

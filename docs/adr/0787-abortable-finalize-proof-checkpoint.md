@@ -186,16 +186,21 @@ any of this runs, and the receipt is still compared with the derived proof conte
 - The recovery index is removed only while its content names the record being finalized. The
   check no longer depends on the record still being present, so a retry after the record went
   first also removes the index. An index naming another record stays in place.
-- Each finalize directory scan refuses a store holding more than 4096 names, the bound System
-  teardown already applied, and the error tells the operator to remove leftover files and retry.
-  The refusal happens before the marker is written.
+- Each finalize directory scan refuses more than 4096 names of the suffix it reads, before reading
+  any of them and before the marker is written. The error tells the operator to release or tear
+  down the host's other activations, which removes their files, and retry. Only that suffix
+  counts: a finalized marker stays for the life of the store, so a bound on every name would
+  eventually stop every finalize on a long-lived host. System teardown's existing 4096 bound
+  counted every name and could stop teardown the same way; it now counts only `.request` names.
 - The `.request` conflict check compares the whole module operation, as `teardown_preparation`
   does, rather than only the nonce. Finalize no longer records a nonce that teardown would refuse.
 - A `.request` file that does not parse, and a marker without teardown refs once the terminal
-  record is gone, now say what to do next. For the request: restore it or remove it as residue,
-  then retry finalize. For the marker: confirm the activation's module volumes are gone from the
-  pool, remove the marker, then retry teardown. Without the marker, teardown reads the live
-  records it did before finalize.
+  record is gone, now say what to do next. For the request: keep a copy, confirm no module volume
+  of the activation's System and run remains in the pool, remove the file, then retry finalize.
+  Removing it without that check would let finalize record no nonce, and teardown's
+  unfinished-preparation proof would pass without looking at the pool. For the marker: confirm
+  the activation's module volumes are gone from the pool, remove the marker, then retry teardown.
+  Without the marker, teardown reads the live records it did before finalize.
 - Crash-window tests cover the index removed with the record present (the retry finds the receipt
   through the marker) and the record removed with the index present (the retry finds it through
   the index). Each test fails if the index-then-record order or that retry path changes.
