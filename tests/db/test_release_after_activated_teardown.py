@@ -1,15 +1,16 @@
-"""Allocation release after the teardown of an activated authority System (#3382).
+"""Allocation release after the teardown of an activated authority System (#3382, #3423).
 
 The ownership row of an activated System ends ``torn-down`` with its first activation recorded.
 Only allocation release is admitted for it; every other mutation keeps the pre-activation fence,
-and a never-activated owner still needs the consumed absence receipt.
+and a never-activated owner still needs the consumed absence receipt, whatever activation rows
+it has.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import LiteralString
-from uuid import UUID
+from typing import Literal, LiteralString
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -20,7 +21,6 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from kdive.services.external_boot.admission import (
     AUTHORITY_PREACTIVATION_DENIAL_REASON,
-    DENIAL_REASON,
     ExternalBootDenied,
     ExternalBootOperation,
     check_external_boot_admission,
@@ -30,6 +30,7 @@ from tests.db.external_boot_authority_support import _AuthorityCase, _RoleDsns, 
 _PROFILE = "sha256:" + "d" * 64
 _ROOT = "sha256:" + "e" * 64
 _CONTEXT = RequestContext("q", "release", ("proj",), {"proj": Role.CONTRIBUTOR})
+_PROOF = "SELECT authority_system_torn_down_after_activation(%s)"
 
 
 def _scalar(dsn: str, query: LiteralString, params: tuple[object, ...]) -> object:
@@ -40,7 +41,11 @@ def _scalar(dsn: str, query: LiteralString, params: tuple[object, ...]) -> objec
 
 
 def _torn_down_owner(
-    dsn: str, *, activated: bool, state: str = "torn-down", orphan_row: bool = False
+    dsn: str,
+    *,
+    activated: bool,
+    state: str = "torn-down",
+    orphan_row: Literal["live", "cleaned"] | None = None,
 ) -> _AuthorityCase:
     """An authority owner whose System was torn down, with or without a first activation."""
     with psycopg.connect(dsn) as seed:
@@ -68,7 +73,7 @@ def _torn_down_owner(
             ),
         )
         seed.execute("UPDATE systems SET state='torn_down' WHERE id=%s", (case.system_id,))
-        if orphan_row:
+        if orphan_row == "live":
             seed.execute(
                 "UPDATE external_boot_activations SET state='preparing', materialization=NULL, "
                 "pre_recovery_evidence=NULL, recovery_point=NULL WHERE id=%s",
@@ -85,7 +90,7 @@ def _torn_down_owner(
                 "WHERE id=%s",
                 (case.activation_id,),
             )
-        if not activated and not orphan_row:
+        if not activated and orphan_row is None:
             seed.execute("DELETE FROM external_boot_activations WHERE id=%s", (case.activation_id,))
     return case
 
@@ -182,15 +187,16 @@ def test_an_owner_that_is_not_torn_down_stays_fenced_even_with_an_activation_row
     assert denied.value.details["reason"] == AUTHORITY_PREACTIVATION_DENIAL_REASON
 
 
-def test_an_unclaimed_activation_row_left_by_a_blocked_claim_still_denies_release(
-    migrated_url: str, authority_role_dsns: _RoleDsns
+@pytest.mark.parametrize("orphan_row", ["live", "cleaned"])
+def test_an_unclaimed_activation_row_left_by_a_blocked_claim_never_admits_release(
+    migrated_url: str, authority_role_dsns: _RoleDsns, orphan_row: Literal["live", "cleaned"]
 ) -> None:
-    """A claim blocked by a requested teardown can leave a live activation row behind.
+    """A claim blocked by a requested teardown can leave an activation row behind (#3423).
 
-    The row is not a first activation, but while it is not cleaned the activation policy denies
-    release, so the activation-row proxy for activation history never admits it.
+    The row is not a first activation, so the never-activated owner keeps the pre-activation
+    fence whether the row is still live or already cleaned.
     """
-    case = _torn_down_owner(migrated_url, activated=False, orphan_row=True)
+    case = _torn_down_owner(migrated_url, activated=False, orphan_row=orphan_row)
 
     with pytest.raises(ExternalBootDenied) as denied:
         _admit(
@@ -199,5 +205,48 @@ def test_an_unclaimed_activation_row_left_by_a_blocked_claim_still_denies_releas
             ExternalBootOperation.ALLOCATION_RELEASE,
         )
 
-    assert denied.value.details["reason"] == DENIAL_REASON
-    assert denied.value.details["activation_state"] == "preparing"
+    assert denied.value.details["reason"] == AUTHORITY_PREACTIVATION_DENIAL_REASON
+
+
+@pytest.mark.parametrize(
+    ("activated", "state", "orphan_row", "proven"),
+    [
+        (True, "torn-down", None, True),
+        (False, "torn-down", None, False),
+        (False, "torn-down", "cleaned", False),
+        (True, "ready", None, False),
+        (True, "teardown-requested", None, False),
+        (True, "repair-required", None, False),
+    ],
+)
+def test_first_activation_proof_holds_only_for_a_torn_down_activated_owner(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    activated: bool,
+    state: str,
+    orphan_row: Literal["live", "cleaned"] | None,
+    proven: bool,
+) -> None:
+    case = _torn_down_owner(migrated_url, activated=activated, state=state, orphan_row=orphan_row)
+
+    assert _scalar(authority_role_dsns("kdive_server"), _PROOF, (case.system_id,)) is proven
+
+
+@pytest.mark.parametrize(
+    ("role", "allowed"),
+    [
+        ("kdive_server", True),
+        ("kdive_reconciler", True),
+        ("kdive_worker", False),
+        ("kdive_provider_authority", False),
+    ],
+)
+def test_first_activation_proof_is_restricted_to_control_roles(
+    authority_role_dsns: _RoleDsns, role: str, allowed: bool
+) -> None:
+    with psycopg.connect(authority_role_dsns(role), autocommit=True) as conn:
+        if allowed:
+            assert conn.execute(_PROOF, (uuid4(),)).fetchone() == (False,)
+            return
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute(_PROOF, (uuid4(),))
