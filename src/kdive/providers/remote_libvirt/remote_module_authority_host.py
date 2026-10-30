@@ -670,7 +670,7 @@ class ConcreteRemoteModuleAuthorityHost:
     ) -> RemoteModuleOperationV1:
         installed.validate_for(capture)
         if installed.phase != "installed" or installed.capture_state is None:
-            raise ValueError("remote module installed baseline is incomplete")
+            raise ProviderRecoveryRefusal("remote module installed baseline is incomplete")
         return RemoteModuleOperationV1(
             operation="restore",
             system_id=capture.system_id,
@@ -703,14 +703,16 @@ class ConcreteRemoteModuleAuthorityHost:
             or recovery.run_id != str(authority.run_id)
             or recovery.plan_identity != authority.plan_identity
         ):
-            raise ValueError("remote module lifecycle authority differs from preparation")
+            raise ProviderRecoveryRefusal(
+                "remote module lifecycle authority differs from preparation"
+            )
         capture = terminal.request.operation
         installed = terminal.response.result
         if (
             identity_for(capture) != recovery.operation_identity
             or identity_for(installed) != recovery.result_identity
         ):
-            raise ValueError("remote module lifecycle baseline identity differs")
+            raise ProviderRecoveryRefusal("remote module lifecycle baseline identity differs")
         return capture, self._restore_operation(capture, installed), installed, recovery
 
     def _restore(

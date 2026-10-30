@@ -1836,7 +1836,7 @@ class RemoteModuleVolumePreparationStore:
             return []
         identity = index.decode("ascii", errors="replace")
         if len(identity) != 64 or any(value not in "0123456789abcdef" for value in identity):
-            raise ProviderRecoveryRefusal("remote materialization plan index is malformed")
+            raise ValueError("remote materialization plan index is malformed")
         data = self._read(f"{identity}.materialization")
         if data is not None:
             ownership = RemoteExternalBootMaterializationRecord.from_canonical_json(
@@ -2963,7 +2963,7 @@ class RemoteExternalBootAuthorityAdapter:
             point.source_state.definition != request.expected_source_identity
             or point.target_state.definition != request.intended_target_identity
         ):
-            raise ValueError("remote external-boot identities differ from request")
+            raise ProviderRecoveryRefusal("remote external-boot identities differ from request")
         named = request.recovery_objects
         if any(
             item.reference != point.recovery_ref.ref
@@ -2971,7 +2971,9 @@ class RemoteExternalBootAuthorityAdapter:
             or str(item.activation_id) != point.binding.activation_id
             for item in named
         ) or (request.operation is AuthorityOperation.CLEANUP and not named):
-            raise ValueError("remote external-boot recovery objects are not this activation's")
+            raise ProviderRecoveryRefusal(
+                "remote external-boot recovery objects are not this activation's"
+            )
         return point
 
     def _finalized_cleanup(self, request: AuthorityMutationRequestV1) -> bool:

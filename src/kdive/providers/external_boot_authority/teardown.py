@@ -21,6 +21,8 @@ type ProviderRecoveryRefusalReason = Literal[
     "external-boot pre-stop module layout conflicts with metadata",
     # The remote adapter's cleanup, finalize and reap checks (#3436).
     "remote cleanup evidence differs from exact request",
+    "remote external-boot identities differ from request",
+    "remote external-boot recovery objects are not this activation's",
     "remote cleanup evidence changed before provider deletion",
     "remote cleanup quarantine belongs to another operation",
     "remote cleanup proof differs from the quarantine receipt",
@@ -33,7 +35,6 @@ type ProviderRecoveryRefusalReason = Literal[
     "remote cleanup finalized marker is malformed",
     "remote cleanup finalized marker conflicts with durable bytes",
     "remote recovery record differs from the quarantine receipt",
-    "remote materialization plan index is malformed",
     "remote materialization differs from the finalized activation",
     "remote finalize found conflicting preparation requests for one activation; "
     "resolve the duplicate .request records before finalizing",
@@ -41,6 +42,9 @@ type ProviderRecoveryRefusalReason = Literal[
     "remote cleanup boot artifact identity differs",
     "remote cleanup volume name differs",
     "remote cleanup volume remained after deletion",
+    "remote module installed baseline is incomplete",
+    "remote module lifecycle authority differs from preparation",
+    "remote module lifecycle baseline identity differs",
     "installed-only module reap requires teardown authority",
     "remote module restored evidence differs from preparation",
     "remote module recovery geometry differs from fixed host binding",
