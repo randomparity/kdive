@@ -62,4 +62,4 @@ async def remote_module_volume_reap_handler(
         return _expand(await repository.retained_owners(conn))
 
     removed = await reaper.reap_module_volumes(retained_owners)
-    _LOG.info("remote module-volume reap completed", extra={"removed": removed})
+    _LOG.info("remote module-volume reap completed: removed=%d", removed)
