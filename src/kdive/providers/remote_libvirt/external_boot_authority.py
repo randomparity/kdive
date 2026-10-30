@@ -3236,9 +3236,13 @@ class RemoteExternalBootAuthorityAdapter:
         return await self.observe(request)
 
     async def cleanup_quarantine_inventory(
-        self, request: AuthorityMutationRequestV1
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> tuple[RecoveryObjectObservation, ...]:
-        """Reopen only the exact standing private cleanup receipt."""
+        """Reopen only the exact standing private cleanup receipt.
+
+        The receipt is compared with the proof ``context``, not the request: a retried release
+        that adopted an earlier generation's cleanup still names that cleanup (ADR-0787, #3434).
+        """
         if request.operation is not AuthorityOperation.CLEANUP:
             return ()
         binding = _activation_binding(request)
@@ -3248,8 +3252,8 @@ class RemoteExternalBootAuthorityAdapter:
         if receipt is None or receipt.managed:
             return ()
         if (
-            receipt.operation_identity != request.operation_identity
-            or receipt.attempt_id != request.attempt_id
+            receipt.operation_identity != context.operation_identity
+            or receipt.attempt_id != context.attempt_id
         ):
             # Deferred: the service module imports this one.
             from kdive.providers.external_boot_authority.service import AuthorityServiceError
