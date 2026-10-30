@@ -59,9 +59,11 @@ class _Sender:
         failure: Exception | None = None,
         owned: tuple[ModuleVolumeKey, ...] = (_KEY0,),
         events: list[str] | None = None,
+        fail_on_sweep: int | None = None,
     ) -> None:
         self.removed = removed
         self.failure = failure
+        self.fail_on_sweep = fail_on_sweep
         self.owned = owned
         self.events = events if events is not None else []
         self.requests: list[ModuleVolumeSweepRequestV1] = []
@@ -72,7 +74,10 @@ class _Sender:
         del deadline
         self.requests.append(request)
         self.events.append(f"{request.phase}")
-        if self.failure is not None:
+        if self.failure is not None and (
+            self.fail_on_sweep is None
+            or (request.phase == "sweep" and len(self.sweeps) == self.fail_on_sweep)
+        ):
             raise self.failure
         if request.phase == "list":
             return ModuleVolumeSweepResponseV1(
@@ -333,3 +338,19 @@ def test_a_large_listing_is_swept_in_slices_with_the_whole_retained_set() -> Non
     assert [item.operation_nonce for request in sender.sweeps for item in request.candidates] == [
         key.operation_nonce for key in owned
     ]
+
+
+def test_a_mid_host_slice_failure_skips_that_hosts_remaining_slices_only() -> None:
+    owned = tuple(_key(index) for index in range(MAX_SWEEP_CANDIDATES * 3))
+    failing = _Sender(removed=1, owned=owned, failure=OSError("down"), fail_on_sweep=2)
+    healthy = _Sender(removed=1, owned=owned)
+
+    with pytest.raises(CategorizedError) as caught:
+        _reap(
+            _reaper([_config("bad"), _config("good")], {"bad": failing, "good": healthy}),
+            [_key(10_000)],
+        )
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert len(failing.sweeps) == 2
+    assert len(healthy.sweeps) == 3
