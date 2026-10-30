@@ -1240,14 +1240,8 @@ class RemoteModuleVolumePreparationStore:
         response: RemoteModuleLifecycleResponseV1 | None,
     ) -> None:
         self.reopen_lifecycle(request)
-        completion = RemoteModuleLifecycleCompletionV1(
-            state="terminal" if response is not None else "failed-after-mutation",
-            response=response,
-        )
-        self._publish(
-            f"{self._lifecycle_key(request)}.lifecycle-completion",
-            completion.to_canonical_json(),
-        )
+        # The restored record goes first: a crash before the completion leaves evidence a restore
+        # retry publishes the completion from, never a completion that hides absent evidence.
         if response is not None and response.action == "restore":
             authority = request.authority
             restored_key = self._terminal_key(
@@ -1257,6 +1251,14 @@ class RemoteModuleVolumePreparationStore:
                 authority.plan_identity,
             )
             self._publish(f"{restored_key}.restored", response.to_canonical_json())
+        completion = RemoteModuleLifecycleCompletionV1(
+            state="terminal" if response is not None else "failed-after-mutation",
+            response=response,
+        )
+        self._publish(
+            f"{self._lifecycle_key(request)}.lifecycle-completion",
+            completion.to_canonical_json(),
+        )
 
     def reopen_lifecycle_completion(
         self, request: RemoteModuleLifecycleRequestV1
@@ -1395,13 +1397,16 @@ class RemoteModuleVolumePreparationStore:
         self, binding: ExternalBootActivationBinding, plan_identity: str
     ) -> RemoteModuleVolumePreparationRequestV1 | None:
         """Find one exact durable PREPARE request without trusting a caller-selected path."""
-        names = os.listdir(self._root_fd)
+        names = [
+            name
+            for name in os.listdir(self._root_fd)
+            if len(name) == 64 + len(".request") and name.endswith(".request")
+        ]
+        # Only .request names count: finalized markers stay for the life of the store.
         if len(names) > 4096:
             raise ValueError("remote preparation store exceeds teardown scan bound")
         matches: list[RemoteModuleVolumePreparationRequestV1] = []
         for name in names:
-            if len(name) != 64 + len(".request") or not name.endswith(".request"):
-                continue
             digest = name.removesuffix(".request")
             if any(character not in "0123456789abcdef" for character in digest):
                 raise ValueError("remote preparation request name is malformed")
@@ -1708,6 +1713,14 @@ class RemoteModuleVolumePreparationStore:
         return self._read(self._finalized_name(binding, plan_identity)) is not None
 
     def refuse_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> None:
+        """Refuse a finalized activation; the caller's later write is not atomic with this check.
+
+        Nothing locks the store between the check and the write, and the module executor runs
+        up to four calls at once. The ordering rests on the authority service running one
+        mutation at a time per System lane (ADR-0584), so a finalize never overlaps a stage or
+        publish for the same activation. A second authority instance writing this store
+        directory would break that assumption.
+        """
         if self.cleanup_finalized(binding, plan_identity):
             raise RemoteCleanupFinalizedError(
                 "remote activation records were removed when its cleanup was finalized"
@@ -1724,6 +1737,8 @@ class RemoteModuleVolumePreparationStore:
 
         A file that does not parse cannot be proven foreign. The deleting scan leaves it in
         place; a ``strict`` scan, which captures what teardown must still prove, refuses it.
+        The scan is unbounded (ADR-0787, #3419): store files accumulate until something
+        collects a torn-down activation's files.
         """
         return [
             name
@@ -1732,8 +1747,21 @@ class RemoteModuleVolumePreparationStore:
             and name.endswith(suffix)
             and all(character in "0123456789abcdef" for character in name.removesuffix(suffix))
             and (data := self._read(name)) is not None
-            and (owns(data) if strict else self._owns(name, owns, data))
+            and (self._strictly_owns(name, owns, data) if strict else self._owns(name, owns, data))
         ]
+
+    @staticmethod
+    def _strictly_owns(name: str, owns: Callable[[bytes], bool], data: bytes) -> bool:
+        try:
+            return owns(data)
+        except ValueError as error:
+            raise ValueError(
+                f"remote finalize cannot parse {name}, so it cannot prove which activation owns "
+                "it, and it may be any activation's on this host; keep a copy of the file, find "
+                "the System and run it names, or every System on this host if the copy names "
+                "none, confirm that no module volume of those Systems remains unaccounted for in "
+                "the storage pool, then remove it and retry finalize"
+            ) from error
 
     @staticmethod
     def _owns(name: str, owns: Callable[[bytes], bool], data: bytes) -> bool:
@@ -1833,7 +1861,13 @@ class RemoteModuleVolumePreparationStore:
         )
         if self._read(f"{key}.terminal") is not None:
             return None
-        raise ValueError("remote cleanup finalized marker has no teardown refs; teardown refused")
+        raise ValueError(
+            "remote cleanup finalized marker has no teardown refs and the activation's terminal "
+            "record is gone, so teardown is refused; confirm no module volume of System "
+            f"{binding.system_id} run {binding.run_id} (plan {plan_identity}) remains in the "
+            "storage pool, then remove "
+            f"{self._finalized_name(binding, plan_identity)} and retry teardown"
+        )
 
     def _teardown_refs(
         self, binding: ExternalBootActivationBinding, plan_identity: str
@@ -1846,19 +1880,21 @@ class RemoteModuleVolumePreparationStore:
             )
         except FileNotFoundError:
             volumes = ()
-        nonces: list[str] = []
+        operations: list[RemoteModuleOperationV1] = []
 
         def collect(data: bytes) -> bool:
             request = _PersistedRemoteModulePreparationV1.from_canonical_json(data).request
             if owned := _authority_owned(request.authority, binding, plan_identity):
-                nonces.append(request.operation.operation_nonce)
+                operations.append(request.operation)
             return owned
 
         self._scan_owned(".request", collect, strict=True)
-        if len(set(nonces)) > 1:
+        # The same comparison teardown_preparation applies, so finalize captures no nonce that
+        # teardown would have refused.
+        if any(operation != operations[0] for operation in operations[1:]):
             raise ValueError(
-                "remote finalize found preparation requests with different nonces for one "
-                "activation; resolve the duplicate .request records before finalizing"
+                "remote finalize found conflicting preparation requests for one activation; "
+                "resolve the duplicate .request records before finalizing"
             )
         boot: list[RemoteFinalizedBootArtifactV1] = []
         if (record := self.teardown_materialization(binding, plan_identity)) is not None:
@@ -1881,7 +1917,7 @@ class RemoteModuleVolumePreparationStore:
                 )
         return RemoteFinalizedTeardownRefsV1(
             module_volumes=volumes,
-            operation_nonce=nonces[0] if nonces else None,
+            operation_nonce=operations[0].operation_nonce if operations else None,
             boot_artifacts=tuple(boot),
         )
 
@@ -1932,7 +1968,9 @@ class RemoteModuleVolumePreparationStore:
         files go before the recovery record, whose identity and plan name them. The receipt is
         found by its record's identity, or through the marker once the index is gone, so an
         interrupted finalization is repeatable until nothing but the marker remains. The marker
-        keeps a finalized cleanup distinguishable from a record that never existed.
+        keeps a finalized cleanup distinguishable from a record that never existed. An index is
+        removed only while it names this record, whether or not the record is still present.
+        The ordering against a concurrent stage rests on the System lane (``refuse_finalized``).
         """
         identity = _recovery_identity(receipt.recovery_ref)
         record = self._recovery_record(identity)
@@ -1942,17 +1980,17 @@ class RemoteModuleVolumePreparationStore:
             raise ValueError("remote recovery record differs from the quarantine receipt")
         self._write_finalized_marker(receipt)
         names = self._activation_files(receipt.binding, receipt.plan_identity)
+        owned = identity.encode("ascii")
         if record is not None:
             names += [
                 name
                 for reference in record.recovery_objects
-                if self._read(name := _object_index_name(reference)) == identity.encode("ascii")
+                if self._read(name := _object_index_name(reference)) == owned
             ]
-            names += [
-                f"{self._recovery_key(record.binding, record.plan_identity)}.recovery-index",
-                f"{identity}.recovery",
-            ]
-        names.append(self._quarantine_name(receipt.recovery_ref))
+        index = f"{self._recovery_key(receipt.binding, receipt.plan_identity)}.recovery-index"
+        if self._read(index) == owned:
+            names.append(index)
+        names += [f"{identity}.recovery", self._quarantine_name(receipt.recovery_ref)]
         for name in names:
             with suppress(FileNotFoundError):
                 os.unlink(name, dir_fd=self._root_fd)
@@ -3234,9 +3272,13 @@ class RemoteExternalBootAuthorityAdapter:
         return await self.observe(request)
 
     async def cleanup_quarantine_inventory(
-        self, request: AuthorityMutationRequestV1
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> tuple[RecoveryObjectObservation, ...]:
-        """Reopen only the exact standing private cleanup receipt."""
+        """Reopen only the exact standing private cleanup receipt.
+
+        The receipt is compared with the proof ``context``, not the request: a retried release
+        that adopted an earlier generation's cleanup still names that cleanup (ADR-0787, #3434).
+        """
         if request.operation is not AuthorityOperation.CLEANUP:
             return ()
         binding = _activation_binding(request)
@@ -3246,8 +3288,8 @@ class RemoteExternalBootAuthorityAdapter:
         if receipt is None or receipt.managed:
             return ()
         if (
-            receipt.operation_identity != request.operation_identity
-            or receipt.attempt_id != request.attempt_id
+            receipt.operation_identity != context.operation_identity
+            or receipt.attempt_id != context.attempt_id
         ):
             # Deferred: the service module imports this one.
             from kdive.providers.external_boot_authority.service import AuthorityServiceError
@@ -3265,7 +3307,8 @@ class RemoteExternalBootAuthorityAdapter:
         receipt = await self._executor.run(
             lambda: self._coordinator.cleanup_quarantine(binding, request.plan_identity)
         )
-        if receipt is None:
+        if receipt is None or receipt.managed:
+            # An adopted receipt is the operator's; finalize leaves it in place (ADR-0787).
             return
         if (
             receipt.operation_identity != context.operation_identity

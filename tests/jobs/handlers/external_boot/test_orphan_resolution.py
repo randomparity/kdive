@@ -29,6 +29,7 @@ from kdive.mcp.tools.external_boot.recovery_requests import resolve_recovery_orp
 from kdive.providers.external_boot_authority.journal import record_digest
 from kdive.providers.external_boot_authority.orphan import RecoveryOrphanAuthorityService
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
@@ -308,7 +309,14 @@ async def _publish_local_quarantine(
         intended_target_identity="sha256:" + "b" * 64,
         recovery_objects=(),
     )
-    observations = await adapter.cleanup_quarantine_inventory(request)
+    context = AuthorityCommitContextV1(
+        commit_point=AuthorityOperation.CLEANUP,
+        operation_identity=cleanup_identity,
+        attempt_id=attempt_id,
+        journal_sequence=8,
+        journal_digest=mutation_digest,
+    )
+    observations = await adapter.cleanup_quarantine_inventory(request, context)
     assert len(observations) == 1
     authority_binding = AuthorityBinding(
         peer_incarnation_id=publisher,
