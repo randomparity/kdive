@@ -1065,7 +1065,9 @@ async def test_crash_between_the_restore_evidence_writes_is_recovered_by_a_retry
     [
         {"phase": "restore-ready"},
         {"status": "failure", "error_code": "FILESYSTEM_FAILURE"},
+        {"operation_nonce": "9" * 32},
     ],
+    ids=["restore-ready", "failed", "another-attempt"],
 )
 async def test_system_teardown_refuses_an_unfinished_restore_in_the_scratch_volume(
     tmp_path: Path, unfinished: dict[str, str]
