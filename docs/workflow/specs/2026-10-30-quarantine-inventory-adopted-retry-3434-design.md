@@ -105,6 +105,10 @@ adapter records its quarantine only inside `commit` (`local_libvirt/external_boo
      exclusion, follow-up candidate.
    - A `journal_conflict` from a missing `mutation-started` record is raised again by publication
      after `finalize` raised it. Accepted: same category, nothing is published.
+   - A build carrying this change, running against a database without 0186, stores the retry's
+     identity for an adopted release row. That row cannot be resolved. Accepted: migrations run
+     as their own step before a build rolls out (`kdive.admin.migrations`, ADR-0121), so this
+     needs an out-of-order deploy.
 4. **Covered elsewhere**
    - Adopted (`managed`) receipt at finalize: #3435 (merged).
    - Finalize hardening: #3419.
@@ -133,21 +137,23 @@ adapter records its quarantine only inside `commit` (`local_libvirt/external_boo
 4. The publish function refuses an object identity that matches neither the current identity nor
    an earlier release authority's cleanup derivation for the same activation. It also refuses a
    foreign identity on a non-release authority.
-5. Two controlled faults turn the focused tests red. Restoring the remote inventory's request
-   comparison fails the remote adopted-retry test. Passing the request's own context from the
-   service's publication fails the service test.
-6. Chain proof: the database test rebuilds the resolver's binding (`orphan._Selection.binding()`)
-   from the stored row and asserts that it equals the published observation's binding. The remote
-   test disposes of that binding through `delete_recovery_object`. The two share one value
-   contract. There is no harness that combines the service, the remote adapter and PostgreSQL
-   for quarantine.
+5. Service-level chain test: an `ExternalBootAuthorityService` drives a release CLEANUP whose
+   inventory and finalize are the real remote adapter's. The receipt is recorded through the
+   remote `commit_cleanup` under the service's own context. The test is parametrized as
+   abort, then abort; and shutdown, then abort. The retry's abort publishes one observation that
+   names the first cleanup. A binding rebuilt from that observation's published fields through
+   `orphan._Selection.binding()` is disposed of by the remote `delete_recovery_object`.
+6. Controlled faults turn tests red. Restoring the remote inventory's request comparison fails
+   the chain test and the remote adapter test. Passing the request's own context from the
+   service's publication fails the chain test.
+7. The database test rebuilds `orphan._Selection.binding()` from the stored row and asserts that
+   it equals the published observation's binding. The resolver's own SQL selection is unchanged
+   and is covered by `tests/jobs/handlers/external_boot/test_orphan_resolution.py`.
 
 ## Validation
 
-- `focused-test`: the service passes the oldest adopted context to the inventory on a retry. The
-  test is parametrized over the first interruption: abort, then abort; and shutdown, then abort.
-  `tests/providers/external_boot_authority/test_service.py`. Red under the service fault
-  (request-derived context).
+- `focused-test`: the service-level chain test (Success 5).
+  `tests/providers/remote_libvirt/test_external_boot_authority.py`. Red under both faults.
 - `focused-test`: the remote inventory accepts the adopted context on a retry request, refuses a
   differing one, and its observation is disposed of by `delete_recovery_object`.
   `tests/providers/remote_libvirt/test_external_boot_authority.py`. Red under the remote fault.

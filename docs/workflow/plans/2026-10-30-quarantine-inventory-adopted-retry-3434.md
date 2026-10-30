@@ -41,8 +41,8 @@ lines across three Python modules, a roughly 130-line migration copied from 0144
 | `src/kdive/providers/local_libvirt/external_boot_authority.py` | Signature only. | 1 (protocol) |
 | `src/kdive/providers/external_boot_authority/repository.py` | Per-object `operation_identity` in the payload. Release-only relaxation of the Python identity check. | 2, 3 |
 | `src/kdive/db/schema/0186_quarantine_publication_adopted_identity.sql` | Replace the publish function. | 2, 3 |
-| `tests/providers/external_boot_authority/test_service.py` | Fake inventory signature, plus a twice-aborted retry test. | 4 |
-| `tests/providers/remote_libvirt/test_external_boot_authority.py` | Inventory call sites take `context`, plus an adopted-retry test. | 1, 4 |
+| `tests/providers/external_boot_authority/test_service.py` | Fake inventory signature. | protocol |
+| `tests/providers/remote_libvirt/test_external_boot_authority.py` | Inventory call sites take `context`, an adopted-retry adapter test, and the service-level chain test. | 1, 4 |
 | `tests/providers/external_boot_authority/test_quarantine_publication.py` | Adopted identity admitted, confirmed and stored; foreign identity refused. | 2, 3 |
 | `tests/jobs/handlers/external_boot/test_orphan_resolution.py` | Inventory call site takes `context`. | protocol |
 | `tests/db/test_migrate.py`, `tests/db/test_migration_0115_capture_reap_state.py`, `tests/db/test_migration_0102_build_gc_cursors.py`, `tests/db/test_migration_0091_system_object_sweep_cursors.py` | 0186 window row, K+1, and the applied-version lists. | migration |
@@ -51,13 +51,14 @@ lines across three Python modules, a roughly 130-line migration copied from 0144
 
 **Verification**
 
-- Contract: the service passes the oldest adopted `mutation-started` context to the inventory.
-  Mode: focused-test. A new `test_adopted_release_retry_publishes_the_receipt_it_ran_with` in
-  `test_service.py`, parametrized over the first interruption (`abort`, `shutdown`; the second
-  is `ProofBarrierShutdown`, which publishes nothing). Red under the controlled fault: the
-  service passes `AuthorityCommitContextV1.for_record` of the request's own `mutation-started`
-  record. Green:
-  `uv run pytest tests/providers/external_boot_authority/test_service.py -k "adopted_release" -q`.
+- Contract: a service-level chain over the real remote adapter publishes the first cleanup's
+  receipt on a retried abort, and the resolver's rebuilt binding disposes of it. Mode:
+  focused-test. A new `test_service_publishes_the_adopted_receipt_and_the_resolver_disposes_it`
+  in `tests/providers/remote_libvirt/test_external_boot_authority.py`, parametrized
+  `first_interruption` in (`"abort"`, `"shutdown"`). Red under either controlled fault: the
+  strict request comparison restored in the remote inventory, or the service passing
+  `AuthorityCommitContextV1.for_record` of the request's own `mutation-started` record. Green:
+  `uv run pytest tests/providers/remote_libvirt/test_external_boot_authority.py -k "adopted_receipt" -q`.
 - Contract: the remote inventory accepts the receipt's proof context on a retry request and
   refuses a differing one, and the observation's binding is disposed of. Mode: focused-test. A new
   `test_remote_cleanup_inventory_follows_the_adopted_proof_on_a_retry` in
@@ -134,13 +135,35 @@ lines across three Python modules, a roughly 130-line migration copied from 0144
    operation_identity=cleanup_identity, attempt_id=attempt_id, journal_sequence=8,
    journal_digest=mutation_digest)` from the helper's own values and pass it. Add the two
    focused tests:
-   - Service: reuse the setup of `test_adopted_release_cleanup_finalizes_against_the_proof_that_ran`
-     with two interrupted generations. The first is parametrized as `ProofBarrierAbort` or
-     `ProofBarrierShutdown`, and the second is always `ProofBarrierAbort`. A recording adapter
-     stores each inventory `context`. Assert that every recorded context equals
-     `AuthorityCommitContextV1.for_record(started)` of the first cleanup. Assert that
-     `repository.published_cleanup_quarantines` holds one entry per abort (two for abort/abort,
-     one for shutdown/abort), all with the same receipt.
+   - Service chain (remote test module). Build `adapter, operations, record, point, _ =
+     _native_adapter(tmp_path, restored=True)` and set `operations.state =
+     replace(operations.state, definition="source", active=False,
+     recovery_objects_absent=True)`, as `_cleaned_release` does. Build the service root from
+     `tests.providers.external_boot_authority.service_support._takeover()`. Use
+     `model_copy(update=...)` to give it `purpose="release"`, `operation=RELEASE`, the record's
+     `system_id`, `activation_id`, `run_id` and `plan_identity`, `provider_kind="remote-libvirt"`
+     and `authority_instance="remote-a"`. Wire `ExternalBootAuthorityService(repository=
+     _Repository(peer, root), journal_factory=..., adapter=chain, proof_checkpoint=fault)`.
+     `chain` subclasses `service_support._Adapter`:
+     - `observe` returns category `absent`;
+     - `commit(request, context)`, for CLEANUP, calls `adapter.commit_cleanup(native, context,
+       evidence)`. `native` is `_native_request(record, point, purpose="release",
+       operation=CLEANUP, named=True)` with `operation_identity` and `attempt_id` taken from
+       `context`, and `evidence` is built as `_cleaned_release` builds it. It returns the
+       `absent` observation;
+     - `finalize` and `cleanup_quarantine_inventory` delegate to `adapter`.
+
+     `fault` is a checkpoint that raises the queued exception at `before-finalize`. Generation 1
+     raises `ProofBarrierAbort` or `ProofBarrierShutdown` (the parameter). Generation 2, a
+     successor acknowledged the way
+     `test_adopted_release_cleanup_finalizes_against_the_proof_that_ran` does it, raises
+     `ProofBarrierAbort`. Assert the last entry of `repository.published_cleanup_quarantines`
+     is one observation whose `binding.operation_identity` and `attempt_id` equal generation 1's
+     commit context. Build `orphan._Selection` from that observation's binding fields and its
+     `observed_digest` (`disposition="delete"`, `authority_instance="remote-a"`, a future
+     deadline) and require `.binding() == observation.binding`. Then
+     `adapter.delete_recovery_object(selection.binding(), OpaqueProviderRef(ref="remote-a"),
+     selection.observed_digest)` returns `present=False`.
    - Remote: `_cleaned_release` gives `request` and `context`. Build `retry =
      request.model_copy(update={"generation": request.generation + 1, "attempt_id": uuid4(),
      "operation_identity": "sha256:" + "9" * 64})`. Then
