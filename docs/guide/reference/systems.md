@@ -361,6 +361,12 @@ without renewing it. Read `data.external_boot_conflict.composite_state` from
 `systems.get` for a fresh composite identity, then submit a
 new `systems.resolve_external_boot_conflict` request with a new idempotency key, or use
 `systems.teardown` if recovery is unavailable. The same key replays the original job.
+`systems.get` shows `data.external_boot_conflict` only while the activation is in
+`recovery_conflict`, so resubmit only while it is present. A job that fails after it has
+begun the recovery usually ends the activation in `recovery_failed`, where only
+`systems.teardown` applies; a `conflict` failure instead returns it to
+`recovery_conflict`. If the block is absent, a resubmission is refused and its error names
+the state in `details.activation_state`.
 
 Requires admin on the System's project. Only an activation in `recovery_conflict` is
 admissible. `runs.get` reports the owning Run's current state; `systems.teardown` remains
