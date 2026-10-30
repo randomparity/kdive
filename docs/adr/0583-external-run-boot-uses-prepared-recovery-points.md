@@ -876,9 +876,11 @@ LVM volume `/dev/<vg>/<lv>`, never `/dev/mapper/<vg>-<lv>`, and neither name may
 Stage inspection attaches the one image as `/dev/sda`, so the disk form is now exactly `sda` or
 `sda<N>`; any other first segment followed by a second one is read as `<vg>/<lv>`, with both names
 limited to LVM's character set (letters, digits and `+_.-`, no leading `-`). That keeps a volume
-group such as `vdata` or `sdvg` from being misread as a disk. The first segment may not be an md
-array (`md<N>`), which is a single segment, or `mapper`, whose names are not LVM volumes; those
-forms, and every other device form, still fail inspection with `unsupported_btrfs_root`. A volume
-group named exactly `sda` or `sda<N>` remains indistinguishable from the disk and is read as the
-disk; this is an accepted limitation. The subvolume rule, the root spec contract and the
-fail-closed tradeoff are unchanged.
+group such as `vdata` or `sdvg` from being misread as a disk. libguestfs names an md array
+`/dev/md<N>` or `/dev/md/<name>`; neither, nor a `/dev/mapper` name, may be read as `<vg>/<lv>`,
+so those forms fail inspection with `unsupported_btrfs_root`, as does any device form with too few
+segments. Two names stay indistinguishable and are accepted limitations: a volume group named
+exactly `sda` or `sda<N>` is read as the disk, and a one-segment device other than `sda` followed
+by a nested subvolume would be read as `<vg>/<lv>`; the single attached disk keeps the latter out
+of inspector output. The subvolume rule, the root spec contract and the fail-closed tradeoff are
+unchanged.

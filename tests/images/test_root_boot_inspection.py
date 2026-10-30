@@ -234,6 +234,7 @@ def test_a_non_btrfs_root_has_no_rootflags() -> None:
         "btrfsvol:/dev/vgsys/-lv/root",
         "btrfsvol:/dev/md127/os/root",
         "btrfsvol:/dev/md127p1/os/root",
+        "btrfsvol:/dev/md/md0/os/root",
         "btrfsvol:/dev/mapper/luks-0/os/root",
         "btrfsvol:/dev/nvme0n1p3/root",
         "btrfsvol:/dev/vda3/root",
