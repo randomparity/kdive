@@ -377,6 +377,51 @@ async def test_recovery_refusal_log_names_its_fixed_reason(
 
 
 @pytest.mark.anyio
+async def test_remote_reap_refusal_log_names_its_fixed_reason(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#3436: a remote adapter's own cleanup, finalize or reap refusal is logged with its text."""
+    service, _repository, adapter, peer, request = await _ready(tmp_path)
+    adapter.failure = ProviderRecoveryRefusal(
+        "remote module reaped marker conflicts with present attempt volumes"
+    )
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(AuthorityServiceError, match="provider_conflict"),
+    ):
+        await service.execute_teardown(peer, request)
+
+    assert _boundary_messages(caplog) == [
+        "authority provider boundary failed: ProviderRecoveryRefusal: "
+        "remote module reaped marker conflicts with present attempt volumes"
+    ]
+    await service.close()
+
+
+@pytest.mark.anyio
+async def test_foreign_failure_with_a_credentialed_url_logs_only_its_type(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#3436: foreign exception text stays out of the log even when it names a credential."""
+    service, _repository, adapter, peer, request = await _ready(tmp_path)
+    adapter.failure = ValueError("cannot reach qemu+ssh://operator:hunter2@lab-host/system")
+
+    with (
+        caplog.at_level(logging.DEBUG),
+        pytest.raises(AuthorityServiceError, match="provider_conflict"),
+    ):
+        await service.execute_teardown(peer, request)
+
+    assert _boundary_messages(caplog) == ["authority provider boundary failed: ValueError"]
+    assert all(
+        "hunter2" not in record.getMessage() and "qemu+ssh" not in record.getMessage()
+        for record in caplog.records
+    )
+    await service.close()
+
+
+@pytest.mark.anyio
 async def test_post_commit_reobservation_under_a_successor_record_is_superseded(
     tmp_path: Path,
 ) -> None:

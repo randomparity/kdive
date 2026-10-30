@@ -24,6 +24,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
 )
+from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
 from kdive.providers.ports.external_boot import ExternalBootArtifactStager, OpaqueProviderRef
 from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
@@ -127,6 +128,15 @@ class InstalledRemoteModuleAppliance:
     kernel: Path
     initrd: Path
     manifest_digest: str
+
+
+def _finished_restore(result: RemoteModuleResultV1, restore: RemoteModuleOperationV1) -> bool:
+    """Whether ``result`` is what ``_restore`` accepts as this attempt's successful restore."""
+    try:
+        result.validate_for(restore)
+    except ValueError:
+        return False
+    return result.status == "success" and result.phase == "restored"
 
 
 def _read_regular(path: Path, limit: int) -> bytes:
@@ -660,7 +670,7 @@ class ConcreteRemoteModuleAuthorityHost:
     ) -> RemoteModuleOperationV1:
         installed.validate_for(capture)
         if installed.phase != "installed" or installed.capture_state is None:
-            raise ValueError("remote module installed baseline is incomplete")
+            raise ProviderRecoveryRefusal("remote module installed baseline is incomplete")
         return RemoteModuleOperationV1(
             operation="restore",
             system_id=capture.system_id,
@@ -693,14 +703,16 @@ class ConcreteRemoteModuleAuthorityHost:
             or recovery.run_id != str(authority.run_id)
             or recovery.plan_identity != authority.plan_identity
         ):
-            raise ValueError("remote module lifecycle authority differs from preparation")
+            raise ProviderRecoveryRefusal(
+                "remote module lifecycle authority differs from preparation"
+            )
         capture = terminal.request.operation
         installed = terminal.response.result
         if (
             identity_for(capture) != recovery.operation_identity
             or identity_for(installed) != recovery.result_identity
         ):
-            raise ValueError("remote module lifecycle baseline identity differs")
+            raise ProviderRecoveryRefusal("remote module lifecycle baseline identity differs")
         return capture, self._restore_operation(capture, installed), installed, recovery
 
     def _restore(
@@ -744,7 +756,7 @@ class ConcreteRemoteModuleAuthorityHost:
             raise RuntimeError("remote module restore did not produce durable terminal evidence")
         result = outcome.result
         result.validate_for(restore)
-        if result.status != "success" or result.phase != "restored":
+        if not _finished_restore(result, restore):
             raise ValueError("remote module restore did not reach restored success")
         teardown = teardown_remote_module_appliance(
             self._configuration.appliance.appliance, appliance_request
@@ -768,11 +780,13 @@ class ConcreteRemoteModuleAuthorityHost:
     ) -> RemoteModuleLifecycleResponseV1:
         capture, restore, installed, recovery = self._lifecycle_baseline(request, terminal)
         if restored is None and request.authority.operation is not AuthorityOperation.TEARDOWN:
-            raise ValueError("installed-only module reap requires teardown authority")
+            raise ProviderRecoveryRefusal("installed-only module reap requires teardown authority")
         if restored is not None and (
             restored.operation != restore or restored.recovery != recovery
         ):
-            raise ValueError("remote module restored evidence differs from preparation")
+            raise ProviderRecoveryRefusal(
+                "remote module restored evidence differs from preparation"
+            )
         volumes = recovery_attempt_volumes(
             restore, recovery.pool.ref, recovery.source_capacity_bytes
         )
@@ -782,7 +796,9 @@ class ConcreteRemoteModuleAuthorityHost:
             or recovery.root_volume.ref != restore.root_volume.key
             or recovery.pool.ref != self._configuration.volumes.pool_name
         ):
-            raise ValueError("remote module recovery geometry differs from fixed host binding")
+            raise ProviderRecoveryRefusal(
+                "remote module recovery geometry differs from fixed host binding"
+            )
         operation = restore if restored is not None else capture
         result = restored.result if restored is not None else installed
         state = self._reap_state(recovery)
@@ -807,8 +823,19 @@ class ConcreteRemoteModuleAuthorityHost:
             )
         if state == "absent":
             raw = self._configuration.appliance.read_scratch_result(volumes.scratch, deadline)
-            if raw is None or RemoteModuleResultV1.from_wire_bytes(raw) != result:
-                raise ValueError("remote module restored result differs before reap")
+            scratch = None if raw is None else RemoteModuleResultV1.from_wire_bytes(raw)
+            if scratch != result:
+                # A restore whose process died before publishing its evidence left only the
+                # scratch volume's result; accept it when it is this attempt's finished restore.
+                if (
+                    restored is not None
+                    or scratch is None
+                    or not _finished_restore(scratch, restore)
+                ):
+                    raise ProviderRecoveryRefusal(
+                        "remote module restored result differs before reap"
+                    )
+                operation, result = restore, scratch
         # A release CLEANUP follows a RECOVER that restored the System's power, so the System may
         # be running. The reap deletes only attempt volumes it has proven attached to no domain,
         # which does not need the System off; a teardown still requires it.
@@ -875,7 +902,7 @@ class ConcreteRemoteModuleAuthorityHost:
         reaping = self._marker_present(recovery, "reaping")
         reaped = self._marker_present(recovery, "reaped")
         if reaped and not reaping:
-            raise ValueError("remote module reap markers are out of order")
+            raise ProviderRecoveryRefusal("remote module reap markers are out of order")
         if reaped:
             return "reaped"
         return "reaping" if reaping else "absent"
@@ -910,7 +937,9 @@ class ConcreteRemoteModuleAuthorityHost:
 
     def _require_attempt_volumes_absent(self, volumes: PreparedModuleVolumes) -> None:
         if self._present_attempt_volumes(volumes):
-            raise ValueError("remote module reaped marker conflicts with present attempt volumes")
+            raise ProviderRecoveryRefusal(
+                "remote module reaped marker conflicts with present attempt volumes"
+            )
 
     async def execute_lifecycle(
         self,

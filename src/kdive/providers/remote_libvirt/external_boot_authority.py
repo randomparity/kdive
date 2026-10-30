@@ -36,6 +36,7 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
+    ProviderRecoveryRefusal,
     SystemTeardownSupersededError,
 )
 from kdive.providers.ports.external_boot import (
@@ -809,7 +810,7 @@ def _parse_finalized_marker(
         try:
             return RemoteCleanupQuarantineV1.from_canonical_json(data), None
         except ValueError:
-            raise ValueError("remote cleanup finalized marker is malformed") from None
+            raise ProviderRecoveryRefusal("remote cleanup finalized marker is malformed") from None
     return marker.receipt, marker.teardown
 
 
@@ -1240,14 +1241,8 @@ class RemoteModuleVolumePreparationStore:
         response: RemoteModuleLifecycleResponseV1 | None,
     ) -> None:
         self.reopen_lifecycle(request)
-        completion = RemoteModuleLifecycleCompletionV1(
-            state="terminal" if response is not None else "failed-after-mutation",
-            response=response,
-        )
-        self._publish(
-            f"{self._lifecycle_key(request)}.lifecycle-completion",
-            completion.to_canonical_json(),
-        )
+        # The restored record goes first: a crash before the completion leaves evidence a restore
+        # retry publishes the completion from, never a completion that hides absent evidence.
         if response is not None and response.action == "restore":
             authority = request.authority
             restored_key = self._terminal_key(
@@ -1257,6 +1252,14 @@ class RemoteModuleVolumePreparationStore:
                 authority.plan_identity,
             )
             self._publish(f"{restored_key}.restored", response.to_canonical_json())
+        completion = RemoteModuleLifecycleCompletionV1(
+            state="terminal" if response is not None else "failed-after-mutation",
+            response=response,
+        )
+        self._publish(
+            f"{self._lifecycle_key(request)}.lifecycle-completion",
+            completion.to_canonical_json(),
+        )
 
     def reopen_lifecycle_completion(
         self, request: RemoteModuleLifecycleRequestV1
@@ -1395,13 +1398,16 @@ class RemoteModuleVolumePreparationStore:
         self, binding: ExternalBootActivationBinding, plan_identity: str
     ) -> RemoteModuleVolumePreparationRequestV1 | None:
         """Find one exact durable PREPARE request without trusting a caller-selected path."""
-        names = os.listdir(self._root_fd)
+        names = [
+            name
+            for name in os.listdir(self._root_fd)
+            if len(name) == 64 + len(".request") and name.endswith(".request")
+        ]
+        # Only .request names count: finalized markers stay for the life of the store.
         if len(names) > 4096:
             raise ValueError("remote preparation store exceeds teardown scan bound")
         matches: list[RemoteModuleVolumePreparationRequestV1] = []
         for name in names:
-            if len(name) != 64 + len(".request") or not name.endswith(".request"):
-                continue
             digest = name.removesuffix(".request")
             if any(character not in "0123456789abcdef" for character in digest):
                 raise ValueError("remote preparation request name is malformed")
@@ -1671,7 +1677,7 @@ class RemoteModuleVolumePreparationStore:
         if existing is None:
             self._publish(name, receipt.to_canonical_json())
         elif existing.operation_identity != receipt.operation_identity:
-            raise ValueError("remote cleanup quarantine belongs to another operation")
+            raise ProviderRecoveryRefusal("remote cleanup quarantine belongs to another operation")
         elif existing != receipt:
             self._replace(name, existing.to_canonical_json(), receipt.to_canonical_json())
 
@@ -1681,7 +1687,9 @@ class RemoteModuleVolumePreparationStore:
             return None
         receipt = RemoteCleanupQuarantineV1.from_canonical_json(data)
         if receipt.recovery_ref != reference:
-            raise ValueError("remote cleanup quarantine receipt names another recovery record")
+            raise ProviderRecoveryRefusal(
+                "remote cleanup quarantine receipt names another recovery record"
+            )
         return receipt
 
     def read_cleanup_quarantine(
@@ -1700,7 +1708,9 @@ class RemoteModuleVolumePreparationStore:
         if receipt is not None and (
             receipt.binding != binding or receipt.plan_identity != plan_identity
         ):
-            raise ValueError("remote cleanup quarantine receipt differs from its owner")
+            raise ProviderRecoveryRefusal(
+                "remote cleanup quarantine receipt differs from its owner"
+            )
         return receipt
 
     def cleanup_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> bool:
@@ -1708,6 +1718,14 @@ class RemoteModuleVolumePreparationStore:
         return self._read(self._finalized_name(binding, plan_identity)) is not None
 
     def refuse_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> None:
+        """Refuse a finalized activation; the caller's later write is not atomic with this check.
+
+        Nothing locks the store between the check and the write, and the module executor runs
+        up to four calls at once. The ordering rests on the authority service running one
+        mutation at a time per System lane (ADR-0584), so a finalize never overlaps a stage or
+        publish for the same activation. A second authority instance writing this store
+        directory would break that assumption.
+        """
         if self.cleanup_finalized(binding, plan_identity):
             raise RemoteCleanupFinalizedError(
                 "remote activation records were removed when its cleanup was finalized"
@@ -1724,6 +1742,8 @@ class RemoteModuleVolumePreparationStore:
 
         A file that does not parse cannot be proven foreign. The deleting scan leaves it in
         place; a ``strict`` scan, which captures what teardown must still prove, refuses it.
+        The scan is unbounded (ADR-0787, #3419): store files accumulate until something
+        collects a torn-down activation's files.
         """
         return [
             name
@@ -1732,8 +1752,21 @@ class RemoteModuleVolumePreparationStore:
             and name.endswith(suffix)
             and all(character in "0123456789abcdef" for character in name.removesuffix(suffix))
             and (data := self._read(name)) is not None
-            and (owns(data) if strict else self._owns(name, owns, data))
+            and (self._strictly_owns(name, owns, data) if strict else self._owns(name, owns, data))
         ]
+
+    @staticmethod
+    def _strictly_owns(name: str, owns: Callable[[bytes], bool], data: bytes) -> bool:
+        try:
+            return owns(data)
+        except ValueError as error:
+            raise ValueError(
+                f"remote finalize cannot parse {name}, so it cannot prove which activation owns "
+                "it, and it may be any activation's on this host; keep a copy of the file, find "
+                "the System and run it names, or every System on this host if the copy names "
+                "none, confirm that no module volume of those Systems remains unaccounted for in "
+                "the storage pool, then remove it and retry finalize"
+            ) from error
 
     @staticmethod
     def _owns(name: str, owns: Callable[[bytes], bool], data: bytes) -> bool:
@@ -1810,7 +1843,9 @@ class RemoteModuleVolumePreparationStore:
                 data
             ).materialization.ownership
             if ownership.system_id != binding.system_id or ownership.run_id != binding.run_id:
-                raise ValueError("remote materialization differs from the finalized activation")
+                raise ProviderRecoveryRefusal(
+                    "remote materialization differs from the finalized activation"
+                )
         return [f"{identity}.materialization", index_name]
 
     def finalized_teardown_refs(
@@ -1833,7 +1868,13 @@ class RemoteModuleVolumePreparationStore:
         )
         if self._read(f"{key}.terminal") is not None:
             return None
-        raise ValueError("remote cleanup finalized marker has no teardown refs; teardown refused")
+        raise ValueError(
+            "remote cleanup finalized marker has no teardown refs and the activation's terminal "
+            "record is gone, so teardown is refused; confirm no module volume of System "
+            f"{binding.system_id} run {binding.run_id} (plan {plan_identity}) remains in the "
+            "storage pool, then remove "
+            f"{self._finalized_name(binding, plan_identity)} and retry teardown"
+        )
 
     def _teardown_refs(
         self, binding: ExternalBootActivationBinding, plan_identity: str
@@ -1846,19 +1887,21 @@ class RemoteModuleVolumePreparationStore:
             )
         except FileNotFoundError:
             volumes = ()
-        nonces: list[str] = []
+        operations: list[RemoteModuleOperationV1] = []
 
         def collect(data: bytes) -> bool:
             request = _PersistedRemoteModulePreparationV1.from_canonical_json(data).request
             if owned := _authority_owned(request.authority, binding, plan_identity):
-                nonces.append(request.operation.operation_nonce)
+                operations.append(request.operation)
             return owned
 
         self._scan_owned(".request", collect, strict=True)
-        if len(set(nonces)) > 1:
-            raise ValueError(
-                "remote finalize found preparation requests with different nonces for one "
-                "activation; resolve the duplicate .request records before finalizing"
+        # The same comparison teardown_preparation applies, so finalize captures no nonce that
+        # teardown would have refused.
+        if any(operation != operations[0] for operation in operations[1:]):
+            raise ProviderRecoveryRefusal(
+                "remote finalize found conflicting preparation requests for one activation; "
+                "resolve the duplicate .request records before finalizing"
             )
         boot: list[RemoteFinalizedBootArtifactV1] = []
         if (record := self.teardown_materialization(binding, plan_identity)) is not None:
@@ -1881,7 +1924,7 @@ class RemoteModuleVolumePreparationStore:
                 )
         return RemoteFinalizedTeardownRefsV1(
             module_volumes=volumes,
-            operation_nonce=nonces[0] if nonces else None,
+            operation_nonce=operations[0].operation_nonce if operations else None,
             boot_artifacts=tuple(boot),
         )
 
@@ -1893,7 +1936,9 @@ class RemoteModuleVolumePreparationStore:
         if existing is not None:
             held, refs = _parse_finalized_marker(existing)
             if held != cleaned:
-                raise ValueError("remote cleanup finalized marker conflicts with durable bytes")
+                raise ProviderRecoveryRefusal(
+                    "remote cleanup finalized marker conflicts with durable bytes"
+                )
             if refs is not None:
                 return
         marker = RemoteCleanupFinalizedMarkerV1(
@@ -1932,27 +1977,31 @@ class RemoteModuleVolumePreparationStore:
         files go before the recovery record, whose identity and plan name them. The receipt is
         found by its record's identity, or through the marker once the index is gone, so an
         interrupted finalization is repeatable until nothing but the marker remains. The marker
-        keeps a finalized cleanup distinguishable from a record that never existed.
+        keeps a finalized cleanup distinguishable from a record that never existed. An index is
+        removed only while it names this record, whether or not the record is still present.
+        The ordering against a concurrent stage rests on the System lane (``refuse_finalized``).
         """
         identity = _recovery_identity(receipt.recovery_ref)
         record = self._recovery_record(identity)
         if record is not None and (
             record.binding != receipt.binding or record.plan_identity != receipt.plan_identity
         ):
-            raise ValueError("remote recovery record differs from the quarantine receipt")
+            raise ProviderRecoveryRefusal(
+                "remote recovery record differs from the quarantine receipt"
+            )
         self._write_finalized_marker(receipt)
         names = self._activation_files(receipt.binding, receipt.plan_identity)
+        owned = identity.encode("ascii")
         if record is not None:
             names += [
                 name
                 for reference in record.recovery_objects
-                if self._read(name := _object_index_name(reference)) == identity.encode("ascii")
+                if self._read(name := _object_index_name(reference)) == owned
             ]
-            names += [
-                f"{self._recovery_key(record.binding, record.plan_identity)}.recovery-index",
-                f"{identity}.recovery",
-            ]
-        names.append(self._quarantine_name(receipt.recovery_ref))
+        index = f"{self._recovery_key(receipt.binding, receipt.plan_identity)}.recovery-index"
+        if self._read(index) == owned:
+            names.append(index)
+        names += [f"{identity}.recovery", self._quarantine_name(receipt.recovery_ref)]
         for name in names:
             with suppress(FileNotFoundError):
                 os.unlink(name, dir_fd=self._root_fd)
@@ -2914,7 +2963,7 @@ class RemoteExternalBootAuthorityAdapter:
             point.source_state.definition != request.expected_source_identity
             or point.target_state.definition != request.intended_target_identity
         ):
-            raise ValueError("remote external-boot identities differ from request")
+            raise ProviderRecoveryRefusal("remote external-boot identities differ from request")
         named = request.recovery_objects
         if any(
             item.reference != point.recovery_ref.ref
@@ -2922,7 +2971,9 @@ class RemoteExternalBootAuthorityAdapter:
             or str(item.activation_id) != point.binding.activation_id
             for item in named
         ) or (request.operation is AuthorityOperation.CLEANUP and not named):
-            raise ValueError("remote external-boot recovery objects are not this activation's")
+            raise ProviderRecoveryRefusal(
+                "remote external-boot recovery objects are not this activation's"
+            )
         return point
 
     def _finalized_cleanup(self, request: AuthorityMutationRequestV1) -> bool:
@@ -3198,7 +3249,7 @@ class RemoteExternalBootAuthorityAdapter:
             or context.operation_identity != request.operation_identity
             or context.attempt_id != request.attempt_id
         ):
-            raise ValueError("remote cleanup evidence differs from exact request")
+            raise ProviderRecoveryRefusal("remote cleanup evidence differs from exact request")
 
         def reopen() -> tuple[RecoveryPoint, RemoteExternalBootRecoveryRecord]:
             point = self._matched_point(request)
@@ -3210,13 +3261,15 @@ class RemoteExternalBootAuthorityAdapter:
             reference != record.module_recovery
             or evidence.operation_nonce != reference.operation_nonce
         ):
-            raise ValueError("remote cleanup evidence changed before provider deletion")
+            raise ProviderRecoveryRefusal(
+                "remote cleanup evidence changed before provider deletion"
+            )
         authority = authority_reference(request)
         existing = await self._executor.run(
             lambda: self._coordinator.cleanup_quarantine(point.binding, point.plan_identity)
         )
         if existing is not None and existing.operation_identity != context.operation_identity:
-            raise ValueError("remote cleanup quarantine belongs to another operation")
+            raise ProviderRecoveryRefusal("remote cleanup quarantine belongs to another operation")
         acknowledged = await self._acknowledged_definition(request, point)
         await self._executor.run(lambda: self._coordinator.recover(point, authority, acknowledged))
         await self._executor.run(lambda: self._coordinator.cleanup(point))
@@ -3234,9 +3287,13 @@ class RemoteExternalBootAuthorityAdapter:
         return await self.observe(request)
 
     async def cleanup_quarantine_inventory(
-        self, request: AuthorityMutationRequestV1
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> tuple[RecoveryObjectObservation, ...]:
-        """Reopen only the exact standing private cleanup receipt."""
+        """Reopen only the exact standing private cleanup receipt.
+
+        The receipt is compared with the proof ``context``, not the request: a retried release
+        that adopted an earlier generation's cleanup still names that cleanup (ADR-0787, #3434).
+        """
         if request.operation is not AuthorityOperation.CLEANUP:
             return ()
         binding = _activation_binding(request)
@@ -3246,8 +3303,8 @@ class RemoteExternalBootAuthorityAdapter:
         if receipt is None or receipt.managed:
             return ()
         if (
-            receipt.operation_identity != request.operation_identity
-            or receipt.attempt_id != request.attempt_id
+            receipt.operation_identity != context.operation_identity
+            or receipt.attempt_id != context.attempt_id
         ):
             # Deferred: the service module imports this one.
             from kdive.providers.external_boot_authority.service import AuthorityServiceError
@@ -3274,14 +3331,18 @@ class RemoteExternalBootAuthorityAdapter:
             or receipt.journal_sequence != context.journal_sequence
             or receipt.journal_digest != context.journal_digest
         ):
-            raise ValueError("remote cleanup proof differs from the quarantine receipt")
+            raise ProviderRecoveryRefusal(
+                "remote cleanup proof differs from the quarantine receipt"
+            )
         await self._executor.run(lambda: self._coordinator.finalize_cleanup_quarantine(receipt))
 
     async def _quarantine_receipt(
         self, binding: RecoveryObjectBinding
     ) -> RemoteCleanupQuarantineV1 | None:
         if binding.kind != "recovery-record":
-            raise ValueError("remote recovery-object port serves only the recovery record")
+            raise ProviderRecoveryRefusal(
+                "remote recovery-object port serves only the recovery record"
+            )
         return await self._executor.run(
             lambda: self._coordinator.cleanup_quarantine_for_object(binding.reference)
         )
@@ -3299,7 +3360,9 @@ class RemoteExternalBootAuthorityAdapter:
             )
         observation = _quarantine_observation(receipt)
         if observation.binding != binding:
-            raise ValueError("remote cleanup quarantine ownership conflicts with request")
+            raise ProviderRecoveryRefusal(
+                "remote cleanup quarantine ownership conflicts with request"
+            )
         return observation
 
     async def delete_recovery_object(
@@ -3307,11 +3370,15 @@ class RemoteExternalBootAuthorityAdapter:
     ) -> RecoveryObjectObservation:
         observed = await self.observe_recovery_object(binding, authority)
         if observed.observed_digest != digest or observed.managed:
-            raise ValueError("remote cleanup quarantine observation changed before delete")
+            raise ProviderRecoveryRefusal(
+                "remote cleanup quarantine observation changed before delete"
+            )
         receipt = await self._quarantine_receipt(binding)
         if receipt is not None:
             if _quarantine_observation(receipt).observed_digest != digest or receipt.managed:
-                raise ValueError("remote cleanup quarantine observation changed before delete")
+                raise ProviderRecoveryRefusal(
+                    "remote cleanup quarantine observation changed before delete"
+                )
             await self._executor.run(lambda: self._coordinator.finalize_cleanup_quarantine(receipt))
         return await self.observe_recovery_object(binding, authority)
 
@@ -3325,7 +3392,9 @@ class RemoteExternalBootAuthorityAdapter:
             or receipt is None
             or _quarantine_observation(receipt).observed_digest != digest
         ):
-            raise ValueError("remote cleanup quarantine observation changed before adopt")
+            raise ProviderRecoveryRefusal(
+                "remote cleanup quarantine observation changed before adopt"
+            )
         await self._executor.run(lambda: self._coordinator.adopt_cleanup_quarantine(receipt))
         return await self.observe_recovery_object(binding, authority)
 
