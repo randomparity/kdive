@@ -201,9 +201,9 @@ elif name == 'guestfish':
     trace = tmp_path / "trace"
 
     def invoke(fault=""):
-        code = script
-        if fault == "host-space":
-            code = code.replace("shutil.disk_usage(source.parent).free", "0")
+        free_read = "shutil.disk_usage(source.parent).free"
+        assert free_read in script, "host free-space read moved; update this stub"
+        code = script.replace(free_read, "0" if fault == "host-space" else str(1 << 60))
         result = subprocess.run(
             [sys.executable, "-c", code, str(source), str(destination)],
             env={

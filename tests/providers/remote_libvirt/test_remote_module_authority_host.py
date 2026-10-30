@@ -30,6 +30,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityPreparationMutationRequestV1,
     AuthorityTeardownMutationRequestV1,
 )
+from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
 from kdive.providers.ports.external_boot import ExternalBootActivationBinding
 from kdive.providers.remote_libvirt.authority_client import (
     RemoteModuleAuthorityAdapter,
@@ -989,7 +990,7 @@ async def test_system_teardown_refuses_a_scratch_result_that_is_not_the_stored_e
     else:
         stack.scratch = installed.model_copy(update={"entry_count": 99, "content_bytes": 99})
 
-    with pytest.raises(ValueError, match="differs before reap"):
+    with pytest.raises(ProviderRecoveryRefusal, match="differs before reap"):
         await stack.system_teardown()
 
     assert stack.storage.pool.volumes
@@ -1078,7 +1079,7 @@ async def test_system_teardown_refuses_an_unfinished_restore_in_the_scratch_volu
     await stack.crash_after_host_restore()
     stack.scratch = stack.scratch.model_copy(update=unfinished)
 
-    with pytest.raises(ValueError, match="differs before reap"):
+    with pytest.raises(ProviderRecoveryRefusal, match="differs before reap"):
         await stack.system_teardown()
 
     assert len(_live_attempt_volumes(stack)) == 2
@@ -1240,7 +1241,7 @@ async def test_reap_with_a_volume_present_and_no_markers_still_verifies_the_resu
     await stack.restore()
     stack.scratch = installed
 
-    with pytest.raises(ValueError, match="differs before reap"):
+    with pytest.raises(ProviderRecoveryRefusal, match="differs before reap"):
         await stack.reap("cleanup")
 
     stack.close()
