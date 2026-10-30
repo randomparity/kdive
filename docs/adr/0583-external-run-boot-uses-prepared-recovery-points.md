@@ -866,3 +866,17 @@ validation need no change.
 Root specs are stored with the image at stage time, so an image staged before this change keeps
 its old spec. A btrfs-subvolume image staged earlier must be re-staged to gain the argument; no
 migration rewrites stored specs.
+
+## Amendment (2026-10-30): a btrfs subvolume root on an LVM volume is split
+
+The 2026-10-28 amendment split the device from the subvolume only for `sd*` and `vd*` devices,
+so an image whose btrfs root sits on an LVM logical volume could not be staged even for a disk
+boot (#3422). libguestfs names such a root `btrfsvol:/dev/<vg>/<lv>/<subvolume>`: it spells an
+LVM volume `/dev/<vg>/<lv>`, never `/dev/mapper/<vg>-<lv>`, and neither name may contain `/`.
+Stage inspection now splits that form after the second segment as well, with both names limited
+to LVM's character set (letters, digits and `+_.-`, no leading `-`). The first segment may not be
+an md array (`md<N>`), which is a single segment, or `mapper`, whose names are not LVM volumes;
+those forms, and every other device form, still fail inspection with `unsupported_btrfs_root`.
+The subvolume rule, the root spec contract and the fail-closed tradeoff are unchanged. A volume
+group named like an `sd*`/`vd*` disk keeps the one-segment reading; LVM refuses to create a
+volume group whose name already exists under `/dev`.

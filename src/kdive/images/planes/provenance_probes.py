@@ -216,8 +216,15 @@ def _run_bounded_inspector(
 
 _BTRFS_VOLUME_PREFIX = "btrfsvol:"
 # libguestfs names a subvolume root ``btrfsvol:<device>/<subvolume>``. The appliance attaches an
-# image's disks as sd*, so only that device form is split unambiguously; any other fails closed.
-_BTRFS_VOLUME = re.compile(r"btrfsvol:/dev/(?:sd|vd)[a-z]+[0-9]*/(?P<subvolume>.+)")
+# image's disks as sd*, and names an LVM volume /dev/<vg>/<lv> (never /dev/mapper/<vg>-<lv>);
+# neither name can hold another '/', so only those two device forms split unambiguously. An md
+# array (/dev/md<N>) is one segment and a /dev/mapper name is not an LVM volume, so neither may
+# be read as <vg>/<lv>; those and every other device form fail closed.
+_LVM_NAME = r"[A-Za-z0-9+_.][A-Za-z0-9+_.-]*"
+_BTRFS_VOLUME = re.compile(
+    rf"btrfsvol:/dev/(?:(?:sd|vd)[a-z]+[0-9]*|(?!md[0-9]|mapper/){_LVM_NAME}/{_LVM_NAME})"
+    r"/(?P<subvolume>.+)"
+)
 _SUBVOLUME_SEGMENT = re.compile(r"[A-Za-z0-9._@+-]+")
 _SUBVOLUME_MAX_CHARS = 128
 
