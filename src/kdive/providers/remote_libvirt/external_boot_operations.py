@@ -11,6 +11,7 @@ from uuid import UUID
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
@@ -422,7 +423,9 @@ class ConcreteRemoteExternalBootOperations:
                 recovery.module_recovery.scratch_volume,
             ):
                 if self._lookup_optional(module_pool, reference.ref) is not None:
-                    raise ValueError("remote module volume remains before authorized cleanup")
+                    raise ProviderRecoveryRefusal(
+                        "remote module volume remains before authorized cleanup"
+                    )
             boot = [recovery.materialization.artifacts.kernel]
             if recovery.materialization.artifacts.initrd is not None:
                 boot.append(recovery.materialization.artifacts.initrd)
@@ -442,16 +445,16 @@ class ConcreteRemoteExternalBootOperations:
                     or str(parsed.run_id) != recovery.binding.run_id
                     or parsed.digest != digest
                 ):
-                    raise ValueError("remote cleanup boot artifact identity differs")
+                    raise ProviderRecoveryRefusal("remote cleanup boot artifact identity differs")
                 self._require_deadline(deadline, "cleanup")
                 volume = self._lookup_optional(boot_pool, reference.ref)
                 if volume is None:
                     continue
                 if volume.name() != reference.ref:
-                    raise ValueError("remote cleanup volume name differs")
+                    raise ProviderRecoveryRefusal("remote cleanup volume name differs")
                 volume.delete(0)
                 if self._lookup_optional(boot_pool, reference.ref) is not None:
-                    raise ValueError("remote cleanup volume remained after deletion")
+                    raise ProviderRecoveryRefusal("remote cleanup volume remained after deletion")
 
     @staticmethod
     def _lookup_domain_optional(
