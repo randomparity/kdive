@@ -66,8 +66,8 @@ recovery when it fails.
    - `recovery_failed` evidence records the takeover quiescence digest, not an observation made
      after the failure. This is the existing 0181 and recover-branch semantics.
 4. **Covered elsewhere:** release fail while recovering (0181, ADR-0714 #3396 amendment); the
-   worker SUPERSEDED retry for other job kinds (excluded); the reconciler release lane selecting
-   `recovery_failed` (ADR-0714 #3396 amendment).
+   worker SUPERSEDED retry for other job kinds (excluded); leaving `recovery_failed`, which
+   `systems.teardown` always admits.
 
 ## Success
 

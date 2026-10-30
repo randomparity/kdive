@@ -12,8 +12,8 @@ source changes. Spec:
 Tech stack: PostgreSQL 17 PL/pgSQL; Python 3.14 pytest with the disposable Postgres fixtures in
 `tests/db/conftest.py` (`migrated_url`, `pg_conn`, `authority_role_dsns`).
 
-Expected implementation size: 320–340 changed lines (M) — the 0185 migration (89), one new test
-module (about 226), seven window-list rows and four slice edits.
+Expected implementation size: 350–370 changed lines (M) — the 0185 migration (89), one new test
+module (about 260), seven window-list rows and four slice edits.
 
 ## Global Constraints
 
@@ -50,8 +50,11 @@ later tasks.
   `test_resolve_conflict_non_terminal_failure_while_recovering_requeues`. Red: the commit returns
   `('superseded', None)`.
 - Contract C2. Mode: focused-test. `test_terminal_failure_while_recovering_closes_the_recovery`
-  (four ids). Red: resolve-conflict ids return `superseded`; `recover-last-attempt` leaves the
-  activation `recovering`.
+  (four ids). Red: resolve-conflict ids return `superseded`; `recover-terminal` and
+  `recover-last-attempt` leave the activation `recovering`.
+- Contract C2, repeat rule. Mode: focused-test.
+  `test_repeated_provider_conflict_while_recovering_closes_the_recovery`. Red: the first commit
+  returns `('superseded', None)`.
 - Contract C3. Mode: focused-test. `test_recover_readiness_failure_before_recovery_began_commits`.
   Red: `('superseded', None)`.
 - Contract C5. Mode: focused-test. `test_0185_patch_targets_exist_once`. Red: `StopIteration`
@@ -71,6 +74,7 @@ later tasks.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from uuid import uuid4
 
 import psycopg
@@ -164,12 +168,13 @@ def _fail(
     *,
     terminal: bool,
     category: str = "infrastructure_failure",
+    context: dict[str, str] | None = None,
 ) -> tuple[str, str | None]:
     result = {
         "schema": "external-boot-authority-result-v1",
         "operation": "fail",
         "error_category": category,
-        "failure_context": {"phase": "provider-call"},
+        "failure_context": context or {"phase": "provider-call"},
         "terminal": terminal,
     }
     with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
@@ -292,10 +297,43 @@ def test_recover_readiness_failure_before_recovery_began_commits(
         authority_role_dsns, case, authority, terminal=True, category="readiness_failure"
     ) == ("applied", "failed")
     assert _states(migrated_url, case) == ("active", "active", None, None, "failed", None)
+
+
+def test_repeated_provider_conflict_while_recovering_closes_the_recovery(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """ADR-0714's repeat rule makes the second identical conflict terminal, so it closes too."""
+    conflict = {"phase": "commit", "authority_reason": "provider-conflict"}
+    case = _case(migrated_url, "resolve-conflict", "g", recovering=True)
+    authority = _authority(authority_role_dsns, migrated_url, case)
+    assert _fail(authority_role_dsns, case, authority, terminal=False, context=conflict) == (
+        "applied",
+        "queued",
+    )
+    retry = replace(case, attempt=2)
+    with psycopg.connect(migrated_url) as seed:
+        seed.execute(
+            "UPDATE jobs SET state = 'running', attempt = 2, worker_id = %s, "
+            "lease_expires_at = now() + interval '5 minutes', heartbeat_at = now() "
+            "WHERE id = %s",
+            (case.worker_id, case.job_id),
+        )
+    authority = _authority(authority_role_dsns, migrated_url, retry)
+    assert _fail(authority_role_dsns, retry, authority, terminal=False, context=conflict) == (
+        "applied",
+        "failed",
+    )
+    assert _states(migrated_url, case)[:5] == (
+        "recovery_failed",
+        "recovery_failed",
+        "failed",
+        "recovery_failed",
+        "failed",
+    )
 ```
 
 2. Run `uv run python -m pytest tests/db/test_migration_0185_recover_fail_while_recovering.py -q`.
-   Expect 7 failures: the six behaviour cases as listed above and the patch-target test with
+   Expect 8 failures: the seven behaviour cases as listed above and the patch-target test with
    `StopIteration`. Commit the test (`test(db): ...`).
 3. Create `src/kdive/db/schema/0185_recover_fail_while_recovering.sql`:
 
@@ -391,7 +429,7 @@ END
 $$;
 ```
 
-4. Re-run the step 2 command. Expect `7 passed`. Then run
+4. Re-run the step 2 command. Expect `8 passed`. Then run
    `uv run python -m pytest tests/db/test_release_fail_recovering.py tests/db/test_external_boot_authority_migration.py -q`
    and expect all tests to pass. These suites cover release and the existing recover and
    resolve-conflict behaviour.
@@ -402,7 +440,7 @@ $$;
    0091 75→76, 0102 75→76, 0115 62→63. Run the window command above and expect it to pass.
 6. Run `just lint` and `just type` (expect exit 0), then commit (`fix(external-boot): ...`).
 
-**Acceptance.** All seven new cases pass; the release and existing authority migration suites
+**Acceptance.** All eight new cases pass; the release and existing authority migration suites
 stay green; the four window tests pass.
 
 **Rollback.** Delete the 0185 file and the test module, and revert the window rows. No applied
