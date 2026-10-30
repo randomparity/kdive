@@ -20,10 +20,9 @@ then remove the adopted receipt:
   the store's `finalize_tombstone`, which unlinks the receipt and the tombstone without reading
   the receipt.
 
-Every other path already honors `managed`. That covers cleanup quarantine inventory, the
-object-port observation, and the recovery-object `delete` on both providers. So the database
-says `adopted` while the provider has removed the object. An automatic retry silently undoes an
-audited administrator decision.
+Inventory, the object-port observation, and the recovery-object `delete` already honor
+`managed` on both providers. So the database says `adopted` while the provider has removed the
+object. An automatic retry silently undoes an audited administrator decision.
 
 ## Decision
 
@@ -54,10 +53,10 @@ and the rejected alternative, which is to keep removal and warn on adopt.
    - a platform administrator who earlier adopted the receipt through
      `ops.resolve_recovery_orphan`.
 2. **Invariants and assets at stake.**
-   - An adopted receipt, and the records it proves, stay on disk until an operator acts.
+   - Release finalize does not remove an adopted receipt, or the records still beside it.
    - An unmanaged receipt is still finalized exactly as before, including idempotent repeat and
      post-delete absence.
-   - The `adopted` row status matches provider state.
+   - Release finalize does not make the `adopted` row stale.
 3. **Accepted failure classes.**
    - Adopted residue stays on the provider host indefinitely. Accepted: that is what adoption
      means. The same state already exists when no retry follows an adopt.
@@ -69,7 +68,12 @@ and the rejected alternative, which is to keep removal and warn on adopt.
 4. **Covered elsewhere.**
    - Inventory identity of the receipt: #3434.
    - Resolver adoption semantics beyond this change: out of scope (operator exclusion).
-   - System teardown of adopted residue: ADR-0583 teardown authority, unchanged here.
+   - System teardown of adopted residue (ADR-0583, unchanged here). Local teardown's discard path
+     removes it and remote teardown does not, so the row can go stale at teardown. This is a
+     follow-up candidate.
+   - `record_cleanup_quarantine` on either provider replaces a standing receipt with an
+     unmanaged one. A commit that re-runs after adoption would un-adopt it. The adopted-terminal
+     retry (#3416) skips the commit, so no such path is known. This is a follow-up candidate.
 
 ## Success
 
@@ -86,7 +90,7 @@ and the rejected alternative, which is to keep removal and warn on adopt.
 - Success 2: `focused-test`, in
   `tests/providers/remote_libvirt/test_external_boot_authority.py`, named
   `test_remote_finalize_leaves_an_adopted_receipt_in_place`. Before the fix it fails because
-  the recovery point is gone (`FileNotFoundError`).
+  the observation no longer equals the adopted one (`AssertionError`, receipt removed).
 - Success 3: `focused-test`, in `tests/providers/local_libvirt/test_external_boot.py`, named
   `test_real_adapter_finalization_leaves_an_adopted_receipt_in_place`. Before the fix it fails
   because the tombstone directory no longer exists.

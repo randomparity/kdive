@@ -39,7 +39,7 @@ Expected implementation size: 50–80 changed lines (M) — two early returns of
 - Contract: after an adopt, remote `finalize` changes nothing.
   - Mode: `focused-test`.
   - Test: `test_remote_finalize_leaves_an_adopted_receipt_in_place`.
-  - Red: `FileNotFoundError` from `recovery_point`.
+  - Red: `AssertionError` on the first assertion, because the observation is no longer the adopted one.
   - Green: `uv run python -m pytest tests/providers/remote_libvirt/test_external_boot_authority.py -q -k "finalize"`.
 
 **Interfaces.** This task uses these existing functions:
@@ -76,7 +76,7 @@ async def test_remote_finalize_leaves_an_adopted_receipt_in_place(tmp_path: Path
     adapter.close()
 ```
 
-Step 2. Run the green command and confirm that the new test fails with `FileNotFoundError`.
+Step 2. Run the green command and confirm that the new test fails with `AssertionError` on the `observe_recovery_object(...) == adopted` line.
 
 Step 3. In `finalize`, replace `if receipt is None:` / `return` with this:
 

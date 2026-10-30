@@ -125,8 +125,9 @@ receipt with the tombstone.
   `finalize` returns before its proof comparison. Local `finalize_cleanup_tombstone` reads the
   receipt under its pinned session and returns. An unmanaged or absent receipt finalizes as
   before.
-- The two providers agree. Inventory, observation, recovery-object `delete` and now `finalize` all
-  leave a managed receipt alone, so the `adopted` row keeps describing what is on disk.
+- The two providers agree at `finalize`. Inventory, observation, recovery-object `delete` and now
+  release `finalize` all leave a managed receipt alone, so release does not make the `adopted`
+  row stale.
 - System teardown's discard path (ADR-0583) is unchanged: destruction still owns its cleanup.
 
 Considered & rejected:
@@ -136,5 +137,6 @@ Considered & rejected:
   makes an audited administrator decision depend on whether a retry happens to follow.
 - **Raise a conflict on a managed receipt.** verified: `rg -n '"managed": (False|True)' src/kdive`
   at `37e2db046` finds only the two adopt writes setting `True`, plus the remote marker's
-  `False` copy, which never rewrites the receipt. Nothing un-adopts a receipt, so every later
-  retry of the release job would fail the same way.
+  `False` copy, which never rewrites the receipt. No resolver path un-adopts a receipt, so every
+  later retry would fail the same way, and under ADR-0714 the second identical
+  `provider-conflict` ends the release job.
