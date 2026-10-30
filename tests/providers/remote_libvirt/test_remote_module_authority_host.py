@@ -751,29 +751,39 @@ class _Quiesce:
         self.store.stage(self.request, deadline)
         self.durable = DurableRemoteModuleVolumePreparationHost(self.store, host)
 
-    def prior_power(self) -> str | None:
+    def _binding(self) -> ExternalBootActivationBinding:
         authority = self.request.authority
-        binding = ExternalBootActivationBinding(
+        return ExternalBootActivationBinding(
             system_id=str(authority.system_id),
             run_id=str(authority.run_id),
             activation_id=str(authority.activation_id),
         )
-        return self.store.prior_power(binding, authority.plan_identity)
 
-    async def restore(self) -> RemoteModuleLifecycleResponseV1:
-        """Run the release RECOVER module restore after a completed PREPARE."""
+    def prior_power(self) -> str | None:
+        return self.store.prior_power(self._binding(), self.request.authority.plan_identity)
+
+    def _restore_request(self) -> RemoteModuleLifecycleRequestV1:
+        """Model the appliance rewriting the scratch volume, and return the RECOVER restore."""
         self.scratch = self.scratch.model_copy(
             update={"phase": "restored", "entry_count": None, "content_bytes": None}
         )
-        return await self.durable.execute_lifecycle(
-            RemoteModuleLifecycleRequestV1(
-                authority=_lifecycle_authority(
-                    self.request, purpose="release", operation="recover"
-                ),
-                action="restore",
-                budget_seconds=300,
-            )
+        return RemoteModuleLifecycleRequestV1(
+            authority=_lifecycle_authority(self.request, purpose="release", operation="recover"),
+            action="restore",
+            budget_seconds=300,
         )
+
+    async def restore(self) -> RemoteModuleLifecycleResponseV1:
+        """Run the release RECOVER module restore after a completed PREPARE."""
+        return await self.durable.execute_lifecycle(self._restore_request())
+
+    async def crash_after_host_restore(self) -> None:
+        """Finish the host restore, then die before the durable layer publishes anything."""
+        request = self._restore_request()
+        self.store.stage_lifecycle(request, 10_000.0)
+        admitted = self.store.reopen_lifecycle(request)
+        terminal = self.store.reopen_terminal(self._binding(), request.authority.plan_identity)
+        await self.host.execute_lifecycle(request, terminal, None, admitted.local_deadline)
 
     async def reap(
         self, operation: str, identity: str | None = None
@@ -983,6 +993,107 @@ async def test_system_teardown_refuses_a_scratch_result_that_is_not_the_stored_e
 
     assert stack.storage.pool.volumes
     stack.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_after_a_crash_before_the_restore_evidence_reaps_the_restored_result(
+    tmp_path: Path,
+) -> None:
+    """The scratch volume's finished restore stands in for the evidence the crash lost (#3427)."""
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    await stack.durable.execute(stack.request)
+    await stack.crash_after_host_restore()
+
+    reaped = await stack.system_teardown()
+
+    assert reaped.volumes_absent
+    assert reaped.result == stack.scratch
+    assert reaped.operation.operation == "restore"
+    assert not _live_attempt_volumes(stack)
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_restore_retry_after_a_crash_before_its_evidence_publishes_it(
+    tmp_path: Path,
+) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    await stack.durable.execute(stack.request)
+    await stack.crash_after_host_restore()
+
+    restored = await stack.restore()
+
+    assert restored.result == stack.scratch
+    assert stack.store.reopen_restored(stack._binding(), stack.request.authority.plan_identity)
+    assert (await stack.reap("cleanup")).volumes_absent
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_crash_between_the_restore_evidence_writes_is_recovered_by_a_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whichever evidence file is written first, a retry must leave both behind."""
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    await stack.durable.execute(stack.request)
+    publish = stack.store._publish
+    writes = 0
+
+    def die_on_the_second_evidence_write(name: str, data: bytes) -> None:
+        nonlocal writes
+        if name.endswith((".lifecycle-completion", ".restored")):
+            writes += 1
+            if writes == 2:
+                raise SystemExit("worker died between the restore evidence writes")
+        publish(name, data)
+
+    monkeypatch.setattr(stack.store, "_publish", die_on_the_second_evidence_write)
+    with pytest.raises(SystemExit):
+        await stack.restore()
+    monkeypatch.setattr(stack.store, "_publish", publish)
+
+    restored = await stack.restore()
+
+    assert restored.result == stack.scratch
+    assert (await stack.reap("cleanup")).volumes_absent
+    stack.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "unfinished",
+    [
+        {"phase": "restore-ready"},
+        {"status": "failure", "error_code": "FILESYSTEM_FAILURE"},
+        {"operation_nonce": "9" * 32},
+    ],
+    ids=["restore-ready", "failed", "another-attempt"],
+)
+async def test_system_teardown_refuses_an_unfinished_restore_in_the_scratch_volume(
+    tmp_path: Path, unfinished: dict[str, str]
+) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    await stack.durable.execute(stack.request)
+    await stack.crash_after_host_restore()
+    stack.scratch = stack.scratch.model_copy(update=unfinished)
+
+    with pytest.raises(ValueError, match="differs before reap"):
+        await stack.system_teardown()
+
+    assert len(_live_attempt_volumes(stack)) == 2
+    stack.close()
+
+
+def _live_attempt_volumes(stack: _Quiesce) -> set[str]:
+    operation = stack.request.operation
+    names = {
+        render_module_volume_name(
+            operation.system_id, operation.run_id, operation.operation_nonce, purpose
+        )
+        for purpose in ("source.ext4", "scratch.ext4")
+    }
+    volumes = stack.storage.pool.volumes
+    return {name for name in names if name in volumes and not volumes[name].deleted}
 
 
 class _PowerAwareInspection:
