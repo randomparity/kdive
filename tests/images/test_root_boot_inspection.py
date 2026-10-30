@@ -142,6 +142,59 @@ def test_a_nested_btrfs_subvolume_is_kept_whole() -> None:
     assert "rootflags=subvol=os/root" in result.arguments
 
 
+# virt-inspector output (guestfs-tools 1.56, libguestfs 1.60; OS details trimmed) for a disk whose
+# root is subvolume ``root`` of a btrfs filesystem on LVM volume vgsys/lvroot. libguestfs spells the
+# device /dev/<vg>/<lv>, never /dev/mapper/<vg>-<lv>.
+_LVM_SUBVOLUME_INSPECTION = b"""<?xml version="1.0"?>
+<operatingsystems>
+  <operatingsystem>
+    <root>btrfsvol:/dev/vgsys/lvroot/root</root>
+    <name>linux</name>
+    <mountpoints>
+      <mountpoint dev="btrfsvol:/dev/vgsys/lvroot/root">/</mountpoint>
+      <mountpoint dev="btrfsvol:/dev/vgsys/lvroot/home">/home</mountpoint>
+    </mountpoints>
+    <filesystems>
+      <filesystem dev="btrfsvol:/dev/vgsys/lvroot/home">
+        <type>btrfs</type>
+        <uuid>34bf1a43-e73e-4dad-9a54-e728a2a0c4fd</uuid>
+      </filesystem>
+      <filesystem dev="btrfsvol:/dev/vgsys/lvroot/root">
+        <type>btrfs</type>
+        <uuid>34bf1a43-e73e-4dad-9a54-e728a2a0c4fd</uuid>
+      </filesystem>
+    </filesystems>
+    <applications/>
+  </operatingsystem>
+</operatingsystems>
+"""
+
+
+def test_a_btrfs_subvolume_root_on_lvm_carries_its_subvolume() -> None:
+    result = _parse_root_boot(_LVM_SUBVOLUME_INSPECTION, "x86_64", _DIGEST)
+
+    assert result.arguments == (
+        "root=UUID=34bf1a43-e73e-4dad-9a54-e728a2a0c4fd",
+        "rootfstype=btrfs",
+        "rootflags=subvol=root",
+    )
+
+
+@pytest.mark.parametrize(
+    ("device", "subvolume"),
+    [
+        ("btrfsvol:/dev/fedora-vg/root.lv/os/root", "os/root"),
+        ("btrfsvol:/dev/vg_0/lv+1/@/.snapshots/1/snapshot", "@/.snapshots/1/snapshot"),
+        ("btrfsvol:/dev/vdata/lv/root", "root"),
+        ("btrfsvol:/dev/sdvg/lv/root", "root"),
+    ],
+)
+def test_an_lvm_volume_name_is_split_from_its_subvolume(device: str, subvolume: str) -> None:
+    result = _parse_root_boot(_inspector_xml(device, (device,)), "x86_64", _DIGEST)
+
+    assert f"rootflags=subvol={subvolume}" in result.arguments
+
+
 def test_a_top_level_btrfs_root_has_no_rootflags() -> None:
     result = _parse_root_boot(_inspector_xml("/dev/sda3", ("/dev/sda3",)), "x86_64", _DIGEST)
 
@@ -174,6 +227,18 @@ def test_a_non_btrfs_root_has_no_rootflags() -> None:
         "btrfsvol:/dev/sda3/" + "x" * 129,
         "btrfsvol:/dev/mapper/vg-root/root",
         "btrfsvol:/dev/sda3/" + "x" * 200,
+        "btrfsvol:/dev/vgsys/lvroot",
+        "btrfsvol:/dev/vgsys/lvroot/",
+        "btrfsvol:/dev/vgsys/lvroot/../x",
+        "btrfsvol:/dev/-vg/lvroot/root",
+        "btrfsvol:/dev/vgsys/-lv/root",
+        "btrfsvol:/dev/md127/os/root",
+        "btrfsvol:/dev/md127p1/os/root",
+        "btrfsvol:/dev/md/md0/os/root",
+        "btrfsvol:/dev/mapper/luks-0/os/root",
+        "btrfsvol:/dev/nvme0n1p3/root",
+        "btrfsvol:/dev/vda3/root",
+        "btrfsvol:/dev/sdb3/root",
     ],
 )
 def test_an_unusable_subvolume_fails_closed(device: str) -> None:
@@ -216,7 +281,7 @@ def test_an_unsupported_subvolume_is_reported_as_an_actionable_failure(
 
 @pytest.mark.parametrize("subvolume", ["@", "@/.snapshots/1/snapshot", "x" * 128, "root-1.2_a+b"])
 def test_supported_subvolume_names_are_carried(subvolume: str) -> None:
-    device = f"btrfsvol:/dev/vda3/{subvolume}"
+    device = f"btrfsvol:/dev/sda3/{subvolume}"
 
     result = _parse_root_boot(_inspector_xml(device, (device,)), "x86_64", _DIGEST)
 

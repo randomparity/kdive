@@ -866,3 +866,22 @@ validation need no change.
 Root specs are stored with the image at stage time, so an image staged before this change keeps
 its old spec. A btrfs-subvolume image staged earlier must be re-staged to gain the argument; no
 migration rewrites stored specs.
+
+## Amendment (2026-10-30): a btrfs subvolume root on an LVM volume is split
+
+The 2026-10-28 amendment split the device from the subvolume only for `sd*` and `vd*` devices,
+so an image whose btrfs root sits on an LVM logical volume could not be staged even for a disk
+boot (#3422). libguestfs names such a root `btrfsvol:/dev/<vg>/<lv>/<subvolume>`: it spells an
+LVM volume `/dev/<vg>/<lv>`, never `/dev/mapper/<vg>-<lv>`, and neither name may contain `/`.
+Stage inspection attaches the one image as `/dev/sda`, so the disk form is now exactly `sda` or
+`sda<N>`; any other first segment followed by a second one is read as `<vg>/<lv>`, with both names
+limited to LVM's character set (letters, digits and `+_.-`, no leading `-`). That keeps a volume
+group such as `vdata` or `sdvg` from being misread as a disk. libguestfs may spell an md array
+`/dev/md<N>` or `/dev/md/<name>`; neither, nor a `/dev/mapper` name, may be read as `<vg>/<lv>`,
+so those forms fail inspection with `unsupported_btrfs_root`, as does any device form with too few
+segments. The same exclusion refuses a volume group whose name begins with `md` and a digit (such
+as `md0vg`) or is `mapper`; such an image fails closed. Two names stay indistinguishable and are accepted limitations: a volume group named
+exactly `sda` or `sda<N>` is read as the disk, and a one-segment device other than `sda` followed
+by a nested subvolume would be read as `<vg>/<lv>`; the single attached disk keeps the latter out
+of inspector output. The subvolume rule, the root spec contract and the fail-closed tradeoff are
+unchanged.
