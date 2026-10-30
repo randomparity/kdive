@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal, cast
@@ -300,7 +301,8 @@ _STANDARD_RECORD_FIELDS = frozenset(vars(logging.makeLogRecord({})))
 def _log_surface(record: logging.LogRecord) -> str:
     """Message plus caller-supplied extras, excluding location fields such as pathname."""
     extras = {k: v for k, v in vars(record).items() if k not in _STANDARD_RECORD_FIELDS}
-    return f"{record.getMessage()} {extras}"
+    exception = logging.Formatter().formatException(record.exc_info) if record.exc_info else ""
+    return f"{record.getMessage()} {extras} {exception}"
 
 
 def test_log_surface_ignores_checkout_path_but_keeps_logged_values() -> None:
@@ -308,10 +310,15 @@ def test_log_surface_ignores_checkout_path_but_keeps_logged_values() -> None:
         "n", logging.INFO, "/src/activate-branch/mod.py", 1, "msg %s", ("arg",), None
     )
     record.tenant = "secret-ref"
+    try:
+        raise ValueError("exc-detail")
+    except ValueError:
+        record.exc_info = sys.exc_info()
     surface = _log_surface(record)
     assert "activate" not in surface
     assert "secret-ref" in surface
     assert "arg" in surface
+    assert "exc-detail" in surface
 
 
 @pytest.mark.anyio
