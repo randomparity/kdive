@@ -212,12 +212,14 @@ async def _insert_release_authority(
     *,
     generation: int,
     state: str,
+    acknowledged: bool = True,
 ) -> tuple[UUID, str, str]:
     """Insert one release authority generation; return its id and derived cleanup binding."""
     authority_id = uuid4()
     root_identity = _digest(str(generation))
     root_digest = _digest("b")
     superseded = "now()" if state == "superseded" else "NULL"
+    acknowledged_at = "now()" if acknowledged else "NULL"
     await seed.execute(
         "INSERT INTO external_boot_authorities "
         "(id, system_id, allocation_id, activation_id, run_id, plan_identity, job_id, "
@@ -225,7 +227,7 @@ async def _insert_release_authority(
         "operation, operation_identity, operation_digest, generation, state, "
         f"acknowledged_at, superseded_at) "
         "VALUES (%s,%s,%s,%s,%s,%s,%s,1,'release','local-libvirt','authority-vehicle',"
-        f"%s,'release',%s,%s,%s,%s,now(),{superseded})",
+        f"%s,'release',%s,%s,%s,%s,{acknowledged_at},{superseded})",
         (
             authority_id,
             vehicle.system_id,
@@ -279,13 +281,27 @@ def test_publication_admits_an_earlier_release_cleanup_identity(
             _first_id, adopted_identity, _ = await _insert_release_authority(
                 seed, vehicle, case, generation=1, state="superseded"
             )
+            _unacknowledged_id, unacknowledged_identity, _ = await _insert_release_authority(
+                seed, vehicle, case, generation=2, state="superseded", acknowledged=False
+            )
             authority_id, cleanup_identity, cleanup_digest = await _insert_release_authority(
-                seed, vehicle, case, generation=2, state="current"
+                seed, vehicle, case, generation=3, state="current"
+            )
+            other_vehicle = build_vehicle()
+            other_case = await seed_case(
+                seed,
+                other_vehicle,
+                purpose="release",
+                operation="release",
+                activation_state="active",
+            )
+            _other_id, other_lineage_identity, _ = await _insert_release_authority(
+                seed, other_vehicle, other_case, generation=1, state="superseded"
             )
             binding = AuthorityBinding(
                 peer_incarnation_id=case.worker_incarnation,
                 authority_id=authority_id,
-                generation=2,
+                generation=3,
                 system_id=vehicle.system_id,
                 activation_id=vehicle.activation_id,
                 run_id=vehicle.run_id,
@@ -300,7 +316,7 @@ def test_publication_admits_an_earlier_release_cleanup_identity(
             )
             terminal = JournalRecordV1(
                 authority_id=authority_id,
-                generation=2,
+                generation=3,
                 system_id=vehicle.system_id,
                 activation_id=vehicle.activation_id,
                 run_id=vehicle.run_id,
@@ -333,7 +349,7 @@ def test_publication_admits_an_earlier_release_cleanup_identity(
                     terminal.sequence,
                     record_digest(terminal),
                     authority_id,
-                    2,
+                    3,
                     cleanup_identity,
                 ),
             )
@@ -398,15 +414,16 @@ def test_publication_admits_an_earlier_release_cleanup_identity(
             assert row[9] == adopted_identity
             assert selection.binding() == observation.binding
 
-            foreign = observation.model_copy(
-                update={
-                    "binding": observation.binding.model_copy(
-                        update={"record_id": str(uuid4()), "operation_identity": _digest("7")}
-                    )
-                }
-            )
-            with pytest.raises(psycopg.Error, match="not admissible"):
-                await repository.publish_cleanup_quarantine(peer, binding, terminal, (foreign,))
+            for refused in (_digest("7"), unacknowledged_identity, other_lineage_identity):
+                foreign = observation.model_copy(
+                    update={
+                        "binding": observation.binding.model_copy(
+                            update={"record_id": str(uuid4()), "operation_identity": refused}
+                        )
+                    }
+                )
+                with pytest.raises(psycopg.Error, match="not admissible"):
+                    await repository.publish_cleanup_quarantine(peer, binding, terminal, (foreign,))
 
             keyless = {
                 "id": str(uuid4()),
@@ -427,7 +444,7 @@ def test_publication_admits_an_earlier_release_cleanup_identity(
                     (
                         case.worker_incarnation,
                         authority_id,
-                        2,
+                        3,
                         cleanup_identity,
                         terminal.sequence,
                         record_digest(terminal),
