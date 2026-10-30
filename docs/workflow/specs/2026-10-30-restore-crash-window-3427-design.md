@@ -36,8 +36,9 @@ the System:
   it reads the scratch result and refuses any other value.
 - A restore retry with nothing published re-runs `_restore`: the existing scratch volume is left
   alone (`_ensure_scratch_formatted` keeps a formatted volume) and the appliance's `restored`
-  resume action rewrites `restored` (`deploy/remote_module_appliance/README.md`, phase table), so
-  the re-run reaches the same RESTORED success. Case 1 strands only the teardown, not the retry.
+  resume action rewrites `restored` (`deploy/remote_module_appliance/README.md`, phase table;
+  `tests/deploy/test_remote_module_appliance.py::test_restore_retry_reconciles_every_durable_terminal_transition`),
+  so the re-run reaches the same RESTORED success. Case 1 strands only the teardown, not the retry.
 - `_restore` accepts the appliance result only when `validate_for(restore)` holds, `status` is
   `success` and `phase` is `restored`. The restore operation is derived deterministically from the
   stored terminal preparation (`_restore_operation`), so `_reap` derives the same one.
@@ -107,8 +108,9 @@ publishes the evidence (case 1 re-runs the host; case 2 publishes from `.restore
   to another attempt.** Still refused with `remote module restored result differs before reap`;
   recovering a failed restore is another crash window and out of scope.
 - **Existing stores.** A store already holding a completion without `.restored` (written by the
-  old order) is not repaired by the new order; a teardown of that System is covered by the reap
-  rule, and its CLEANUP still needs a fresh restore. Pre-release surface; no migration.
+  old order) is not repaired. Every retry of that release's restore carries the same lifecycle key
+  and is answered from the completion, so its CLEANUP stays refused; a System teardown, covered by
+  the reap rule, is the recovery. Pre-release surface; no migration.
 
 ## Tests
 
@@ -125,5 +127,6 @@ stack (real durable store and host, fakes at the libvirt edge):
    teardown.
 
 Controlled faults: revert the `_reap` rule (test 1 red) and revert the write order (test 3 red),
-then restore. Test 2 passes before the change too; it pins the retry behaviour the design relies
-on.
+and make `execute_lifecycle` refuse a restore whose request is already staged with no completion
+(test 2 red), then restore each. Test 2 passes before the change too; it pins the retry behaviour
+the design relies on.

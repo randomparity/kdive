@@ -42,5 +42,6 @@ Append `## Amendment (2026-10-30): A restore's crash window does not strand tear
 
 ## Task 5: controlled faults and guardrails
 
-Commit, then revert each rule in turn and observe the matching test red, then `git checkout --`
-the source file. Run `just lint`, `just type`, `just test-changed`, `just records`.
+Commit, then revert each rule in turn and observe the matching test red (the `_reap` rule: test
+1; the write order: test 3), and make `execute_lifecycle` refuse a restore whose request is already
+staged with no completion (test 2 red); `git checkout --` the source file after each. Run `just lint`, `just type`, `just test-changed`, `just records`.
