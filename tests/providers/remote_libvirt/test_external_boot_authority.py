@@ -4971,7 +4971,11 @@ async def test_remote_legacy_finalized_marker_serves_teardown_only_while_files_r
         record.plan_identity,
     )
     os.unlink(f"{key}.terminal", dir_fd=store._root_fd)
-    with pytest.raises(ValueError, match="no teardown refs"):
+    with pytest.raises(
+        ValueError,
+        match=f"no teardown refs.*System {record.binding.system_id} run {record.binding.run_id}"
+        ".*remove .*and retry teardown",
+    ):
         store.finalized_teardown_refs(record.binding, record.plan_identity)
     adapter.close()
 
@@ -5058,7 +5062,9 @@ async def test_remote_finalize_refuses_a_corrupt_request_before_the_marker(tmp_p
     store._publish("e" * 64 + ".request", b"not json")
     names = _store_names(store)
 
-    with pytest.raises(ValueError, match="not json|Invalid JSON"):
+    with pytest.raises(
+        ValueError, match="cannot parse e{64}.request.*any activation.*no module volume.*remove it"
+    ):
         await adapter.finalize(request, context)
 
     assert _store_names(store) == names
@@ -5078,7 +5084,7 @@ async def test_remote_finalize_refuses_conflicting_preparation_nonces_before_the
         terminal.request.model_copy(update={"operation": operation, "authority": authority}), 999.0
     )
 
-    with pytest.raises(ValueError, match="different nonces for one activation"):
+    with pytest.raises(ValueError, match="conflicting preparation requests"):
         await adapter.finalize(request, context)
 
     assert not store.cleanup_finalized(record.binding, record.plan_identity)
@@ -5131,3 +5137,144 @@ async def test_remote_system_teardown_of_a_finalized_activation_checks_unfinishe
     assert isinstance(operations.finalized_nonce, str)
     assert not result.complete
     finalized.close()
+
+
+def _recovery_names(
+    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+) -> tuple[str, str]:
+    """The recovery index and the recovery record it names (#3419)."""
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    identity = receipt.recovery_ref.ref.removeprefix("remote-external-boot/")
+    index = f"{store._recovery_key(record.binding, record.plan_identity)}.recovery-index"
+    return index, f"{identity}.recovery"
+
+
+async def _finalized_names(tmp_path: Path) -> set[str]:
+    root = tmp_path / "clean"
+    root.mkdir()
+    adapter, _record, request, context, store = await _finalized_release_store(root)
+    await adapter.finalize(request, context)
+    names = _store_names(store)
+    adapter.close()
+    return names
+
+
+async def _finalize_crashing_at(
+    adapter: RemoteExternalBootAuthorityAdapter,
+    request: AuthorityMutationRequestV1,
+    context: AuthorityCommitContextV1,
+    target: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_unlink = os.unlink
+
+    def failing(path: str, *args: Any, **kwargs: Any) -> None:
+        if path == target:
+            raise OSError("injected crash")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(external_boot_authority.os, "unlink", failing)
+    try:
+        with pytest.raises(OSError, match="injected crash"):
+            await adapter.finalize(request, context)
+    finally:
+        monkeypatch.setattr(external_boot_authority.os, "unlink", real_unlink)
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_retries_when_the_index_is_gone_and_the_record_remains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = await _finalized_names(tmp_path)
+    (crash := tmp_path / "crash").mkdir()
+    adapter, record, request, context, store = await _finalized_release_store(crash)
+    index, recovery = _recovery_names(store, record)
+
+    await _finalize_crashing_at(adapter, request, context, recovery, monkeypatch)
+
+    names = _store_names(store)
+    assert index not in names
+    assert recovery in names
+    assert store.read_cleanup_quarantine(record.binding, record.plan_identity) is not None
+    await adapter.finalize(request, context)
+    assert _store_names(store) == expected
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_retries_when_the_record_is_gone_and_the_index_remains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = await _finalized_names(tmp_path)
+    (crash := tmp_path / "crash").mkdir()
+    adapter, record, request, context, store = await _finalized_release_store(crash)
+    index, recovery = _recovery_names(store, record)
+    await _finalize_crashing_at(adapter, request, context, index, monkeypatch)
+    os.unlink(recovery, dir_fd=store._root_fd)
+
+    names = _store_names(store)
+    assert index in names
+    assert recovery not in names
+    assert store.read_cleanup_quarantine(record.binding, record.plan_identity) is not None
+    await adapter.finalize(request, context)
+    assert _store_names(store) == expected
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_leaves_a_recovery_index_naming_another_record(
+    tmp_path: Path,
+) -> None:
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    index, recovery = _recovery_names(store, record)
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    os.unlink(index, dir_fd=store._root_fd)
+    store._publish(index, b"0" * 64)
+
+    store.finalize_cleanup_quarantine(receipt)
+
+    names = _store_names(store)
+    assert recovery not in names
+    assert store._read(index) == b"0" * 64
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_refuses_requests_with_one_nonce_and_different_operations(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    terminal = store.reopen_terminal(record.binding, record.plan_identity)
+    operation = terminal.request.operation.model_copy(
+        update={"appliance_image_digest": "sha256:" + "b" * 64}
+    )
+    assert operation != terminal.request.operation
+    assert operation.operation_nonce == terminal.request.operation.operation_nonce
+    authority = terminal.request.authority.model_copy(update={"attempt_id": uuid4()})
+    store.stage(
+        terminal.request.model_copy(update={"operation": operation, "authority": authority}), 999.0
+    )
+
+    with pytest.raises(ValueError, match="conflicting preparation requests"):
+        await adapter.finalize(request, context)
+
+    assert not store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_and_teardown_scans_ignore_accumulated_finalized_markers(
+    tmp_path: Path,
+) -> None:
+    """Markers outlive their activations, so teardown's scan bound counts only .request names."""
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    for count in range(4097):
+        store._publish(f"{count:064x}.cleanup-finalized", b"{}")
+
+    assert store.teardown_preparation(record.binding, record.plan_identity) is not None
+    await adapter.finalize(request, context)
+
+    assert store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()

@@ -176,3 +176,53 @@ Considered & rejected:
 - **Accept any caller-supplied identity in the publish function.** judgment: a
   `SECURITY DEFINER` boundary would then trust the authority worker for a value the database
   can derive itself.
+
+### Amendment (2026-10-30): remote finalize removes only what it can prove and names the remedy (#3419)
+
+The #3326 and #3333 reviews left six low findings on remote `finalize_cleanup_quarantine`. Five
+are fixed and one, the unbounded scan, is accepted. The #3435 and #3434 amendments are unchanged: a `managed` receipt still returns before
+any of this runs, and the receipt is still compared with the derived proof context.
+
+- The recovery index is removed only while its content names the record being finalized. The
+  check no longer depends on the record still being present, so a retry after the record went
+  first also removes the index. An index naming another record stays in place.
+- Accepted limitation: the finalize directory scans stay unbounded. Nothing removes a store's
+  files except finalize. A finalized activation keeps its marker, and an adopted or never-finalized
+  activation keeps its `.request` and other files, so the store grows for the life of the host
+  until something collects a torn-down activation's files. Under a bound, finalize would refuse
+  once the host passed it. Releasing or tearing down another activation runs into the same
+  bound, so the refusal would offer no remedy short of deleting files by hand. An unbounded scan
+  costs time proportional to the store but never refuses.
+- System teardown's existing 4096-name bound in `teardown_preparation` is kept. It now counts
+  only `.request` names, because counting every name let accumulated markers stop teardown too.
+- The `.request` conflict check compares the whole module operation, as `teardown_preparation`
+  does, rather than only the nonce. Finalize no longer records a nonce that teardown would refuse.
+- A `.request` file that does not parse, and a marker without teardown refs once the terminal
+  record is gone, now say what to do next. For the request: the file may belong to any activation
+  on the host, so keep a copy and find the System and run it names, or take every System on the
+  host if the copy names none. Confirm no module volume of those Systems remains unaccounted for
+  in the pool, remove the file, then retry finalize. Removing it without that check could let a
+  finalize record no nonce, and that activation's unfinished-preparation proof at teardown would
+  pass without looking at the pool. For the marker: confirm
+  the activation's module volumes are gone from the pool, remove the marker, then retry teardown.
+  Without the marker, teardown reads the live records it did before finalize.
+- Crash-window tests cover the index removed with the record present (the retry finds the receipt
+  through the marker) and the record removed with the index present (the retry finds it through
+  the index). Each test fails if the index-then-record order or that retry path changes.
+- The reviews described `refuse_finalized` followed by a write as relying on a single executor.
+  That description is wrong: the module executor runs up to four calls at once. The
+  check-then-act is ordered by the authority service's one active mutation per System lane
+  (ADR-0584), and the `refuse_finalized` docstring now says so. A second authority instance
+  writing the same store directory would break it.
+
+Considered & rejected:
+
+- **Scan `.object-index` files by content when the record is gone.** judgment: object indexes are
+  removed before the index and the record, so a retry that finds the record gone has already
+  removed them. The scan would add work and find nothing in that state.
+- **Bound the finalize scan and refuse past it.** judgment: the refusal has no working remedy
+  while store files accumulate (above); the operator chose to accept the unbounded scan and track
+  store-file collection separately.
+- **Add a store lock around `refuse_finalized` and the write.** judgment: the System lane already
+  serializes those calls within one service. A lock would only help a second process writing the
+  same store directory, which this change does not introduce.
