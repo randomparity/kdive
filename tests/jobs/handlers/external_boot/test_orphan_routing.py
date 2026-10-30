@@ -196,3 +196,19 @@ async def _test_host_refuses_a_foreign_row_before_any_provider_io(instances: lis
         await service.resolve_recovery_orphan(AuthenticatedPeer("peer"), request)
 
     assert raised.value.category == "configuration_error"
+    assert raised.value.reason == "orphan_row_foreign_authority"
+
+
+def test_host_accepts_rows_of_its_own_instance_past_the_ownership_check() -> None:
+    asyncio.run(_test_host_accepts_rows_of_its_own_instance_past_the_ownership_check())
+
+
+async def _test_host_accepts_rows_of_its_own_instance_past_the_ownership_check() -> None:
+    service = _service([_row("sys-R1")])
+    request = AuthorityRecoveryOrphanDispositionRequestV1(
+        request_id=uuid4(), job_id=uuid4(), job_attempt=1
+    )
+
+    selections = await service._selection(AuthenticatedPeer("peer"), request)  # noqa: SLF001
+
+    assert [selection.authority_instance for selection in selections] == ["sys-R1"]
