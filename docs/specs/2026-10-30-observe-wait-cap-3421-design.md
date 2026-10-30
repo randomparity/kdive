@@ -18,5 +18,5 @@ and the failure did not say the cap was the limit.
 ## Verification
 
 `tests/providers/remote_libvirt/test_external_boot_observe_readiness.py`: an agent connecting at
-120 s (past the old cap, inside the new) is observed; the cap test asserts the new value and that
+120 s (past the old cap, inside the new) is observed; the cap test asserts the wait ends at the cap constant and that
 the failure details name it.
