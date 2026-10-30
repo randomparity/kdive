@@ -112,3 +112,117 @@ journal position. The service therefore builds the `finalize` context from the a
 `mutation-started` record (the oldest, when several retries were interrupted), not the retry's, and the remote adapter's exact comparison with the
 receipt holds. The receipt is not rewritten, so the published quarantine row and the object port's
 digest fences keep naming what the first attempt recorded.
+
+### Amendment (2026-10-30): release finalize leaves an adopted receipt in place (#3435)
+
+`ops.resolve_recovery_orphan` with the `adopt` disposition marks the cleanup quarantine receipt
+`managed`, and the quarantine row becomes `adopted`. A later attempt of the same release job still
+reaches `finalize`. Before this amendment, both providers then removed the adopted receipt and the
+records it proves. The remote adapter never read `managed`, and the local finalizer unlinked the
+receipt with the tombstone.
+
+- Release `finalize` makes no change while the standing cleanup receipt is `managed`. Remote
+  `finalize` returns before its proof comparison. Local `finalize_cleanup_tombstone` reads the
+  receipt under its pinned session and returns. An unmanaged or absent receipt finalizes as
+  before.
+- The two providers agree at `finalize`. Inventory, observation, recovery-object `delete` and now
+  release `finalize` all leave a managed receipt alone, so release does not make the `adopted`
+  row stale.
+- System teardown's discard path (ADR-0583) is unchanged: destruction still owns its cleanup.
+
+Considered & rejected:
+
+- **Keep removal, and have the resolver's adopt warn that a retry may still finalize.** judgment:
+  this leaves the database recording `adopted` for an object the provider later deletes, and it
+  makes an audited administrator decision depend on whether a retry happens to follow.
+- **Raise a conflict on a managed receipt.** verified: `rg -n '"managed": (False|True)' src/kdive`
+  at `37e2db046` finds only the two adopt writes setting `True`, plus the remote marker's
+  `False` copy, which never rewrites the receipt. No resolver path un-adopts a receipt, so every
+  later retry would fail the same way, and under ADR-0714 the second identical
+  `provider-conflict` ends the release job.
+
+### Amendment (2026-10-30): an adopted cleanup publishes its quarantine under the proof it ran with (#3434)
+
+The #3416 amendment applied the adopted proof to `finalize` only. A retried release generation
+that is aborted again before `finalize` still published under its own CLEANUP identity. The
+receipt names the adopted cleanup's identity, so the remote inventory refused it, and the
+repository and publish function refused it too. A shutdown at the first `before-finalize` publishes
+nothing. When an aborted retry followed it, no row could be published at all.
+
+- The service derives one proof context, the adopted operation's `mutation-started` record (the
+  oldest, or the request's own when nothing was adopted), and passes it to both `finalize` and
+  `cleanup_quarantine_inventory(request, context)`. The remote inventory compares the receipt's
+  operation identity and attempt with that context instead of the request. The local
+  adapter takes the parameter and keeps its request comparison. That gap is a follow-up.
+- Each published object carries its own operation identity. Migration 0186 stores that identity on
+  the row and compares an existing row against it. It is admitted when it equals the current
+  authority's identity, or, for a `release` authority only, when it equals the 0143 `cleanup`
+  derivation of an earlier acknowledged `release` authority row of the same system, activation,
+  run, plan, provider kind and authority instance. Every other identity is refused. An object with
+  no identity falls back to the current authority's, so a binary older than 0186 publishes as before. The row
+  therefore names what the receipt names, and the resolver's binding equals the object port's.
+
+Considered & rejected:
+
+- **Return no observation from a retry whose receipt belongs to an adopted operation, relying on
+  the earlier generation's row.** judgment: this leaves a shutdown followed by an aborted retry
+  with no row, and the issue requires a row however many times the release was interrupted.
+- **Do nothing.** judgment: an aborted retry stays unresolvable, and the issue requires a row.
+- **Store the retry's identity on the row and have the resolver translate it.** verified: the
+  resolver refuses unless the provider's observed binding equals the one it rebuilds from the
+  row (`src/kdive/providers/external_boot_authority/orphan.py`, `orphan_binding_changed`). The
+  remote observation names the receipt's identity, so a row stored under the retry's identity
+  could not be resolved without changing the disposition path.
+- **Accept any caller-supplied identity in the publish function.** judgment: a
+  `SECURITY DEFINER` boundary would then trust the authority worker for a value the database
+  can derive itself.
+
+### Amendment (2026-10-30): remote finalize removes only what it can prove and names the remedy (#3419)
+
+The #3326 and #3333 reviews left six low findings on remote `finalize_cleanup_quarantine`. Five
+are fixed and one, the unbounded scan, is accepted. The #3435 and #3434 amendments are unchanged: a `managed` receipt still returns before
+any of this runs, and the receipt is still compared with the derived proof context.
+
+- The recovery index is removed only while its content names the record being finalized. The
+  check no longer depends on the record still being present, so a retry after the record went
+  first also removes the index. An index naming another record stays in place.
+- Accepted limitation: the finalize directory scans stay unbounded. Nothing removes a store's
+  files except finalize. A finalized activation keeps its marker, and an adopted or never-finalized
+  activation keeps its `.request` and other files, so the store grows for the life of the host
+  until something collects a torn-down activation's files. Under a bound, finalize would refuse
+  once the host passed it. Releasing or tearing down another activation runs into the same
+  bound, so the refusal would offer no remedy short of deleting files by hand. An unbounded scan
+  costs time proportional to the store but never refuses.
+- System teardown's existing 4096-name bound in `teardown_preparation` is kept. It now counts
+  only `.request` names, because counting every name let accumulated markers stop teardown too.
+- The `.request` conflict check compares the whole module operation, as `teardown_preparation`
+  does, rather than only the nonce. Finalize no longer records a nonce that teardown would refuse.
+- A `.request` file that does not parse, and a marker without teardown refs once the terminal
+  record is gone, now say what to do next. For the request: the file may belong to any activation
+  on the host, so keep a copy and find the System and run it names, or take every System on the
+  host if the copy names none. Confirm no module volume of those Systems remains unaccounted for
+  in the pool, remove the file, then retry finalize. Removing it without that check could let a
+  finalize record no nonce, and that activation's unfinished-preparation proof at teardown would
+  pass without looking at the pool. For the marker: confirm
+  the activation's module volumes are gone from the pool, remove the marker, then retry teardown.
+  Without the marker, teardown reads the live records it did before finalize.
+- Crash-window tests cover the index removed with the record present (the retry finds the receipt
+  through the marker) and the record removed with the index present (the retry finds it through
+  the index). Each test fails if the index-then-record order or that retry path changes.
+- The reviews described `refuse_finalized` followed by a write as relying on a single executor.
+  That description is wrong: the module executor runs up to four calls at once. The
+  check-then-act is ordered by the authority service's one active mutation per System lane
+  (ADR-0584), and the `refuse_finalized` docstring now says so. A second authority instance
+  writing the same store directory would break it.
+
+Considered & rejected:
+
+- **Scan `.object-index` files by content when the record is gone.** judgment: object indexes are
+  removed before the index and the record, so a retry that finds the record gone has already
+  removed them. The scan would add work and find nothing in that state.
+- **Bound the finalize scan and refuse past it.** judgment: the refusal has no working remedy
+  while store files accumulate (above); the operator chose to accept the unbounded scan and track
+  store-file collection separately.
+- **Add a store lock around `refuse_finalized` and the write.** judgment: the System lane already
+  serializes those calls within one service. A lock would only help a second process writing the
+  same store directory, which this change does not introduce.

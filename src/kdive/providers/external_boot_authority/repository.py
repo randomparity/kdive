@@ -385,7 +385,12 @@ class DatabaseAuthorityRepository:
                 or object_binding.binding.system_id != str(binding.system_id)
                 or object_binding.binding.activation_id != str(binding.activation_id)
                 or object_binding.binding.run_id != str(binding.run_id)
-                or object_binding.operation_identity != binding.operation_identity
+                or (
+                    # A release retry publishes the adopted cleanup's receipt; migration 0186
+                    # admits that identity only from this activation's own release lineage.
+                    object_binding.operation_identity != binding.operation_identity
+                    and binding.purpose != "release"
+                )
             ):
                 raise ValueError("cleanup quarantine receipt does not match current authority")
             identity = (
@@ -406,6 +411,7 @@ class DatabaseAuthorityRepository:
                     "object_reference": object_binding.reference.ref,
                     "ownership_digest": object_binding.ownership_digest,
                     "observed_digest": observation.observed_digest,
+                    "operation_identity": object_binding.operation_identity,
                     "attempt_id": str(object_binding.attempt_id),
                     "mutation_journal_sequence": object_binding.mutation_journal_sequence,
                     "mutation_journal_digest": object_binding.mutation_journal_digest,

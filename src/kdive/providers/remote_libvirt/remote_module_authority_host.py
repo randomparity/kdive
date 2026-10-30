@@ -129,6 +129,15 @@ class InstalledRemoteModuleAppliance:
     manifest_digest: str
 
 
+def _finished_restore(result: RemoteModuleResultV1, restore: RemoteModuleOperationV1) -> bool:
+    """Whether ``result`` is what ``_restore`` accepts as this attempt's successful restore."""
+    try:
+        result.validate_for(restore)
+    except ValueError:
+        return False
+    return result.status == "success" and result.phase == "restored"
+
+
 def _read_regular(path: Path, limit: int) -> bytes:
     descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
@@ -744,7 +753,7 @@ class ConcreteRemoteModuleAuthorityHost:
             raise RuntimeError("remote module restore did not produce durable terminal evidence")
         result = outcome.result
         result.validate_for(restore)
-        if result.status != "success" or result.phase != "restored":
+        if not _finished_restore(result, restore):
             raise ValueError("remote module restore did not reach restored success")
         teardown = teardown_remote_module_appliance(
             self._configuration.appliance.appliance, appliance_request
@@ -807,8 +816,17 @@ class ConcreteRemoteModuleAuthorityHost:
             )
         if state == "absent":
             raw = self._configuration.appliance.read_scratch_result(volumes.scratch, deadline)
-            if raw is None or RemoteModuleResultV1.from_wire_bytes(raw) != result:
-                raise ValueError("remote module restored result differs before reap")
+            scratch = None if raw is None else RemoteModuleResultV1.from_wire_bytes(raw)
+            if scratch != result:
+                # A restore whose process died before publishing its evidence left only the
+                # scratch volume's result; accept it when it is this attempt's finished restore.
+                if (
+                    restored is not None
+                    or scratch is None
+                    or not _finished_restore(scratch, restore)
+                ):
+                    raise ValueError("remote module restored result differs before reap")
+                operation, result = restore, scratch
         # A release CLEANUP follows a RECOVER that restored the System's power, so the System may
         # be running. The reap deletes only attempt volumes it has proven attached to no domain,
         # which does not need the System off; a teardown still requires it.
