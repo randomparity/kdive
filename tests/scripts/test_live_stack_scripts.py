@@ -2085,7 +2085,8 @@ def test_server_and_worker_receive_the_same_libvirt_endpoint(tmp_path: Path) -> 
     python = tmp_path / "python"
     python.write_text(
         '#!/bin/sh\ncase "$*" in *server*) printf \'%s\' "${KDIVE_LIBVIRT_URI-unset}"'
-        ' > "$KDIVE_DAEMON_PROBE" ;; esac\n',
+        ' > "$KDIVE_DAEMON_PROBE.tmp"'
+        ' && mv "$KDIVE_DAEMON_PROBE.tmp" "$KDIVE_DAEMON_PROBE" ;; esac\n',
         encoding="utf-8",
     )
     python.chmod(0o755)
@@ -2104,9 +2105,11 @@ def test_server_and_worker_receive_the_same_libvirt_endpoint(tmp_path: Path) -> 
         staged,
     )
     assert result.returncode == 0, result.stderr
+    # The fake renames the probe into place, so its existence implies complete content.
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and not server_side.exists():
         time.sleep(0.05)
+    assert server_side.exists(), "background server never wrote its endpoint probe"
     assert server_side.read_text(encoding="utf-8") == worker_side.read_text(encoding="utf-8")
     assert worker_side.read_text(encoding="utf-8") == _PUBLISHED_URI
 
