@@ -313,9 +313,13 @@ class LocalExternalBootAuthorityAdapter:
         )
 
     async def cleanup_quarantine_inventory(
-        self, request: AuthorityMutationRequestV1
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> tuple[RecoveryObjectObservation, ...]:
-        """Reopen only the exact unfinalized private cleanup receipt on the bounded lane."""
+        """Reopen only the exact unfinalized private cleanup receipt on the bounded lane.
+
+        The comparison stays with the request, not ``context``; an adopted release retry is a
+        follow-up (#3434).
+        """
         if request.operation not in _DELETING_OPERATIONS:
             return ()
         authority = _authority_ref(request)
