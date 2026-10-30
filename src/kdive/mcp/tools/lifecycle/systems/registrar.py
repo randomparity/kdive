@@ -808,8 +808,8 @@ def _register_systems_resolve_external_boot_conflict(
         `recovery_conflict`, so resubmit only while it is present. A job that fails after it has
         begun the recovery usually ends the activation in `recovery_failed`, where only
         `systems.teardown` applies; a `conflict` failure instead returns it to
-        `recovery_conflict`. If the block is absent, a resubmission is refused and its error names
-        the state in `details.activation_state`.
+        `recovery_conflict`. If the block is absent, a resubmission with a new idempotency key is
+        refused and its error names the state in `data.activation_state`.
 
         Requires admin on the System's project. Only an activation in `recovery_conflict` is
         admissible. `runs.get` reports the owning Run's current state; `systems.teardown` remains
