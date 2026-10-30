@@ -76,3 +76,17 @@ release, so the proxy does not admit it; once such a row is cleaned, a never-act
 directly would remove the limit, needs a function that exposes it, and is left to a later
 change. Every other operation keeps the fence, and a never-activated `torn-down` owner with no
 activation row still needs the receipt. No schema change.
+
+## Amendment (2026-10-30): release reads the first activation
+
+The 2026-10-28 amendment admitted release for a `torn-down` owner with any activation row, and
+stated its limit: once an unclaimed row left by a claim blocked by a requested teardown is
+cleaned, a never-activated owner read as activated and its allocation was released without the
+receipt (#3423). Release after teardown is now admitted exactly when the ownership row is
+`torn-down` with `first_activation_id` set. Migration 0183 adds
+`authority_system_torn_down_after_activation(uuid)`, a restricted function on the 0171 pattern
+that returns that boolean to the server and reconciler only; raw authority tables stay private.
+That limit no longer applies: a never-activated `torn-down` owner needs the consumed absence
+receipt whatever activation rows exist, and while such a row is live the release is refused by
+the pre-activation fence rather than by the activation policy. Every other operation keeps the
+fence.
