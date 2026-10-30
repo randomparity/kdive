@@ -81,11 +81,11 @@ _REFUSAL_OBSERVED_OPERATIONS = frozenset(
     {AuthorityOperation.ACTIVATE, AuthorityOperation.RECOVER, AuthorityOperation.RESOLVE_CONFLICT}
 )
 # The (purpose, operation) pairs that delete recovery objects and so need cleanup evidence.
-# read_authorized_remote_module_cleanup_evidence (migration 0145) also admits
-# ("recover", "recover") and ("resolve-conflict", "resolve-conflict"), but a RECOVER of either
-# purpose and a conflict resolution only restore the source definition: the module volumes are
-# still present, so they commit directly and the later release CLEANUP reaps them and deletes the
-# boot artifacts (#3332, #3414).
+# read_authorized_remote_module_cleanup_evidence (migration 0145) also admits ("recover",
+# "recover"), but a RECOVER of either purpose and a conflict resolution only restore the source
+# definition: the module volumes are still present, so they commit directly and the later release
+# CLEANUP reaps them and deletes the boot artifacts (#3332, #3414). Migration 0184 removed the
+# read's ("resolve-conflict", "resolve-conflict") pair (#3432).
 _CLEANUP_EVIDENCE_COMMITS = frozenset(
     {
         ("release", AuthorityOperation.CLEANUP),
