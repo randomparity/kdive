@@ -166,4 +166,16 @@ def test_the_wait_is_capped_below_a_distant_deadline(monkeypatch: pytest.MonkeyP
         _observe(clock, deadline=3600.0)
 
     assert expired.value.category is ErrorCategory.READINESS_FAILURE
-    assert clock.now == pytest.approx(90.0)
+    assert clock.now == pytest.approx(operations_module._OBSERVE_WAIT_S)
+    assert expired.value.details["observe_wait_cap_s"] == operations_module._OBSERVE_WAIT_S
+
+
+def test_an_agent_connecting_after_the_former_90_second_cap_is_observed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock()
+    calls = _identity_reads(monkeypatch, [_failure(ErrorCategory.TRANSPORT_FAILURE)] * 120)
+
+    assert _observe(clock, deadline=3600.0) is _OBSERVED
+    assert len(calls) == 121
+    assert clock.now == pytest.approx(120.0)

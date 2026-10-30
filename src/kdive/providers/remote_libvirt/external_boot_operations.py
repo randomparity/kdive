@@ -65,9 +65,11 @@ from kdive.providers.shared.runtime_paths import domain_name_for
 
 # Pause between identity reads while the guest agent is not yet answering, and the most one
 # observation waits: the worker's own deadline spans the whole job, so a longer server-side wait
-# would outlive the caller and hold the System's lane.
+# would outlive the caller and hold the System's lane. Live remote boots connect the guest agent
+# 50 to 54 s after the domain starts; 300 s is about five times that, so a slower host, a larger
+# image or a cold page cache is waited out, while a guest that never answers still frees the lane.
 _OBSERVE_POLL_S = 1.0
-_OBSERVE_WAIT_S = 90.0
+_OBSERVE_WAIT_S = 300.0
 
 
 class _Volume(Protocol):
@@ -324,7 +326,10 @@ class ConcreteRemoteExternalBootOperations:
                     raise CategorizedError(
                         "the guest agent did not answer before the observation deadline",
                         category=ErrorCategory.READINESS_FAILURE,
-                        details={"system_id": recovery.binding.system_id},
+                        details={
+                            "system_id": recovery.binding.system_id,
+                            "observe_wait_cap_s": _OBSERVE_WAIT_S,
+                        },
                     ) from exc
                 self._sleep(min(_OBSERVE_POLL_S, remaining))
 
