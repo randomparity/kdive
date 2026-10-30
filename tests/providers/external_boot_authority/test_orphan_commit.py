@@ -53,7 +53,9 @@ def _commit(conn: _Connection) -> None:
     async def connections() -> AsyncIterator[_Connection]:
         yield conn
 
-    service = RecoveryOrphanAuthorityService(cast(Any, connections), cast(Any, SimpleNamespace()))
+    service = RecoveryOrphanAuthorityService(
+        cast(Any, connections), cast(Any, SimpleNamespace()), authority_instance="sys-R1"
+    )
     peer: Any = SimpleNamespace(incarnation_id=uuid4())
     request: Any = SimpleNamespace(request_id=uuid4(), job_id=uuid4(), job_attempt=1)
     selection: Any = SimpleNamespace(object_id=uuid4(), ownership_digest="sha256:" + "a" * 64)
