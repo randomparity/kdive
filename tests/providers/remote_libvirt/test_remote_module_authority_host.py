@@ -1219,10 +1219,12 @@ async def test_re_entered_resolve_conflict_restore_returns_the_first_response(
             evidence.unlink()
     volumes = set(stack.storage.pool.volumes)
     appliance_runs = len(stack.appliance.created_while_system_active)
+    scratch = stack.scratch
 
     again = await stack.restore("resolve-conflict")
 
     assert again == first
+    assert stack.scratch == scratch
     assert set(stack.storage.pool.volumes) == volumes
     assert len(stack.appliance.created_while_system_active) == appliance_runs
     stack.close()
