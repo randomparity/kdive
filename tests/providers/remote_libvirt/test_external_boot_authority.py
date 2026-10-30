@@ -55,6 +55,7 @@ from kdive.providers.external_boot_authority.service import (
 )
 from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownReservationV1,
+    ProviderRecoveryRefusal,
     SystemTeardownSupersededError,
 )
 from kdive.providers.ports.external_boot import (
@@ -569,6 +570,9 @@ def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -
             )
         }
     )
+    with pytest.raises(ProviderRecoveryRefusal, match="remains before authorized cleanup"):
+        operations.cleanup(recovery, authority, 2.0)
+    assert not deleted
     modules_absent = True
     assert recovery.materialization.artifacts.initrd is not None
     operations.cleanup(recovery, authority, 2.0)
@@ -812,7 +816,7 @@ async def test_remote_cleanup_changed_nonce_fails_before_provider_mutation() -> 
     executor = RemoteModulePreparationExecutor()
     adapter = RemoteExternalBootAuthorityAdapter(cast(Any, Coordinator()), executor)
 
-    with pytest.raises(ValueError, match="changed before provider deletion"):
+    with pytest.raises(ProviderRecoveryRefusal, match="changed before provider deletion"):
         await adapter.commit_cleanup(request, context, evidence)
     assert calls == ["point", "record"]
     executor.shutdown()
@@ -4458,7 +4462,7 @@ async def test_remote_finalize_refuses_a_proof_that_differs_from_the_receipt(
         "attempt_id": uuid4(),
     }[field]
 
-    with pytest.raises(ValueError, match="differs from the quarantine receipt"):
+    with pytest.raises(ProviderRecoveryRefusal, match="differs from the quarantine receipt"):
         await adapter.finalize(request, context.model_copy(update={field: changed}))
 
     assert len(await adapter.cleanup_quarantine_inventory(request, _native_context(request))) == 1
@@ -4473,9 +4477,9 @@ async def test_remote_recovery_record_delete_and_adopt_are_digest_fenced(tmp_pat
     authority = authority_reference(request)
     stale = "sha256:" + "0" * 64
 
-    with pytest.raises(ValueError, match="changed before delete"):
+    with pytest.raises(ProviderRecoveryRefusal, match="changed before delete"):
         await adapter.delete_recovery_object(observed.binding, authority, stale)
-    with pytest.raises(ValueError, match="changed before adopt"):
+    with pytest.raises(ProviderRecoveryRefusal, match="changed before adopt"):
         await adapter.adopt_recovery_object(observed.binding, authority, stale)
     assert await adapter.observe_recovery_object(observed.binding, authority) == observed
 
@@ -4484,7 +4488,7 @@ async def test_remote_recovery_record_delete_and_adopt_are_digest_fenced(tmp_pat
     )
     assert adopted.managed
     assert await adapter.cleanup_quarantine_inventory(request, _native_context(request)) == ()
-    with pytest.raises(ValueError, match="changed before delete"):
+    with pytest.raises(ProviderRecoveryRefusal, match="changed before delete"):
         await adapter.delete_recovery_object(observed.binding, authority, adopted.observed_digest)
     adapter.close()
 
@@ -4533,7 +4537,7 @@ async def test_remote_recovery_object_port_serves_only_the_recovery_record(
     adapter, _record, request, _context = await _cleaned_release(tmp_path)
     (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
 
-    with pytest.raises(ValueError, match="only the recovery record"):
+    with pytest.raises(ProviderRecoveryRefusal, match="only the recovery record"):
         await adapter.observe_recovery_object(
             observed.binding.model_copy(update={"kind": "kernel"}), authority_reference(request)
         )
@@ -4571,7 +4575,7 @@ async def test_remote_cleanup_refuses_another_operations_unfinalized_receipt(
         recovery_reference_json=record.module_recovery.model_dump_json(),
     )
 
-    with pytest.raises(ValueError, match="belongs to another operation"):
+    with pytest.raises(ProviderRecoveryRefusal, match="belongs to another operation"):
         await adapter.commit_cleanup(other, _native_context(other), evidence)
 
     assert operations.calls == calls
@@ -4647,7 +4651,7 @@ async def test_remote_delete_rechecks_the_receipt_it_finalizes(
         return await real(binding)
 
     monkeypatch.setattr(adapter, "_quarantine_receipt", adopted_between_reads)
-    with pytest.raises(ValueError, match="changed before delete"):
+    with pytest.raises(ProviderRecoveryRefusal, match="changed before delete"):
         await adapter.delete_recovery_object(
             observed.binding, authority_reference(request), observed.observed_digest
         )
@@ -4943,7 +4947,7 @@ async def test_remote_malformed_finalized_marker_fails_closed(tmp_path: Path, da
     os.unlink(name, dir_fd=store._root_fd)
     store._publish(name, bad)
 
-    with pytest.raises(ValueError, match="malformed"):
+    with pytest.raises(ProviderRecoveryRefusal, match="malformed"):
         store.finalized_teardown_refs(record.binding, record.plan_identity)
     with pytest.raises(ValueError, match="malformed"):
         adapter._coordinator.system_teardown_state(record.binding, record.plan_identity)
@@ -5084,7 +5088,7 @@ async def test_remote_finalize_refuses_conflicting_preparation_nonces_before_the
         terminal.request.model_copy(update={"operation": operation, "authority": authority}), 999.0
     )
 
-    with pytest.raises(ValueError, match="conflicting preparation requests"):
+    with pytest.raises(ProviderRecoveryRefusal, match="conflicting preparation requests"):
         await adapter.finalize(request, context)
 
     assert not store.cleanup_finalized(record.binding, record.plan_identity)
@@ -5257,7 +5261,7 @@ async def test_remote_finalize_refuses_requests_with_one_nonce_and_different_ope
         terminal.request.model_copy(update={"operation": operation, "authority": authority}), 999.0
     )
 
-    with pytest.raises(ValueError, match="conflicting preparation requests"):
+    with pytest.raises(ProviderRecoveryRefusal, match="conflicting preparation requests"):
         await adapter.finalize(request, context)
 
     assert not store.cleanup_finalized(record.binding, record.plan_identity)

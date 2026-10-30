@@ -24,6 +24,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
 )
+from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
 from kdive.providers.ports.external_boot import ExternalBootArtifactStager, OpaqueProviderRef
 from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
@@ -777,11 +778,13 @@ class ConcreteRemoteModuleAuthorityHost:
     ) -> RemoteModuleLifecycleResponseV1:
         capture, restore, installed, recovery = self._lifecycle_baseline(request, terminal)
         if restored is None and request.authority.operation is not AuthorityOperation.TEARDOWN:
-            raise ValueError("installed-only module reap requires teardown authority")
+            raise ProviderRecoveryRefusal("installed-only module reap requires teardown authority")
         if restored is not None and (
             restored.operation != restore or restored.recovery != recovery
         ):
-            raise ValueError("remote module restored evidence differs from preparation")
+            raise ProviderRecoveryRefusal(
+                "remote module restored evidence differs from preparation"
+            )
         volumes = recovery_attempt_volumes(
             restore, recovery.pool.ref, recovery.source_capacity_bytes
         )
@@ -791,7 +794,9 @@ class ConcreteRemoteModuleAuthorityHost:
             or recovery.root_volume.ref != restore.root_volume.key
             or recovery.pool.ref != self._configuration.volumes.pool_name
         ):
-            raise ValueError("remote module recovery geometry differs from fixed host binding")
+            raise ProviderRecoveryRefusal(
+                "remote module recovery geometry differs from fixed host binding"
+            )
         operation = restore if restored is not None else capture
         result = restored.result if restored is not None else installed
         state = self._reap_state(recovery)
@@ -825,7 +830,9 @@ class ConcreteRemoteModuleAuthorityHost:
                     or scratch is None
                     or not _finished_restore(scratch, restore)
                 ):
-                    raise ValueError("remote module restored result differs before reap")
+                    raise ProviderRecoveryRefusal(
+                        "remote module restored result differs before reap"
+                    )
                 operation, result = restore, scratch
         # A release CLEANUP follows a RECOVER that restored the System's power, so the System may
         # be running. The reap deletes only attempt volumes it has proven attached to no domain,
@@ -893,7 +900,7 @@ class ConcreteRemoteModuleAuthorityHost:
         reaping = self._marker_present(recovery, "reaping")
         reaped = self._marker_present(recovery, "reaped")
         if reaped and not reaping:
-            raise ValueError("remote module reap markers are out of order")
+            raise ProviderRecoveryRefusal("remote module reap markers are out of order")
         if reaped:
             return "reaped"
         return "reaping" if reaping else "absent"
@@ -928,7 +935,9 @@ class ConcreteRemoteModuleAuthorityHost:
 
     def _require_attempt_volumes_absent(self, volumes: PreparedModuleVolumes) -> None:
         if self._present_attempt_volumes(volumes):
-            raise ValueError("remote module reaped marker conflicts with present attempt volumes")
+            raise ProviderRecoveryRefusal(
+                "remote module reaped marker conflicts with present attempt volumes"
+            )
 
     async def execute_lifecycle(
         self,
