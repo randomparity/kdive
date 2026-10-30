@@ -4253,6 +4253,26 @@ async def test_remote_recovery_record_delete_and_adopt_are_digest_fenced(tmp_pat
 
 
 @pytest.mark.anyio
+async def test_remote_finalize_leaves_an_adopted_receipt_in_place(tmp_path: Path) -> None:
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    (observed,) = await adapter.cleanup_quarantine_inventory(request)
+    authority = authority_reference(request)
+    adopted = await adapter.adopt_recovery_object(
+        observed.binding, authority, observed.observed_digest
+    )
+
+    await adapter.finalize(request, context)
+
+    assert await adapter.observe_recovery_object(observed.binding, authority) == adopted
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None and receipt.managed
+    assert adapter._coordinator.recovery_point(record.binding, record.plan_identity)
+    assert store._read(store._finalized_name(record.binding, record.plan_identity)) is None
+    adapter.close()
+
+
+@pytest.mark.anyio
 async def test_remote_recovery_record_delete_finalizes_the_exact_record(tmp_path: Path) -> None:
     adapter, record, request, _context = await _cleaned_release(tmp_path)
     (observed,) = await adapter.cleanup_quarantine_inventory(request)

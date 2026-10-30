@@ -3235,6 +3235,10 @@ class LocalLibvirtExternalBoot:
         # post-delete absence idempotently. The delete runs under the pinned session, as
         # ``record_cleanup_quarantine`` does (ADR-0710 amendment, 2026-09-30).
         with self._io.open(authority, _expected_binding(recovery.binding)):
+            receipt = self._io.read_cleanup_quarantine(recovery.binding)
+            if receipt is not None and receipt.managed:
+                # An adopted receipt is the operator's; finalize leaves it in place (ADR-0787).
+                return
             self._io.finalize_tombstone(recovery, proof)
 
     def _reopen(

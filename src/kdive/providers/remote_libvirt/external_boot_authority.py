@@ -3267,7 +3267,8 @@ class RemoteExternalBootAuthorityAdapter:
         receipt = await self._executor.run(
             lambda: self._coordinator.cleanup_quarantine(binding, request.plan_identity)
         )
-        if receipt is None:
+        if receipt is None or receipt.managed:
+            # An adopted receipt is the operator's; finalize leaves it in place (ADR-0787).
             return
         if (
             receipt.operation_identity != context.operation_identity
