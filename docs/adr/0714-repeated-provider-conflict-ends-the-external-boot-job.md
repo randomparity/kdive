@@ -144,7 +144,9 @@ attempt to adopt.
 The reconciler's release lane no longer selects `abandoned`, `recovery_conflict` or
 `recovery_failed` activations. The release handler refuses all three, so each reconciler pass built
 a release payload that could never advance, and a refused job never records a release row. The
-System teardown is their exit. The lane keeps `recovered`, which the handler admits.
+System teardown is the exit for `recovery_conflict` and `recovery_failed`. An `abandoned`
+activation that still holds a ready reservation has no release path in either lane; that gap is
+outside this change. The lane keeps `recovered`, which the handler admits.
 
 ### Amendment (2026-10-28): only `provider-conflict` carries `authority_reason` (#3391)
 
