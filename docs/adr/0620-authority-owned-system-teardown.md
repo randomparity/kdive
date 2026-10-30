@@ -514,3 +514,20 @@ retried after its discharge and for a System teardown alike. A teardown with no 
 whose attempt volumes were never created, or are already gone, therefore completes instead of
 raising "restored result differs before reap". A reap with any volume present still verifies the
 scratch result first. No schema change.
+
+## Amendment (2026-10-30): A restore's crash window does not strand teardown (#3427)
+
+A remote module restore rewrites the attempt's scratch volume to the RESTORED result and only then
+writes its evidence: the `.restored` record and the lifecycle completion. A process death between
+the two points left a teardown expecting the INSTALLED result, which raised "restored result
+differs before reap" for ever. Two rules close the window. The module store now writes `.restored`
+before the completion, so a crash between them leaves evidence that the next restore turns into a
+completion, never a completion without evidence. And a System teardown with no restored evidence
+whose scratch volume holds this attempt's finished restore (the result `_restore` itself accepts:
+bound to the derived restore operation, `success`, phase `restored`) reaps against that result
+instead of refusing; a failed or unfinished restore is still refused. A restore retry needs
+nothing new: it re-runs the appliance, which resumes the `restored` phase. The teardown discards
+the reap response, so a teardown resumed after its `reaping` marker reports the installed result
+even when the volumes held the restored one; the response is not authoritative on this path. A
+store that the earlier order left with a completion and no `.restored` keeps its CLEANUP refused;
+a System teardown recovers it. No schema change.
