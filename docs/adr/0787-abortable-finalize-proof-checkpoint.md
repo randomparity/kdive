@@ -152,13 +152,14 @@ nothing. When an aborted retry followed it, no row could be published at all.
 - The service derives one proof context, the adopted operation's `mutation-started` record (the
   oldest, or the request's own when nothing was adopted), and passes it to both `finalize` and
   `cleanup_quarantine_inventory(request, context)`. The remote inventory compares the receipt's
-  operation identity, attempt and journal position with that context, as `finalize` does. The local
+  operation identity and attempt with that context instead of the request. The local
   adapter takes the parameter and keeps its request comparison. That gap is a follow-up.
 - Each published object carries its own operation identity. Migration 0186 stores that identity on
   the row and compares an existing row against it. It is admitted when it equals the current
   authority's identity, or, for a `release` authority only, when it equals the 0143 `cleanup`
   derivation of an earlier acknowledged `release` authority row of the same system, activation,
-  run, plan, provider kind and authority instance. Every other identity is refused. The row
+  run, plan, provider kind and authority instance. Every other identity is refused. An object with
+  no identity falls back to the current authority's, so a binary older than 0186 publishes as before. The row
   therefore names what the receipt names, and the resolver's binding equals the object port's.
 
 Considered & rejected:
@@ -166,9 +167,12 @@ Considered & rejected:
 - **Return no observation from a retry whose receipt belongs to an adopted operation, relying on
   the earlier generation's row.** judgment: this leaves a shutdown followed by an aborted retry
   with no row, and the issue requires a row however many times the release was interrupted.
-- **Store the retry's identity on the row and have the resolver translate it.** judgment: the
-  resolver and the object port would then disagree about the receipt's binding. The fix would
-  move into the disposition path, which is outside this change.
+- **Do nothing.** judgment: an aborted retry stays unresolvable, and the issue requires a row.
+- **Store the retry's identity on the row and have the resolver translate it.** verified: the
+  resolver refuses unless the provider's observed binding equals the one it rebuilds from the
+  row (`src/kdive/providers/external_boot_authority/orphan.py`, `orphan_binding_changed`). The
+  remote observation names the receipt's identity, so a row stored under the retry's identity
+  could not be resolved without changing the disposition path.
 - **Accept any caller-supplied identity in the publish function.** judgment: a
   `SECURITY DEFINER` boundary would then trust the authority worker for a value the database
   can derive itself.

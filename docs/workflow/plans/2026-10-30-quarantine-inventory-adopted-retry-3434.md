@@ -37,7 +37,7 @@ lines across three Python modules, a roughly 130-line migration copied from 0144
 | File | Change | Criterion |
 |---|---|---|
 | `src/kdive/providers/external_boot_authority/service.py` | Extract `_proven_cleanup_context`. Inventory protocol takes `context`. Publication passes it and takes `records`. | 1, 2 |
-| `src/kdive/providers/remote_libvirt/external_boot_authority.py` | `_receipt_proves` predicate shared by inventory and finalize. Inventory takes `context`. | 1 |
+| `src/kdive/providers/remote_libvirt/external_boot_authority.py` | Inventory takes `context` and compares identity and attempt with it. | 1 |
 | `src/kdive/providers/local_libvirt/external_boot_authority.py` | Signature only. | 1 (protocol) |
 | `src/kdive/providers/external_boot_authority/repository.py` | Per-object `operation_identity` in the payload. Release-only relaxation of the Python identity check. | 2, 3 |
 | `src/kdive/db/schema/0186_quarantine_publication_adopted_identity.sql` | Replace the publish function. | 2, 3 |
@@ -53,11 +53,13 @@ lines across three Python modules, a roughly 130-line migration copied from 0144
 
 - Contract: the service passes the oldest adopted `mutation-started` context to the inventory.
   Mode: focused-test. A new `test_adopted_release_retry_publishes_the_receipt_it_ran_with` in
-  `test_service.py`. Red before the change: `TypeError` on the two-argument fake, or the context
-  is absent. Green:
+  `test_service.py`, parametrized over the first interruption (`abort`, `shutdown`; the second
+  is `ProofBarrierShutdown`, which publishes nothing). Red under the controlled fault: the
+  service passes `AuthorityCommitContextV1.for_record` of the request's own `mutation-started`
+  record. Green:
   `uv run pytest tests/providers/external_boot_authority/test_service.py -k "adopted_release" -q`.
 - Contract: the remote inventory accepts the receipt's proof context on a retry request and
-  refuses a differing one. Mode: focused-test. A new
+  refuses a differing one, and the observation's binding is disposed of. Mode: focused-test. A new
   `test_remote_cleanup_inventory_follows_the_adopted_proof_on_a_retry` in
   `test_external_boot_authority.py`. Red with the strict request comparison restored. Green:
   `uv run pytest tests/providers/remote_libvirt/test_external_boot_authority.py -k "inventory" -q`.
@@ -69,8 +71,6 @@ lines across three Python modules, a roughly 130-line migration copied from 0144
 - `AuthorityCleanupQuarantineInventory.cleanup_quarantine_inventory(self, request:
   AuthorityMutationRequestV1, context: AuthorityCommitContextV1) ->
   tuple[RecoveryObjectObservation, ...]`.
-- Remote module function `_receipt_proves(receipt: RemoteCleanupQuarantineV1, context:
-  AuthorityCommitContextV1) -> bool`.
 
 **Steps**
 
@@ -117,22 +117,30 @@ lines across three Python modules, a roughly 130-line migration copied from 0144
    `self._adapter.cleanup_quarantine_inventory(request, self._proven_cleanup_context(request,
    records))`. Pass `records` at the three call sites (conflict refusal, terminal replay, normal
    terminal).
-3. Remote adapter: add `_receipt_proves`, comparing `operation_identity`, `attempt_id`,
-   `journal_sequence` and `journal_digest`. Use it in `finalize` (the `ValueError` message is
-   unchanged) and in `cleanup_quarantine_inventory(request, context)` (`provider_conflict`
-   unchanged).
+3. Remote adapter: in `cleanup_quarantine_inventory(self, request, context)`, compare
+   `receipt.operation_identity` and `receipt.attempt_id` with `context.operation_identity` and
+   `context.attempt_id` instead of the request's. The raise stays
+   `AuthorityServiceError("provider_conflict")`. `finalize` is unchanged.
 4. Local adapter: add `context: AuthorityCommitContextV1` to the signature. Keep the body.
    Extend the docstring: "The comparison stays with the request; an adopted release retry is a
    follow-up (#3434)."
 5. Tests: update the fake `_FinalizingAdapter.cleanup_quarantine_inventory(self, request,
    context)` in `test_service.py`, every remote call site (pass the `context` from
-   `_cleaned_release` or `_native_context(request)`), and `test_orphan_resolution.py:311`
-   (pass the context the publishing helper already built). Add the two focused tests:
+   `_cleaned_release` or `_native_context(request)`). The existing attempt-mismatch assertion in
+   `test_remote_cleanup_inventory_is_the_exact_unmanaged_recovery_record` becomes
+   `cleanup_quarantine_inventory(request, context.model_copy(update={"attempt_id": uuid4()}))`
+   raising `AuthorityServiceError`. In `test_orphan_resolution.py` `_publish_local_quarantine`,
+   build `AuthorityCommitContextV1(commit_point=AuthorityOperation.CLEANUP,
+   operation_identity=cleanup_identity, attempt_id=attempt_id, journal_sequence=8,
+   journal_digest=mutation_digest)` from the helper's own values and pass it. Add the two
+   focused tests:
    - Service: reuse the setup of `test_adopted_release_cleanup_finalizes_against_the_proof_that_ran`
-     with two aborted generations. A recording adapter stores each inventory `context`. Assert
-     every recorded context equals `AuthorityCommitContextV1.for_record(started)` of the first
-     cleanup. Assert `repository.published_cleanup_quarantines` holds one entry per abort with
-     the same receipt.
+     with two interrupted generations. The first is parametrized as `ProofBarrierAbort` or
+     `ProofBarrierShutdown`, and the second is always `ProofBarrierAbort`. A recording adapter
+     stores each inventory `context`. Assert that every recorded context equals
+     `AuthorityCommitContextV1.for_record(started)` of the first cleanup. Assert that
+     `repository.published_cleanup_quarantines` holds one entry per abort (two for abort/abort,
+     one for shutdown/abort), all with the same receipt.
    - Remote: `_cleaned_release` gives `request` and `context`. Build `retry =
      request.model_copy(update={"generation": request.generation + 1, "attempt_id": uuid4(),
      "operation_identity": "sha256:" + "9" * 64})`. Then
@@ -181,12 +189,14 @@ lines across three Python modules, a roughly 130-line migration copied from 0144
    public.publish_external_boot_recovery_quarantine_authority(...)` with the same parameters.
    Then change it:
    - Add `operation_identity text` to both `jsonb_to_recordset` column lists.
-   - After the resource lookup, add:
+   - After the resource lookup, add the check below. Every `item.operation_identity` read in
+     this function is `COALESCE(item.operation_identity, p_operation_identity)`, so a payload
+     from a binary older than 0186 behaves exactly as under 0144:
 
      ```sql
      IF EXISTS (
          SELECT 1 FROM jsonb_to_recordset(p_objects) AS item(operation_identity text)
-         WHERE item.operation_identity IS DISTINCT FROM p_operation_identity
+         WHERE COALESCE(item.operation_identity, p_operation_identity) IS DISTINCT FROM p_operation_identity
            AND NOT (
                v_authority.purpose = 'release' AND v_authority.operation = 'release'
                AND EXISTS (
@@ -213,7 +223,7 @@ lines across three Python modules, a roughly 130-line migration copied from 0144
                      AND earlier.purpose = 'release' AND earlier.operation = 'release'
                      AND earlier.generation < v_authority.generation
                      AND earlier.acknowledged_at IS NOT NULL
-                     AND derived.operation_identity = item.operation_identity
+                     AND derived.operation_identity = COALESCE(item.operation_identity, p_operation_identity)
                )
            )
      ) THEN
@@ -222,8 +232,8 @@ lines across three Python modules, a roughly 130-line migration copied from 0144
      END IF;
      ```
 
-   - The insert selects `objects.operation_identity` in place of `p_operation_identity`. The
-     conflict check compares `q.operation_identity IS DISTINCT FROM objects.operation_identity`.
+   - The insert selects `COALESCE(objects.operation_identity, p_operation_identity)` in place of `p_operation_identity`. The
+     conflict check compares `q.operation_identity IS DISTINCT FROM COALESCE(objects.operation_identity, p_operation_identity)`.
    - Add a header comment naming ADR-0787 and #3434, in the style of 0182's header.
 3. Add the window rows: `("0186", "0186_quarantine_publication_adopted_identity.sql")` and K+1
    in the four `migrations[-K:]` assertions, and `"0186"` after `"0182"` in the three
@@ -237,6 +247,10 @@ lines across three Python modules, a roughly 130-line migration copied from 0144
    - publishing an object with identity `A` under the generation-2 binding succeeds, twice;
    - `SELECT operation_identity FROM external_boot_recovery_quarantine` returns `A`, count 1;
    - an object with identity `"sha256:" + "7" * 64` raises `psycopg.Error`;
+   - a payload object without the `operation_identity` key, sent straight to the SQL function as
+     the `kdive_provider_authority` role, is stored under `p_operation_identity` (0144 behaviour);
+   - building `orphan._Selection` from the stored row's columns and calling `.binding()` returns
+     the published observation's `binding`;
    - the non-release `ValueError` case from the Verification list.
 5. Run the focused commands, `just lint` and `just type`. Commit
    `fix(db): publish a quarantine row under the receipt's own operation identity`.

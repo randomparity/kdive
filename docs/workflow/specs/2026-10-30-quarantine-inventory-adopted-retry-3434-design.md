@@ -47,10 +47,11 @@ Two cases reach this:
   `cleanup_quarantine_inventory(request, context)`, and publication passes the derived context.
   `_publish_cleanup_quarantine` gains a `records` argument. Its three call sites already hold
   `records`.
-- **Remote adapter.** The inventory compares the standing unmanaged receipt's operation identity,
-  attempt, journal sequence and journal digest with `context`. These are the same four fields
-  `finalize` compares, through one shared predicate. A mismatch is still `provider_conflict`. The
-  returned observation is unchanged: it names the receipt's own identity `A`.
+- **Remote adapter.** The inventory compares the standing unmanaged receipt's operation identity
+  and attempt with `context` instead of the request. These are the two fields it compares today, so
+  a receipt whose journal position differs from the context is still inventoried. A mismatch is
+  still `provider_conflict`. The returned observation is unchanged: it names the receipt's own
+  identity `A`.
 - **Local adapter.** It gets the new signature only. Its comparison with the request stays
   unchanged (operator exclusion; follow-up candidate below).
 - **Repository.** Each published object carries its own `operation_identity` in the JSON
@@ -60,7 +61,9 @@ Two cases reach this:
   the publish function with the same signature, so grants and the host function allow-list
   are unchanged. The function is still `SECURITY DEFINER` with `search_path = ''`, and its
   authority, worker, job and head fences are unchanged. Changes:
-  - Each object's `operation_identity` must be one of two values. It may be `p_operation_identity`.
+  - Each object's `operation_identity`, read as `COALESCE(<object value>, p_operation_identity)`,
+    must be one of two values. The fallback keeps an older authority binary that sends no
+    per-object identity publishing exactly as under 0144. It may be `p_operation_identity`.
     Or the current authority is a `release`/`release` row and the identity equals the 0143
     `cleanup` derivation of an **earlier acknowledged** `release`/`release` authority row. That row
     must share `system_id`, `activation_id`, `run_id`, `plan_identity`, `provider_kind` and
@@ -90,7 +93,8 @@ adapter records its quarantine only inside `commit` (`local_libvirt/external_boo
      the resolver's binding equals the object port's.
    - The publish function admits only the current authority's identity, or a cleanup identity
      that an earlier acknowledged release authority of the same activation derives. An authority
-     cannot name another activation's or another operation's identity.
+     cannot name another activation's identity, or any identity other than its own or a release
+    `cleanup` derivation from that activation's lineage.
    - Non-release publication keeps its exact identity equality.
    - The inventory still refuses a receipt whose proof differs from the derived context.
 3. **Accepted failure classes**
@@ -129,18 +133,27 @@ adapter records its quarantine only inside `commit` (`local_libvirt/external_boo
 4. The publish function refuses an object identity that matches neither the current identity nor
    an earlier release authority's cleanup derivation for the same activation. It also refuses a
    foreign identity on a non-release authority.
-5. Restoring the strict request comparison in the remote inventory turns the service-level and
-   adapter tests red.
+5. Two controlled faults turn the focused tests red. Restoring the remote inventory's request
+   comparison fails the remote adopted-retry test. Passing the request's own context from the
+   service's publication fails the service test.
+6. Chain proof: the database test rebuilds the resolver's binding (`orphan._Selection.binding()`)
+   from the stored row and asserts that it equals the published observation's binding. The remote
+   test disposes of that binding through `delete_recovery_object`. The two share one value
+   contract. There is no harness that combines the service, the remote adapter and PostgreSQL
+   for quarantine.
 
 ## Validation
 
-- `focused-test`: service passes the oldest adopted context to the inventory on a twice-aborted
-  retry. `tests/providers/external_boot_authority/test_service.py`. Red on main: the context
-  argument is absent and the retry raises before publishing.
-- `focused-test`: remote inventory accepts the adopted context and refuses a differing one.
-  `tests/providers/remote_libvirt/test_external_boot_authority.py`.
+- `focused-test`: the service passes the oldest adopted context to the inventory on a retry. The
+  test is parametrized over the first interruption: abort, then abort; and shutdown, then abort.
+  `tests/providers/external_boot_authority/test_service.py`. Red under the service fault
+  (request-derived context).
+- `focused-test`: the remote inventory accepts the adopted context on a retry request, refuses a
+  differing one, and its observation is disposed of by `delete_recovery_object`.
+  `tests/providers/remote_libvirt/test_external_boot_authority.py`. Red under the remote fault.
 - `focused-test`: the SQL function admits an earlier generation's derived identity, confirms an
-  existing row, stores the object's identity, and refuses foreign identities.
+  existing row, stores the object's identity, falls back to `p_operation_identity` when the key
+  is absent, and refuses foreign identities. The resolver binding is rebuilt from the row.
   `tests/providers/external_boot_authority/test_quarantine_publication.py`.
 - `focused-test`: migration window lists include 0186. The four `migrations[-K:]` tests.
 - `task-test-not-applicable`: ADR-0787 amendment. Prose with no executable consumer.
