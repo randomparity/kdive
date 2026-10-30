@@ -215,14 +215,15 @@ def _run_bounded_inspector(
 
 
 _BTRFS_VOLUME_PREFIX = "btrfsvol:"
-# libguestfs names a subvolume root ``btrfsvol:<device>/<subvolume>``. The appliance attaches an
-# image's disks as sd*, and names an LVM volume /dev/<vg>/<lv> (never /dev/mapper/<vg>-<lv>);
-# neither name can hold another '/', so only those two device forms split unambiguously. An md
-# array (/dev/md<N>) is one segment and a /dev/mapper name is not an LVM volume, so neither may
-# be read as <vg>/<lv>; those and every other device form fail closed.
+# libguestfs names a subvolume root ``btrfsvol:<device>/<subvolume>``. Inspection attaches the one
+# image as /dev/sda, so a partition is sda<N>, and an LVM volume is /dev/<vg>/<lv> (never
+# /dev/mapper/<vg>-<lv>); neither name can hold another '/', so only those two device forms split.
+# An md array (/dev/md<N>) is one segment and a /dev/mapper name is not an LVM volume, so neither
+# may be read as <vg>/<lv>; those and every other device form fail closed. A volume group named
+# exactly sda or sda<N> is read as the disk: that name alone cannot tell the two apart.
 _LVM_NAME = r"[A-Za-z0-9+_.][A-Za-z0-9+_.-]*"
 _BTRFS_VOLUME = re.compile(
-    rf"btrfsvol:/dev/(?:(?:sd|vd)[a-z]+[0-9]*|(?!md[0-9]|mapper/){_LVM_NAME}/{_LVM_NAME})"
+    rf"btrfsvol:/dev/(?:sda[0-9]*|(?!md[0-9]|mapper/){_LVM_NAME}/{_LVM_NAME})"
     r"/(?P<subvolume>.+)"
 )
 _SUBVOLUME_SEGMENT = re.compile(r"[A-Za-z0-9._@+-]+")

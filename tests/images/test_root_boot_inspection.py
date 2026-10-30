@@ -142,9 +142,9 @@ def test_a_nested_btrfs_subvolume_is_kept_whole() -> None:
     assert "rootflags=subvol=os/root" in result.arguments
 
 
-# virt-inspector 1.60 output (OS details trimmed) for a disk whose root is subvolume ``root`` of
-# a btrfs filesystem on LVM volume vgsys/lvroot. libguestfs spells the device /dev/<vg>/<lv>,
-# never /dev/mapper/<vg>-<lv>.
+# virt-inspector output (guestfs-tools 1.56, libguestfs 1.60; OS details trimmed) for a disk whose
+# root is subvolume ``root`` of a btrfs filesystem on LVM volume vgsys/lvroot. libguestfs spells the
+# device /dev/<vg>/<lv>, never /dev/mapper/<vg>-<lv>.
 _LVM_SUBVOLUME_INSPECTION = b"""<?xml version="1.0"?>
 <operatingsystems>
   <operatingsystem>
@@ -185,6 +185,8 @@ def test_a_btrfs_subvolume_root_on_lvm_carries_its_subvolume() -> None:
     [
         ("btrfsvol:/dev/fedora-vg/root.lv/os/root", "os/root"),
         ("btrfsvol:/dev/vg_0/lv+1/@/.snapshots/1/snapshot", "@/.snapshots/1/snapshot"),
+        ("btrfsvol:/dev/vdata/lv/root", "root"),
+        ("btrfsvol:/dev/sdvg/lv/root", "root"),
     ],
 )
 def test_an_lvm_volume_name_is_split_from_its_subvolume(device: str, subvolume: str) -> None:
@@ -234,6 +236,8 @@ def test_a_non_btrfs_root_has_no_rootflags() -> None:
         "btrfsvol:/dev/md127p1/os/root",
         "btrfsvol:/dev/mapper/luks-0/os/root",
         "btrfsvol:/dev/nvme0n1p3/root",
+        "btrfsvol:/dev/vda3/root",
+        "btrfsvol:/dev/sdb3/root",
     ],
 )
 def test_an_unusable_subvolume_fails_closed(device: str) -> None:
@@ -276,7 +280,7 @@ def test_an_unsupported_subvolume_is_reported_as_an_actionable_failure(
 
 @pytest.mark.parametrize("subvolume", ["@", "@/.snapshots/1/snapshot", "x" * 128, "root-1.2_a+b"])
 def test_supported_subvolume_names_are_carried(subvolume: str) -> None:
-    device = f"btrfsvol:/dev/vda3/{subvolume}"
+    device = f"btrfsvol:/dev/sda3/{subvolume}"
 
     result = _parse_root_boot(_inspector_xml(device, (device,)), "x86_64", _DIGEST)
 
