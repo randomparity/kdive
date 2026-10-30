@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, cast
@@ -18,6 +19,7 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.module_volume_reaping import (
     remote_module_volume_reap_handler,
 )
+from kdive.log import JsonFormatter
 from kdive.providers.infra.reaping import ModuleVolumeKey
 from kdive.reconciler.cleanup.provider_resources.module_volume_reaping import (
     enqueue_remote_module_volume_reap,
@@ -112,16 +114,15 @@ def test_repository_read_is_deferred_until_provider_invokes_callback() -> None:
     assert repository.calls == 0
 
 
-def test_provider_count_is_logged_only_in_worker_telemetry(
+def test_provider_count_reaches_the_formatted_worker_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO, logger="kdive.jobs.handlers.module_volume_reaping")
     assert _run(Repository(), Reaper(count=23)) is None
-    assert any(
-        record.message == "remote module-volume reap completed"
-        and getattr(record, "removed", None) == 23
-        for record in caplog.records
-    )
+    completed = [r for r in caplog.records if r.getMessage().startswith("remote module-volume")]
+    assert len(completed) == 1
+    payload = json.loads(JsonFormatter().format(completed[0]))
+    assert payload["msg"] == "remote module-volume reap completed: removed=23"
 
 
 def test_repository_failure_propagates() -> None:

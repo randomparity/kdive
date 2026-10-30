@@ -81,11 +81,11 @@ _REFUSAL_OBSERVED_OPERATIONS = frozenset(
     {AuthorityOperation.ACTIVATE, AuthorityOperation.RECOVER, AuthorityOperation.RESOLVE_CONFLICT}
 )
 # The (purpose, operation) pairs that delete recovery objects and so need cleanup evidence.
-# read_authorized_remote_module_cleanup_evidence (migration 0145) also admits
-# ("recover", "recover") and ("resolve-conflict", "resolve-conflict"), but a RECOVER of either
-# purpose and a conflict resolution only restore the source definition: the module volumes are
-# still present, so they commit directly and the later release CLEANUP reaps them and deletes the
-# boot artifacts (#3332, #3414).
+# read_authorized_remote_module_cleanup_evidence (migration 0145) also admits ("recover",
+# "recover"), but a RECOVER of either purpose and a conflict resolution only restore the source
+# definition: the module volumes are still present, so they commit directly and the later release
+# CLEANUP reaps them and deletes the boot artifacts (#3332, #3414). Migration 0184 removed the
+# read's ("resolve-conflict", "resolve-conflict") pair (#3432).
 _CLEANUP_EVIDENCE_COMMITS = frozenset(
     {
         ("release", AuthorityOperation.CLEANUP),
@@ -149,7 +149,7 @@ class AuthorityMutationFinalizer(Protocol):
 @runtime_checkable
 class AuthorityCleanupQuarantineInventory(Protocol):
     async def cleanup_quarantine_inventory(
-        self, request: AuthorityMutationRequestV1
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> tuple[RecoveryObjectObservation, ...]: ...
 
 
@@ -921,26 +921,25 @@ class ExternalBootAuthorityService:
             and record.generation < request.generation
         ]
 
-    async def _finalize_adapter(
-        self,
-        request: AuthorityMutationRequestV1,
-        records: list[JournalRecordV1],
-    ) -> None:
-        if isinstance(request, AuthorityTeardownMutationRequestV1):
-            return
-        if not isinstance(self._adapter, AuthorityMutationFinalizer):
-            return
-        # A release adopted from an earlier generation ran no commit of its own, so the proof
-        # its provider receipt holds is that of the oldest adopted cleanup, the one that ran: a
-        # retry that adopted it and was itself interrupted leaves a later terminal (#3416).
+    @classmethod
+    def _proven_cleanup_context(
+        cls, request: AuthorityMutationRequestV1, records: list[JournalRecordV1]
+    ) -> AuthorityCommitContextV1:
+        """Return the proof a release phase's provider receipt holds (ADR-0787).
+
+        A release adopted from an earlier generation ran no commit of its own, so its receipt
+        holds the proof of the oldest adopted operation, the one that ran: a retry that adopted
+        it and was itself interrupted leaves a later terminal (#3416, #3434).
+        """
         terminals = (
-            self._prior_release_terminals(records, request)
+            cls._prior_release_terminals(records, request)
             if request.purpose == "release"
             and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
             else []
         )
-        adopted = terminals[0] if terminals else None
-        proven_identity = adopted.operation_identity if adopted else request.operation_identity
+        proven_identity = (
+            terminals[0].operation_identity if terminals else request.operation_identity
+        )
         started = next(
             (
                 record
@@ -952,6 +951,18 @@ class ExternalBootAuthorityService:
         )
         if started is None:
             raise AuthorityServiceError("journal_conflict", reason="mutation_started_missing")
+        return AuthorityCommitContextV1.for_record(started)
+
+    async def _finalize_adapter(
+        self,
+        request: AuthorityMutationRequestV1,
+        records: list[JournalRecordV1],
+    ) -> None:
+        if isinstance(request, AuthorityTeardownMutationRequestV1):
+            return
+        if not isinstance(self._adapter, AuthorityMutationFinalizer):
+            return
+        context = self._proven_cleanup_context(request, records)
         if self._proof_checkpoint is not None:
             # Only an operator abort is a finalize failure; a shutdown propagates unmapped and so
             # never publishes a quarantine (ADR-0787).
@@ -962,7 +973,7 @@ class ExternalBootAuthorityService:
             except ProofBarrierAbort as error:
                 raise self._provider_error(request, error) from None
         try:
-            await self._adapter.finalize(request, AuthorityCommitContextV1.for_record(started))
+            await self._adapter.finalize(request, context)
         except AuthorityServiceError:
             raise
         except Exception as error:
@@ -974,6 +985,7 @@ class ExternalBootAuthorityService:
         binding: AuthorityBinding,
         request: AuthorityMutationRequestV1,
         terminal: JournalRecordV1,
+        records: list[JournalRecordV1],
     ) -> None:
         """Publish only a receipt re-opened by the trusted private provider boundary."""
         if not (
@@ -981,7 +993,9 @@ class ExternalBootAuthorityService:
             and isinstance(self._repository, AuthorityCleanupQuarantineRepository)
         ):
             return
-        observations = await self._adapter.cleanup_quarantine_inventory(request)
+        observations = await self._adapter.cleanup_quarantine_inventory(
+            request, self._proven_cleanup_context(request, records)
+        )
         if observations:
             await self._repository.publish_cleanup_quarantine(peer, binding, terminal, observations)
 
@@ -1205,7 +1219,9 @@ class ExternalBootAuthorityService:
             try:
                 await self._finalize_adapter(request, records)
             except AuthorityServiceError:
-                await self._publish_cleanup_quarantine(authenticated, binding, request, records[-1])
+                await self._publish_cleanup_quarantine(
+                    authenticated, binding, request, records[-1], records
+                )
                 raise
         return observation
 
@@ -1824,7 +1840,7 @@ class ExternalBootAuthorityService:
                             await self._finalize_adapter(request, records)
                         except AuthorityServiceError:
                             await self._publish_cleanup_quarantine(
-                                authenticated, binding, request, prior
+                                authenticated, binding, request, prior, records
                             )
                             raise
                         return prior.observation
@@ -2167,7 +2183,7 @@ class ExternalBootAuthorityService:
                         await self._finalize_adapter(request, records)
                     except AuthorityServiceError:
                         await self._publish_cleanup_quarantine(
-                            authenticated, completion_binding, request, records[-1]
+                            authenticated, completion_binding, request, records[-1], records
                         )
                         raise
                     return observation
