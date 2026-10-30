@@ -75,7 +75,6 @@ logger = logging.getLogger(__name__)
 
 _MAX_RECORD_BYTES = 1_048_576
 _MAX_PREPARATION_BYTES = 1_048_576
-_MAX_STORE_SCAN_NAMES = 4096
 _OBSERVATION_NAMESPACE = UUID("9cf0fa94-f250-4e5f-a950-155e7860b692")
 type PriorPower = Literal["running", "inactive"]
 PREPARATION_ABANDONED = "abandoned"
@@ -1403,7 +1402,8 @@ class RemoteModuleVolumePreparationStore:
             for name in os.listdir(self._root_fd)
             if len(name) == 64 + len(".request") and name.endswith(".request")
         ]
-        if len(names) > _MAX_STORE_SCAN_NAMES:
+        # Only .request names count: finalized markers stay for the life of the store.
+        if len(names) > 4096:
             raise ValueError("remote preparation store exceeds teardown scan bound")
         matches: list[RemoteModuleVolumePreparationRequestV1] = []
         for name in names:
@@ -1737,26 +1737,16 @@ class RemoteModuleVolumePreparationStore:
 
         A file that does not parse cannot be proven foreign. The deleting scan leaves it in
         place; a ``strict`` scan, which captures what teardown must still prove, refuses it.
-        Only names of this suffix count toward the bound: finalized markers accumulate for the
-        life of the store and must not stop a later finalize.
+        The scan is unbounded (ADR-0787, #3419): store files accumulate until something
+        collects a torn-down activation's files.
         """
-        names = [
+        return [
             name
             for name in os.listdir(self._root_fd)
             if len(name) == 64 + len(suffix)
             and name.endswith(suffix)
             and all(character in "0123456789abcdef" for character in name.removesuffix(suffix))
-        ]
-        if len(names) > _MAX_STORE_SCAN_NAMES:
-            raise ValueError(
-                f"remote preparation store holds more than {_MAX_STORE_SCAN_NAMES} {suffix} "
-                "files, so finalize will not read them all; release or tear down this host's "
-                "other activations, which removes their files, then retry finalize"
-            )
-        return [
-            name
-            for name in names
-            if (data := self._read(name)) is not None
+            and (data := self._read(name)) is not None
             and (self._strictly_owns(name, owns, data) if strict else self._owns(name, owns, data))
         ]
 
@@ -1767,8 +1757,10 @@ class RemoteModuleVolumePreparationStore:
         except ValueError as error:
             raise ValueError(
                 f"remote finalize cannot parse {name}, so it cannot prove which activation owns "
-                "it; keep a copy of the file, confirm that no module volume of this activation's "
-                "System and run remains in the storage pool, then remove it and retry finalize"
+                "it, and it may be any activation's on this host; keep a copy of the file, find "
+                "the System and run it names, or every System on this host if the copy names "
+                "none, confirm that no module volume of those Systems remains unaccounted for in "
+                "the storage pool, then remove it and retry finalize"
             ) from error
 
     @staticmethod

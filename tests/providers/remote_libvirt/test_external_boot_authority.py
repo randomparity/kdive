@@ -5058,7 +5058,9 @@ async def test_remote_finalize_refuses_a_corrupt_request_before_the_marker(tmp_p
     store._publish("e" * 64 + ".request", b"not json")
     names = _store_names(store)
 
-    with pytest.raises(ValueError, match="cannot parse e{64}.request.*no module volume.*remove it"):
+    with pytest.raises(
+        ValueError, match="cannot parse e{64}.request.*any activation.*no module volume.*remove it"
+    ):
         await adapter.finalize(request, context)
 
     assert _store_names(store) == names
@@ -5236,24 +5238,6 @@ async def test_remote_finalize_leaves_a_recovery_index_naming_another_record(
 
 
 @pytest.mark.anyio
-async def test_remote_finalize_refuses_a_store_past_the_scan_bound_before_the_marker(
-    tmp_path: Path,
-) -> None:
-    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
-    requests = sum(name.endswith(".request") for name in _store_names(store))
-    for count in range(4097 - requests):
-        (tmp_path / f"{count:064x}.request").touch()
-    names = _store_names(store)
-
-    with pytest.raises(ValueError, match="more than 4096 .request files.*release or tear down"):
-        await adapter.finalize(request, context)
-
-    assert _store_names(store) == names
-    assert not store.cleanup_finalized(record.binding, record.plan_identity)
-    adapter.close()
-
-
-@pytest.mark.anyio
 async def test_remote_finalize_refuses_requests_with_one_nonce_and_different_operations(
     tmp_path: Path,
 ) -> None:
@@ -5280,7 +5264,7 @@ async def test_remote_finalize_refuses_requests_with_one_nonce_and_different_ope
 async def test_remote_finalize_and_teardown_scans_ignore_accumulated_finalized_markers(
     tmp_path: Path,
 ) -> None:
-    """Markers outlive their activations, so the scan bound counts only the scanned suffix."""
+    """Markers outlive their activations, so teardown's scan bound counts only .request names."""
     adapter, record, request, context, store = await _finalized_release_store(tmp_path)
     for count in range(4097):
         store._publish(f"{count:064x}.cleanup-finalized", b"{}")
