@@ -1240,14 +1240,8 @@ class RemoteModuleVolumePreparationStore:
         response: RemoteModuleLifecycleResponseV1 | None,
     ) -> None:
         self.reopen_lifecycle(request)
-        completion = RemoteModuleLifecycleCompletionV1(
-            state="terminal" if response is not None else "failed-after-mutation",
-            response=response,
-        )
-        self._publish(
-            f"{self._lifecycle_key(request)}.lifecycle-completion",
-            completion.to_canonical_json(),
-        )
+        # The restored record goes first: a crash before the completion leaves evidence a restore
+        # retry publishes the completion from, never a completion that hides absent evidence.
         if response is not None and response.action == "restore":
             authority = request.authority
             restored_key = self._terminal_key(
@@ -1257,6 +1251,14 @@ class RemoteModuleVolumePreparationStore:
                 authority.plan_identity,
             )
             self._publish(f"{restored_key}.restored", response.to_canonical_json())
+        completion = RemoteModuleLifecycleCompletionV1(
+            state="terminal" if response is not None else "failed-after-mutation",
+            response=response,
+        )
+        self._publish(
+            f"{self._lifecycle_key(request)}.lifecycle-completion",
+            completion.to_canonical_json(),
+        )
 
     def reopen_lifecycle_completion(
         self, request: RemoteModuleLifecycleRequestV1
@@ -3265,7 +3267,8 @@ class RemoteExternalBootAuthorityAdapter:
         receipt = await self._executor.run(
             lambda: self._coordinator.cleanup_quarantine(binding, request.plan_identity)
         )
-        if receipt is None:
+        if receipt is None or receipt.managed:
+            # An adopted receipt is the operator's; finalize leaves it in place (ADR-0787).
             return
         if (
             receipt.operation_identity != context.operation_identity
