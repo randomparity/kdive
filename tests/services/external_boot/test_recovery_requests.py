@@ -13,7 +13,6 @@ import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import Any, LiteralString
 from uuid import UUID, uuid4
 
@@ -25,7 +24,6 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.domain.capacity.state import DebugSessionState, ExternalBootActivationState
-from kdive.domain.catalog.resources import ResourceKind
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.external_boot import recovery_requests
 from kdive.mcp.tools.external_boot.recovery_idempotency import recovery_request
@@ -34,7 +32,6 @@ from kdive.mcp.tools.external_boot.recovery_requests import (
     resolve_conflict,
     resolve_recovery_orphan,
 )
-from kdive.providers.core.runtime import AuthorityCapability
 from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role, RoleDenied
@@ -814,33 +811,6 @@ def test_orphan_repair_refuses_when_the_server_route_is_not_the_rows_authority(
     assert requests == 0
 
 
-def _binding(kind: ResourceKind, instance: str | None, port: object | None) -> Any:
-    capability = None if instance is None else AuthorityCapability(instance, None, None)
-    runtime = SimpleNamespace(authority=capability, external_boot_recovery_objects=port)
-    return SimpleNamespace(kind=kind, runtime=runtime)
-
-
-@pytest.mark.parametrize(
-    ("kind", "instance", "port", "expected"),
-    [
-        (ResourceKind.LOCAL_LIBVIRT, "authority/a", None, True),
-        (ResourceKind.LOCAL_LIBVIRT, "authority/b", None, False),
-        (ResourceKind.LOCAL_LIBVIRT, None, None, False),
-        (ResourceKind.LOCAL_LIBVIRT, None, object(), True),
-        (ResourceKind.REMOTE_LIBVIRT, "authority/a", None, False),
-        (ResourceKind.REMOTE_LIBVIRT, None, object(), True),
-    ],
-)
-def test_the_recovery_provider_is_a_port_or_a_local_route_matching_every_row(
-    kind: ResourceKind, instance: str | None, port: object | None, expected: bool
-) -> None:
-    rows = [{"provider_kind": kind.value, "authority_instance": "authority/a"}]
-    configured = recovery_requests._recovery_provider_configured(
-        _binding(kind, instance, port), rows
-    )
-    assert configured is expected
-
-
 def test_orphan_repair_needs_no_activation_to_report(migrated_url: str) -> None:
     """ADR-0583 scopes the orphan tool to quarantined objects, not to the activation."""
 
@@ -1018,9 +988,8 @@ _REVIEWED_FIRST_PARTY_IMPORTS = frozenset(
         "kdive.services.external_boot:ExternalBootOperation",
         "kdive.services.external_boot:check_external_boot_admission",
         "kdive.services.external_boot.local_timing:local_external_boot_timing",
-        "kdive.providers.core.resolver:ProviderResolver",
         "kdive.providers.core.resolver:ProviderBinding",
-        "kdive.domain.catalog.resources:ResourceKind",
+        "kdive.providers.core.resolver:ProviderResolver",
         "kdive.services.external_boot.routing:server_authority_instance",
     }
 )

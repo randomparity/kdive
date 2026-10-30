@@ -23,7 +23,6 @@ from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import JobState
-from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import Digest
 from kdive.domain.lifecycle.records import Run
@@ -180,21 +179,17 @@ def _recovery_provider_configured(
 ) -> bool:
     """Whether this server can dispatch disposition of the rows' exact objects.
 
-    A runtime that composes a recovery-object port can. The server process composes none for
-    local-libvirt (the authority host owns the provider I/O), so a local row is dispatchable
-    when the server's fixed authority route is the instance that published it, as release and
-    conflict admission decide it (``admission.py``). Remote keeps requiring the port.
+    A runtime that composes a recovery-object port can. A provider whose authority host owns the
+    provider I/O (local and remote libvirt, ADR-0615) composes none on the server, so its rows are
+    dispatchable when the server's fixed authority route is the instance that published them, as
+    release and conflict admission decide it (``admission.py``).
     """
     if any(row["provider_kind"] != binding.kind.value for row in rows):
         return False
     if binding.runtime.external_boot_recovery_objects is not None:
         return True
     route = server_authority_instance(binding)
-    return (
-        binding.kind is ResourceKind.LOCAL_LIBVIRT
-        and route is not None
-        and all(row["authority_instance"] == route for row in rows)
-    )
+    return route is not None and all(row["authority_instance"] == route for row in rows)
 
 
 def _config_error(object_id: str, *, reason: str, detail: str, next_action: str) -> ToolResponse:
