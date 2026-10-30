@@ -68,6 +68,7 @@ TEARDOWN_REQUIRED = "external_boot_system_teardown_required"
 FAULT_READ_TABLES = (
     "jobs",
     "external_boot_activations",
+    "external_boot_reservation_releases",
     "external_boot_authority_journal_heads",
     "external_boot_authority_audit",
     "external_boot_recovery_quarantine",
@@ -75,6 +76,7 @@ FAULT_READ_TABLES = (
 )
 HOLD_TIMEOUT_S = 120.0
 ROW_DEADLINE_S = 60.0
+RELEASE_REPAIR_GRACE_S = 30.0
 _POLL_S = 0.5
 _REASON = "authority recovery fault proof (#3185)"
 _AUTHORITY_PYTHON = "/opt/kdive-provider-authority/.venv/bin/python"
@@ -440,6 +442,29 @@ async def _activation_state(db_url: str, activation_id: str) -> object:
     return rows[0][0]
 
 
+async def _release_cleanup(db_url: str, activation_id: str) -> tuple[bool, int]:
+    """``(cleanup_complete, release credits)`` of one activation."""
+    rows = await _rows(
+        db_url,
+        "SELECT cleanup_complete, (SELECT count(*) FROM external_boot_reservation_releases "
+        "WHERE activation_id = %s) FROM external_boot_activations WHERE id = %s",
+        (activation_id, activation_id),
+    )
+    assert len(rows) == 1, f"activation {activation_id} is not in the database"
+    return bool(rows[0][0]), int(str(rows[0][1]))
+
+
+async def _cleaned_within(db_url: str, activation_id: str, window_s: float) -> bool:
+    """Poll until the activation's release cleanup is complete, or the window closes."""
+    deadline = time.monotonic() + window_s
+    while True:
+        if (await _release_cleanup(db_url, activation_id))[0]:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(_POLL_S)
+
+
 async def _drain_conflict(system: AuthoritySystem, phase: str, job_id: str) -> None:
     """Require the job to end ``failed`` with category ``conflict``, not to succeed."""
     try:
@@ -777,10 +802,22 @@ async def recorded_conflict(
     if current == anchored:
         assert head[:4] == ("terminal", "resolve-conflict", "source", "source"), head
     assert await _activation_state(db_url, activation_id) == "recovered"
+    release_by = "reconciler"
+    if not await _cleaned_within(db_url, activation_id, RELEASE_REPAIR_GRACE_S):
+        release_by = "admitted"
+        again = await release_external_boot(op, activation.run_id)
+        await drain_job(op, "release", again.object_id)
+        assert await _cleaned_within(db_url, activation_id, ROW_DEADLINE_S), (
+            "the release after the resolution left the cleanup incomplete"
+        )
+    cleaned, credits = await _release_cleanup(db_url, activation_id)
+    assert cleaned and credits == 1, f"release credit after the resolution: {cleaned}, {credits}"
     return {
         "recorded": "recovery_conflict",
         "release": "failed: conflict",
         "resolution_admitted": resolution.object_id,
         "resolution": "succeeded: restored the recorded source",
         "activation": "recovered",
+        "release_after_resolution": release_by,
+        "release_credits": credits,
     }

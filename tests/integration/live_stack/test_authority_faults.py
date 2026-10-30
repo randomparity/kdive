@@ -500,6 +500,7 @@ def _fake_conflict_arm(
     failures: dict[str, str],
     heads: list[tuple[object, ...]],
     states: tuple[str, ...] = ("recovery_conflict", "recovered"),
+    cleanup: list[tuple[bool, int]] | None = None,
     anchored: int | None = 7,
     current: int = 7,
 ) -> list[str]:
@@ -507,10 +508,12 @@ def _fake_conflict_arm(
     calls: list[str] = []
     remaining = iter(heads)
     activation_states = iter(states)
+    failures = dict(failures)
+    cleanups = iter(cleanup if cleanup is not None else [(True, 1)] * 4)
 
     async def drain(_op: object, phase: str, _job: str, **_kwargs: object) -> ToolResponse:
         calls.append(f"drain:{phase}")
-        category = failures.get(phase)
+        category = failures.pop(phase, None)
         if category is None:
             return ToolResponse(object_id=_job, status="succeeded")
         raise SpinePhaseError(phase, "job failed", error_category=category)
@@ -528,6 +531,9 @@ def _fake_conflict_arm(
         "drain_job": drain,
         "conflict_head": lambda *_a: _async(next(remaining))(),
         "_activation_state": lambda *_a: _async(next(activation_states))(),
+        "_release_cleanup": lambda *_a: _async(next(cleanups))(),
+        "RELEASE_REPAIR_GRACE_S": 0.0,
+        "ROW_DEADLINE_S": 0.0,
         "scalar": scalar,
         "audited_sequence": _async(anchored),
         "head_sequence": _async(current),
@@ -653,6 +659,55 @@ def test_conflict_arm_requires_the_activation_recovered(monkeypatch: pytest.Monk
         states=("recovery_conflict", "recovery_conflict"),
     )
     with pytest.raises(AssertionError):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+
+
+_CONFLICT_HEADS = [
+    ("terminal", "recover", "conflict", "conflict", _COMPOSITE),
+    ("terminal", "resolve-conflict", "source", "source", _COMPOSITE),
+]
+
+
+def test_conflict_arm_awaits_a_release_the_reconciler_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_conflict_arm(monkeypatch, {"release": "conflict"}, list(_CONFLICT_HEADS))
+    observed = asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+    assert calls.count("drain:release") == 1, "a second release was admitted"
+    assert (observed["release_after_resolution"], observed["release_credits"]) == ("reconciler", 1)
+
+
+def test_conflict_arm_admits_a_release_when_the_reconciler_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_conflict_arm(
+        monkeypatch,
+        {"release": "conflict"},
+        list(_CONFLICT_HEADS),
+        cleanup=[(False, 0), (True, 1), (True, 1)],
+    )
+    observed = asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+    assert calls[-1] == "drain:release" and calls.count("drain:release") == 2
+    assert observed["release_after_resolution"] == "admitted"
+
+
+def test_conflict_arm_refuses_a_release_that_never_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_conflict_arm(
+        monkeypatch, {"release": "conflict"}, list(_CONFLICT_HEADS), cleanup=[(False, 0)] * 4
+    )
+    with pytest.raises(AssertionError, match="cleanup incomplete"):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+
+
+def test_conflict_arm_requires_exactly_one_release_credit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_conflict_arm(
+        monkeypatch, {"release": "conflict"}, list(_CONFLICT_HEADS), cleanup=[(True, 0)] * 4
+    )
+    with pytest.raises(AssertionError, match="release credit"):
         asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
 
 
