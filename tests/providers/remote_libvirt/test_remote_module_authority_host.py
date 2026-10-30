@@ -1203,24 +1203,28 @@ async def test_reap_after_the_sweep_removed_the_markers_reports_the_volumes_abse
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("swept", [False, True], ids=["intact", "swept"])
+@pytest.mark.parametrize("removed", ["nothing", "attempt-volumes", "restored-evidence"])
 async def test_re_entered_resolve_conflict_restore_returns_the_first_response(
-    tmp_path: Path, swept: bool
+    tmp_path: Path, removed: str
 ) -> None:
     """#3414: a job re-entry reuses the stored completion, whatever a sweep removed between."""
     stack = _Quiesce(tmp_path, _SystemDomain(active=False))
     await stack.durable.execute(stack.request)
     first = await stack.restore("resolve-conflict")
-    if swept:
+    if removed == "attempt-volumes":
         for name in _live_attempt_volumes(stack):
             stack.storage.pool.volumes.pop(name)
+    if removed == "restored-evidence":
+        for evidence in (tmp_path / "evidence").glob("*.restored"):
+            evidence.unlink()
     volumes = set(stack.storage.pool.volumes)
+    appliance_runs = len(stack.appliance.created_while_system_active)
 
     again = await stack.restore("resolve-conflict")
 
     assert again == first
     assert set(stack.storage.pool.volumes) == volumes
-    assert bool(_live_attempt_volumes(stack)) is not swept
+    assert len(stack.appliance.created_while_system_active) == appliance_runs
     stack.close()
 
 
