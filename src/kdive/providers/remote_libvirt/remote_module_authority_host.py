@@ -753,7 +753,7 @@ class ConcreteRemoteModuleAuthorityHost:
             raise RuntimeError("remote module restore did not produce durable terminal evidence")
         result = outcome.result
         result.validate_for(restore)
-        if result.status != "success" or result.phase != "restored":
+        if not _finished_restore(result, restore):
             raise ValueError("remote module restore did not reach restored success")
         teardown = teardown_remote_module_appliance(
             self._configuration.appliance.appliance, appliance_request
