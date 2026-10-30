@@ -105,21 +105,15 @@ async def ordinary_mutation_is_fenced(conn: AsyncConnection, system_id: UUID) ->
 
 
 async def torn_down_after_activation(conn: AsyncConnection, system_id: UUID) -> bool:
-    """Whether an activated authority System has been torn down.
+    """Whether a torn-down authority System recorded its first activation (ADR-0754).
 
-    The owner ends ``torn-down`` and, unlike a never-activated one, has an activation row: the
-    first activation is claimed in the transaction that creates it, so that row is the activation
-    history. A claim blocked by a requested teardown can leave an unclaimed row behind: the
-    activation policy denies release while it is live, but once it is cleaned a never-activated
-    torn-down owner reads as activated here. The pre-activation fence does not apply to the
-    activated case (#3382), so its allocation can be released.
+    Reads the ownership row's first activation, not activation rows: a claim blocked by a
+    requested teardown can leave a row that was never a first activation (#3423). The
+    pre-activation fence does not apply to the activated case (#3382), so its allocation can be
+    released.
     """
-    binding = await authority_system_binding(conn, system_id)
-    if binding is None or binding.ownership_state != "torn-down":
-        return False
     cursor = await conn.execute(
-        "SELECT EXISTS (SELECT 1 FROM external_boot_activations WHERE system_id = %s)",
-        (system_id,),
+        "SELECT authority_system_torn_down_after_activation(%s)", (system_id,)
     )
     row = await cursor.fetchone()
     return row is not None and row[0] is True

@@ -5710,6 +5710,26 @@ def _assert_disposed(root: Path, point: RecoveryPoint, disposition: str) -> None
             assert receipt is not None and receipt.managed
 
 
+def test_real_adapter_finalization_leaves_an_adopted_receipt_in_place(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+    host = _RealPreparation(_metadata("recovered"), root)
+    io, _factory = _resolving_io(root, host, _RealSession(host), [])
+    ports = LocalLibvirtExternalBoot(io)
+
+    ports.finalize_cleanup_tombstone(
+        point, _cleanup_proof_for(point), OpaqueProviderRef(ref="authority/current")
+    )
+
+    assert (root / recovery_directory_name(point.recovery_ref, point.binding)).is_dir()
+    with RecoveryMetadataStore(root) as store:
+        held = store.read_cleanup_quarantine(point.binding)
+    assert held == receipt.model_copy(update={"managed": True})
+
+
 @pytest.mark.parametrize("disposition", ["delete", "adopt"])
 def test_recovery_object_writes_run_under_one_session(tmp_path: Path, disposition: str) -> None:
     """#3045: the re-read and the store write run in their own pinned session."""

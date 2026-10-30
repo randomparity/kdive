@@ -1240,14 +1240,8 @@ class RemoteModuleVolumePreparationStore:
         response: RemoteModuleLifecycleResponseV1 | None,
     ) -> None:
         self.reopen_lifecycle(request)
-        completion = RemoteModuleLifecycleCompletionV1(
-            state="terminal" if response is not None else "failed-after-mutation",
-            response=response,
-        )
-        self._publish(
-            f"{self._lifecycle_key(request)}.lifecycle-completion",
-            completion.to_canonical_json(),
-        )
+        # The restored record goes first: a crash before the completion leaves evidence a restore
+        # retry publishes the completion from, never a completion that hides absent evidence.
         if response is not None and response.action == "restore":
             authority = request.authority
             restored_key = self._terminal_key(
@@ -1257,6 +1251,14 @@ class RemoteModuleVolumePreparationStore:
                 authority.plan_identity,
             )
             self._publish(f"{restored_key}.restored", response.to_canonical_json())
+        completion = RemoteModuleLifecycleCompletionV1(
+            state="terminal" if response is not None else "failed-after-mutation",
+            response=response,
+        )
+        self._publish(
+            f"{self._lifecycle_key(request)}.lifecycle-completion",
+            completion.to_canonical_json(),
+        )
 
     def reopen_lifecycle_completion(
         self, request: RemoteModuleLifecycleRequestV1
@@ -3234,9 +3236,13 @@ class RemoteExternalBootAuthorityAdapter:
         return await self.observe(request)
 
     async def cleanup_quarantine_inventory(
-        self, request: AuthorityMutationRequestV1
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> tuple[RecoveryObjectObservation, ...]:
-        """Reopen only the exact standing private cleanup receipt."""
+        """Reopen only the exact standing private cleanup receipt.
+
+        The receipt is compared with the proof ``context``, not the request: a retried release
+        that adopted an earlier generation's cleanup still names that cleanup (ADR-0787, #3434).
+        """
         if request.operation is not AuthorityOperation.CLEANUP:
             return ()
         binding = _activation_binding(request)
@@ -3246,8 +3252,8 @@ class RemoteExternalBootAuthorityAdapter:
         if receipt is None or receipt.managed:
             return ()
         if (
-            receipt.operation_identity != request.operation_identity
-            or receipt.attempt_id != request.attempt_id
+            receipt.operation_identity != context.operation_identity
+            or receipt.attempt_id != context.attempt_id
         ):
             # Deferred: the service module imports this one.
             from kdive.providers.external_boot_authority.service import AuthorityServiceError
@@ -3265,7 +3271,8 @@ class RemoteExternalBootAuthorityAdapter:
         receipt = await self._executor.run(
             lambda: self._coordinator.cleanup_quarantine(binding, request.plan_identity)
         )
-        if receipt is None:
+        if receipt is None or receipt.managed:
+            # An adopted receipt is the operator's; finalize leaves it in place (ADR-0787).
             return
         if (
             receipt.operation_identity != context.operation_identity
