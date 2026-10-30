@@ -172,8 +172,9 @@ recovery for the next attempt.
 
 - **Admit the failure and leave the activation `recovering`.** verified: the reconciler recovery
   lane (`_CANDIDATE_SQL["recovery"]`, `src/kdive/reconciler/repairs/external_boot.py`, main
-  237f78212) re-dispatches every `recovering` activation whose attempt deadline has passed, and
-  that job meets the same expired deadline again.
+  237f78212) selects every `recovering` activation whose attempt deadline has passed. Nothing
+  renews that deadline, so the lane would redrive a recovery its last job gave up on, on every
+  sweep and without bound.
 - **Return a failed resolve-conflict to `recovery_conflict`.** judgment: the mutation may have
   stopped part way, so the original conflict binding no longer describes the host. Only
   `recovery_failed` claims nothing about the host state.
