@@ -398,6 +398,75 @@ def test_local_recovery_client_is_capped_by_persisted_request_deadline(
     asyncio.run(main())
 
 
+def test_reentered_local_recovery_client_gets_a_fresh_budget_after_the_request_deadline(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def main() -> None:
+        vehicle = build_vehicle()
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+        deadlines: list[float] = []
+        acknowledger = RecordingAcknowledger(authority_role_dsns("kdive_provider_authority"))
+        executor = RecordingExecutor("source")
+
+        class Client:
+            async def acknowledge(
+                self, request: AuthorityTakeoverRequestV1
+            ) -> AuthorityAcknowledgementV1:
+                return await acknowledger.acknowledge(request)
+
+            async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+                return await executor.execute(request)
+
+        def client_factory(_binding: object, _marker: object, deadline: float) -> Client:
+            deadlines.append(deadline)
+            return Client()
+
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            case = await seed_case(
+                seed,
+                vehicle,
+                purpose="recover",
+                activation_state="recovering",
+                system_state="crashed",
+                with_reservation=True,
+                with_pre_recovery=True,
+            )
+            timing = LocalExternalBootTimingV1(
+                accel="kvm", console_window_s=900, deadline_budget_s=1200
+            )
+            metadata = RecoveryRequestV1(
+                request_identity="sha256:" + "a" * 64,
+                readiness_deadline=now - timedelta(seconds=100),
+                local_timing=timing,
+            )
+            job = build_job(
+                JobKind.BOOT,
+                {
+                    "run_id": str(vehicle.run_id),
+                    "external_boot_authority_v1": case.marker,
+                    "recovery_request_v1": metadata.model_dump(mode="json", by_alias=True),
+                },
+            ).model_copy(update={"id": case.job_id, "attempt": case.attempt})
+            ports = ExternalBootHandlerPorts(
+                resolver=resolver_for(vehicle),
+                incarnation_credential=SecretStr(case.credential),
+                secret_registry=SecretRegistry(),
+                authority_client_factory=cast(Any, client_factory),
+                clock=lambda: now,
+            )
+            handler = build_operations(ports).get("recover")
+            assert handler is not None
+            marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+            before = asyncio.get_running_loop().time()
+            async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+                result = await handler(worker, job, marker)
+            after = asyncio.get_running_loop().time()
+            assert result.result.operation == "recover"
+            assert before + 1200 <= deadlines[0] <= after + 1200
+
+    asyncio.run(main())
+
+
 def test_recover_commits_attempt_before_provider_and_reuses_it(
     migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:

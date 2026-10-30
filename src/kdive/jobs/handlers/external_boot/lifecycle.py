@@ -43,6 +43,7 @@ from kdive.jobs.handlers.external_boot.runner import (
     _CommandLineMismatch,
     authority_ref,
     run_operation,
+    starts_fresh_readiness_budget,
 )
 from kdive.jobs.handlers.system_reclaim import reclaim_system_core_after_provider_teardown
 from kdive.jobs.models import (
@@ -82,14 +83,8 @@ def _request_deadline(context: OperationContext, fallback: datetime) -> datetime
 
 
 def _starts_fresh_readiness_budget(context: OperationContext) -> bool:
-    """Whether a release is re-entering a recovery that an earlier job attempt began.
-
-    A request's readiness deadline is stamped once at admission, five minutes ahead, and a later
-    job attempt only starts after the lease (also five minutes) has lapsed. Beginning the derived
-    RECOVER against that deadline is always refused, so a re-entered release gets its own budget
-    (ADR-0684 amendment, #3395).
-    """
-    return context.job.attempt > 1 or context.activation.state is State.RECOVERING
+    """Whether a release is re-entering a recovery that an earlier job attempt began (#3395)."""
+    return starts_fresh_readiness_budget(context.job, context.activation)
 
 
 _ACTIVATION_EVIDENCE: Final = frozenset({"materialization", "recovery_point"})
