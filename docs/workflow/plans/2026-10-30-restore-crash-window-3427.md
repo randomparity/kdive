@@ -3,6 +3,8 @@
 Spec: [2026-10-30-restore-crash-window-3427-design.md](../specs/2026-10-30-restore-crash-window-3427-design.md).
 Branch `fix/restore-crash-window-3427`, base `main`.
 
+Expected implementation size: 150–230 changed lines (tests ~120–170 in one file, source ~20–40 across two files, ADR amendment ~15).
+
 ## Task 1: failing tests
 
 File: `tests/providers/remote_libvirt/test_remote_module_authority_host.py`.
