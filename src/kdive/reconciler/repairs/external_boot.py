@@ -75,7 +75,7 @@ _CANDIDATE_SQL = {
         JOIN external_boot_reservations reservation ON reservation.activation_id = a.id
         JOIN systems system ON system.id = a.system_id
         LEFT JOIN external_boot_reservation_releases released ON released.activation_id = a.id
-        WHERE a.state IN ('recovered', 'abandoned', 'recovery_conflict', 'recovery_failed')
+        WHERE a.state = 'recovered'
           AND NOT a.cleanup_complete AND reservation.state = 'ready'
           AND released.activation_id IS NULL
     """,

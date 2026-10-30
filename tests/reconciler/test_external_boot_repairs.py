@@ -345,6 +345,42 @@ def test_each_post_prepared_lane_enqueues_its_existing_worker_operation(
     asyncio.run(body())
 
 
+@pytest.mark.parametrize("activation_state", ["recovery_failed", "recovery_conflict", "abandoned"])
+def test_release_lane_skips_states_the_release_handler_refuses(
+    migrated_url: str, authority_role_dsns: _RoleDsns, activation_state: str
+) -> None:
+    async def body() -> None:
+        vehicle = build_vehicle()
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as admin:
+            await seed_case(
+                admin,
+                vehicle,
+                purpose="release",
+                activation_state=activation_state,
+                attempt_state="failed",
+                with_reservation=True,
+            )
+        async with await psycopg.AsyncConnection.connect(
+            authority_role_dsns("kdive_reconciler"), autocommit=True
+        ) as reconciler:
+            for _ in range(2):
+                assert (
+                    await external_boot.repair_external_boot_lane(
+                        reconciler,
+                        lane="release",
+                        resolver=resolver_for(vehicle),
+                        authority_instance="authority-current",
+                    )
+                    == 0
+                )
+            cursor = await reconciler.execute(
+                "SELECT count(*) FROM jobs WHERE dedup_key LIKE 'external-boot:repair:%'"
+            )
+            assert await cursor.fetchone() == (0,)
+
+    asyncio.run(body())
+
+
 def test_reservation_cannot_exist_without_an_activation(migrated_url: str) -> None:
     async def body() -> None:
         async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
