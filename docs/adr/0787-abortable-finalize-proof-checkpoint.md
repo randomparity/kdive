@@ -112,3 +112,29 @@ journal position. The service therefore builds the `finalize` context from the a
 `mutation-started` record (the oldest, when several retries were interrupted), not the retry's, and the remote adapter's exact comparison with the
 receipt holds. The receipt is not rewritten, so the published quarantine row and the object port's
 digest fences keep naming what the first attempt recorded.
+
+### Amendment (2026-10-30): release finalize leaves an adopted receipt in place (#3435)
+
+`ops.resolve_recovery_orphan` with the `adopt` disposition marks the cleanup quarantine receipt
+`managed`, and the quarantine row becomes `adopted`. A later attempt of the same release job still
+reaches `finalize`. Before this amendment, both providers then removed the adopted receipt and the
+records it proves. The remote adapter never read `managed`, and the local finalizer unlinked the
+receipt with the tombstone.
+
+- Release `finalize` makes no change while the standing cleanup receipt is `managed`. Remote
+  `finalize` returns before its proof comparison. Local `finalize_cleanup_tombstone` reads the
+  receipt under its pinned session and returns. An unmanaged or absent receipt finalizes as
+  before.
+- The two providers agree. Inventory, observation, recovery-object `delete` and now `finalize` all
+  leave a managed receipt alone, so the `adopted` row keeps describing what is on disk.
+- System teardown's discard path (ADR-0583) is unchanged: destruction still owns its cleanup.
+
+Considered & rejected:
+
+- **Keep removal, and have the resolver's adopt warn that a retry may still finalize.** judgment:
+  this leaves the database recording `adopted` for an object the provider later deletes, and it
+  makes an audited administrator decision depend on whether a retry happens to follow.
+- **Raise a conflict on a managed receipt.** verified: `rg -n '"managed": (False|True)' src/kdive`
+  at `37e2db046` finds only the two adopt writes setting `True`, plus the remote marker's
+  `False` copy, which never rewrites the receipt. Nothing un-adopts a receipt, so every later
+  retry of the release job would fail the same way.
