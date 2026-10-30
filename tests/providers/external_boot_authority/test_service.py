@@ -175,7 +175,7 @@ class _FinalizingAdapter(_Adapter):
         self.calls.append("finalize")
 
     async def cleanup_quarantine_inventory(
-        self, request: object
+        self, request: object, context: object
     ) -> tuple[RecoveryObjectObservation, ...]:
         return (self.receipt,)
 
