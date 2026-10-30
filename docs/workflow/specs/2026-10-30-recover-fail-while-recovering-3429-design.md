@@ -33,8 +33,9 @@ Each replacement checks that its old text occurs exactly once and raises an exce
   `resolve-conflict`. When the failure is terminal and the activation is `recovering`, it marks the
   current attempt `failed` and the activation `recovery_failed`, both with
   `external-boot-terminal-evidence-v1` evidence (outcome `recovery_failed`). It also discharges the
-  System's open module obligations as `terminal_escape`. A failure is terminal when its category
-  is terminal or the job is on its last attempt.
+  System's open module obligations as `terminal_escape`. A failure is terminal when the result is
+  marked terminal, the job is on its last attempt, or it repeats the previous attempt's
+  `provider-conflict` failure (the ADR-0714 rule). That third case can now close a recovery too.
 - **Obsolete path removed.** The recover-only readiness branch is deleted. The widened close
   handles recover terminal failures while `recovering`, readiness included. A recover failure on
   an `active` activation no longer has a branch that can refuse it. It commits, the job fails, and
@@ -84,21 +85,9 @@ recovery when it fails.
 
 ## Validation
 
-Connected tests in `tests/db/test_migration_0185_recover_fail_while_recovering.py` exercise the
-real migrated database through the `kdive_worker` role. They are written first, and each fails
-against 0182 as described:
-
-| Criterion | Test | Red before 0185 |
-|---|---|---|
-| C1, C4 | `test_resolve_conflict_non_terminal_failure_while_recovering_requeues` | `superseded` |
-| C2 | `test_terminal_failure_while_recovering_closes_the_recovery[recover-terminal / resolve-conflict-terminal / recover-last-attempt / resolve-conflict-last-attempt]` | resolve-conflict: `superseded`; recover last-attempt: activation stays `recovering` |
-| C3 | `test_recover_readiness_failure_before_recovery_began_commits` | `superseded` |
-| C5 | `test_0185_patch_targets_exist_once` | n/a (structural; it guards the rewrite) |
-
-`resolve-conflict` on `recovery_conflict` already has
-`test_resolve_conflict_failure_applies_after_evidence_only_acknowledgement`. The terminal recover
-readiness close while `recovering` already has
-`test_worker_authority_terminal_recovery_failure_discharges_mutations`. Both must stay green.
-
-Migration window tests (`tests/db/test_migrate.py` and the 0091, 0102 and 0115 window tests) get
-the new row and K+1.
+Connected tests in `tests/db/test_migration_0185_recover_fail_while_recovering.py` are written
+first. The plan's Task 1 Verification lists each test, the criterion it proves, and its red state
+before 0185. `test_resolve_conflict_failure_applies_after_evidence_only_acknowledgement` and
+`test_worker_authority_terminal_recovery_failure_discharges_mutations` already cover a failure on
+`recovery_conflict` and a terminal recover readiness close while `recovering`; both must stay
+green. The four migration window tests gain the 0185 row and K+1.

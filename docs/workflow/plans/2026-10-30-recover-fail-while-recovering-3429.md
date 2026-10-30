@@ -12,8 +12,8 @@ source changes. Spec:
 Tech stack: PostgreSQL 17 PL/pgSQL; Python 3.14 pytest with the disposable Postgres fixtures in
 `tests/db/conftest.py` (`migrated_url`, `pg_conn`, `authority_role_dsns`).
 
-Expected implementation size: 260–300 changed lines (M) — the 0185 migration (~90), one new test
-module (~210), and five window-list rows.
+Expected implementation size: 320–340 changed lines (M) — the 0185 migration (89), one new test
+module (about 226), seven window-list rows and four slice edits.
 
 ## Global Constraints
 

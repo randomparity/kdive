@@ -157,8 +157,9 @@ arrived before any recovery attempt existed.
 
 Migration 0185 makes the `fail` admission accept the same activation states that allocation
 already admits for each purpose: resolve-conflict now also accepts `recovering`. The terminal close
-from #3396 now covers `recover` and `resolve-conflict` as well as `release`. A terminal failure, or
-a failure on the job's last attempt, that finds the activation `recovering` marks the current
+from #3396 now covers `recover` and `resolve-conflict` as well as `release`. A terminal failure
+(marked terminal, on the job's last attempt, or a repeated `provider-conflict` under this ADR's
+rule) that finds the activation `recovering` marks the current
 attempt `failed` and the activation `recovery_failed`, with the same evidence and the same
 `terminal_escape` discharge. The recover-only readiness branch is removed because the widened
 close covers it. A recover failure on an `active` activation commits, and the activation stays
@@ -169,6 +170,10 @@ allocation already lets a job take over any `recovering` attempt, and the job th
 System's one `current` authority. A non-terminal failure still requeues the job and leaves the
 recovery for the next attempt.
 
+- **Admit the failure and leave the activation `recovering`.** verified: the reconciler recovery
+  lane (`_CANDIDATE_SQL["recovery"]`, `src/kdive/reconciler/repairs/external_boot.py`, main
+  237f78212) re-dispatches every `recovering` activation whose attempt deadline has passed, and
+  that job meets the same expired deadline again.
 - **Return a failed resolve-conflict to `recovery_conflict`.** judgment: the mutation may have
   stopped part way, so the original conflict binding no longer describes the host. Only
   `recovery_failed` claims nothing about the host state.
