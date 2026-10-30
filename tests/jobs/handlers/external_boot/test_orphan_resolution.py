@@ -530,6 +530,7 @@ def test_disposition_flows_from_admin_admission_through_real_queue_and_fault_pro
                             authority_role_dsns("kdive_provider_authority")
                         ),
                         provider,
+                        authority_instance="authority/a",
                     ),
                 )
 
@@ -563,7 +564,7 @@ def test_disposition_flows_from_admin_admission_through_real_queue_and_fault_pro
                     registry.register(
                         JobKind.RESOLVE_RECOVERY_ORPHAN,
                         lambda handler_conn, job: resolve_recovery_orphan_handler(
-                            handler_conn, job, sender_factory=lambda: sender
+                            handler_conn, job, resolver=provider_resolver(authority_sender=sender)
                         ),
                     )
                     return registry
@@ -705,6 +706,12 @@ def test_admin_disposition_mutates_private_local_store_and_resumes_between_objec
                         )
                     )
 
+                # A request's rows share one authority; the per-ordinal journal heads do not.
+                await conn.execute(
+                    "UPDATE external_boot_recovery_quarantine SET authority_instance = %s "
+                    "WHERE system_id = %s",
+                    ("authority/local", system_id),
+                )
                 selected = sorted(published, key=lambda item: item[0])[:2]
                 sibling = next(item for item in published if item not in selected)
                 executor = _InterruptBeforeSecondDisposition(local_adapter)
@@ -713,6 +720,7 @@ def test_admin_disposition_mutates_private_local_store_and_resumes_between_objec
                     lambda: _authority_connection(authority_role_dsns("kdive_provider_authority")),
                     local_ports,
                     executor,
+                    authority_instance="authority/local",
                 )
                 service = ExternalBootAuthorityService(
                     repository=authority_repository,
@@ -774,7 +782,7 @@ def test_admin_disposition_mutates_private_local_store_and_resumes_between_objec
                     registry.register(
                         JobKind.RESOLVE_RECOVERY_ORPHAN,
                         lambda handler_conn, job: resolve_recovery_orphan_handler(
-                            handler_conn, job, sender_factory=lambda: sender
+                            handler_conn, job, resolver=provider_resolver(authority_sender=sender)
                         ),
                     )
                     return registry
