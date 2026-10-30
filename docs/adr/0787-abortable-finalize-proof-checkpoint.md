@@ -176,3 +176,40 @@ Considered & rejected:
 - **Accept any caller-supplied identity in the publish function.** judgment: a
   `SECURITY DEFINER` boundary would then trust the authority worker for a value the database
   can derive itself.
+
+### Amendment (2026-10-30): remote finalize removes only what it can prove and names the remedy (#3419)
+
+The #3326 and #3333 reviews left six low findings on remote `finalize_cleanup_quarantine`. Each is
+now fixed. The #3435 and #3434 amendments are unchanged: a `managed` receipt still returns before
+any of this runs, and the receipt is still compared with the derived proof context.
+
+- The recovery index is removed only while its content names the record being finalized. The
+  check no longer depends on the record still being present, so a retry after the record went
+  first also removes the index. An index naming another record stays in place.
+- Each finalize directory scan refuses a store holding more than 4096 names, the bound System
+  teardown already applied, and the error tells the operator to remove leftover files and retry.
+  The refusal happens before the marker is written.
+- The `.request` conflict check compares the whole module operation, as `teardown_preparation`
+  does, rather than only the nonce. Finalize no longer records a nonce that teardown would refuse.
+- A `.request` file that does not parse, and a marker without teardown refs once the terminal
+  record is gone, now say what to do next. For the request: restore it or remove it as residue,
+  then retry finalize. For the marker: confirm the activation's module volumes are gone from the
+  pool, remove the marker, then retry teardown. Without the marker, teardown reads the live
+  records it did before finalize.
+- Crash-window tests cover the index removed with the record present (the retry finds the receipt
+  through the marker) and the record removed with the index present (the retry finds it through
+  the index). Each test fails if the index-then-record order or that retry path changes.
+- The reviews described `refuse_finalized` followed by a write as relying on a single executor.
+  That description is wrong: the module executor runs up to four calls at once. The
+  check-then-act is ordered by the authority service's one active mutation per System lane
+  (ADR-0584), and the `refuse_finalized` docstring now says so. A second authority instance
+  writing the same store directory would break it.
+
+Considered & rejected:
+
+- **Scan `.object-index` files by content when the record is gone.** judgment: object indexes are
+  removed before the index and the record, so a retry that finds the record gone has already
+  removed them. The scan would add work and find nothing in that state.
+- **Add a store lock around `refuse_finalized` and the write.** judgment: the System lane already
+  serializes those calls within one service. A lock would only help a second process writing the
+  same store directory, which this change does not introduce.
