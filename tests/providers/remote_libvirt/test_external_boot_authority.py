@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -211,9 +212,9 @@ def test_concrete_remote_materializer_binds_and_publishes_private_volume_names(
 
     assert result.artifacts.kernel.ref == "volumes/exact-private-kernel"
     modules_ref = result.artifacts.modules.ref
+    assert re.fullmatch(r"bundle/[0-9a-f]{64}", modules_ref)
     assert modules_ref == f"bundle/{plan.bundle.sha256.removeprefix('sha256:')}"
     assert parse_boot_artifact_name(modules_ref) is None
-    assert "/" in modules_ref
     assert result.plan_identity == plan.identity
     assert result.ownership.system_id == binding.system_id
     assert result.ownership.run_id == binding.run_id
