@@ -944,7 +944,9 @@ _REVIEWED_FIRST_PARTY_IMPORTS = frozenset(
         "kdive.services.external_boot:ExternalBootOperation",
         "kdive.services.external_boot:check_external_boot_admission",
         "kdive.services.external_boot.local_timing:local_external_boot_timing",
+        "kdive.providers.core.resolver:ProviderBinding",
         "kdive.providers.core.resolver:ProviderResolver",
+        "kdive.services.external_boot.routing:server_authority_instance",
     }
 )
 
