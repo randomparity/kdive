@@ -10,13 +10,11 @@ from typing import Any, cast
 import pytest
 
 from kdive.mcp.responses import ToolResponse
-from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack import authority_faults
 from tests.integration.live_stack.authority_faults import Barrier
 from tests.integration.live_stack.authority_lane import AuthoritySystem
-from tests.integration.live_stack.evidence import EvidenceWriter
-from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.integration.live_stack.scenario import ScenarioStop
 from tests.integration.live_stack.spine import SpinePhaseError
 from tests.live_vm.installed_local_authority_support import (
     ActivationJob,
@@ -167,7 +165,7 @@ def test_remote_activation_blocker_names_the_envelope_reason(
 
     monkeypatch.setattr(authority_faults, "start_external_boot_activation", refused)
     with pytest.raises(ScenarioStop) as stop:
-        asyncio.run(authority_faults._activate(_system(remote=True)))
+        asyncio.run(authority_faults.activate(_system(remote=True)))
     assert stop.value.outcome is Outcome.BLOCKED
     assert str(stop.value) == (
         "remote external-boot activation failed at boot (error envelope; "
@@ -187,32 +185,44 @@ def test_only_a_remote_activation_uploads_an_initrd(
 
     monkeypatch.setattr(authority_faults, "start_external_boot_activation", start)
     monkeypatch.setattr(authority_faults, "drain_job", _async())
-    asyncio.run(authority_faults._activate(_system(remote=remote)))
+    asyncio.run(authority_faults.activate(_system(remote=remote)))
     assert [(kwargs["with_initrd"], kwargs["require_kdump"]) for kwargs in started] == [
         (remote, not remote)
     ]
 
 
-def _fake_arm_a(monkeypatch: pytest.MonkeyPatch, fake: _FakeBarrier) -> list[str]:
+def _fake_arm_a(
+    monkeypatch: pytest.MonkeyPatch,
+    fake: _FakeBarrier,
+    *,
+    after: tuple[str, int] = ("released", 0),
+    before_release: str = "active",
+) -> list[str]:
+    """``after`` is what the allocation read and the capacity show once force_release answered.
+
+    ``before_release`` is the allocation read once the teardown has drained, ahead of the release.
+    """
     heads = iter([("mutation-started", "teardown"), ("terminal", "teardown")])
     allocations: list[str] = []
+    states = iter(["active", "active", before_release, after[0]])
+    capacity = iter([1, 1, 1, after[1]])
 
     async def scalar(_op: object, name: str, **_args: object) -> ToolResponse:
         if name == "systems.teardown":
             fake.arrive()
             return ToolResponse(object_id="teardown-job", status="queued")
         if name == "allocations.wait":
-            allocations.append("active")
-            return ToolResponse(object_id="alloc", status="active")
+            allocations.append(state := next(states))
+            return ToolResponse(object_id="alloc", status=state)
         return ToolResponse(object_id=_SYSTEM, status="ready")
 
     patches: dict[str, Any] = {
         "require_evidence_read_access": _async(),
-        "_activate": _async(_activation()),
+        "activate": _async(_activation()),
         "release_external_boot": _async(ToolResponse(object_id="release-job", status="queued")),
         "drain_job": _async(),
         "assert_root_release_completion": _async(),
-        "capacity_in_use": _async(1),
+        "capacity_in_use": lambda _op: _async(next(capacity))(),
         "barrier_for": lambda _system: _barrier(fake),
         "scalar": scalar,
         "job_claim": _async(("running", 1)),
@@ -254,7 +264,41 @@ def test_force_release_arm_requires_refusal_then_release(monkeypatch: pytest.Mon
     )
     assert observed["refusal"] == authority_faults.TEARDOWN_REQUIRED
     assert observed["release_after_quiescence"] == "released"
+    assert observed["allocation_after_release"] == "released"
+    assert observed["capacity_freed"] == 1
     assert fake.state == "idle"
+
+
+@pytest.mark.parametrize(
+    ("after", "message"),
+    [(("active", 0), "allocation"), (("released", 1), "capacity")],
+)
+def test_force_release_arm_observes_the_release_outside_the_envelope(
+    monkeypatch: pytest.MonkeyPatch, after: tuple[str, int], message: str
+) -> None:
+    # The tool's own `released` is not the effect (#3186): the allocation and capacity must show it.
+    fake = _FakeBarrier()
+    _fake_arm_a(monkeypatch, fake, after=after)
+    with pytest.raises(AssertionError, match=message):
+        asyncio.run(
+            authority_faults.held_teardown_release(
+                _system(), "db", _force_release(_refusal(authority_faults.TEARDOWN_REQUIRED))
+            )
+        )
+
+
+def test_force_release_arm_requires_the_allocation_active_before_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A release the teardown itself performed would make force_release's effect unprovable.
+    fake = _FakeBarrier()
+    _fake_arm_a(monkeypatch, fake, before_release="released")
+    with pytest.raises(AssertionError, match="teardown released"):
+        asyncio.run(
+            authority_faults.held_teardown_release(
+                _system(), "db", _force_release(_refusal(authority_faults.TEARDOWN_REQUIRED))
+            )
+        )
 
 
 def test_force_release_arm_rejects_another_refusal_reason(
@@ -333,10 +377,10 @@ def _fake_arm_b(
         fake.arrive()
         return ToolResponse(object_id="release-job", status="queued")
 
-    claims = iter([("running", 1), ("succeeded", 2)])
+    claims = iter([("running", 1), ("succeeded", 2), ("succeeded", 1), ("succeeded", 1)])
     patches: dict[str, Any] = {
         "require_evidence_read_access": _async(),
-        "_activate": _async(_activation()),
+        "activate": _async(_activation()),
         "activation_of": _async(_ACTIVATION),
         "barrier_for": lambda _system: _barrier(fake),
         "release_external_boot": release,
@@ -448,24 +492,6 @@ def test_remote_orphan_arm_observes_the_remote_receipt_and_row(
     assert observed["resolved"] == "deleted"
 
 
-@pytest.mark.parametrize("provider", ["local-libvirt", "remote-libvirt"])
-def test_blocked_arm_passes_the_lane_gates_first(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: str
-) -> None:
-    gates: list[str] = []
-    lane = authority_faults.authority_lane
-    monkeypatch.setattr(lane, "select_lane", lambda: gates.append("select") or "lane")
-    monkeypatch.setattr(lane, "select_remote_lane", lambda: gates.append("select") or "lane")
-    monkeypatch.setattr(lane, "require_lane", lambda *_a: gates.append("gate"))
-    monkeypatch.setattr(lane, "require_remote_lane", lambda *_a: gates.append("gate"))
-    cell = Cell("c", "tool/c", 3185, "c", "c", ("effect",), provider=provider, guest_arch="x86_64")
-    run = CellRun(cell, EvidenceWriter(tmp_path))
-    with pytest.raises(ScenarioStop) as stop:
-        authority_faults.blocked_after_gates(run, "u", authority_faults.REMOTE_ORPHAN_BLOCKED)
-    assert gates == ["select", "gate"]
-    assert str(stop.value) == authority_faults.REMOTE_ORPHAN_BLOCKED
-
-
 _COMPOSITE = "sha256:" + "c" * 64
 
 
@@ -474,6 +500,8 @@ def _fake_conflict_arm(
     failures: dict[str, str],
     heads: list[tuple[object, ...]],
     states: tuple[str, ...] = ("recovery_conflict", "recovered"),
+    anchored: int | None = 7,
+    current: int = 7,
 ) -> list[str]:
     """Fake every boundary of the conflict arm; return the ordered calls it made."""
     calls: list[str] = []
@@ -493,7 +521,7 @@ def _fake_conflict_arm(
 
     patches: dict[str, Any] = {
         "require_evidence_read_access": _async(),
-        "_activate": _async(_activation()),
+        "activate": _async(_activation()),
         "activation_of": _async(_ACTIVATION),
         "perturb_definition": lambda _system: calls.append("perturb"),
         "release_external_boot": _async(ToolResponse(object_id="release-job", status="queued")),
@@ -501,6 +529,8 @@ def _fake_conflict_arm(
         "conflict_head": lambda *_a: _async(next(remaining))(),
         "_activation_state": lambda *_a: _async(next(activation_states))(),
         "scalar": scalar,
+        "audited_sequence": _async(anchored),
+        "head_sequence": _async(current),
     }
     for name, value in patches.items():
         monkeypatch.setattr(authority_faults, name, value)
@@ -580,6 +610,38 @@ def test_conflict_arm_requires_the_resolution_head_to_be_the_source(
         asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
 
 
+def test_conflict_arm_tolerates_a_release_repair_after_the_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_conflict_arm(
+        monkeypatch,
+        {"release": "conflict"},
+        [
+            ("terminal", "recover", "conflict", "conflict", _COMPOSITE),
+            ("takeover-acknowledged", "release", None, None, None),
+        ],
+        current=9,
+    )
+    observed = asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+    assert observed["activation"] == "recovered"
+
+
+def test_conflict_arm_requires_the_resolution_to_anchor_a_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_conflict_arm(
+        monkeypatch,
+        {"release": "conflict"},
+        [
+            ("terminal", "recover", "conflict", "conflict", _COMPOSITE),
+            ("terminal", "resolve-conflict", "source", "source", _COMPOSITE),
+        ],
+        anchored=None,
+    )
+    with pytest.raises(AssertionError, match="anchored no journal record"):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+
+
 def test_conflict_arm_requires_the_activation_recovered(monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_conflict_arm(
         monkeypatch,
@@ -592,3 +654,77 @@ def test_conflict_arm_requires_the_activation_recovered(monkeypatch: pytest.Monk
     )
     with pytest.raises(AssertionError):
         asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+
+
+@pytest.mark.parametrize("arm", ["held_teardown_release", "quarantined_orphan"])
+def test_arms_upload_the_kernel_tree_they_are_given(
+    monkeypatch: pytest.MonkeyPatch, arm: str
+) -> None:
+    seen: list[object] = []
+
+    async def activate(_system: AuthoritySystem, **kwargs: object) -> ActivationJob:
+        seen.append(kwargs.get("kernel_tree"))
+        raise RuntimeError("stop after activation")
+
+    monkeypatch.setattr(authority_faults, "require_evidence_read_access", _async())
+    monkeypatch.setattr(authority_faults, "activate", activate)
+    tree = Path("/fixture/tree")
+    body = getattr(authority_faults, arm)
+    with pytest.raises(RuntimeError, match="stop after activation"):
+        asyncio.run(body(_system(), "db", _async(), kernel_tree=tree))
+    assert seen == [tree]
+
+
+def test_the_conflict_arm_uploads_the_kernel_tree_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    async def activate(_system: AuthoritySystem, **kwargs: object) -> ActivationJob:
+        seen.append(kwargs.get("kernel_tree"))
+        raise RuntimeError("stop after activation")
+
+    monkeypatch.setattr(authority_faults, "require_evidence_read_access", _async())
+    monkeypatch.setattr(authority_faults, "activate", activate)
+    tree = Path("/fixture/tree")
+    with pytest.raises(RuntimeError, match="stop after activation"):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db", kernel_tree=tree))
+    assert seen == [tree]
+
+
+def test_activation_forwards_the_kernel_tree_and_evidence_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    async def start(*_args: object, **kwargs: object) -> ActivationJob:
+        seen.update(kwargs)
+        return _activation()
+
+    monkeypatch.setattr(authority_faults, "start_external_boot_activation", start)
+    monkeypatch.setattr(authority_faults, "drain_job", _async())
+    asyncio.run(
+        authority_faults.activate(
+            _system(), kernel_tree=Path("/tree"), evidence_dir=Path("/evidence")
+        )
+    )
+    assert (seen["kernel_tree"], seen["evidence_dir"]) == (Path("/tree"), Path("/evidence"))
+
+
+@pytest.mark.parametrize("state", ["failed", "canceled"])
+def test_an_internal_job_that_did_not_succeed_fails_the_arm(
+    monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    monkeypatch.setattr(authority_faults, "job_claim", _async((state, 1)))
+    with pytest.raises(AssertionError, match=state):
+        asyncio.run(authority_faults._await_internal_job("db", "job"))
+
+
+def test_an_internal_job_is_read_from_the_database_until_it_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claims = iter([("queued", 1), ("running", 1), ("succeeded", 1)])
+    monkeypatch.setattr(authority_faults, "job_claim", lambda *_a: _async(next(claims))())
+    monkeypatch.setattr(authority_faults, "_POLL_S", 0.0)
+    asyncio.run(authority_faults._await_internal_job("db", "job"))
+    assert next(claims, None) is None

@@ -918,7 +918,7 @@ def test_declared_authority_fails_without_it(
     roles = {"server": sha, "worker": sha, "reconciler": sha}
     identity = RunIdentity(sha, "b" * 64, "fedora:44", "x86_64", True, roles)
     monkeypatch.setattr(scenario, "require_stack", lambda: "http://stack.test/mcp")
-    monkeypatch.setattr(scenario, "run_identity", lambda _url: identity)
+    monkeypatch.setattr(scenario, "run_identity", lambda _url, **_kw: identity)
     monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
     monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
     cell = _bound(_cell("runs.release_external_boot", "local-libvirt", "x86_64"))
@@ -930,6 +930,45 @@ def test_declared_authority_fails_without_it(
 
     with pytest.raises(AssertionError, match="missing:authority"):
         scenario.run_cell(cell, body)
+
+
+@pytest.mark.parametrize(
+    ("tool", "provider", "reads"),
+    [
+        ("ops.force_release", "remote-libvirt", True),
+        ("ops.force_release", "local-libvirt", False),
+        ("ops.force_teardown", "remote-libvirt", False),
+    ],
+)
+def test_only_a_remote_authority_cell_reads_the_remote_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str, provider: str, reads: bool
+) -> None:
+    # ADR-0788: the provider host's authority serves a remote authority cell.
+    sha = "a" * 40
+    roles = dict.fromkeys(("server", "worker", "reconciler", "authority"), sha)
+    identity = RunIdentity(sha, "b" * 64, "fedora:44", "x86_64", True, roles)
+    readers: list[object] = []
+
+    def read_identity(_url: str, *, remote_authority: object = None) -> RunIdentity:
+        readers.append(remote_authority)
+        return identity
+
+    monkeypatch.setattr(scenario, "require_stack", lambda: "http://stack.test/mcp")
+    monkeypatch.setattr(scenario, "run_identity", read_identity)
+    monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
+    monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
+    cell = next(
+        c
+        for c in tool_cells.tool_cells((tool,))
+        if c.kind == "functional" and c.provider == provider and c.guest_arch == "x86_64"
+    )
+
+    async def body(run: CellRun, *_: object) -> None:
+        for name in cell.assertions:
+            run.prove(name, {})
+
+    scenario.run_cell(cell, body)
+    assert readers == [scenario.remote_authority_revision if reads else None]
 
 
 def test_foreign_arch_cell_skips_first(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1001,7 +1040,7 @@ def test_run_cell_records_the_proven_outcome(
     sha = "a" * 40
     identity = RunIdentity(sha, "b" * 64, "fedora:44", "x86_64", True, {"server": sha})
     monkeypatch.setattr(scenario, "require_stack", lambda: "http://stack.test/mcp")
-    monkeypatch.setattr(scenario, "run_identity", lambda _url: identity)
+    monkeypatch.setattr(scenario, "run_identity", lambda _url, **_kw: identity)
     monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
     monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
     cell = replace(_run(tmp_path, "authentication").cell, node_id="tests/x.py::test_x")
@@ -1140,7 +1179,7 @@ def _refusal_verdict(
     monkeypatch.setattr(tool_cells, "server_configuration", lambda *_: ("default", []))
     monkeypatch.setattr(tool_cells.platform, "machine", lambda: host_arch)
     monkeypatch.setattr(scenario, "require_stack", lambda: "http://stack.test/mcp")
-    monkeypatch.setattr(scenario, "run_identity", lambda _url: identity)
+    monkeypatch.setattr(scenario, "run_identity", lambda _url, **_kw: identity)
     monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
     monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
 

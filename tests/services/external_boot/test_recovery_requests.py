@@ -767,6 +767,50 @@ def test_orphan_repair_refuses_without_a_configured_provider(
     assert "ops.resolve_recovery_orphan" in (response.detail or "")
 
 
+def _orphan_repair_through_the_server_route(
+    url: str, configured_instance: str | None
+) -> tuple[ToolResponse, int]:
+    """Admit one quarantined object as a server that composes no recovery port, only a route."""
+    if configured_instance is not None:
+        config.load({"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": configured_instance})
+
+    async def _body(fixture: _Fixture) -> tuple[ToolResponse, int]:
+        seeded = await _seed(fixture.conn)
+        identity = await _seed_quarantined_object(fixture.conn, seeded)
+        response = await resolve_recovery_orphan(
+            fixture.pool,
+            _platform_ctx(),
+            resolver=provider_resolver(),
+            system_id=str(seeded.system_id),
+            object_identities=[identity],
+            disposition="delete",
+        )
+        requests = await _count(
+            fixture.conn,
+            "SELECT count(*) FROM external_boot_recovery_orphan_requests WHERE system_id = %s",
+            seeded.system_id,
+        )
+        return response, requests
+
+    return _drive(url, _body)
+
+
+def test_orphan_repair_admits_through_the_fixed_authority_route(migrated_url: str) -> None:
+    """#3186: the server composes no recovery port; the quarantine row's authority is the route."""
+    response, requests = _orphan_repair_through_the_server_route(migrated_url, "authority/a")
+    assert response.error_category is None, response.model_dump()
+    assert requests == 1
+
+
+@pytest.mark.parametrize("configured", ["authority/other", None])
+def test_orphan_repair_refuses_when_the_server_route_is_not_the_rows_authority(
+    migrated_url: str, configured: str | None
+) -> None:
+    response, requests = _orphan_repair_through_the_server_route(migrated_url, configured)
+    _assert_unavailable(response)
+    assert requests == 0
+
+
 def test_orphan_repair_needs_no_activation_to_report(migrated_url: str) -> None:
     """ADR-0583 scopes the orphan tool to quarantined objects, not to the activation."""
 

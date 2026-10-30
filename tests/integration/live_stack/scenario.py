@@ -41,6 +41,7 @@ from tests.integration.live_stack.evidence import (
     build_record,
     evidence_root,
     identity_problems,
+    remote_authority_revision,
     run_identity,
 )
 from tests.integration.live_stack.image_smoke import PROBE, Endpoint, parse_probe, ssh
@@ -141,7 +142,10 @@ def run_cell(cell: Cell, scenario: Scenario, *, proves: Outcome = Outcome.SUCCES
     base_url = require_stack()
     run = CellRun(cell, EvidenceWriter(evidence_root()))
     started = time.monotonic()
-    identity = run_identity(base_url)
+    # ADR-0788: a remote authority cell is served by the provider host's authority.
+    served_remotely = cell.provider == "remote-libvirt" and "authority" in cell.roles
+    reader = remote_authority_revision if served_remotely else None
+    identity = run_identity(base_url, remote_authority=reader)
     problems = identity_problems(identity, cell.roles)
     try:
         if any(not problem.startswith("missing:") for problem in problems):

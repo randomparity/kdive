@@ -1550,8 +1550,10 @@ assemble and qualify as in the System section.
   same image, so a cell stops `blocked` when its image was already published on that stack; this
   is why each configuration starts from a wiped stack. The published rows stay registered until
   the wipe.
-- The four `runs.release_external_boot` functional cells stop `blocked` (`missing-prerequisite`):
-  the demo-up lane installs no local external-boot authority. Their rejection cells run.
+- The `runs.release_external_boot` functional cells run only on the installed authority lanes
+  ([authority functional tool cells](#authority-functional-tool-cells-3186)). On the demo-up
+  lane they stop `blocked` (`missing-prerequisite`), because no authority lane config is named.
+  Their rejection cells run on either lane.
 - `runs.*` rejection cells aim at one unbound Run created in the stack's System target project.
   `runs.install` and `runs.boot` answer another project's Run with `configuration_error`,
   `runs.cancel` and `runs.release_external_boot` with `not_found`; each matches its answer for an
@@ -1854,8 +1856,9 @@ x86_64 cells of `ops.force_release`, `ops.force_teardown`, `ops.resolve_recovery
 remote-libvirt cells on the provider lane of the
 [remote runbook](remote-live-stack.md#8-remote-system-tool-cells-3080). The
 [design](../../workflow/specs/2026-10-07-breakglass-tool-cells-design.md) lists what each cell
-compares. Only the two resolve tools require the provider `authority` role (operator decision,
-2026-10-07).
+compares. `ops.force_teardown` alone does not require the provider `authority` role
+([ADR-0788](../../adr/0788-authority-tool-cells-bind-the-serving-authority.md) amends the
+2026-10-07 operator decision for `ops.force_release`).
 
 - An `ops.force_teardown` functional cell provisions the lane image in a fresh `cov-<hex>`
   project. A platform admin who holds no role in that project then tears it down through the
@@ -1863,14 +1866,11 @@ compares. Only the two resolve tools require the provider `authority` role (oper
   gone on the provider. It also proves the provider's other `kdive-` domains and the lane's
   staged base untouched, and one `platform_audit_log` row for the call. The frame then releases
   the allocation and proves capacity returned.
-- The `ops.force_release` functional cells stop `blocked` (`missing-prerequisite`). The
-  observed ordering, a release that becomes terminal only after the protected provider effects
-  are quiescent, exists only for an authority-owned System with external-boot history. No lane
-  frames one (operator decision, 2026-10-07).
-- The `ops.resolve_recovery_orphan` and `systems.resolve_external_boot_conflict` functional
-  cells stop `blocked`. They need an installed provider authority, an authority-owned System, and
-  a quarantined orphan or a recovery conflict, and no lane or harness provides any of them. A
-  blocked remote cell first probes the provider host, so its record carries that host.
+- The `ops.force_release`, `ops.resolve_recovery_orphan` and
+  `systems.resolve_external_boot_conflict` functional cells run only on the installed authority
+  lanes ([authority functional tool cells](#authority-functional-tool-cells-3186)). On the
+  demo-up lane they stop `blocked`. A blocked remote cell first probes the provider host, so its
+  record carries that host.
 - A rejection cell aims at the stack's System target for its provider: a torn-down System and its
   released allocation.
   - The three `ops.*` tools refuse a `platform_operator` with `authorization_denied` before they
@@ -1899,7 +1899,8 @@ uv run python -m tests.integration.live_stack.evidence assemble \
 uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
 ```
 
-Each configuration records 68 cells (4 `success`, 52 `rejection` and 12 `blocked`) and skips the
+On the demo-up lane, each configuration records 68 cells (4 `success`, 52 `rejection` and 12
+`blocked`) and skips the
 other configuration's 68. `qualify` then qualifies 112 of the 136 and lists the 24 blocked cells,
 so it exits non-zero by design. `demo-down.sh --wipe --yes` clears the stack and the worker's
 libvirt, but it does not reach the provider host. So before each wipe, including the one between
@@ -2146,7 +2147,7 @@ image then carries no `ld.so.cache`, and glibc's built-in search path finds the 
   `active`, and `ops.force_release` refused with `external_boot_system_teardown_required`. After
   the barrier is released and the System is `torn_down`, `ops.force_release` must release. A
   remote activation that fails stops the arm `blocked` with the job's phase.
-- **Recovery orphan (local).** The arm activates, arms `cleanup`/`before-finalize`, and calls
+- **Recovery orphan (local and remote).** The arm activates, arms `cleanup`/`before-finalize`, and calls
   `runs.release_external_boot`. While held it requires the head `terminal` for the cleanup, the
   private `cleanup-quarantine.json` present (a fixed read-only root program under
   `/var/lib/kdive/provider-authority/recovery`), and no quarantine row. It then aborts and requires
@@ -2155,6 +2156,9 @@ image then carries no `ld.so.cache`, and glibc's built-in search path finds the 
   the disposition of an already-absent object; the arm requires that row `deleted` by that job and
   every other quarantine row unchanged. If the arm fails after the abort it resolves the rows it
   published before the frame tears down, and names any it could not as residue on the failure.
+  The deletion of a still-present receipt by `ops.resolve_recovery_orphan` stays unproven, because
+  a receipt survives to resolution only if the release job ends terminally, whose recovery is
+  #3143.
 - **Recovery conflict (local and remote, #3327).** The arm activates, then appends one token to
   the System's persistent kernel command line on the authority daemon, as a host administrator
   would ([ADR-0805](../../adr/0805-authority-observed-conflict-is-recorded-from-its-journal-head.md)).
@@ -2170,22 +2174,72 @@ image then carries no `ld.so.cache`, and glibc's built-in search path finds the 
   `recovered`. Teardown straight from an unresolved remote conflict is not covered: the remote
   provider refuses a definition that is neither the recorded source nor target
   ([ADR-0620](../../adr/0620-authority-owned-system-teardown.md)).
-- **Blocked arm.** The remote orphan passes the lane gates and skips with `blocked:` and its
-  reason before any mutation: the arm needs an activated remote System, and remote PREPARE is
-  blocked (#3363). The remote authority now publishes and resolves the quarantine (#3326), and the
-  arm reads the remote store's receipt, but that path is unproven live. It is a narrower blocker,
-  not a pass.
-
-  The deletion of a still-present receipt by `ops.resolve_recovery_orphan` stays unproven, because
-  a receipt survives to resolution only if the release job ends terminally, whose recovery is
-  #3143.
 
 Every hold waits at most 120 s and checks that the held job is still `running` at the same attempt
 with a live lease before the fault, because the worker's authority deadline is five minutes per
 attempt. No arm restarts the authority. A killed run can leave one arm, and the next arm then
 fails with a stale-arm message: restart the authority once (`sudo systemctl restart` the unit),
-which counts against its five starts in 600 s, then run the killed-run cleanup above. Add
-`tests/integration/test_authority_faults_live.py` to the command above in place of the frame test.
+which counts against its five starts in 600 s, then run the killed-run cleanup above. A killed
+run can also leave an activated Run or a published quarantine row. Before the killed-run
+`systems.teardown`, release the Run's external boot (`runs.release_external_boot` with an `admin`
+token for the frame's project) and wait for its job, then resolve every `quarantined` row naming
+the System with `ops.resolve_recovery_orphan` (`delete`) as a platform admin. Until #3321 and
+#3322 are fixed on the lane those steps fail too; roll the lane back to its pre-run snapshot
+instead. Add `tests/integration/test_authority_faults_live.py` to the command above in place of
+the frame test.
+
+##### Authority functional tool cells (#3186)
+
+The 32 x86_64 functional cells of `runs.release_external_boot`, `ops.force_release`,
+`ops.resolve_recovery_orphan` and `systems.resolve_external_boot_conflict` (both
+configurations, both exposures, both providers) run in this frame through
+`tests/integration/live_stack/authority_cells.py`, from the ordinary carriers
+`test_run_tool_cells_live.py` and `test_breakglass_tool_cells_live.py`. The
+[design](../../workflow/specs/2026-10-21-authority-tool-cells-design.md) maps each cell.
+
+- `runs.release_external_boot`: the cell activates the `longterm` fixture on the frame's System
+  and a `contributor` of its project releases it through the cell's exposure. It requires the
+  release job `succeeded`, the root-release completion evidence, the private cleanup receipt
+  absent (local), the domain still defined, and the System's private rootfs entries (local) or
+  pool volumes (remote) as they were before the activation.
+- `ops.force_release`: the held-teardown arm above, called by an outside platform admin through
+  the cell's exposure. After the refusal and the quiescent teardown it requires the allocation
+  read `released` and the capacity in use lower than while the effect was held.
+- `ops.resolve_recovery_orphan`: the recovery-orphan arm above, called the same way; remotely it
+  reads the remote module store's receipt. The
+  tool admits a local row when its publishing authority is the server's fixed route; the server
+  composes no local recovery-object port.
+- Remote `ops.resolve_recovery_orphan` runs the recovery-orphan arm and every
+  `systems.resolve_external_boot_conflict` cell runs the recovery-conflict arm above, each on the
+  frame's own client.
+- A local record's `effect` discloses its fixture-mode System: provisioned through the worker
+  and moved onto the authority by the fixture script, because of #3144/#3148. Every operation
+  under test runs against the real authority.
+- A remote cell records the provider host as its host and the bound fedora representative as
+  its guest, so the remote authority lane's single registered remote image must be
+  `fedora-kdive-remote-base-43` (the same digest-pinned base in its private store). It records the
+  remote authority's revision as its `authority` role (ADR-0788).
+
+Prerequisites, beyond the frame's: a verified `longterm` fixture under `KDIVE_FIXTURE_ROOT`
+(as for the run cells), the barrier socket in the local lane config, and the remote proof
+config. Point `REMOTE_PROVIDER_SSH` at the remote authority host, both for the bindings and for
+the run. Run one configuration at a time, as for the other tool cells; restart the stack with
+`KDIVE_WORKER_DEATH_VERIFIER=docker` for `recovery`:
+
+```sh
+sha=$(git rev-parse HEAD)
+uv run python -m tests.integration.live_stack.tool_cells bindings --remote --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" \
+LOCAL_AUTHORITY_LANE_CONFIG=/protected/authority-lane.json \
+KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG=/protected/remote-authority.json \
+  uv run python -m pytest -m live_stack -v -p no:randomly \
+  tests/integration/test_run_tool_cells_live.py tests/integration/test_breakglass_tool_cells_live.py \
+  -k "functional and (release_external_boot or force_release or resolve_recovery_orphan or resolve_external_boot_conflict)"
+```
+
+Then assemble and qualify as for the other tool cells, and report every one of the 32 cells as
+qualified, `blocked`, `failure` or not-run.
 
 ### `live_vm` (native) — a real kernel on real silicon
 

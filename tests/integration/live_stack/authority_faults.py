@@ -13,8 +13,6 @@ caller it is handed, so a carrier chooses the exposure and role (#3186).
 - :func:`recorded_conflict` changes the System's persistent definition out of band, as a host
   administrator would (ADR-0584), so the release refuses and the activation is recorded in
   ``recovery_conflict`` from the authority's journal head (ADR-0805); it then resolves it.
-- The remaining faults are product gaps; :func:`blocked_after_gates` records their narrower
-  reasons after the lane gates and before any mutation.
 """
 
 from __future__ import annotations
@@ -27,7 +25,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
-from typing import Literal, LiteralString, NoReturn
+from pathlib import Path
+from typing import Literal, LiteralString
 from uuid import UUID
 
 import psycopg
@@ -37,7 +36,7 @@ from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack import authority_lane
 from tests.integration.live_stack.authority_lane import AuthoritySystem
 from tests.integration.live_stack.cleanup import capacity_in_use
-from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.integration.live_stack.scenario import ScenarioStop
 from tests.integration.live_stack.spine import (
     SpinePhaseError,
     await_system_state,
@@ -57,10 +56,6 @@ from tests.live_vm.installed_local_authority_support import (
 )
 from tests.live_vm.installed_remote_authority_support import RemoteAuthorityProofConfig
 
-REMOTE_ORPHAN_BLOCKED = (
-    "the remote-libvirt recovery-orphan arm needs an activated remote System, and remote "
-    "PREPARE is blocked (#3363)"
-)
 LOCAL_PRESENT_ORPHAN_BLOCKED = (
     "a quarantined receipt survives to resolution only if the release job ends terminally "
     "(ADR-0714), whose recovery is #3143"
@@ -416,6 +411,27 @@ async def conflict_head(db_url: str, system_id: str) -> tuple[object, ...] | Non
     return rows[0] if rows else None
 
 
+async def head_sequence(db_url: str, system_id: str) -> int | None:
+    """The sequence of the System's authority journal head."""
+    rows = await _rows(
+        db_url,
+        "SELECT sequence FROM external_boot_authority_journal_heads WHERE system_id = %s",
+        (system_id,),
+    )
+    return int(str(rows[0][0])) if rows else None
+
+
+async def audited_sequence(db_url: str, job_id: str) -> int | None:
+    """The journal sequence the authority audit anchored for ``job_id``'s terminal receipt."""
+    rows = await _rows(
+        db_url,
+        "SELECT journal_sequence FROM external_boot_authority_audit "
+        "WHERE job_id = %s AND journal_sequence IS NOT NULL ORDER BY journal_sequence DESC",
+        (job_id,),
+    )
+    return int(str(rows[0][0])) if rows else None
+
+
 async def _activation_state(db_url: str, activation_id: str) -> object:
     rows = await _rows(
         db_url, "SELECT state FROM external_boot_activations WHERE id = %s", (activation_id,)
@@ -449,8 +465,16 @@ async def _allocation_state(system: AuthoritySystem) -> str:
     return env.status
 
 
-async def _activate(system: AuthoritySystem) -> ActivationJob:
-    """Start one external boot; a remote one that fails is a recorded blocker, not a pass."""
+async def activate(
+    system: AuthoritySystem,
+    *,
+    kernel_tree: Path | None = None,
+    evidence_dir: Path | None = None,
+) -> ActivationJob:
+    """Start one external boot; a remote one that fails is a recorded blocker, not a pass.
+
+    ``kernel_tree`` defaults to ``KDIVE_KERNEL_SRC``; ``evidence_dir`` retains the upload record.
+    """
     remote = isinstance(system.config, RemoteAuthorityProofConfig)
     try:
         activation = await start_external_boot_activation(
@@ -462,6 +486,8 @@ async def _activate(system: AuthoritySystem) -> ActivationJob:
             # Only the local fixture profile carries a crashkernel; only remote boot needs an
             # initrd (#3323).
             require_kdump=not remote,
+            kernel_tree=kernel_tree,
+            evidence_dir=evidence_dir,
             with_initrd=remote,
         )
         await drain_job(system.op, "activate", activation.activate_job_id)
@@ -481,12 +507,20 @@ def _cause(failed: SpinePhaseError) -> str:
 
 
 async def held_teardown_release(
-    system: AuthoritySystem, db_url: str, force_release: ToolCall
+    system: AuthoritySystem,
+    db_url: str,
+    force_release: ToolCall,
+    *,
+    kernel_tree: Path | None = None,
 ) -> dict[str, object]:
-    """``ops.force_release`` refuses while a teardown effect is held, then releases."""
+    """``ops.force_release`` refuses while a teardown effect is held, then releases.
+
+    The release is observed outside the tool's envelope: the allocation reads ``released`` and
+    the capacity in use drops (#3186).
+    """
     op, system_id = system.op, system.system_id
     await require_evidence_read_access(db_url, FAULT_READ_TABLES)
-    activation = await _activate(system)
+    activation = await activate(system, kernel_tree=kernel_tree)
     release = await release_external_boot(op, activation.run_id)
     await drain_job(op, "release", release.object_id)
     await assert_root_release_completion(
@@ -524,12 +558,20 @@ async def held_teardown_release(
     await drain_job(op, "teardown", teardown.object_id)
     await await_system_state(op, "teardown", system_id, "torn_down")
     assert await journal_head(db_url, system_id) == ("terminal", "teardown")
+    assert await _allocation_state(system) == "active", "the teardown released the allocation"
+    in_use = await capacity_in_use(op)
     released = await force_release("ops.force_release", args)
     assert released.status == "released", f"force_release answered {released.status}"
+    allocation = await _allocation_state(system)
+    assert allocation == "released", f"after force_release the allocation is {allocation}"
+    freed = in_use - await capacity_in_use(op)
+    assert freed > 0, "capacity in use did not drop after force_release"
     return {
         "held_effect": "teardown after-provider",
         "refusal": TEARDOWN_REQUIRED,
         "release_after_quiescence": released.status,
+        "allocation_after_release": allocation,
+        "capacity_freed": freed,
         "held_seconds": held_s,
     }
 
@@ -551,14 +593,32 @@ async def _published_row(
         await asyncio.sleep(_POLL_S)
 
 
-async def _resolve(system: AuthoritySystem, resolve: ToolCall, identities: list[str]) -> str:
+async def _await_internal_job(db_url: str, job_id: str) -> None:
+    """Wait for a platform-internal job to succeed, read from the database.
+
+    ``resolve_recovery_orphan`` is in ``PLATFORM_INTERNAL_JOB_KINDS``: no tenant-facing job tool
+    exposes it, so ``jobs.wait`` never reports it terminal.
+    """
+    deadline = time.monotonic() + ROW_DEADLINE_S
+    while True:
+        state, _attempt = await job_claim(db_url, job_id)
+        if state == "succeeded":
+            return
+        assert state not in {"failed", "canceled"}, f"resolve-orphan job {job_id} is {state}"
+        assert time.monotonic() < deadline, f"resolve-orphan job {job_id} is still {state}"
+        await asyncio.sleep(_POLL_S)
+
+
+async def _resolve(
+    system: AuthoritySystem, resolve: ToolCall, db_url: str, identities: list[str]
+) -> str:
     """Admit and drain one exact-set ``delete`` disposition; return its job id."""
     admitted = await resolve(
         "ops.resolve_recovery_orphan",
         {"system_id": system.system_id, "object_identities": identities, "disposition": "delete"},
     )
     job = ok(admitted, "resolve-orphan").object_id
-    await drain_job(system.op, "resolve-orphan", job)
+    await _await_internal_job(db_url, job)
     return job
 
 
@@ -591,13 +651,17 @@ async def _resolve_published(
         if not identities:
             failure.add_note("no owned quarantine row observed after the abort")
             return
-        await _resolve(system, resolve, identities)
+        await _resolve(system, resolve, db_url, identities)
     except Exception as cleanup:  # noqa: BLE001 - recorded on the primary failure below
         failure.add_note(f"owned quarantine residue {identities}: {type(cleanup).__name__}")
 
 
 async def quarantined_orphan(
-    system: AuthoritySystem, db_url: str, resolve: ToolCall
+    system: AuthoritySystem,
+    db_url: str,
+    resolve: ToolCall,
+    *,
+    kernel_tree: Path | None = None,
 ) -> dict[str, object]:
     """Publish one real quarantine by an aborted finalize, then resolve exactly that row."""
     op, system_id = system.op, system.system_id
@@ -612,7 +676,7 @@ async def quarantined_orphan(
         "remote-libvirt" if isinstance(config, RemoteAuthorityProofConfig) else ("local-libvirt")
     )
     await require_evidence_read_access(db_url, FAULT_READ_TABLES)
-    activation = await _activate(system)
+    activation = await activate(system, kernel_tree=kernel_tree)
     activation_id = await activation_of(db_url, activation.run_id)
     before = await quarantine_rows(db_url)
     aborted = False
@@ -655,7 +719,7 @@ async def quarantined_orphan(
         assert not (await asyncio.to_thread(observe_receipt, activation_id)).present
         quarantined = await quarantine_rows(db_url)
         assert quarantined[row_id]["status"] == "quarantined"
-        resolved_by = await _resolve(system, resolve, [str(row["object_identity"])])
+        resolved_by = await _resolve(system, resolve, db_url, [str(row["object_identity"])])
     except BaseException as failure:
         if aborted:
             await _resolve_published(system, resolve, db_url, (before, activation_id), failure)
@@ -677,11 +741,13 @@ async def quarantined_orphan(
     }
 
 
-async def recorded_conflict(system: AuthoritySystem, db_url: str) -> dict[str, object]:
+async def recorded_conflict(
+    system: AuthoritySystem, db_url: str, *, kernel_tree: Path | None = None
+) -> dict[str, object]:
     """Record a real ``recovery_conflict`` from a host change, then resolve it by its composite."""
     op, system_id = system.op, system.system_id
     await require_evidence_read_access(db_url, FAULT_READ_TABLES)
-    activation = await _activate(system)
+    activation = await activate(system, kernel_tree=kernel_tree)
     activation_id = await activation_of(db_url, activation.run_id)
     await asyncio.to_thread(perturb_definition, system)
     release = await release_external_boot(op, activation.run_id)
@@ -701,10 +767,15 @@ async def recorded_conflict(system: AuthoritySystem, db_url: str) -> dict[str, o
         "resolve-conflict",
     )
     await drain_job(op, "resolve-conflict", resolution.object_id)
+    # The reconciler's release repair lane completes the user's release once the activation is
+    # recovered, so a later record can follow the resolution: judge the resolution's own record.
+    anchored = await audited_sequence(db_url, resolution.object_id)
+    assert anchored is not None, "the resolve-conflict job anchored no journal record"
     head = await conflict_head(db_url, system_id)
-    assert head is not None and head[:4] == ("terminal", "resolve-conflict", "source", "source"), (
-        head
-    )
+    current = await head_sequence(db_url, system_id)
+    assert head is not None and current is not None and current >= anchored, (head, anchored)
+    if current == anchored:
+        assert head[:4] == ("terminal", "resolve-conflict", "source", "source"), head
     assert await _activation_state(db_url, activation_id) == "recovered"
     return {
         "recorded": "recovery_conflict",
@@ -713,12 +784,3 @@ async def recorded_conflict(system: AuthoritySystem, db_url: str) -> dict[str, o
         "resolution": "succeeded: restored the recorded source",
         "activation": "recovered",
     }
-
-
-def blocked_after_gates(run: CellRun, base_url: str, reason: str) -> NoReturn:
-    """Pass the lane's revision gates, then stop ``blocked`` before any mutation."""
-    if run.cell.provider == "remote-libvirt":
-        authority_lane.require_remote_lane(authority_lane.select_remote_lane(), base_url)
-    else:
-        authority_lane.require_lane(authority_lane.select_lane(), base_url)
-    raise ScenarioStop(Outcome.BLOCKED, reason)

@@ -2,7 +2,7 @@
 
 Gated ``live_stack``. Each arm is dormant unless its lane config is named:
 ``LOCAL_AUTHORITY_LANE_CONFIG`` for the local authority, ``KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG``
-for the remote one. A blocked arm passes its lane gates, records its narrower reason and skips
+for the remote one. A remote activation the lane cannot complete stops ``blocked`` and skips
 with ``blocked:`` in the reason; it never reports a pass.
 """
 
@@ -97,13 +97,6 @@ def _prove(run: CellRun, config_env: str, arm: Callable[[str, ToolCall], Authori
     assert set(run.assertions) == {"effect", "cleanup"}
 
 
-def _blocked(run: CellRun, config_env: str, reason: str) -> None:
-    _db_url, base_url, _issuer = _lane(config_env)
-    with pytest.raises(ScenarioStop) as stop:
-        authority_faults.blocked_after_gates(run, base_url, reason)
-    pytest.skip(f"blocked: {stop.value}")
-
-
 @ARMS
 def test_force_release_after_quiescent_teardown(
     tmp_path: Path, provider: str, config_env: str, arch: str
@@ -122,8 +115,6 @@ def test_recovery_orphan_publication_and_disposition(
     tmp_path: Path, provider: str, config_env: str, arch: str
 ) -> None:
     run = _run(tmp_path, provider, arch, "authority-recovery-orphan")
-    if provider == "remote-libvirt":
-        _blocked(run, config_env, authority_faults.REMOTE_ORPHAN_BLOCKED)
 
     def arm(db_url: str, call: ToolCall) -> AuthorityBody:
         async def body(system: AuthoritySystem) -> dict[str, object]:

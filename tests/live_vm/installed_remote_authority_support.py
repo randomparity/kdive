@@ -430,10 +430,15 @@ def remote_authority_inventory(
     )
 
 
+def installed_authority_revision(config: RemoteAuthorityProofConfig) -> str:
+    """The remote authority's installed revision file, read as the authority account."""
+    command = ("sudo", "-n", "-u", _AUTHORITY_ACCOUNT, "cat", _REVISION)
+    return _ssh(config, command).strip().decode(errors="replace")
+
+
 def require_installed_authority(config: RemoteAuthorityProofConfig) -> None:
     """Refuse unless the remote authority unit is active at the configured revision."""
     if _ssh(config, ("systemctl", "is-active", config.authority_service)) != b"active\n":
         raise AssertionError("the remote authority service is not active")
-    revision = _ssh(config, ("sudo", "-n", "-u", _AUTHORITY_ACCOUNT, "cat", _REVISION)).strip()
-    if revision != config.installed_revision.encode():
+    if installed_authority_revision(config) != config.installed_revision:
         raise AssertionError("the installed remote authority revision does not match the config")

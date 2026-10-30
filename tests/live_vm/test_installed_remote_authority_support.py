@@ -22,6 +22,7 @@ from tests.live_vm.installed_remote_authority_support import (
     RemoteAuthorityProofConfig,
     RemoteDomain,
     fault_barrier_request,
+    installed_authority_revision,
     load_config,
     remote_authority_inventory,
     require_installed_authority,
@@ -502,3 +503,18 @@ def test_installed_authority_gate_refuses_an_inactive_unit_or_another_revision(
     host(0, b"2" * 40 + b"\n")
     with pytest.raises(AssertionError, match="revision"):
         require_installed_authority(_config())
+
+
+def test_installed_authority_revision_reads_the_file_as_the_authority_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def run(argv: tuple[str, ...], **_kwargs: object) -> tuple[bytes, bytes, int]:
+        seen.append(argv[-1])
+        return b"2" * 40 + b"\n", b"", 0
+
+    monkeypatch.setattr(carrier, "_run_bounded_command", run)
+    assert installed_authority_revision(_config()) == "2" * 40
+    command = "sudo -n -u kdive-provider-authority cat /opt/kdive-provider-authority/revision"
+    assert seen == [command]

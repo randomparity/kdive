@@ -12,11 +12,15 @@ from scripts.coverage_campaign.contract import (
     FILTERED_LIST_BOUNDARIES,
     HANDLER_REFUSAL,
     Cell,
+    Contract,
     Inventory,
     build_contract,
+    digest,
     load_mapping,
     read_inventory,
 )
+from scripts.coverage_campaign.evidence import Context, Evidence, InputBindings, Outcome
+from scripts.coverage_campaign.results import qualify
 
 
 @pytest.fixture(scope="module")
@@ -574,15 +578,17 @@ def test_operator_tools_follow_the_approved_split(inventory: Inventory) -> None:
         ("ops.recover_build_use", ("server", "worker")),
     }
     assert len([c for c in cells if c.owner == 3112]) == 136
-    # Operator option A (#3112, 2026-10-07): only the resolve tools need the authority.
+    # Operator option A (#3112, 2026-10-07), amended by ADR-0788 (#3186): force_teardown alone
+    # needs no authority; force_release's observed ordering is the authority's.
     base = ("server", "worker", "reconciler")
     roles = {(c.operation, c.roles) for c in glass if c.kind == "functional"}
     assert roles == {
-        ("ops.force_release", base),
+        ("ops.force_release", (*base, "authority")),
         ("ops.force_teardown", base),
         ("ops.resolve_recovery_orphan", (*base, "authority")),
         ("systems.resolve_external_boot_conflict", (*base, "authority")),
     }
+    assert {c.roles for c in glass if c.kind == "rejection"} == {("server",)}
 
 
 def _tool_prefix(provider: str) -> str:
@@ -935,3 +941,95 @@ def test_cli_exposure_validators_fail_closed(
     monkeypatch.setattr(contract, "GENERATED_VERBS", verbs)
     with pytest.raises(ValueError, match="no generated kdivectl verb"):
         build_contract(inventory=inventory)
+
+
+_AUTHORITY_CELL_TOOLS = {
+    "ops.force_release",
+    "ops.resolve_recovery_orphan",
+    "runs.release_external_boot",
+    "systems.resolve_external_boot_conflict",
+}
+_SHA = "a" * 40
+
+
+def _authority_cells(inventory: Inventory) -> list[Cell]:
+    """The 32 x86_64 functional cells #3186 qualifies on the installed authority lanes."""
+    return [
+        c
+        for c in build_contract(inventory=inventory).cells
+        if c.operation in _AUTHORITY_CELL_TOOLS
+        and c.kind == "functional"
+        and c.guest_arch == "x86_64"
+    ]
+
+
+def _authority_evidence(cell: Cell, roles: dict[str, str]) -> tuple[Context, Evidence]:
+    values = {"kernel_source_sha": "c" * 40, "kernel_build_id": "c" * 40}
+    inputs = {name: values.get(name, "d" * 64) for name in ("image_sha256", *cell.inputs)}
+    context = Context.model_validate(
+        {
+            "host_os": "fedora:44",
+            "host_arch": "x86_64",
+            "guest_os": "fedora:44",
+            "guest_arch": "x86_64",
+            "accelerator": cell.accelerator,
+            **inputs,
+        }
+    )
+    record = Evidence.model_validate(
+        {
+            "version": 1,
+            "cell_id": cell.id,
+            "scenario_id": cell.scenario_id,
+            "node_id": cell.node_id,
+            "outcome": Outcome.SUCCESS,
+            "candidate_sha": _SHA,
+            "matrix_sha256": "b" * 64,
+            "input_sha256": digest(context),
+            "deployed_roles": roles,
+            "context": context,
+            "duration_seconds": 1.0,
+            "assertions": {name: "e" * 64 for name in cell.assertions},
+            "artifacts": ["e" * 64],
+            "impediments": [],
+        }
+    )
+    return context, record
+
+
+@pytest.mark.parametrize("fault", ["none", "authority-missing", "authority-stale", "missing"])
+def test_the_32_authority_cells_judge_the_serving_authority(
+    inventory: Inventory, fault: str
+) -> None:
+    # #3186 criteria 4 and 6: missing, stale or absent evidence cannot qualify any of the 32.
+    cells = _authority_cells(inventory)
+    assert len(cells) == 32
+    assert all("authority" in c.roles and c.node_id for c in cells)
+    full = dict.fromkeys(("server", "worker", "reconciler", "authority"), _SHA)
+    roles = {
+        "none": full,
+        "authority-missing": {k: v for k, v in full.items() if k != "authority"},
+        "authority-stale": {**full, "authority": "f" * 40},
+        "missing": full,
+    }[fault]
+    pairs = [_authority_evidence(cell, roles) for cell in cells]
+    bindings = InputBindings(
+        version=1,
+        candidate_sha=_SHA,
+        matrix_sha256="b" * 64,
+        cells={cell.id: context for cell, (context, _) in zip(cells, pairs, strict=True)},
+    )
+    results = [] if fault == "missing" else [record for _, record in pairs]
+    report = qualify(Contract(1, "b" * 64, tuple(cells), inventory), bindings, results)
+    reason = {
+        "none": None,
+        "authority-missing": "deployed-role-missing",
+        "authority-stale": "deployed-revision-mismatch",
+        "missing": "missing-result",
+    }[fault]
+    assert report.passed is (reason is None)
+    assert len(report.cells) == 32
+    for verdict in report.cells:
+        assert verdict.qualified is (reason is None), verdict.reasons
+        if reason is not None:
+            assert reason in verdict.reasons
