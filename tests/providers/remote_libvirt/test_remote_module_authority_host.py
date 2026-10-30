@@ -1203,7 +1203,7 @@ async def test_reap_after_the_sweep_removed_the_markers_reports_the_volumes_abse
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("removed", ["nothing", "attempt-volumes", "restored-evidence"])
+@pytest.mark.parametrize("removed", ["nothing", "attempt-volumes", "volumes-and-restored-evidence"])
 async def test_re_entered_resolve_conflict_restore_returns_the_first_response(
     tmp_path: Path, removed: str
 ) -> None:
@@ -1211,10 +1211,10 @@ async def test_re_entered_resolve_conflict_restore_returns_the_first_response(
     stack = _Quiesce(tmp_path, _SystemDomain(active=False))
     await stack.durable.execute(stack.request)
     first = await stack.restore("resolve-conflict")
-    if removed == "attempt-volumes":
+    if removed != "nothing":
         for name in _live_attempt_volumes(stack):
             stack.storage.pool.volumes.pop(name)
-    if removed == "restored-evidence":
+    if removed == "volumes-and-restored-evidence":
         for evidence in (tmp_path / "evidence").glob("*.restored"):
             evidence.unlink()
     volumes = set(stack.storage.pool.volumes)
