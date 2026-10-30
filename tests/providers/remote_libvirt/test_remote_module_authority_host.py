@@ -762,20 +762,21 @@ class _Quiesce:
     def prior_power(self) -> str | None:
         return self.store.prior_power(self._binding(), self.request.authority.plan_identity)
 
-    def _restore_request(self) -> RemoteModuleLifecycleRequestV1:
-        """Model the appliance rewriting the scratch volume, and return the RECOVER restore."""
+    def _restore_request(self, operation: str = "recover") -> RemoteModuleLifecycleRequestV1:
+        """Model the appliance rewriting the scratch volume, and return the release restore."""
         self.scratch = self.scratch.model_copy(
             update={"phase": "restored", "entry_count": None, "content_bytes": None}
         )
+        purpose = "resolve-conflict" if operation == "resolve-conflict" else "release"
         return RemoteModuleLifecycleRequestV1(
-            authority=_lifecycle_authority(self.request, purpose="release", operation="recover"),
+            authority=_lifecycle_authority(self.request, purpose=purpose, operation=operation),
             action="restore",
             budget_seconds=300,
         )
 
-    async def restore(self) -> RemoteModuleLifecycleResponseV1:
-        """Run the release RECOVER module restore after a completed PREPARE."""
-        return await self.durable.execute_lifecycle(self._restore_request())
+    async def restore(self, operation: str = "recover") -> RemoteModuleLifecycleResponseV1:
+        """Run the release module restore after a completed PREPARE."""
+        return await self.durable.execute_lifecycle(self._restore_request(operation))
 
     async def crash_after_host_restore(self) -> None:
         """Finish the host restore, then die before the durable layer publishes anything."""
@@ -1198,6 +1199,28 @@ async def test_reap_after_the_sweep_removed_the_markers_reports_the_volumes_abse
     assert again.volumes_absent
     assert again.result == first.result
     assert set(stack.storage.pool.volumes) == markers
+    stack.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("swept", [False, True], ids=["intact", "swept"])
+async def test_re_entered_resolve_conflict_restore_returns_the_first_response(
+    tmp_path: Path, swept: bool
+) -> None:
+    """#3414: a job re-entry reuses the stored completion, whatever a sweep removed between."""
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    await stack.durable.execute(stack.request)
+    first = await stack.restore("resolve-conflict")
+    if swept:
+        for name in _live_attempt_volumes(stack):
+            stack.storage.pool.volumes.pop(name)
+    volumes = set(stack.storage.pool.volumes)
+
+    again = await stack.restore("resolve-conflict")
+
+    assert again == first
+    assert set(stack.storage.pool.volumes) == volumes
+    assert bool(_live_attempt_volumes(stack)) is not swept
     stack.close()
 
 
