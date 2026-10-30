@@ -411,6 +411,27 @@ async def conflict_head(db_url: str, system_id: str) -> tuple[object, ...] | Non
     return rows[0] if rows else None
 
 
+async def head_sequence(db_url: str, system_id: str) -> int | None:
+    """The sequence of the System's authority journal head."""
+    rows = await _rows(
+        db_url,
+        "SELECT sequence FROM external_boot_authority_journal_heads WHERE system_id = %s",
+        (system_id,),
+    )
+    return int(str(rows[0][0])) if rows else None
+
+
+async def audited_sequence(db_url: str, job_id: str) -> int | None:
+    """The journal sequence the authority audit anchored for ``job_id``'s terminal receipt."""
+    rows = await _rows(
+        db_url,
+        "SELECT journal_sequence FROM external_boot_authority_audit "
+        "WHERE job_id = %s AND journal_sequence IS NOT NULL ORDER BY journal_sequence DESC",
+        (job_id,),
+    )
+    return int(str(rows[0][0])) if rows else None
+
+
 async def _activation_state(db_url: str, activation_id: str) -> object:
     rows = await _rows(
         db_url, "SELECT state FROM external_boot_activations WHERE id = %s", (activation_id,)
@@ -746,10 +767,15 @@ async def recorded_conflict(
         "resolve-conflict",
     )
     await drain_job(op, "resolve-conflict", resolution.object_id)
+    # The reconciler's release repair lane completes the user's release once the activation is
+    # recovered, so a later record can follow the resolution: judge the resolution's own record.
+    anchored = await audited_sequence(db_url, resolution.object_id)
+    assert anchored is not None, "the resolve-conflict job anchored no journal record"
     head = await conflict_head(db_url, system_id)
-    assert head is not None and head[:4] == ("terminal", "resolve-conflict", "source", "source"), (
-        head
-    )
+    current = await head_sequence(db_url, system_id)
+    assert head is not None and current is not None and current >= anchored, (head, anchored)
+    if current == anchored:
+        assert head[:4] == ("terminal", "resolve-conflict", "source", "source"), head
     assert await _activation_state(db_url, activation_id) == "recovered"
     return {
         "recorded": "recovery_conflict",

@@ -500,6 +500,8 @@ def _fake_conflict_arm(
     failures: dict[str, str],
     heads: list[tuple[object, ...]],
     states: tuple[str, ...] = ("recovery_conflict", "recovered"),
+    anchored: int | None = 7,
+    current: int = 7,
 ) -> list[str]:
     """Fake every boundary of the conflict arm; return the ordered calls it made."""
     calls: list[str] = []
@@ -527,6 +529,8 @@ def _fake_conflict_arm(
         "conflict_head": lambda *_a: _async(next(remaining))(),
         "_activation_state": lambda *_a: _async(next(activation_states))(),
         "scalar": scalar,
+        "audited_sequence": _async(anchored),
+        "head_sequence": _async(current),
     }
     for name, value in patches.items():
         monkeypatch.setattr(authority_faults, name, value)
@@ -603,6 +607,38 @@ def test_conflict_arm_requires_the_resolution_head_to_be_the_source(
         ],
     )
     with pytest.raises(AssertionError, match="resolve-conflict"):
+        asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+
+
+def test_conflict_arm_tolerates_a_release_repair_after_the_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_conflict_arm(
+        monkeypatch,
+        {"release": "conflict"},
+        [
+            ("terminal", "recover", "conflict", "conflict", _COMPOSITE),
+            ("takeover-acknowledged", "release", None, None, None),
+        ],
+        current=9,
+    )
+    observed = asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
+    assert observed["activation"] == "recovered"
+
+
+def test_conflict_arm_requires_the_resolution_to_anchor_a_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_conflict_arm(
+        monkeypatch,
+        {"release": "conflict"},
+        [
+            ("terminal", "recover", "conflict", "conflict", _COMPOSITE),
+            ("terminal", "resolve-conflict", "source", "source", _COMPOSITE),
+        ],
+        anchored=None,
+    )
+    with pytest.raises(AssertionError, match="anchored no journal record"):
         asyncio.run(authority_faults.recorded_conflict(_system(), "db"))
 
 
