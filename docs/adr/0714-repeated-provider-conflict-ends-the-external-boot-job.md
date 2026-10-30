@@ -139,6 +139,13 @@ handler refuses that state. The System is torn down from it, which is always adm
 non-terminal failure still requeues the job and leaves the activation `recovering` for the next
 attempt to adopt.
 
+### Amendment (2026-10-30): the release lane selects only `recovered` (#3426)
+
+The reconciler's release lane no longer selects `abandoned`, `recovery_conflict` or
+`recovery_failed` activations. The release handler refuses all three, so each reconciler pass built
+a release payload that could never advance, and a refused job never records a release row. The
+System teardown is their exit. The lane keeps `recovered`, which the handler admits.
+
 ### Amendment (2026-10-28): only `provider-conflict` carries `authority_reason` (#3391)
 
 [ADR-0808](0808-a-definite-authority-rejection-ends-the-lifecycle-wait.md) adds `details["admission"]`
