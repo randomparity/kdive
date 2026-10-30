@@ -119,10 +119,10 @@ def test_provider_count_reaches_the_formatted_worker_log(
 ) -> None:
     caplog.set_level(logging.INFO, logger="kdive.jobs.handlers.module_volume_reaping")
     assert _run(Repository(), Reaper(count=23)) is None
-    completed = [r for r in caplog.records if "reap completed" in r.getMessage()]
+    completed = [r for r in caplog.records if r.getMessage().startswith("remote module-volume")]
     assert len(completed) == 1
     payload = json.loads(JsonFormatter().format(completed[0]))
-    assert "removed=23" in payload["msg"]
+    assert payload["msg"] == "remote module-volume reap completed: removed=23"
 
 
 def test_repository_failure_propagates() -> None:
