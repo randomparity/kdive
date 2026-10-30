@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import os
@@ -12,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, NoReturn, cast
+from typing import Any, Literal, NoReturn, cast, get_args
 from uuid import UUID, uuid4
 
 import libvirt
@@ -56,6 +57,7 @@ from kdive.providers.external_boot_authority.service import (
 from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownReservationV1,
     ProviderRecoveryRefusal,
+    ProviderRecoveryRefusalReason,
     SystemTeardownSupersededError,
 )
 from kdive.providers.ports.external_boot import (
@@ -5282,3 +5284,26 @@ async def test_remote_finalize_and_teardown_scans_ignore_accumulated_finalized_m
 
     assert store.cleanup_finalized(record.binding, record.plan_identity)
     adapter.close()
+
+
+def test_remote_refusal_reasons_are_never_raised_as_plain_value_errors() -> None:
+    """#3436: a closed refusal reason raised as ``ValueError`` would log only its class."""
+    reasons = set(get_args(ProviderRecoveryRefusalReason.__value__))
+    package = Path(external_boot_authority.__file__).parent
+    plain = [
+        f"{path.name}:{node.lineno}"
+        for path in (
+            package / "external_boot_authority.py",
+            package / "external_boot_operations.py",
+            package / "remote_module_authority_host.py",
+        )
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Raise)
+        and isinstance(node.exc, ast.Call)
+        and isinstance(node.exc.func, ast.Name)
+        and node.exc.func.id == "ValueError"
+        and node.exc.args
+        and isinstance(literal := node.exc.args[0], ast.Constant)
+        and literal.value in reasons
+    ]
+    assert plain == []
