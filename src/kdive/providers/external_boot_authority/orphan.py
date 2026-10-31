@@ -173,7 +173,9 @@ class RecoveryOrphanAuthorityService:
         # A row another host published must not reach this host's provider (ADR-0615, #3439).
         own = self._authority_instance
         if any(selection.authority_instance != own for selection in selections):
-            raise AuthorityServiceError("configuration_error")
+            raise AuthorityServiceError(
+                "configuration_error", reason="orphan_row_foreign_authority"
+            )
         return selections
 
     async def _commit(

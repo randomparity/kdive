@@ -391,6 +391,7 @@ JournalConflictReason = Literal[
     "orphan_binding_changed",
     "orphan_binding_changed_after_disposition",
     "orphan_digest_changed",
+    "orphan_row_foreign_authority",
     "orphan_selection_malformed",
     "orphan_system_mismatch",
     "pending_predecessor_missing",
