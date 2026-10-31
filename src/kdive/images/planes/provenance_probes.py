@@ -215,9 +215,18 @@ def _run_bounded_inspector(
 
 
 _BTRFS_VOLUME_PREFIX = "btrfsvol:"
-# libguestfs names a subvolume root ``btrfsvol:<device>/<subvolume>``. The appliance attaches an
-# image's disks as sd*, so only that device form is split unambiguously; any other fails closed.
-_BTRFS_VOLUME = re.compile(r"btrfsvol:/dev/(?:sd|vd)[a-z]+[0-9]*/(?P<subvolume>.+)")
+# libguestfs names a subvolume root ``btrfsvol:<device>/<subvolume>``. Inspection attaches the one
+# image as /dev/sda, so a partition is sda<N>, and an LVM volume is /dev/<vg>/<lv> (never
+# /dev/mapper/<vg>-<lv>); neither name can hold another '/', so only those two device forms split.
+# An md array (/dev/md<N> or /dev/md/<name>) and a /dev/mapper name are not LVM volumes, so neither
+# may be read as <vg>/<lv> and both fail closed. Any other device would be read as <vg>/<lv> when
+# followed by two segments; the single attached disk keeps such names out of inspector output. A
+# volume group named exactly sda or sda<N> is read as the disk: that name cannot tell them apart.
+_LVM_NAME = r"[A-Za-z0-9+_.][A-Za-z0-9+_.-]*"
+_BTRFS_VOLUME = re.compile(
+    rf"btrfsvol:/dev/(?:sda[0-9]*|(?!md(?:[0-9]|/)|mapper/){_LVM_NAME}/{_LVM_NAME})"
+    r"/(?P<subvolume>.+)"
+)
 _SUBVOLUME_SEGMENT = re.compile(r"[A-Za-z0-9._@+-]+")
 _SUBVOLUME_MAX_CHARS = 128
 
@@ -282,7 +291,7 @@ def inspect_root_boot(
     except UnsupportedBtrfsRootError as exc:
         raise CategorizedError(
             "the image's btrfs root subvolume cannot be expressed as a boot argument; "
-            "use an image whose root subvolume has a plain name on an sd or vd disk",
+            "use an image whose root subvolume has a plain name on a disk partition or LVM volume",
             category=ErrorCategory.PROVISIONING_FAILURE,
             details={"stage": "root-inspection", "reason": "unsupported_btrfs_root"},
         ) from exc

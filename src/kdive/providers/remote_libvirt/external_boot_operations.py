@@ -11,6 +11,7 @@ from uuid import UUID
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
@@ -65,9 +66,11 @@ from kdive.providers.shared.runtime_paths import domain_name_for
 
 # Pause between identity reads while the guest agent is not yet answering, and the most one
 # observation waits: the worker's own deadline spans the whole job, so a longer server-side wait
-# would outlive the caller and hold the System's lane.
+# would outlive the caller and hold the System's lane. Live remote boots connect the guest agent
+# 50 to 54 s after the domain starts; 300 s is about five times that, so a slower host, a larger
+# image or a cold page cache is waited out, while a guest that never answers still frees the lane.
 _OBSERVE_POLL_S = 1.0
-_OBSERVE_WAIT_S = 90.0
+_OBSERVE_WAIT_S = 300.0
 
 
 class _Volume(Protocol):
@@ -324,7 +327,10 @@ class ConcreteRemoteExternalBootOperations:
                     raise CategorizedError(
                         "the guest agent did not answer before the observation deadline",
                         category=ErrorCategory.READINESS_FAILURE,
-                        details={"system_id": recovery.binding.system_id},
+                        details={
+                            "system_id": recovery.binding.system_id,
+                            "observe_wait_cap_s": _OBSERVE_WAIT_S,
+                        },
                     ) from exc
                 self._sleep(min(_OBSERVE_POLL_S, remaining))
 
@@ -417,7 +423,9 @@ class ConcreteRemoteExternalBootOperations:
                 recovery.module_recovery.scratch_volume,
             ):
                 if self._lookup_optional(module_pool, reference.ref) is not None:
-                    raise ValueError("remote module volume remains before authorized cleanup")
+                    raise ProviderRecoveryRefusal(
+                        "remote module volume remains before authorized cleanup"
+                    )
             boot = [recovery.materialization.artifacts.kernel]
             if recovery.materialization.artifacts.initrd is not None:
                 boot.append(recovery.materialization.artifacts.initrd)
@@ -437,16 +445,16 @@ class ConcreteRemoteExternalBootOperations:
                     or str(parsed.run_id) != recovery.binding.run_id
                     or parsed.digest != digest
                 ):
-                    raise ValueError("remote cleanup boot artifact identity differs")
+                    raise ProviderRecoveryRefusal("remote cleanup boot artifact identity differs")
                 self._require_deadline(deadline, "cleanup")
                 volume = self._lookup_optional(boot_pool, reference.ref)
                 if volume is None:
                     continue
                 if volume.name() != reference.ref:
-                    raise ValueError("remote cleanup volume name differs")
+                    raise ProviderRecoveryRefusal("remote cleanup volume name differs")
                 volume.delete(0)
                 if self._lookup_optional(boot_pool, reference.ref) is not None:
-                    raise ValueError("remote cleanup volume remained after deletion")
+                    raise ProviderRecoveryRefusal("remote cleanup volume remained after deletion")
 
     @staticmethod
     def _lookup_domain_optional(
