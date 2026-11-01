@@ -2046,6 +2046,26 @@ async def test_cleanup_finalization_failure_publishes_reopened_private_receipt(
     assert observations[0].binding.operation_identity == mutation.operation_identity
 
 
+async def test_cleanup_inventory_follows_the_adopted_proof_on_a_retry() -> None:
+    """A retry that adopted the earlier cleanup inventories the receipt it left (#3471)."""
+    io = _FakeIO(_metadata("recovered"))
+    io.finalize_error = OSError("private receipt finalization interrupted")
+    adapter = _adapter(io)
+    ran = _cleanup_mutation("cleanup-1")
+    await adapter.commit(ran, _context(AuthorityOperation.CLEANUP, operation_identity="cleanup-1"))
+    retry = _cleanup_mutation("cleanup-2")
+
+    (observed,) = await adapter.cleanup_quarantine_inventory(
+        retry, _context(AuthorityOperation.CLEANUP, operation_identity="cleanup-1")
+    )
+
+    assert observed.binding.operation_identity == "cleanup-1"
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await adapter.cleanup_quarantine_inventory(
+            retry, _context(AuthorityOperation.CLEANUP, operation_identity="cleanup-2")
+        )
+
+
 async def test_a_teardown_commit_finalizes_the_tombstone(tmp_path: Path) -> None:
     io = _FakeIO(_metadata("recovered"))
     peer = AuthenticatedPeer(uuid4())
