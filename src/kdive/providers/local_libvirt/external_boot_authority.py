@@ -317,8 +317,8 @@ class LocalExternalBootAuthorityAdapter:
     ) -> tuple[RecoveryObjectObservation, ...]:
         """Reopen only the exact unfinalized private cleanup receipt on the bounded lane.
 
-        The comparison stays with the request, not ``context``; an adopted release retry is a
-        follow-up (#3434).
+        The receipt is compared with the proof ``context``, not the request: a retried release
+        that adopted an earlier generation's cleanup still names that cleanup (ADR-0787, #3471).
         """
         if request.operation not in _DELETING_OPERATIONS:
             return ()
@@ -333,8 +333,8 @@ class LocalExternalBootAuthorityAdapter:
                 not observation.present
                 or observation.managed
                 or object_binding.binding != binding
-                or object_binding.operation_identity != request.operation_identity
-                or object_binding.attempt_id != str(request.attempt_id)
+                or object_binding.operation_identity != context.operation_identity
+                or object_binding.attempt_id != str(context.attempt_id)
             ):
                 raise AuthorityServiceError("provider_conflict")
         return observations
