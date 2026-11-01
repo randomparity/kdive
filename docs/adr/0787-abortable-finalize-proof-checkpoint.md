@@ -226,3 +226,40 @@ Considered & rejected:
 - **Add a store lock around `refuse_finalized` and the write.** judgment: the System lane already
   serializes those calls within one service. A lock would only help a second process writing the
   same store directory, which this change does not introduce.
+
+### Amendment (2026-11-01): System teardown keeps an adopted receipt (#3467)
+
+This amendment replaces the #3435 bullet "System teardown's discard path (ADR-0583) is
+unchanged: destruction still owns its cleanup". Local teardown unlinked an adopted receipt with
+its tombstone, so the `adopted` row named a receipt the provider had deleted. Remote teardown
+removes no store file, so the receipt survived there.
+
+- System teardown leaves a `managed` receipt in place on both providers and still completes.
+  ADR-0583 limits teardown to objects whose activation ownership is provable; an adopted object
+  is the operator's.
+- Local: the teardown discard path removes the activation's intent, preparation and tombstone,
+  keeps the receipt alone in its recovery directory, and does not call `finalize_tombstone`.
+  System teardown's recovery-absence check counts a directory holding only a `managed` receipt
+  as absent. Release observation keeps the stricter check.
+- Remote: unchanged. Teardown already leaves the receipt.
+- Nothing in kdive removes an adopted receipt after teardown; the operator who adopted it does.
+  On local, remove the receipt's whole recovery directory, not only the file, or teardown
+  absence reads false again. On remote the receipt is `<recovery identity>.cleanup-quarantine`,
+  found by the row's object reference without the index or the `cleanup-finalized` marker. A
+  marker written before adoption carries an unmanaged copy and does not own the receipt.
+- Remote store collection at teardown (#3472) may remove the activation's other files,
+  including that marker, and keeps a `managed` receipt.
+
+Considered & rejected:
+
+- **Remove the receipt on both providers and settle the row.** judgment: it undoes an audited
+  administrator decision whenever the System is later destroyed, the objection #3435 raised
+  for release. verified: the row's status check in
+  `src/kdive/db/schema/0138_external_boot_recovery_quarantine.sql` allows only `quarantined`,
+  `adopted` and `deleted`, and no function moves `adopted` onward, so settling it needs a
+  migration; the remote half needs the store collection #3472 owns.
+- **Keep the receipt and its tombstone directory unchanged on local.** verified:
+  `exact_recovery_absence` returns false while the recovery directory exists, and
+  `_prepare_system_teardown_recovery` then returns before teardown destroys the domain, so an
+  adoption would block destruction, which ADR-0583 forbids.
+- **Do nothing.** judgment: the providers keep disagreeing and the local row stays stale.
