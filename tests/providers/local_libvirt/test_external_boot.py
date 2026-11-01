@@ -5770,6 +5770,27 @@ def test_system_teardown_keeps_an_adopted_receipt(tmp_path: Path) -> None:
         assert not store.exact_recovery_absence(point.binding)
 
 
+def test_system_teardown_absence_refuses_a_tombstone_the_adopted_receipt_does_not_name(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+    moved = point.model_copy(update={"plan_identity": "sha256:" + "7" * 64})
+    other = CleanupTombstoneV1(
+        binding=point.binding,
+        recovery_point=moved,
+        point_digest=LocalLibvirtExternalBoot.point_digest(moved),
+    )
+    directory = root / recovery_directory_name(point.recovery_ref, point.binding)
+    (directory / "tombstone.json").write_bytes(external_boot_module._tombstone_bytes(other))
+
+    with RecoveryMetadataStore(root) as store:
+        assert not store.exact_recovery_absence(point.binding, adopted_receipt_absent=True)
+
+
 @pytest.mark.parametrize("disposition", ["delete", "adopt"])
 def test_recovery_object_writes_run_under_one_session(tmp_path: Path, disposition: str) -> None:
     """#3045: the re-read and the store write run in their own pinned session."""
