@@ -531,3 +531,16 @@ the reap response, so a teardown resumed after its `reaping` marker reports the 
 even when the volumes held the restored one; the response is not authoritative on this path. A
 store that the earlier order left with a completion and no `.restored` keeps its CLEANUP refused;
 a System teardown recovers it. No schema change.
+
+## Amendment (2026-11-01): A failed module restore is re-driven on retry (#3469)
+
+A remote module restore whose host call raised or was cancelled published a `failed-after-mutation`
+lifecycle completion, and every retry with the same lifecycle key was refused "remote module
+lifecycle requires recovery" before the host ran, so a restore that had already rewritten the
+scratch volume could only be recovered by a System teardown. A restore completion with no response
+no longer answers a retry: the retry runs the host restore again, which the appliance resumes from
+its durable phase (ADR-0585 retry table) or refuses with no further write, and a success writes
+`.restored` and then replaces the failed completion with the terminal one. A terminal completion
+is never replaced, and a failed reap completion is still refused. The host restore runs under the
+deadline of the call that runs it rather than the deadline staged by the first call, which had
+usually expired by the time of a retry. No schema change.

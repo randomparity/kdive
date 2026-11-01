@@ -638,6 +638,11 @@ class RemoteModuleLifecycleCompletionV1(BaseModel):
         return value
 
 
+_FAILED_LIFECYCLE_COMPLETION = RemoteModuleLifecycleCompletionV1(
+    state="failed-after-mutation"
+).to_canonical_json()
+
+
 class RemoteModuleTerminalRecord(BaseModel):
     """Exact authenticated request and terminal provider-host response."""
 
@@ -1252,14 +1257,20 @@ class RemoteModuleVolumePreparationStore:
                 authority.plan_identity,
             )
             self._publish(f"{restored_key}.restored", response.to_canonical_json())
-        completion = RemoteModuleLifecycleCompletionV1(
+        name = f"{self._lifecycle_key(request)}.lifecycle-completion"
+        data = RemoteModuleLifecycleCompletionV1(
             state="terminal" if response is not None else "failed-after-mutation",
             response=response,
-        )
-        self._publish(
-            f"{self._lifecycle_key(request)}.lifecycle-completion",
-            completion.to_canonical_json(),
-        )
+        ).to_canonical_json()
+        # A re-driven restore that succeeded supersedes the failure it was re-driven from (#3469).
+        if (
+            response is not None
+            and response.action == "restore"
+            and self._read(name) == _FAILED_LIFECYCLE_COMPLETION
+        ):
+            self._replace(name, _FAILED_LIFECYCLE_COMPLETION, data)
+        else:
+            self._publish(name, data)
 
     def reopen_lifecycle_completion(
         self, request: RemoteModuleLifecycleRequestV1
@@ -1671,13 +1682,18 @@ class RemoteModuleVolumePreparationStore:
         return f"{self._recovery_key(binding, plan_identity)}.cleanup-finalized"
 
     def record_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
-        """Record the receipt; another operation's standing receipt is a conflict."""
+        """Record the receipt; another operation's standing receipt is a conflict.
+
+        An adopted (managed) receipt is kept as is: no path un-adopts it (ADR-0787).
+        """
         name = self._quarantine_name(receipt.recovery_ref)
         existing = self.read_cleanup_quarantine(receipt.binding, receipt.plan_identity)
         if existing is None:
             self._publish(name, receipt.to_canonical_json())
         elif existing.operation_identity != receipt.operation_identity:
             raise ProviderRecoveryRefusal("remote cleanup quarantine belongs to another operation")
+        elif existing.managed:
+            return
         elif existing != receipt:
             self._replace(name, existing.to_canonical_json(), receipt.to_canonical_json())
 
@@ -2252,7 +2268,9 @@ class DurableRemoteModuleVolumePreparationHost:
             return None
         if completion is None:
             return None
-        if completion.response is None:
+        # A failed restore is re-driven: the appliance resumes from its durable phase or refuses
+        # without writing (ADR-0585). A failed reap stays latched (#3469).
+        if completion.response is None and request.action != "restore":
             raise CategorizedError(
                 "remote module lifecycle requires recovery",
                 category=ErrorCategory.CONFLICT,
@@ -2263,7 +2281,8 @@ class DurableRemoteModuleVolumePreparationHost:
     async def execute_lifecycle(
         self, request: RemoteModuleLifecycleRequestV1
     ) -> RemoteModuleLifecycleResponseV1:
-        self._store.stage_lifecycle(request, self._monotonic() + request.budget_seconds)
+        deadline = self._monotonic() + request.budget_seconds
+        self._store.stage_lifecycle(request, deadline)
         admitted = self._store.reopen_lifecycle(request)
         request = admitted.request
         if completion := await self.observe_lifecycle(request):
@@ -2288,8 +2307,11 @@ class DurableRemoteModuleVolumePreparationHost:
                 category=ErrorCategory.CONFLICT,
                 details={"completion": "refused-before-mutation"},
             )
+        # A restore runs under this call's budget: a retry's staged deadline has usually expired.
+        if request.action == "reap":
+            deadline = admitted.local_deadline
         task = asyncio.create_task(
-            self._host.execute_lifecycle(request, terminal, restored, admitted.local_deadline)
+            self._host.execute_lifecycle(request, terminal, restored, deadline)
         )
         cancelled, consumed = await _wait_for_owned_child(task)
         if cancelled is not None:
