@@ -5741,6 +5741,35 @@ def test_re_recording_never_un_adopts_a_cleanup_quarantine(tmp_path: Path) -> No
     assert held == receipt.model_copy(update={"managed": True})
 
 
+def test_system_teardown_keeps_an_adopted_receipt(tmp_path: Path) -> None:
+    """#3467: teardown leaves an adopted receipt, as release finalize does (#3435)."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    io = _system_teardown_io(root, _SystemTeardownSession())
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+    assert not io.system_teardown_recovery_is_absent(intent, authority)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+
+    io.discard_system_teardown_recovery(intent, point, _cleanup_proof_for(point), authority)
+
+    directory = root / recovery_directory_name(point.recovery_ref, point.binding)
+    assert directory.is_dir()
+    assert sorted(path.name for path in directory.iterdir()) == [
+        "cleanup-quarantine.json",
+        "tombstone.json",
+    ]
+    assert io.system_teardown_recovery_is_absent(intent, authority)
+    assert io.teardown_system(intent, authority).complete
+    with RecoveryMetadataStore(root) as store:
+        assert store.read_cleanup_quarantine(point.binding) == receipt.model_copy(
+            update={"managed": True}
+        )
+        assert not store.exact_recovery_absence(point.binding)
+
+
 @pytest.mark.parametrize("disposition", ["delete", "adopt"])
 def test_recovery_object_writes_run_under_one_session(tmp_path: Path, disposition: str) -> None:
     """#3045: the re-read and the store write run in their own pinned session."""

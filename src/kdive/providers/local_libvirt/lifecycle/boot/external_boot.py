@@ -1775,7 +1775,9 @@ class RealLocalExternalBootIO:
             inspection = session.inspect()
             with RecoveryMetadataStore(self._recovery_root) as store:
                 store.begin_system_teardown(intent, inspection)
-                recovery_absent = store.exact_recovery_absence(intent.binding)
+                recovery_absent = store.exact_recovery_absence(
+                    intent.binding, adopted_receipt_absent=True
+                )
             return _system_teardown_facts(
                 intent, inspection, recovery_absent, None, intent.reservation
             )
@@ -1800,7 +1802,9 @@ class RealLocalExternalBootIO:
                     # ADR-0620 (#2921): this generation never reached `begin`; the earlier
                     # generation's record is not its own, so it observes as if absent.
                     retained = None
-                recovery_absent = store.exact_recovery_absence(anchor.binding)
+                recovery_absent = store.exact_recovery_absence(
+                    anchor.binding, adopted_receipt_absent=True
+                )
             completed_at = (
                 retained.completed_at
                 if retained is not None and retained.phase == "complete"
@@ -1850,7 +1854,7 @@ class RealLocalExternalBootIO:
             self._open_system_teardown(intent, authority),
             RecoveryMetadataStore(self._recovery_root) as store,
         ):
-            return store.exact_recovery_absence(intent.binding)
+            return store.exact_recovery_absence(intent.binding, adopted_receipt_absent=True)
 
     def discard_system_teardown_recovery(
         self,
@@ -1877,6 +1881,12 @@ class RealLocalExternalBootIO:
                 or proof.point_digest != LocalLibvirtExternalBoot.point_digest(recovery)
             ):
                 raise ValueError("external-boot cleanup proof does not match recovery point")
+            standing = store.read_cleanup_quarantine(recovery.binding)
+            if standing is not None and standing.managed:
+                # An adopted receipt is the operator's; teardown keeps it (ADR-0787, #3467).
+                if standing.tombstone.recovery_point != recovery:
+                    raise ValueError("adopted cleanup receipt does not match recovery point")
+                return
             if not store.cleanup_complete(reference, recovery):
                 metadata = store.reopen(reference, recovery.binding)
                 if _recovery_point_of(metadata, reference) != recovery:
@@ -1891,7 +1901,7 @@ class RealLocalExternalBootIO:
                     LocalLibvirtExternalBoot.point_digest(recovery),
                     require_recovered=False,
                 )
-            if store.read_cleanup_quarantine(recovery.binding) is None:
+            if standing is None:
                 store.record_cleanup_quarantine(recovery, proof)
             store.finalize_tombstone(reference, recovery, proof)
 
@@ -1902,7 +1912,7 @@ class RealLocalExternalBootIO:
             inspection = session.inspect()
             with RecoveryMetadataStore(self._recovery_root) as store:
                 record = store.begin_system_teardown(intent, inspection)
-                if not store.exact_recovery_absence(intent.binding):
+                if not store.exact_recovery_absence(intent.binding, adopted_receipt_absent=True):
                     return _system_teardown_facts(
                         intent, inspection, False, None, intent.reservation
                     )
@@ -1919,7 +1929,9 @@ class RealLocalExternalBootIO:
                     record = store.record_system_teardown_phase(record, phase)
             final = session.inspect()
             with RecoveryMetadataStore(self._recovery_root) as store:
-                recovery_absent = store.exact_recovery_absence(intent.binding)
+                recovery_absent = store.exact_recovery_absence(
+                    intent.binding, adopted_receipt_absent=True
+                )
                 physically_absent = (
                     final.domain_absent
                     and final.overlay_absent
@@ -4362,6 +4374,18 @@ class RecoveryMetadataStore:
             for descriptor in descriptors[1:]:
                 os.close(descriptor)
 
+    def _holds_only_adopted_receipt(
+        self, directory_fd: int, binding: ExternalBootActivationBinding
+    ) -> bool:
+        if set(os.listdir(directory_fd)) != {_TOMBSTONE_NAME, _QUARANTINE_NAME}:
+            return False
+        receipt = self.read_cleanup_quarantine(binding)
+        return (
+            receipt is not None
+            and receipt.managed
+            and self._read_tombstone(directory_fd) == receipt.tombstone
+        )
+
     def _read_optional_abort_receipt(self, name: str) -> LocalPartialAbortReceiptV1 | None:
         try:
             data = _read_private_file(self._root_fd, name)
@@ -4374,16 +4398,30 @@ class RecoveryMetadataStore:
             raise ValueError("partial abort receipt is not canonical")
         return receipt
 
-    def exact_recovery_absence(self, binding: ExternalBootActivationBinding) -> bool:
-        """Read-only proof that every exact activation-owned storage location is absent."""
+    def exact_recovery_absence(
+        self, binding: ExternalBootActivationBinding, *, adopted_receipt_absent: bool = False
+    ) -> bool:
+        """Read-only proof that every exact activation-owned storage location is absent.
+
+        System teardown passes ``adopted_receipt_absent``: a recovery directory holding only its
+        tombstone and an adopted receipt is the operator's, not the activation's (ADR-0787,
+        #3467).
+        """
         name = recovery_directory_name(_recovery_ref(binding), binding)
         for candidate in (name, f".{name}.partial"):
             try:
                 descriptor = _open_private_directory(self._root_fd, candidate)
             except FileNotFoundError:
                 continue
-            else:
+            try:
+                adopted = (
+                    adopted_receipt_absent
+                    and candidate == name
+                    and self._holds_only_adopted_receipt(descriptor, binding)
+                )
+            finally:
                 os.close(descriptor)
+            if not adopted:
                 return False
         if self._read_optional_abort_receipt(f".{name}.abort.json") is not None:
             return False
