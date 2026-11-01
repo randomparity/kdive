@@ -5753,6 +5753,12 @@ def test_system_teardown_keeps_an_adopted_receipt(tmp_path: Path) -> None:
     with RecoveryMetadataStore(root) as store:
         store.adopt_cleanup_quarantine(receipt)
 
+    # A session opened before ADR-0710 re-creates the activation's empty parents (#2898).
+    parent = root
+    for name in (_BINDING.system_id, _BINDING.run_id, _BINDING.activation_id):
+        parent = parent / name
+        parent.mkdir(mode=0o700)
+
     io.discard_system_teardown_recovery(intent, point, _cleanup_proof_for(point), authority)
 
     directory = root / recovery_directory_name(point.recovery_ref, point.binding)
@@ -5761,8 +5767,13 @@ def test_system_teardown_keeps_an_adopted_receipt(tmp_path: Path) -> None:
         "cleanup-quarantine.json",
         "tombstone.json",
     ]
+    assert not (root / _BINDING.system_id).exists()
     assert io.system_teardown_recovery_is_absent(intent, authority)
+    assert io.begin_system_teardown(intent, authority).recovery_absent
     assert io.teardown_system(intent, authority).complete
+    observed = io.observe_system_teardown(intent, authority)
+    assert observed.recovery_absent
+    assert not observed.quarantine_retained
     with RecoveryMetadataStore(root) as store:
         assert store.read_cleanup_quarantine(point.binding) == receipt.model_copy(
             update={"managed": True}

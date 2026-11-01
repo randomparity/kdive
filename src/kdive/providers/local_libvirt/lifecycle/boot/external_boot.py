@@ -3999,13 +3999,7 @@ class RecoveryMetadataStore:
             raise ValueError("cleanup tombstone does not match recovery point")
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
-            entries = set(os.listdir(directory_fd))
-            allowed = {_TOMBSTONE_NAME, _INTENT_NAME, _PREPARATION_NAME, _QUARANTINE_NAME}
-            if entries - allowed:
-                raise ValueError("cleanup tombstone directory contains unexpected payload")
-            if self._read_tombstone(directory_fd) != expected:
-                raise ValueError("cleanup tombstone changed before finalization")
-            self._validate_tombstone_residue(directory_fd, entries, expected)
+            entries = self._checked_tombstone_entries(directory_fd, expected)
             with suppress(FileNotFoundError):
                 os.unlink(_QUARANTINE_NAME, dir_fd=directory_fd)
             for residual in (_INTENT_NAME, _PREPARATION_NAME):
@@ -4027,7 +4021,7 @@ class RecoveryMetadataStore:
         raise ValueError("cleanup tombstone remained after finalization")
 
     def drop_tombstone_residue(self, recovery: RecoveryPoint) -> None:
-        """Remove intent and preparation residue beside an exact tombstone, keeping the rest.
+        """Drop residue beside an exact tombstone, keeping it and the receipt; prune parents.
 
         System teardown keeps an adopted receipt and its tombstone (ADR-0787, #3467), but a
         crash inside ``publish_tombstone`` can leave the intent beside them.
@@ -4041,18 +4035,14 @@ class RecoveryMetadataStore:
         )
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
-            entries = set(os.listdir(directory_fd))
-            if entries - {_TOMBSTONE_NAME, _INTENT_NAME, _PREPARATION_NAME, _QUARANTINE_NAME}:
-                raise ValueError("cleanup tombstone directory contains unexpected payload")
-            if self._read_tombstone(directory_fd) != expected:
-                raise ValueError("cleanup tombstone does not match recovery point")
-            self._validate_tombstone_residue(directory_fd, entries, expected)
+            entries = self._checked_tombstone_entries(directory_fd, expected)
             for residual in (_INTENT_NAME, _PREPARATION_NAME):
                 if residual in entries:
                     os.unlink(residual, dir_fd=directory_fd)
                     os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+        self.prune_empty_activation_parents(recovery.binding)
 
     def record_cleanup_quarantine(
         self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
@@ -4130,6 +4120,19 @@ class RecoveryMetadataStore:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+
+    def _checked_tombstone_entries(
+        self, directory_fd: int, expected: CleanupTombstoneV1
+    ) -> set[str]:
+        """The directory's entries, after proving the tombstone and every residue file exact."""
+        entries = set(os.listdir(directory_fd))
+        allowed = {_TOMBSTONE_NAME, _INTENT_NAME, _PREPARATION_NAME, _QUARANTINE_NAME}
+        if entries - allowed:
+            raise ValueError("cleanup tombstone directory contains unexpected payload")
+        if self._read_tombstone(directory_fd) != expected:
+            raise ValueError("cleanup tombstone changed before finalization")
+        self._validate_tombstone_residue(directory_fd, entries, expected)
+        return entries
 
     def _validate_tombstone_residue(
         self,

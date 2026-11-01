@@ -31,7 +31,8 @@ Local only; remote already behaves this way.
   proof check, read the standing receipt. When it is `managed`, require
   `receipt.tombstone.recovery_point == recovery` (else `ValueError`), remove validated intent
   and preparation residue beside the exact tombstone (`drop_tombstone_residue`, the same checks
-  `finalize_tombstone` applies), and return. Unmanaged or absent receipts take today's path.
+  `finalize_tombstone` applies, now shared), prune the activation's empty parents as
+  `finalize_tombstone` does, and return. Unmanaged or absent receipts take today's path.
 - **Teardown absence.** `RecoveryMetadataStore.exact_recovery_absence(binding, *,
   adopted_receipt_absent=False)`. With the flag, the recovery directory (not the `.partial`
   one) counts as absent when its entries are exactly the tombstone and the receipt, the receipt
