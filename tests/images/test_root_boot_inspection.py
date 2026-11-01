@@ -13,6 +13,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.provenance_probes import (
     ROOT_INSPECTION_MAX_OUTPUT_BYTES,
+    UnsupportedBtrfsRootError,
     _kill_inspector_group,
     _parse_root_boot,
     _run_bounded_inspector,
@@ -193,6 +194,33 @@ def test_an_lvm_volume_name_is_split_from_its_subvolume(device: str, subvolume: 
     result = _parse_root_boot(_inspector_xml(device, (device,)), "x86_64", _DIGEST)
 
     assert f"rootflags=subvol={subvolume}" in result.arguments
+
+
+@pytest.mark.parametrize(
+    ("mountpoint", "filesystem", "subvolume"),
+    [
+        ("btrfsvol:/dev/sda2//root", "btrfsvol:/dev/sda2/root", "root"),
+        ("btrfsvol:/dev/sda2//os/root", "btrfsvol:/dev/sda2/os/root", "os/root"),
+        ("btrfsvol:/dev/vgsys/lvroot//root", "btrfsvol:/dev/vgsys/lvroot/root", "root"),
+    ],
+)
+def test_a_leading_slash_subvol_option_names_the_same_subvolume(
+    mountpoint: str, filesystem: str, subvolume: str
+) -> None:
+    result = _parse_root_boot(_inspector_xml(mountpoint, (filesystem,)), "x86_64", _DIGEST)
+
+    assert result.arguments[-1] == f"rootflags=subvol={subvolume}"
+
+
+@pytest.mark.parametrize(
+    "mountpoint",
+    ["btrfsvol:/dev/sda2//", "btrfsvol:/dev/sda2///root", "btrfsvol:/dev/sda2//a b"],
+)
+def test_a_leading_slash_with_an_unusable_name_is_unsupported_not_malformed(
+    mountpoint: str,
+) -> None:
+    with pytest.raises(UnsupportedBtrfsRootError):
+        _parse_root_boot(_inspector_xml(mountpoint, (mountpoint,)), "x86_64", _DIGEST)
 
 
 def test_a_top_level_btrfs_root_has_no_rootflags() -> None:
