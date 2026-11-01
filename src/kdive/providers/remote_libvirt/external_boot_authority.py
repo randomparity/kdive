@@ -1671,13 +1671,18 @@ class RemoteModuleVolumePreparationStore:
         return f"{self._recovery_key(binding, plan_identity)}.cleanup-finalized"
 
     def record_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
-        """Record the receipt; another operation's standing receipt is a conflict."""
+        """Record the receipt; another operation's standing receipt is a conflict.
+
+        An adopted (managed) receipt is kept as is: no path un-adopts it (ADR-0787).
+        """
         name = self._quarantine_name(receipt.recovery_ref)
         existing = self.read_cleanup_quarantine(receipt.binding, receipt.plan_identity)
         if existing is None:
             self._publish(name, receipt.to_canonical_json())
         elif existing.operation_identity != receipt.operation_identity:
             raise ProviderRecoveryRefusal("remote cleanup quarantine belongs to another operation")
+        elif existing.managed:
+            return
         elif existing != receipt:
             self._replace(name, existing.to_canonical_json(), receipt.to_canonical_json())
 
