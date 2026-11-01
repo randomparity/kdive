@@ -2064,6 +2064,11 @@ async def test_cleanup_inventory_follows_the_adopted_proof_on_a_retry() -> None:
         await adapter.cleanup_quarantine_inventory(
             retry, _context(AuthorityOperation.CLEANUP, operation_identity="cleanup-2")
         )
+    other_attempt = _context(AuthorityOperation.CLEANUP, operation_identity="cleanup-1")
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await adapter.cleanup_quarantine_inventory(
+            retry, other_attempt.model_copy(update={"attempt_id": uuid4()})
+        )
 
 
 async def test_a_teardown_commit_finalizes_the_tombstone(tmp_path: Path) -> None:
