@@ -5730,6 +5730,17 @@ def test_real_adapter_finalization_leaves_an_adopted_receipt_in_place(tmp_path: 
     assert held == receipt.model_copy(update={"managed": True})
 
 
+def test_re_recording_never_un_adopts_a_cleanup_quarantine(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+        store.record_cleanup_quarantine(point, _cleanup_proof_for(point))
+        held = store.read_cleanup_quarantine(point.binding)
+    assert held == receipt.model_copy(update={"managed": True})
+
+
 @pytest.mark.parametrize("disposition", ["delete", "adopt"])
 def test_recovery_object_writes_run_under_one_session(tmp_path: Path, disposition: str) -> None:
     """#3045: the re-read and the store write run in their own pinned session."""

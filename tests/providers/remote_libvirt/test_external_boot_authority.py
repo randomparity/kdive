@@ -2893,6 +2893,35 @@ async def test_durable_remote_lifecycle_cancel_persists_exceptional_completion(
 
 
 @pytest.mark.anyio
+async def test_failed_remote_reap_completion_still_requires_recovery(tmp_path: Path) -> None:
+    """Only a restore is re-driven (#3469); a reap whose host call failed stays latched."""
+    preparation = _remote_preparation_request()
+    teardown = _module_lifecycle_request(
+        preparation, purpose="teardown", operation="teardown", action="reap"
+    )
+    calls = 0
+
+    class FailingHost(InactiveSystemHost):
+        async def execute_lifecycle(self, *_args: object) -> object:
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("provider failed after mutation")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(preparation, 999.0)
+    store.publish_result(preparation, _terminal_response(preparation))
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    with pytest.raises(RuntimeError, match="after mutation"):
+        await durable.execute_lifecycle(teardown)
+    with pytest.raises(CategorizedError, match="requires recovery"):
+        await durable.observe_lifecycle(teardown)
+    with pytest.raises(CategorizedError, match="requires recovery"):
+        await durable.execute_lifecycle(teardown)
+    assert calls == 1
+    store.close()
+
+
+@pytest.mark.anyio
 async def test_durable_remote_preparation_retries_unrecorded_provider_return(
     tmp_path: Path,
 ) -> None:
@@ -4500,6 +4529,23 @@ async def test_remote_recovery_record_delete_and_adopt_are_digest_fenced(tmp_pat
     assert await adapter.cleanup_quarantine_inventory(request, _native_context(request)) == ()
     with pytest.raises(ProviderRecoveryRefusal, match="changed before delete"):
         await adapter.delete_recovery_object(observed.binding, authority, adopted.observed_digest)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_re_recording_never_un_adopts_a_receipt(tmp_path: Path) -> None:
+    adapter, record, request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+    await adapter.adopt_recovery_object(
+        observed.binding, authority_reference(request), observed.observed_digest
+    )
+    adopted = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert adopted is not None and adopted.managed
+
+    store.record_cleanup_quarantine(adopted.model_copy(update={"managed": False}))
+
+    assert store.read_cleanup_quarantine(record.binding, record.plan_identity) == adopted
     adapter.close()
 
 

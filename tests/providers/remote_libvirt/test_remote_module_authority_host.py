@@ -1061,6 +1061,133 @@ async def test_crash_between_the_restore_evidence_writes_is_recovered_by_a_retry
     stack.close()
 
 
+class _RaiseAfterTheRestore:
+    """Let the appliance rewrite the scratch volume, then fail the host call ``times`` times."""
+
+    def __init__(self, stack: _Quiesce, monkeypatch: pytest.MonkeyPatch, times: int = 1) -> None:
+        self._restore = stack.host._restore
+        self._remaining = times
+        self.calls = 0
+        monkeypatch.setattr(stack.host, "_restore", self)
+
+    def __call__(self, *args: Any) -> RemoteModuleLifecycleResponseV1:
+        self.calls += 1
+        response = self._restore(*args)
+        if self._remaining:
+            self._remaining -= 1
+            raise RuntimeError("remote module restore teardown is incomplete")
+        return response
+
+
+async def _fail_the_restore(
+    durable: DurableRemoteModuleVolumePreparationHost,
+    stack: _Quiesce,
+    request: RemoteModuleLifecycleRequestV1,
+) -> None:
+    with pytest.raises(RuntimeError, match="teardown is incomplete"):
+        await durable.execute_lifecycle(request)
+    completion = stack.store.reopen_lifecycle_completion(request)
+    assert completion is not None and completion.state == "failed-after-mutation"
+
+
+def _assert_restore_published(
+    stack: _Quiesce,
+    request: RemoteModuleLifecycleRequestV1,
+    restored: RemoteModuleLifecycleResponseV1,
+) -> None:
+    assert restored.result == stack.scratch
+    plan_identity = stack.request.authority.plan_identity
+    assert stack.store.reopen_restored(stack._binding(), plan_identity) == restored
+    completion = stack.store.reopen_lifecycle_completion(request)
+    assert completion is not None and completion.state == "terminal"
+
+
+@pytest.mark.anyio
+async def test_restore_retry_after_the_host_raised_past_the_rewrite_re_drives_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed restore completion no longer refuses its retry (#3469)."""
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    await stack.durable.execute(stack.request)
+    host = _RaiseAfterTheRestore(stack, monkeypatch)
+    request = stack._restore_request()
+    await _fail_the_restore(stack.durable, stack, request)
+
+    restored = await stack.durable.execute_lifecycle(request)
+
+    _assert_restore_published(stack, request, restored)
+    assert host.calls == 2
+    assert (await stack.reap("cleanup")).volumes_absent
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_restore_re_drive_runs_under_its_own_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first call staged a deadline that has expired by the time of the retry."""
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    await stack.durable.execute(stack.request)
+    durable = DurableRemoteModuleVolumePreparationHost(
+        stack.store, stack.host, monotonic=stack.clock
+    )
+    _RaiseAfterTheRestore(stack, monkeypatch)
+    request = stack._restore_request()
+    await _fail_the_restore(durable, stack, request)
+    assert stack.store.reopen_lifecycle(request).local_deadline < 1_000.0
+    stack.clock.value = 1_000.0
+
+    restored = await durable.execute_lifecycle(request)
+
+    _assert_restore_published(stack, request, restored)
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_restore_re_drive_that_fails_again_stays_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    await stack.durable.execute(stack.request)
+    host = _RaiseAfterTheRestore(stack, monkeypatch, times=2)
+    request = stack._restore_request()
+    await _fail_the_restore(stack.durable, stack, request)
+    await _fail_the_restore(stack.durable, stack, request)
+
+    restored = await stack.durable.execute_lifecycle(request)
+
+    _assert_restore_published(stack, request, restored)
+    assert host.calls == 3
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_restore_re_drive_crash_before_the_replace_finishes_from_restored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-drive that wrote ``.restored`` but died before replacing the failure needs no host."""
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+    await stack.durable.execute(stack.request)
+    host = _RaiseAfterTheRestore(stack, monkeypatch)
+    request = stack._restore_request()
+    await _fail_the_restore(stack.durable, stack, request)
+    replace = stack.store._replace
+
+    def die_before_the_replace(name: str, expected: bytes, data: bytes) -> None:
+        raise SystemExit("worker died before replacing the failed completion")
+
+    monkeypatch.setattr(stack.store, "_replace", die_before_the_replace)
+    with pytest.raises(SystemExit):
+        await stack.durable.execute_lifecycle(request)
+    monkeypatch.setattr(stack.store, "_replace", replace)
+
+    restored = await stack.durable.execute_lifecycle(request)
+
+    _assert_restore_published(stack, request, restored)
+    assert host.calls == 2
+    stack.close()
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "unfinished",

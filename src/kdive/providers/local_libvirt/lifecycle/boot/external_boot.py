@@ -4027,6 +4027,9 @@ class RecoveryMetadataStore:
         )
         if tombstone != expected or proof.point_digest != expected.point_digest:
             raise ValueError("cleanup tombstone does not match recovery point")
+        standing = self.read_cleanup_quarantine(recovery.binding)
+        if standing is not None and standing.managed:
+            return  # an adopted receipt is kept as is: no path un-adopts it (ADR-0787)
         receipt = CleanupQuarantineReceiptV1(tombstone=tombstone, proof=proof)
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
