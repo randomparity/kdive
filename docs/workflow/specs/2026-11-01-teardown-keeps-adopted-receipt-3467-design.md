@@ -29,8 +29,9 @@ Local only; remote already behaves this way.
 
 - **Discard path.** In `LocalSystemTeardownIO.discard_system_teardown_recovery`, after the
   proof check, read the standing receipt. When it is `managed`, require
-  `receipt.tombstone.recovery_point == recovery` (else `ValueError`) and return without any
-  store write. Unmanaged or absent receipts take today's path.
+  `receipt.tombstone.recovery_point == recovery` (else `ValueError`), remove validated intent
+  and preparation residue beside the exact tombstone (`drop_tombstone_residue`, the same checks
+  `finalize_tombstone` applies), and return. Unmanaged or absent receipts take today's path.
 - **Teardown absence.** `RecoveryMetadataStore.exact_recovery_absence(binding, *,
   adopted_receipt_absent=False)`. With the flag, the recovery directory (not the `.partial`
   one) counts as absent when its entries are exactly the tombstone and the receipt, the receipt
@@ -61,9 +62,9 @@ Local only; remote already behaves this way.
    - After local teardown the recovery-object port cannot observe or act on the receipt.
      Accepted: the port's session needs the System domain for every row, not only adopted
      ones; a follow-up candidate, not this change.
-   - A corrupt adopted receipt or tombstone makes local teardown absence false, so teardown
-     does not complete. Accepted: both are canonical JSON the store wrote, and a corrupt one
-     already refuses every other read.
+   - A corrupt adopted receipt or tombstone makes the local teardown absence check raise, so
+     teardown does not complete. Accepted: both are canonical JSON the store wrote, and a
+     corrupt one already refuses every other read.
 4. **Covered elsewhere.**
    - Remote collection of a torn-down activation's other store files: #3472.
    - Re-recording a managed receipt: #3468. Release finalize: #3435.
@@ -73,8 +74,9 @@ Local only; remote already behaves this way.
 
 1. ADR-0787 carries a 2026-11-01 amendment stating the teardown rule, the receipt's lifecycle,
    the #3472 boundary, and the rejected alternatives.
-2. Local: with an adopted receipt, teardown discard changes no store file, teardown completes,
-   and the store reads the receipt as adopted beside its tombstone.
+2. Local: with an adopted receipt, teardown discard leaves exactly the tombstone and receipt
+   (removing intent residue when present), teardown completes, and the store reads the receipt
+   as adopted.
 3. Local: with an unmanaged receipt standing, teardown absence stays false (discard still runs).
 4. Local: the existing `test_system_teardown_*` cases still pass.
 5. Remote: with an adopted receipt, teardown completes and the port observes the adopted receipt.

@@ -5770,6 +5770,31 @@ def test_system_teardown_keeps_an_adopted_receipt(tmp_path: Path) -> None:
         assert not store.exact_recovery_absence(point.binding)
 
 
+def test_system_teardown_drops_residue_beside_an_adopted_receipt(tmp_path: Path) -> None:
+    """A crash inside publish_tombstone leaves the intent beside the receipt it later proves."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    directory = root / recovery_directory_name(point.recovery_ref, point.binding)
+    residue = directory / "intent.json"
+    residue.write_bytes(external_boot_module._metadata_bytes(_metadata("recovered")))
+    residue.chmod(0o600)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+    io = _system_teardown_io(root, _SystemTeardownSession())
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+    assert io.system_teardown_recovery_point(intent, authority) == point
+
+    io.discard_system_teardown_recovery(intent, point, _cleanup_proof_for(point), authority)
+
+    assert sorted(path.name for path in directory.iterdir()) == [
+        "cleanup-quarantine.json",
+        "tombstone.json",
+    ]
+    assert io.teardown_system(intent, authority).complete
+
+
 def test_system_teardown_absence_refuses_a_tombstone_the_adopted_receipt_does_not_name(
     tmp_path: Path,
 ) -> None:

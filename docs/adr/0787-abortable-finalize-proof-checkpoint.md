@@ -237,9 +237,9 @@ removes no store file, so the receipt survived there.
 - System teardown leaves a `managed` receipt in place on both providers and still completes.
   ADR-0583 limits teardown to objects whose activation ownership is provable; an adopted object
   is the operator's.
-- Local: the teardown discard path makes no store change when the standing receipt is
-  `managed`, so the recovery directory keeps the tombstone and receipt that release `finalize`
-  also leaves (#3435). System teardown's recovery-absence check counts a directory holding
+- Local: when the standing receipt is `managed`, the teardown discard path removes only intent
+  and preparation residue a crash inside `publish_tombstone` left, so the recovery directory
+  keeps the tombstone and receipt that release `finalize` also leaves (#3435). System teardown's recovery-absence check counts a directory holding
   exactly that tombstone and a `managed` receipt carrying the same tombstone as absent. Release
   readers keep the stricter check and see the state an adopted release already leaves.
 - Remote: unchanged. Teardown already leaves the receipt.

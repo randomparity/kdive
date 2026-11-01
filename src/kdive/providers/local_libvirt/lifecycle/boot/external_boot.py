@@ -1886,6 +1886,7 @@ class RealLocalExternalBootIO:
                 # An adopted receipt is the operator's; teardown keeps it (ADR-0787, #3467).
                 if standing.tombstone.recovery_point != recovery:
                     raise ValueError("adopted cleanup receipt does not match recovery point")
+                store.drop_tombstone_residue(recovery)
                 return
             if not store.cleanup_complete(reference, recovery):
                 metadata = store.reopen(reference, recovery.binding)
@@ -4024,6 +4025,34 @@ class RecoveryMetadataStore:
             self.prune_empty_activation_parents(recovery.binding)
             return
         raise ValueError("cleanup tombstone remained after finalization")
+
+    def drop_tombstone_residue(self, recovery: RecoveryPoint) -> None:
+        """Remove intent and preparation residue beside an exact tombstone, keeping the rest.
+
+        System teardown keeps an adopted receipt and its tombstone (ADR-0787, #3467), but a
+        crash inside ``publish_tombstone`` can leave the intent beside them.
+        """
+        self._require_open()
+        name = recovery_directory_name(recovery.recovery_ref, recovery.binding)
+        expected = CleanupTombstoneV1(
+            binding=recovery.binding,
+            recovery_point=recovery,
+            point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
+        )
+        directory_fd = _open_private_directory(self._root_fd, name)
+        try:
+            entries = set(os.listdir(directory_fd))
+            if entries - {_TOMBSTONE_NAME, _INTENT_NAME, _PREPARATION_NAME, _QUARANTINE_NAME}:
+                raise ValueError("cleanup tombstone directory contains unexpected payload")
+            if self._read_tombstone(directory_fd) != expected:
+                raise ValueError("cleanup tombstone does not match recovery point")
+            self._validate_tombstone_residue(directory_fd, entries, expected)
+            for residual in (_INTENT_NAME, _PREPARATION_NAME):
+                if residual in entries:
+                    os.unlink(residual, dir_fd=directory_fd)
+                    os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     def record_cleanup_quarantine(
         self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
