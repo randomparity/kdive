@@ -2893,6 +2893,35 @@ async def test_durable_remote_lifecycle_cancel_persists_exceptional_completion(
 
 
 @pytest.mark.anyio
+async def test_failed_remote_reap_completion_still_requires_recovery(tmp_path: Path) -> None:
+    """Only a restore is re-driven (#3469); a reap whose host call failed stays latched."""
+    preparation = _remote_preparation_request()
+    teardown = _module_lifecycle_request(
+        preparation, purpose="teardown", operation="teardown", action="reap"
+    )
+    calls = 0
+
+    class FailingHost(InactiveSystemHost):
+        async def execute_lifecycle(self, *_args: object) -> object:
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("provider failed after mutation")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(preparation, 999.0)
+    store.publish_result(preparation, _terminal_response(preparation))
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    with pytest.raises(RuntimeError, match="after mutation"):
+        await durable.execute_lifecycle(teardown)
+    with pytest.raises(CategorizedError, match="requires recovery"):
+        await durable.observe_lifecycle(teardown)
+    with pytest.raises(CategorizedError, match="requires recovery"):
+        await durable.execute_lifecycle(teardown)
+    assert calls == 1
+    store.close()
+
+
+@pytest.mark.anyio
 async def test_durable_remote_preparation_retries_unrecorded_provider_return(
     tmp_path: Path,
 ) -> None:
