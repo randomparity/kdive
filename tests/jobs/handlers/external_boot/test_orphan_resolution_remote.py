@@ -117,8 +117,14 @@ async def _run(
         case = await seed_case(
             conn, vehicle, purpose="release", operation="release", activation_state="active"
         )
-        await conn.execute("UPDATE resources SET kind = 'remote-libvirt'")
-        await conn.execute("UPDATE runs SET target_kind = 'remote-libvirt'")
+        await conn.execute(
+            "UPDATE resources SET kind = 'remote-libvirt' "
+            "WHERE id = (SELECT resource_id FROM allocations WHERE id = %s)",
+            (case.allocation_id,),
+        )
+        await conn.execute(
+            "UPDATE runs SET target_kind = 'remote-libvirt' WHERE id = %s", (vehicle.run_id,)
+        )
         _, adopted_identity, _ = await insert_release_authority(
             conn,
             vehicle,
