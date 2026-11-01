@@ -2458,6 +2458,8 @@ class RemoteExternalBootRecoveryRecord(BaseModel):
             raise ValueError("remote recovery module state differs")
         encoded = self.to_canonical_json()
         if len(encoded) > _MAX_RECORD_BYTES:
+            # Pydantic rewraps this as ValidationError; the type keeps the reason off plain
+            # ValueError, and from_canonical_json raises the same refusal unwrapped.
             raise ProviderRecoveryRefusal("remote recovery record exceeds 1048576 bytes")
         return self
 
