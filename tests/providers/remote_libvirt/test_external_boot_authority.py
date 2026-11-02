@@ -4585,6 +4585,26 @@ async def test_remote_adoption_during_teardown_collection_fails_as_changed(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("named", [b"../" + b"a" * 61, b"z" * 64])
+async def test_remote_collection_refuses_a_malformed_recovery_index_before_unlinking(
+    tmp_path: Path, named: bytes
+) -> None:
+    """#3472: an index whose content is not a recovery identity names no file to remove."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    index = f"{store._recovery_key(record.binding, record.plan_identity)}.recovery-index"
+    os.unlink(index, dir_fd=store._root_fd)
+    store._publish(index, named)
+    before = _store_names(store)
+
+    # A traversal-shaped value fails the opaque-reference check, a non-hex one the identity check.
+    with pytest.raises(ValueError, match="opaque|malformed"):
+        store.collect_torn_down_activation(record.binding, record.plan_identity)
+
+    assert _store_names(store) == before
+    adapter.close()
+
+
+@pytest.mark.anyio
 async def test_remote_adoption_after_teardown_collection_fails_as_changed(tmp_path: Path) -> None:
     adapter, record, _request, _context = await _cleaned_release(tmp_path)
     store = adapter._coordinator._store
