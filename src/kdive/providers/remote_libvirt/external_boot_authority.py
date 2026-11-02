@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import json
 import logging
 import os
 import stat
 import time
-from collections.abc import Callable
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -921,6 +922,20 @@ class RemoteModuleVolumePreparationStore:
         if descriptor >= 0:
             os.close(descriptor)
 
+    @contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        """Hold an exclusive lock on the store directory (ADR-0787, #3472).
+
+        Each acquisition opens its own file description, so threads of one process exclude
+        each other too; closing it releases the lock.
+        """
+        descriptor = os.open(".", os.O_RDONLY | os.O_DIRECTORY, dir_fd=self._root_fd)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(descriptor)
+
     @staticmethod
     def _key(request: RemoteModuleVolumePreparationRequestV1) -> str:
         return RemoteModuleVolumePreparationStore._authority_key(request.authority)
@@ -1765,9 +1780,23 @@ class RemoteModuleVolumePreparationStore:
             )
         return receipt
 
+    def torn_down(self, binding: ExternalBootActivationBinding, plan_identity: str) -> bool:
+        """Whether this System's teardown completed for exactly this activation (#3472)."""
+        data = self._read(f"{self._system_teardown_key(binding)}.teardown")
+        if data is None:
+            return False
+        record = RemoteSystemTeardownRecordV1.from_canonical_json(data)
+        return (
+            record.phase == "complete"
+            and record.intent.binding == binding
+            and record.intent.plan_identity == plan_identity
+        )
+
     def cleanup_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> bool:
-        """Whether finalization began removing this activation's recovery record."""
-        return self._read(self._finalized_name(binding, plan_identity)) is not None
+        """Whether finalize or a completed System teardown removed, or is removing, its records."""
+        return self._read(self._finalized_name(binding, plan_identity)) is not None or (
+            self.torn_down(binding, plan_identity)
+        )
 
     def refuse_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> None:
         """Refuse a finalized activation; the caller's later write is not atomic with this check.
@@ -1780,7 +1809,7 @@ class RemoteModuleVolumePreparationStore:
         """
         if self.cleanup_finalized(binding, plan_identity):
             raise RemoteCleanupFinalizedError(
-                "remote activation records were removed when its cleanup was finalized"
+                "remote activation records were removed by cleanup finalization or System teardown"
             )
 
     def _scan_owned(
@@ -2016,11 +2045,12 @@ class RemoteModuleVolumePreparationStore:
         return self._receipt(reference)
 
     def adopt_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
-        self._replace(
-            self._quarantine_name(receipt.recovery_ref),
-            receipt.to_canonical_json(),
-            receipt.model_copy(update={"managed": True}).to_canonical_json(),
-        )
+        with self._exclusive():
+            self._replace(
+                self._quarantine_name(receipt.recovery_ref),
+                receipt.to_canonical_json(),
+                receipt.model_copy(update={"managed": True}).to_canonical_json(),
+            )
 
     def finalize_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
         """Remove the activation's records and indexes, then the receipt that proves the cleanup.
@@ -2032,7 +2062,14 @@ class RemoteModuleVolumePreparationStore:
         keeps a finalized cleanup distinguishable from a record that never existed. An index is
         removed only while it names this record, whether or not the record is still present.
         The ordering against a concurrent stage rests on the System lane (``refuse_finalized``).
+        It runs under the store lock and writes nothing once System teardown completed for the
+        activation, so it cannot publish a marker after collection (#3472).
         """
+        with self._exclusive():
+            if not self.torn_down(receipt.binding, receipt.plan_identity):
+                self._finalize_cleanup_quarantine(receipt)
+
+    def _finalize_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
         identity = _recovery_identity(receipt.recovery_ref)
         record = self._recovery_record(identity)
         if record is not None and (
@@ -2058,6 +2095,74 @@ class RemoteModuleVolumePreparationStore:
             with suppress(FileNotFoundError):
                 os.unlink(name, dir_fd=self._root_fd)
         os.fsync(self._root_fd)
+
+    def collect_torn_down_activation(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> None:
+        """Remove a torn-down activation's files; keep an adopted receipt and what finds it.
+
+        Each anchor goes after what it names, so a retry after a crash finds what remains: the
+        recovery index and the marker go after the record and receipt (ADR-0787, #3472). The
+        store lock makes the ``managed`` read and the unlinks atomic against an adoption.
+        """
+        index = f"{self._recovery_key(binding, plan_identity)}.recovery-index"
+        marker = self._finalized_name(binding, plan_identity)
+        with self._exclusive():
+            names = self._activation_files(binding, plan_identity)
+            adopted = False
+            for identity in self._collected_identities(index, marker):
+                files, managed = self._recovery_files(identity, binding, plan_identity)
+                names += files
+                adopted = adopted or managed
+            if not adopted:
+                names.append(index)
+            names.append(marker)
+            for name in names:
+                with suppress(FileNotFoundError):
+                    os.unlink(name, dir_fd=self._root_fd)
+            os.fsync(self._root_fd)
+
+    def _collected_identities(self, index: str, marker: str) -> list[str]:
+        """Recovery identities the index or the marker names, without duplicates."""
+        references: list[OpaqueProviderRef] = []
+        if (named := self._read(index)) is not None:
+            identity = named.decode("ascii", errors="replace")
+            references.append(OpaqueProviderRef(ref=f"remote-external-boot/{identity}"))
+        if (data := self._read(marker)) is not None:
+            references.append(_parse_finalized_marker(data)[0].recovery_ref)
+        return list(dict.fromkeys(_recovery_identity(reference) for reference in references))
+
+    def _recovery_files(
+        self, identity: str, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> tuple[list[str], bool]:
+        """Object indexes naming the record, then the record and receipt unless adopted."""
+        reference = OpaqueProviderRef(ref=f"remote-external-boot/{identity}")
+        record = self._recovery_record(identity)
+        receipt = self._receipt(reference)
+        if record is not None and (
+            record.binding != binding or record.plan_identity != plan_identity
+        ):
+            raise ProviderRecoveryRefusal("remote recovery index differs from durable record")
+        if receipt is not None and (
+            receipt.binding != binding or receipt.plan_identity != plan_identity
+        ):
+            raise ProviderRecoveryRefusal(
+                "remote cleanup quarantine receipt differs from its owner"
+            )
+        owned = identity.encode("ascii")
+        names = (
+            []
+            if record is None
+            else [
+                name
+                for object_ref in record.recovery_objects
+                if self._read(name := _object_index_name(object_ref)) == owned
+            ]
+        )
+        managed = receipt is not None and receipt.managed
+        if not managed:
+            names += [f"{identity}.recovery", self._quarantine_name(reference)]
+        return names, managed
 
 
 class RemoteModulePreparationOperation(Protocol):
@@ -2805,6 +2910,17 @@ class RemoteExternalBootCoordinator:
     def system_teardown_state(
         self, binding: ExternalBootActivationBinding, plan_identity: str
     ) -> RemoteSystemTeardownState:
+        if self._store.torn_down(binding, plan_identity):
+            # A complete teardown proved its volumes absent; a half-collected store's records
+            # are neither read nor trusted (ADR-0787, #3472).
+            return RemoteSystemTeardownState(
+                binding=binding,
+                plan_identity=plan_identity,
+                preparation=None,
+                terminal=None,
+                materialization=None,
+                recovery=None,
+            )
         finalized = self._store.finalized_teardown_refs(binding, plan_identity)
         try:
             terminal = self._store.reopen_terminal(binding, plan_identity)
@@ -2843,6 +2959,21 @@ class RemoteExternalBootCoordinator:
         completed_at: datetime | None = None,
     ) -> RemoteSystemTeardownRecordV1:
         return self._store.checkpoint_system_teardown(record, phase, completed_at=completed_at)
+
+    def collect_torn_down_activation(self, record: RemoteSystemTeardownRecordV1) -> None:
+        """Collect a completed teardown's activation files; a failure is logged, not raised.
+
+        The System is already destroyed and the ``complete`` record keeps refusing late stages,
+        so a failure is logged rather than turned into a teardown refusal (ADR-0787, #3472).
+        """
+        if record.phase != "complete":
+            return
+        try:
+            self._store.collect_torn_down_activation(
+                record.intent.binding, record.intent.plan_identity
+            )
+        except Exception:  # noqa: BLE001 - the service's following observe collects again
+            logger.exception("remote store collection after System teardown failed")
 
     def inspect_system_teardown(
         self, state: RemoteSystemTeardownState, *, domain_validated: bool
@@ -3246,6 +3377,7 @@ class RemoteExternalBootAuthorityAdapter:
                     record, "complete", completed_at=self._teardown_clock()
                 )
             )
+        await self._executor.run(lambda: self._coordinator.collect_torn_down_activation(record))
         return self._teardown_facts(record.intent, record, inspection)
 
     async def observe_system_teardown(
@@ -3258,6 +3390,9 @@ class RemoteExternalBootAuthorityAdapter:
 
         def observe() -> AuthoritySystemTeardownFacts:
             record = self._coordinator.reopen_system_teardown(anchor)
+            if record is not None:
+                # The service recovers an interrupted teardown by observing it (#3472).
+                self._coordinator.collect_torn_down_activation(record)
             state = self._coordinator.system_teardown_state(anchor.binding, anchor.plan_identity)
             inspection = self._coordinator.inspect_system_teardown(
                 state, domain_validated=record.domain_validated if record is not None else False
