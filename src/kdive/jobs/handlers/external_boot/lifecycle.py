@@ -83,8 +83,14 @@ def _request_deadline(context: OperationContext, fallback: datetime) -> datetime
 
 
 def _starts_fresh_readiness_budget(context: OperationContext) -> bool:
-    """Whether a release is re-entering a recovery that an earlier job attempt began (#3395)."""
+    """Whether an operation is re-entering a recovery that an earlier job attempt began (#3395)."""
     return starts_fresh_readiness_budget(context.job, context.activation)
+
+
+def _attempt_deadline(context: OperationContext, ports: ExternalBootHandlerPorts) -> datetime:
+    """Deadline for a recovery attempt: a re-entry gets a fresh budget, not the recorded one."""
+    fresh = ports.clock() + ports.recovery_readiness_timeout
+    return fresh if _starts_fresh_readiness_budget(context) else _request_deadline(context, fresh)
 
 
 _ACTIVATION_EVIDENCE: Final = frozenset({"materialization", "recovery_point"})
@@ -830,7 +836,7 @@ def recover_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
         if context.activation.state is not State.ACTIVE:
             return None
-        deadline = _request_deadline(context, ports.clock() + ports.recovery_readiness_timeout)
+        deadline = _attempt_deadline(context, ports)
         if ports.clock() >= deadline:
             raise CategorizedError(
                 "recovery readiness deadline expired",
@@ -903,7 +909,7 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
                 category=ErrorCategory.STALE_HANDLE,
                 terminal=True,
             )
-        deadline = _request_deadline(context, ports.clock() + ports.recovery_readiness_timeout)
+        deadline = _attempt_deadline(context, ports)
         if ports.clock() >= deadline:
             raise CategorizedError(
                 "recovery readiness deadline expired",

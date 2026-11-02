@@ -19,7 +19,7 @@ import json
 import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, LiteralString, cast
 from uuid import UUID, uuid4
 
@@ -57,6 +57,7 @@ from kdive.jobs.models import (
     ExternalBootAuthoritySuccessV1,
     _ActivateResult,
     _FailureResult,
+    _RecoveryAttemptResult,
     _TeardownResult,
 )
 from kdive.jobs.worker import _authority_binding_matches
@@ -1741,3 +1742,82 @@ def test_remote_module_lifecycle_steps_per_operation(
     )
 
     assert actions == [(action, operation) for action in expected]
+
+
+# Recover / resolve-conflict re-entry takes a fresh deadline (#3465)
+_REENTRY_NOW = datetime(2026, 11, 1, tzinfo=UTC)
+_REENTRY_TIMEOUT = timedelta(seconds=120)
+_REENTRY_EXPIRED = _REENTRY_NOW - timedelta(minutes=10)
+# The recover case is seeded mid-recovery; the pre-check only runs from ``active``.
+_REENTRY_FIRST_STATE = {"recover": "active"}
+
+
+def _run_reentry(
+    migrated_url: str, dsns: Callable[[str], str], operation: str, job_attempt: int
+) -> ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1:
+    async def main() -> ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1:
+        spec = CASES[operation]
+        vehicle = build_vehicle()
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            case = await seed_case(
+                seed,
+                vehicle,
+                purpose=spec["purpose"],
+                operation=operation,
+                activation_state=_REENTRY_FIRST_STATE.get(operation, spec["activation_state"]),
+                **spec["seed"],
+            )
+            await seed.execute(
+                "UPDATE jobs SET attempt = %s WHERE id = %s", (job_attempt, case.job_id)
+            )
+            ports = ExternalBootHandlerPorts(
+                resolver=resolver_for(vehicle),
+                incarnation_credential=SecretStr(case.credential),
+                secret_registry=SecretRegistry(),
+                acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
+                authority_executor=_VehicleExecutor(vehicle),
+                clock=lambda: _REENTRY_NOW,
+                recovery_readiness_timeout=_REENTRY_TIMEOUT,
+            )
+            handler = build_operations(ports).get(operation)
+            assert handler is not None
+            job = build_job(
+                JobKind.BOOT,
+                {
+                    "run_id": str(vehicle.run_id),
+                    "external_boot_authority_v1": case.marker,
+                    "recovery_request_v1": {
+                        "request_identity": "sha256:" + "1" * 64,
+                        "readiness_deadline": _REENTRY_EXPIRED.isoformat(),
+                    },
+                },
+            ).model_copy(update={"id": case.job_id, "attempt": job_attempt})
+            async with await role_connection(dsns("kdive_worker")) as worker:
+                return await handler(
+                    worker, job, ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+                )
+
+    return asyncio.run(main())
+
+
+@pytest.mark.parametrize("operation", ["recover", "resolve-conflict"])
+def test_reentry_gets_a_fresh_deadline_not_a_refusal(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], operation: str
+) -> None:
+    result = _run_reentry(migrated_url, authority_role_dsns, operation, job_attempt=2)
+
+    assert isinstance(result, ExternalBootAuthoritySuccessV1)
+    assert isinstance(result.result, _RecoveryAttemptResult)
+    assert result.result.deadline == _REENTRY_NOW + _REENTRY_TIMEOUT
+
+
+@pytest.mark.parametrize("operation", ["recover", "resolve-conflict"])
+def test_first_entry_still_refuses_an_expired_deadline(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], operation: str
+) -> None:
+    with pytest.raises(ExternalBootAuthorityFailure) as raised:
+        _run_reentry(migrated_url, authority_role_dsns, operation, job_attempt=1)
+
+    failure = raised.value.result.result
+    assert isinstance(failure, _FailureResult)
+    assert failure.error_category == ErrorCategory.READINESS_FAILURE.value
