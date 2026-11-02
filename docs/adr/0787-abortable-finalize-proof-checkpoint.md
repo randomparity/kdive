@@ -281,3 +281,43 @@ Considered & rejected:
   then returns before teardown destroys the domain, so an adoption would block destruction,
   which ADR-0583 forbids.
 - **Do nothing.** judgment: the providers keep disagreeing and the local row stays stale.
+
+### Amendment (2026-11-02): remote System teardown collects the activation's store files (#3472)
+
+This amendment narrows the #3419 sentence "Nothing removes a store's files except finalize". The
+#3419 accepted limitation on unbounded scans stands until #3475 replaces it.
+
+- When remote System teardown returns with its record in phase `complete`, the store removes the
+  torn-down activation's files under an exclusive `flock` on the store directory: the activation
+  files finalize removes, then per recovery identity the object indexes, the recovery record and
+  the cleanup receipt, then the recovery index, the `cleanup-finalized` marker, and last the
+  `.terminal` record. Each anchor goes after what it names, so a retry after a crash finds every
+  remaining file; a never-finalized activation has no marker to find its record through. A
+  teardown retry that finds the phase already `complete` collects again.
+- A `managed` receipt and the recovery record it quarantines are kept, as the 2026-11-01
+  amendment requires. Remote `adopt_cleanup_quarantine` now takes the same store lock, so
+  collection either sees the receipt adopted or removes it before the adoption reads it, and
+  that adoption fails as changed. This lock does not cover finalize.
+- The System's `.teardown` record is kept. `cleanup_finalized`, and through it
+  `refuse_finalized`, is also true when that record is `complete` and names the activation, so
+  a late stage stays refused after the marker is collected, and a cleanup observation of the
+  activation still reads `absent`. Once that record is `complete`, `system_teardown_state`
+  reads none of the activation's records, so a half-collected store cannot refuse a retry or an
+  observation; the recovery volumes were read absent before `complete` was written.
+- Other activations of the same System, and stores torn down before this change, keep their
+  files.
+
+Considered & rejected:
+
+- **Keep the `cleanup-finalized` marker as the late-stage refusal.** judgment: one file per
+  activation for the life of the host, and a never-finalized activation has no marker, so a
+  late stage for it was never refused.
+- **Write a new per-activation teardown tombstone.** judgment: the per-System `.teardown` record
+  already carries the binding, plan and `complete` phase, and is written before collection.
+- **Collect in a separate garbage-collection step.** judgment: a new entry point and scheduler
+  for work the teardown lane already reaches at the one moment the activation is known dead.
+- **Re-check `managed` just before unlinking, without a lock.** verified: remote
+  `adopt_cleanup_quarantine` is a read-compare-`os.replace` in `_replace`
+  (`src/kdive/providers/remote_libvirt/external_boot_authority.py`), so an adoption can land
+  between any re-check and the unlink.
+- **Do nothing.** judgment: the store grows without bound and #3475 has no remedy to restore.
