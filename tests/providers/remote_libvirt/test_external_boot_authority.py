@@ -562,7 +562,7 @@ def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -
             )
         }
     )
-    with pytest.raises(ValueError, match="omitted an owned private artifact"):
+    with pytest.raises(ProviderRecoveryRefusal, match="omitted an owned private artifact"):
         operations.activate(incomplete, authority, 2.0)
     assert domain.creates == 1
 
@@ -2930,7 +2930,7 @@ def test_materialization_index_rejects_path_before_descriptor_relative_open(
     monkeypatch.setattr(
         "kdive.providers.remote_libvirt.external_boot_authority.os.open", guarded_open
     )
-    with pytest.raises(ValueError, match="index is malformed"):
+    with pytest.raises(ProviderRecoveryRefusal, match="index is malformed"):
         store.reopen_materialization_for_plan(plan)
     assert escaped == []
     store.close()
@@ -3098,7 +3098,7 @@ def test_coordinator_rejects_changed_recovery_before_provider_contact(tmp_path: 
             "plan_identity": "sha256:" + "f" * 64,
         }
     )
-    with pytest.raises(ValueError, match="differs from durable record"):
+    with pytest.raises(ProviderRecoveryRefusal, match="differs from durable record"):
         coordinator.activate(changed, OpaqueProviderRef(ref="authority/remote-a"))
     store.close()
 
@@ -3409,7 +3409,7 @@ async def test_remote_system_teardown_restarts_after_lost_storage_response(
         request.model_copy(update={"plan_identity": "sha256:" + "8" * 64}),
         request.model_copy(update={"activation_id": uuid4()}),
     ):
-        with pytest.raises(ValueError, match="conflicts with retained intent"):
+        with pytest.raises(ProviderRecoveryRefusal, match="conflicts with retained intent"):
             await restarted.execute_system_teardown(
                 changed, _remote_teardown_context(changed), reservation
             )
@@ -3535,7 +3535,7 @@ async def test_remote_system_teardown_observation_refuses_another_subject_at_any
         at_generation.model_copy(update={"activation_id": uuid4()}),
         retained.model_copy(update={"operation_digest": "sha256:" + "7" * 64}),
     ):
-        with pytest.raises(ValueError, match="conflicts with retained intent"):
+        with pytest.raises(ProviderRecoveryRefusal, match="conflicts with retained intent"):
             await adapter.observe_system_teardown(changed, _remote_teardown_context(changed))
 
     assert {path: path.read_bytes() for path in teardown_files} == before
@@ -4702,9 +4702,9 @@ async def test_remote_teardown_after_finalize_protects_the_same_volumes_as_befor
     after = coordinator.system_teardown_state(record.binding, record.plan_identity)
     assert after.terminal is None and after.finalized is not None
     assert operations._protected_teardown_volumes(after) == protected
-    with pytest.raises(ValueError, match="boot artifact identity differs"):
+    with pytest.raises(ProviderRecoveryRefusal, match="boot artifact identity differs"):
         operations._teardown_boot_volumes(before)
-    with pytest.raises(ValueError, match="boot artifact identity differs"):
+    with pytest.raises(ProviderRecoveryRefusal, match="boot artifact identity differs"):
         operations._teardown_boot_volumes(after)
     adapter.close()
 
@@ -5083,24 +5083,52 @@ async def test_remote_finalize_and_teardown_scans_ignore_accumulated_finalized_m
     adapter.close()
 
 
+def _plain_literal_value_errors(path: Path) -> list[tuple[int, str, bool]]:
+    """Each ``raise ValueError("<literal>")``: line, text, and whether a validator owns it."""
+    found: list[tuple[int, str, bool]] = []
+
+    def visit(node: ast.AST, in_validator: bool) -> None:
+        for child in ast.iter_child_nodes(node):
+            inside = in_validator
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                inside = any(
+                    isinstance(decorator, ast.Call)
+                    and isinstance(decorator.func, ast.Name)
+                    and decorator.func.id in {"model_validator", "field_validator"}
+                    for decorator in child.decorator_list
+                )
+            if (
+                isinstance(child, ast.Raise)
+                and isinstance(child.exc, ast.Call)
+                and isinstance(child.exc.func, ast.Name)
+                and child.exc.func.id == "ValueError"
+                and child.exc.args
+                and isinstance(literal := child.exc.args[0], ast.Constant)
+            ):
+                found.append((child.lineno, str(literal.value), inside))
+            visit(child, inside)
+
+    visit(ast.parse(path.read_text()), False)
+    return found
+
+
 def test_remote_refusal_reasons_are_never_raised_as_plain_value_errors() -> None:
-    """#3436: a closed refusal reason raised as ``ValueError`` would log only its class."""
+    """#3436/#3474: a fixed refusal raised as ``ValueError`` would log only its class.
+
+    The adapter's fixed-literal refusals are all ``ProviderRecoveryRefusal``; a pydantic
+    validator's ``ValueError`` is rewrapped as ``ValidationError``, so it stays plain.
+    """
     reasons = set(get_args(ProviderRecoveryRefusalReason.__value__))
     package = Path(external_boot_authority.__file__).parent
+    adapter_modules = (
+        "external_boot_authority.py",
+        "external_boot_operations.py",
+        "recovery_objects.py",
+    )
     plain = [
-        f"{path.name}:{node.lineno}"
-        for path in (
-            package / "external_boot_authority.py",
-            package / "external_boot_operations.py",
-            package / "remote_module_authority_host.py",
-        )
-        for node in ast.walk(ast.parse(path.read_text()))
-        if isinstance(node, ast.Raise)
-        and isinstance(node.exc, ast.Call)
-        and isinstance(node.exc.func, ast.Name)
-        and node.exc.func.id == "ValueError"
-        and node.exc.args
-        and isinstance(literal := node.exc.args[0], ast.Constant)
-        and literal.value in reasons
+        f"{name}:{line}: {text}"
+        for name in (*adapter_modules, "remote_module_authority_host.py")
+        for line, text, in_validator in _plain_literal_value_errors(package / name)
+        if text in reasons or (name in adapter_modules and not in_validator)
     ]
     assert plain == []

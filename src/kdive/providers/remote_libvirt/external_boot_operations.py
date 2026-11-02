@@ -160,7 +160,9 @@ class ConcreteRemoteExternalBootOperations:
             or str(modules.request.authority.run_id) != binding.run_id
             or modules.request.authority.plan_identity != plan.identity
         ):
-            raise ValueError("remote module terminal record differs from activation binding")
+            raise ProviderRecoveryRefusal(
+                "remote module terminal record differs from activation binding"
+            )
         with self._connection() as connection:
             domain = connection.lookupByName(domain_name_for(UUID(binding.system_id)))
             source_xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
@@ -189,7 +191,9 @@ class ConcreteRemoteExternalBootOperations:
             source_modules = AbsentComponentState()
         else:
             if result.capture_manifest is None:
-                raise ValueError("remote module result omitted captured source manifest")
+                raise ProviderRecoveryRefusal(
+                    "remote module result omitted captured source manifest"
+                )
             source_modules = PresentComponentState(manifest=result.capture_manifest)
         objects = {
             materialization.artifacts.kernel,
@@ -229,7 +233,7 @@ class ConcreteRemoteExternalBootOperations:
         if recovery.materialization.artifacts.initrd is not None:
             expected.add(recovery.materialization.artifacts.initrd)
         if not expected.issubset(recovery.recovery_objects):
-            raise ValueError("remote recovery omitted an owned private artifact")
+            raise ProviderRecoveryRefusal("remote recovery omitted an owned private artifact")
         boot_references = [(recovery.materialization.artifacts.kernel, "kernel")]
         if recovery.materialization.artifacts.initrd is not None:
             boot_references.append((recovery.materialization.artifacts.initrd, "initrd"))
@@ -248,16 +252,16 @@ class ConcreteRemoteExternalBootOperations:
                 or str(parsed.run_id) != recovery.binding.run_id
                 or parsed.digest != digest
             ):
-                raise ValueError("remote recovery boot artifact identity differs")
+                raise ProviderRecoveryRefusal("remote recovery boot artifact identity differs")
         paths = {
             reference: pool.storageVolLookupByName(reference.ref).path() for reference in expected
         }
         for path in paths.values():
             if not path.startswith("/"):
-                raise ValueError("remote recovery artifact path is not absolute")
+                raise ProviderRecoveryRefusal("remote recovery artifact path is not absolute")
         os_element = parse_projected_domain_xml(recovery.definition.target_xml).find("os")
         if os_element is None:
-            raise ValueError("remote target definition omitted operating-system paths")
+            raise ProviderRecoveryRefusal("remote target definition omitted operating-system paths")
         recorded_kernel = os_element.findtext("kernel")
         recorded_initrd = os_element.findtext("initrd")
         if (
@@ -268,7 +272,9 @@ class ConcreteRemoteExternalBootOperations:
                 and recorded_initrd != paths[recovery.materialization.artifacts.initrd]
             )
         ):
-            raise ValueError("remote recovery artifact paths differ from target definition")
+            raise ProviderRecoveryRefusal(
+                "remote recovery artifact paths differ from target definition"
+            )
 
     def activate(
         self,
@@ -556,7 +562,7 @@ class ConcreteRemoteExternalBootOperations:
                 or str(parsed.run_id) != state.binding.run_id
                 or parsed.digest != digest
             ):
-                raise ValueError("remote teardown boot artifact identity differs")
+                raise ProviderRecoveryRefusal("remote teardown boot artifact identity differs")
             boot.add((self._pool_name, ref))
         return frozenset(boot)
 
@@ -590,7 +596,9 @@ class ConcreteRemoteExternalBootOperations:
         allowed_boots = {boot for _definition, boot in allowed}
         observed = (preserved_definition_identity(inactive), boot_projection_identity(inactive))
         if observed not in allowed or boot_projection_identity(live) not in allowed_boots:
-            raise ValueError("remote teardown domain identity differs from durable recovery")
+            raise ProviderRecoveryRefusal(
+                "remote teardown domain identity differs from durable recovery"
+            )
 
     def _prove_teardown_graph(
         self, connection: RemoteExternalBootPreparationConn, state: RemoteSystemTeardownState
@@ -606,7 +614,9 @@ class ConcreteRemoteExternalBootOperations:
         with self._connection() as connection:
             domain = self._lookup_domain_optional(connection, state.binding.system_id)
             if domain is None:
-                raise ValueError("remote teardown cannot validate an absent System domain")
+                raise ProviderRecoveryRefusal(
+                    "remote teardown cannot validate an absent System domain"
+                )
             self._validate_teardown_domain(connection, domain, state)
             self._prove_teardown_graph(connection, state)
 
@@ -628,7 +638,7 @@ class ConcreteRemoteExternalBootOperations:
             if domain is None:
                 return
             if domain.isActive():
-                raise ValueError("remote System domain became active before undefine")
+                raise ProviderRecoveryRefusal("remote System domain became active before undefine")
             self._validate_teardown_domain(connection, domain, state)
             self._prove_teardown_graph(connection, state)
             try:
@@ -698,7 +708,9 @@ class ConcreteRemoteExternalBootOperations:
     def remove_system_artifacts(self, state: RemoteSystemTeardownState) -> None:
         with self._connection() as connection:
             if self._lookup_domain_optional(connection, state.binding.system_id) is not None:
-                raise ValueError("remote System domain remains before storage deletion")
+                raise ProviderRecoveryRefusal(
+                    "remote System domain remains before storage deletion"
+                )
             self._prove_teardown_graph(connection, state)
             protected = self._protected_teardown_volumes(state)
             overlay = (self._pool_name, overlay_volume_name(state.binding.system_id))
@@ -711,7 +723,7 @@ class ConcreteRemoteExternalBootOperations:
                     not self._teardown_volume_absent(connection, *volume)
                     for volume in remaining_non_boot
                 ):
-                    raise ValueError(
+                    raise ProviderRecoveryRefusal(
                         "remote module recovery remains before System storage deletion"
                     )
                 for pool_name, name in sorted(allowed_boot):
@@ -719,14 +731,18 @@ class ConcreteRemoteExternalBootOperations:
                     volume = self._lookup_optional(pool, name)
                     if volume is not None:
                         if volume.name() != name:
-                            raise ValueError("remote boot artifact name differs before deletion")
+                            raise ProviderRecoveryRefusal(
+                                "remote boot artifact name differs before deletion"
+                            )
                         volume.delete(0)
             for pool_name, name in (overlay, baseline):
                 pool = connection.storagePoolLookupByName(pool_name)
                 volume = self._lookup_optional(pool, name)
                 if volume is not None:
                     if volume.name() != name:
-                        raise ValueError("remote System volume name differs before deletion")
+                        raise ProviderRecoveryRefusal(
+                            "remote System volume name differs before deletion"
+                        )
                     volume.delete(0)
                 if self._lookup_optional(pool, name) is not None:
                     raise RuntimeError("remote System volume remained after deletion")
