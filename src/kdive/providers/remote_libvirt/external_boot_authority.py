@@ -214,10 +214,10 @@ class RemoteSystemTeardownRecordV1(BaseModel):
     @classmethod
     def from_canonical_json(cls, data: bytes) -> Self:
         if len(data) > _MAX_PREPARATION_BYTES:
-            raise ValueError("remote System teardown record exceeds 1048576 bytes")
+            raise ProviderRecoveryRefusal("remote System teardown record exceeds 1048576 bytes")
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("remote System teardown record is not canonical JSON")
+            raise ProviderRecoveryRefusal("remote System teardown record is not canonical JSON")
         return value
 
 
@@ -308,16 +308,16 @@ class RemoteModuleVolumePreparationRequestV1(BaseModel):
     def to_canonical_json(self) -> bytes:
         encoded = _canonical_model_bytes(self)
         if len(encoded) > _MAX_PREPARATION_BYTES:
-            raise ValueError("remote module preparation request exceeds 1048576 bytes")
+            raise ProviderRecoveryRefusal("remote module preparation request exceeds 1048576 bytes")
         return encoded
 
     @classmethod
     def from_canonical_json(cls, data: bytes) -> Self:
         if len(data) > _MAX_PREPARATION_BYTES:
-            raise ValueError("remote module preparation request exceeds 1048576 bytes")
+            raise ProviderRecoveryRefusal("remote module preparation request exceeds 1048576 bytes")
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("remote module preparation request is not canonical JSON")
+            raise ProviderRecoveryRefusal("remote module preparation request is not canonical JSON")
         return value
 
 
@@ -413,28 +413,38 @@ class RemoteModuleVolumePreparationResponseV1(BaseModel):
         )
         for volume in (self.source, self.scratch):
             if (volume.system_id, volume.run_id, volume.operation_nonce) != expected:
-                raise ValueError("provider returned volumes for a different remote module attempt")
+                raise ProviderRecoveryRefusal(
+                    "provider returned volumes for a different remote module attempt"
+                )
         if (
             self.source.name != render_module_volume_name(*expected, "source.ext4")
             or self.scratch.name != render_module_volume_name(*expected, "scratch.ext4")
             or self.source.digest != operation.source_manifest
             or self.scratch.digest != "sha256:" + "0" * 64
         ):
-            raise ValueError("provider returned mismatched remote module volume identities")
+            raise ProviderRecoveryRefusal(
+                "provider returned mismatched remote module volume identities"
+            )
 
     def to_canonical_json(self) -> bytes:
         encoded = _canonical_model_bytes(self)
         if len(encoded) > _MAX_PREPARATION_BYTES:
-            raise ValueError("remote module preparation response exceeds 1048576 bytes")
+            raise ProviderRecoveryRefusal(
+                "remote module preparation response exceeds 1048576 bytes"
+            )
         return encoded
 
     @classmethod
     def from_canonical_json(cls, data: bytes) -> Self:
         if len(data) > _MAX_PREPARATION_BYTES:
-            raise ValueError("remote module preparation response exceeds 1048576 bytes")
+            raise ProviderRecoveryRefusal(
+                "remote module preparation response exceeds 1048576 bytes"
+            )
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("remote module preparation response is not canonical JSON")
+            raise ProviderRecoveryRefusal(
+                "remote module preparation response is not canonical JSON"
+            )
         return value
 
 
@@ -472,7 +482,9 @@ class RemoteModuleTerminalPreparationResponseV1(RemoteModuleVolumePreparationRes
             or recovery.authority_identity
             != RemoteModuleRecoveryRefV2.identity_for_authority(exact_authority)
         ):
-            raise ValueError("remote module terminal recovery differs from exact operation")
+            raise ProviderRecoveryRefusal(
+                "remote module terminal recovery differs from exact operation"
+            )
 
 
 type RemoteModulePreparationResponse = (
@@ -503,7 +515,7 @@ class RemoteModulePreparationCompletionV1(BaseModel):
     def from_canonical_json(cls, data: bytes) -> Self:
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("remote preparation completion is not canonical JSON")
+            raise ProviderRecoveryRefusal("remote preparation completion is not canonical JSON")
         return value
 
 
@@ -539,7 +551,7 @@ class RemoteModuleLifecycleRequestV1(BaseModel):
     def from_canonical_json(cls, data: bytes) -> Self:
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("remote module lifecycle request is not canonical JSON")
+            raise ProviderRecoveryRefusal("remote module lifecycle request is not canonical JSON")
         return value
 
 
@@ -585,7 +597,7 @@ class RemoteModuleLifecycleResponseV1(BaseModel):
     def from_canonical_json(cls, data: bytes) -> Self:
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("remote module lifecycle response is not canonical JSON")
+            raise ProviderRecoveryRefusal("remote module lifecycle response is not canonical JSON")
         return value
 
 
@@ -612,7 +624,9 @@ class _PersistedRemoteModuleLifecycleV1(BaseModel):
     def from_canonical_json(cls, data: bytes) -> Self:
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("persisted remote module lifecycle request is not canonical JSON")
+            raise ProviderRecoveryRefusal(
+                "persisted remote module lifecycle request is not canonical JSON"
+            )
         return value
 
 
@@ -634,7 +648,9 @@ class RemoteModuleLifecycleCompletionV1(BaseModel):
     def from_canonical_json(cls, data: bytes) -> Self:
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("remote module lifecycle completion is not canonical JSON")
+            raise ProviderRecoveryRefusal(
+                "remote module lifecycle completion is not canonical JSON"
+            )
         return value
 
 
@@ -659,16 +675,16 @@ class RemoteModuleTerminalRecord(BaseModel):
     def to_canonical_json(self) -> bytes:
         encoded = _canonical_model_bytes(self)
         if len(encoded) > _MAX_PREPARATION_BYTES:
-            raise ValueError("remote module terminal record exceeds 1048576 bytes")
+            raise ProviderRecoveryRefusal("remote module terminal record exceeds 1048576 bytes")
         return encoded
 
     @classmethod
     def from_canonical_json(cls, data: bytes) -> Self:
         if len(data) > _MAX_PREPARATION_BYTES:
-            raise ValueError("remote module terminal record exceeds 1048576 bytes")
+            raise ProviderRecoveryRefusal("remote module terminal record exceeds 1048576 bytes")
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("remote module terminal record is not canonical JSON")
+            raise ProviderRecoveryRefusal("remote module terminal record is not canonical JSON")
         return value
 
 
@@ -687,7 +703,9 @@ class _PersistedRemoteModulePreparationV1(BaseModel):
     def from_canonical_json(cls, data: bytes) -> Self:
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("persisted remote module preparation is not canonical JSON")
+            raise ProviderRecoveryRefusal(
+                "persisted remote module preparation is not canonical JSON"
+            )
         return value
 
 
@@ -756,10 +774,10 @@ class RemoteCleanupQuarantineV1(BaseModel):
     @classmethod
     def from_canonical_json(cls, data: bytes) -> Self:
         if len(data) > _MAX_RECORD_BYTES:
-            raise ValueError("remote cleanup quarantine receipt exceeds 1048576 bytes")
+            raise ProviderRecoveryRefusal("remote cleanup quarantine receipt exceeds 1048576 bytes")
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("remote cleanup quarantine receipt is not canonical JSON")
+            raise ProviderRecoveryRefusal("remote cleanup quarantine receipt is not canonical JSON")
         return value
 
 
@@ -798,10 +816,10 @@ class RemoteCleanupFinalizedMarkerV1(BaseModel):
     @classmethod
     def from_canonical_json(cls, data: bytes) -> Self:
         if len(data) > _MAX_RECORD_BYTES:
-            raise ValueError("remote cleanup finalized marker exceeds 1048576 bytes")
+            raise ProviderRecoveryRefusal("remote cleanup finalized marker exceeds 1048576 bytes")
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("remote cleanup finalized marker is not canonical JSON")
+            raise ProviderRecoveryRefusal("remote cleanup finalized marker is not canonical JSON")
         return value
 
 
@@ -852,10 +870,10 @@ def _quarantine_observation(receipt: RemoteCleanupQuarantineV1) -> RecoveryObjec
 def _recovery_identity(reference: OpaqueProviderRef) -> str:
     prefix = "remote-external-boot/"
     if not reference.ref.startswith(prefix):
-        raise ValueError("remote recovery reference has the wrong namespace")
+        raise ProviderRecoveryRefusal("remote recovery reference has the wrong namespace")
     identity = reference.ref.removeprefix(prefix)
     if len(identity) != 64 or any(value not in "0123456789abcdef" for value in identity):
-        raise ValueError("remote recovery reference is malformed")
+        raise ProviderRecoveryRefusal("remote recovery reference is malformed")
     return identity
 
 
@@ -945,7 +963,7 @@ class RemoteModuleVolumePreparationStore:
                 remaining -= len(chunk)
             data = b"".join(chunks)
             if len(data) > _MAX_PREPARATION_BYTES:
-                raise ValueError("remote preparation evidence exceeds 1048576 bytes")
+                raise ProviderRecoveryRefusal("remote preparation evidence exceeds 1048576 bytes")
             return data
         finally:
             os.close(descriptor)
@@ -954,7 +972,9 @@ class RemoteModuleVolumePreparationStore:
         existing = self._read(name)
         if existing is not None:
             if existing != data:
-                raise ValueError("remote preparation evidence conflicts with durable bytes")
+                raise ProviderRecoveryRefusal(
+                    "remote preparation evidence conflicts with durable bytes"
+                )
             return
         temporary = f".{name}.{uuid4().hex}.tmp"
         try:
@@ -984,7 +1004,7 @@ class RemoteModuleVolumePreparationStore:
                 )
             except FileExistsError:
                 if self._read(name) != data:
-                    raise ValueError(
+                    raise ProviderRecoveryRefusal(
                         "remote preparation evidence conflicts with durable bytes"
                     ) from None
             os.unlink(temporary, dir_fd=self._root_fd)
@@ -995,7 +1015,7 @@ class RemoteModuleVolumePreparationStore:
 
     def _replace(self, name: str, expected: bytes, data: bytes) -> None:
         if self._read(name) != expected:
-            raise ValueError("remote teardown evidence changed before checkpoint")
+            raise ProviderRecoveryRefusal("remote teardown evidence changed before checkpoint")
         temporary = f".{name}.{uuid4().hex}.tmp"
         try:
             descriptor = os.open(
@@ -1040,7 +1060,7 @@ class RemoteModuleVolumePreparationStore:
         if record.intent == intent:
             return record
         if not record.intent.same_subject(intent) or intent.generation <= record.intent.generation:
-            raise ValueError("remote System teardown conflicts with retained intent")
+            raise ProviderRecoveryRefusal("remote System teardown conflicts with retained intent")
         adopted = record.model_copy(update={"intent": intent})
         self._replace(name, data, adopted.to_canonical_json())
         return adopted
@@ -1064,7 +1084,9 @@ class RemoteModuleVolumePreparationStore:
             not record.intent.anchor_subject_matches(anchor)
             or record.intent.generation == anchor.generation
         ):
-            raise ValueError("remote System teardown observation conflicts with retained intent")
+            raise ProviderRecoveryRefusal(
+                "remote System teardown observation conflicts with retained intent"
+            )
         if record.intent.generation > anchor.generation:
             raise SystemTeardownSupersededError
         return None
@@ -1090,7 +1112,7 @@ class RemoteModuleVolumePreparationStore:
         if requested < current:
             return record
         if requested > current + 1:
-            raise ValueError("remote System teardown phase skipped a checkpoint")
+            raise ProviderRecoveryRefusal("remote System teardown phase skipped a checkpoint")
         if requested == current:
             return record
         updated = record.model_copy(
@@ -1117,7 +1139,9 @@ class RemoteModuleVolumePreparationStore:
         if data := self._read(name):
             persisted = _PersistedRemoteModulePreparationV1.from_canonical_json(data)
             if persisted.request != request:
-                raise ValueError("remote preparation evidence conflicts with durable bytes")
+                raise ProviderRecoveryRefusal(
+                    "remote preparation evidence conflicts with durable bytes"
+                )
             return
         self._publish(name, candidate.to_canonical_json())
 
@@ -1129,7 +1153,9 @@ class RemoteModuleVolumePreparationStore:
             raise FileNotFoundError("remote preparation request is absent")
         reopened = _PersistedRemoteModulePreparationV1.from_canonical_json(data)
         if reopened.request != request:
-            raise ValueError("remote preparation evidence conflicts with durable bytes")
+            raise ProviderRecoveryRefusal(
+                "remote preparation evidence conflicts with durable bytes"
+            )
         return AdmittedRemoteModulePreparation(reopened.request, reopened.local_deadline)
 
     def publish_result(
@@ -1225,7 +1251,9 @@ class RemoteModuleVolumePreparationStore:
         if data := self._read(name):
             persisted = _PersistedRemoteModuleLifecycleV1.from_canonical_json(data)
             if not self._same_lifecycle(persisted.request, request):
-                raise ValueError("remote lifecycle evidence conflicts with durable bytes")
+                raise ProviderRecoveryRefusal(
+                    "remote lifecycle evidence conflicts with durable bytes"
+                )
             return
         self._publish(name, candidate.to_canonical_json())
 
@@ -1237,7 +1265,7 @@ class RemoteModuleVolumePreparationStore:
             raise FileNotFoundError("remote module lifecycle request is absent")
         persisted = _PersistedRemoteModuleLifecycleV1.from_canonical_json(data)
         if not self._same_lifecycle(persisted.request, request):
-            raise ValueError("remote lifecycle evidence conflicts with durable bytes")
+            raise ProviderRecoveryRefusal("remote lifecycle evidence conflicts with durable bytes")
         return AdmittedRemoteModuleLifecycle(persisted.request, persisted.local_deadline)
 
     def publish_lifecycle_completion(
@@ -1291,7 +1319,7 @@ class RemoteModuleVolumePreparationStore:
             return None
         response = RemoteModuleLifecycleResponseV1.from_canonical_json(data)
         if response.action != "restore":
-            raise ValueError("remote module restored evidence has the wrong action")
+            raise ProviderRecoveryRefusal("remote module restored evidence has the wrong action")
         return response
 
     def record_prior_power(
@@ -1356,7 +1384,7 @@ class RemoteModuleVolumePreparationStore:
             return "running"
         if data == b"inactive":
             return "inactive"
-        raise ValueError("remote prior-power evidence is malformed")
+        raise ProviderRecoveryRefusal("remote prior-power evidence is malformed")
 
     @staticmethod
     def _terminal_key(
@@ -1389,7 +1417,7 @@ class RemoteModuleVolumePreparationStore:
             or str(record.request.authority.run_id) != binding.run_id
             or record.request.authority.plan_identity != plan_identity
         ):
-            raise ValueError("remote module terminal preparation binding differs")
+            raise ProviderRecoveryRefusal("remote module terminal preparation binding differs")
         return record
 
     def preparation_authority(
@@ -1416,12 +1444,12 @@ class RemoteModuleVolumePreparationStore:
         ]
         # Only .request names count: finalized markers stay for the life of the store.
         if len(names) > 4096:
-            raise ValueError("remote preparation store exceeds teardown scan bound")
+            raise ProviderRecoveryRefusal("remote preparation store exceeds teardown scan bound")
         matches: list[RemoteModuleVolumePreparationRequestV1] = []
         for name in names:
             digest = name.removesuffix(".request")
             if any(character not in "0123456789abcdef" for character in digest):
-                raise ValueError("remote preparation request name is malformed")
+                raise ProviderRecoveryRefusal("remote preparation request name is malformed")
             data = self._read(name)
             if data is None:
                 continue
@@ -1439,7 +1467,7 @@ class RemoteModuleVolumePreparationStore:
             return None
         first = matches[0]
         if any(candidate.operation != first.operation for candidate in matches[1:]):
-            raise ValueError("remote teardown found conflicting preparation attempts")
+            raise ProviderRecoveryRefusal("remote teardown found conflicting preparation attempts")
         return first
 
     @staticmethod
@@ -1495,12 +1523,16 @@ class RemoteModuleVolumePreparationStore:
         existing = self.observe_preparation(request)
         if existing.state != "absent":
             if existing != receipt:
-                raise ValueError("remote preparation receipt conflicts with durable bytes")
+                raise ProviderRecoveryRefusal(
+                    "remote preparation receipt conflicts with durable bytes"
+                )
             return existing
         self._publish(f"{self._preparation_key(request)}.preparation", receipt.to_canonical_json())
         reopened = self.observe_preparation(request)
         if reopened != receipt:
-            raise ValueError("published remote preparation receipt failed exact reopen")
+            raise ProviderRecoveryRefusal(
+                "published remote preparation receipt failed exact reopen"
+            )
         return reopened
 
     def publish_materialization(
@@ -1523,18 +1555,20 @@ class RemoteModuleVolumePreparationStore:
         try:
             identity = index.decode("ascii")
         except UnicodeDecodeError:
-            raise ValueError("remote materialization plan index is malformed") from None
+            raise ProviderRecoveryRefusal(
+                "remote materialization plan index is malformed"
+            ) from None
         if len(identity) != 64 or any(value not in "0123456789abcdef" for value in identity):
-            raise ValueError("remote materialization plan index is malformed")
+            raise ProviderRecoveryRefusal("remote materialization plan index is malformed")
         data = self._read(f"{identity}.materialization")
         if data is None:
-            raise ValueError("remote materialization plan index is incomplete")
+            raise ProviderRecoveryRefusal("remote materialization plan index is incomplete")
         record = RemoteExternalBootMaterializationRecord.from_canonical_json(data)
         if (
             record.plan != plan
             or record.materialization.identity.removeprefix("sha256:") != identity
         ):
-            raise ValueError("remote materialization plan index differs")
+            raise ProviderRecoveryRefusal("remote materialization plan index differs")
         return record
 
     def teardown_materialization(
@@ -1544,21 +1578,23 @@ class RemoteModuleVolumePreparationStore:
         if len(identity) != 64 or any(
             character not in "0123456789abcdef" for character in identity
         ):
-            raise ValueError("remote teardown plan identity is malformed")
+            raise ProviderRecoveryRefusal("remote teardown plan identity is malformed")
         index = self._read(f"{identity}.materialization-index")
         if index is None:
             return None
         try:
             materialization_identity = index.decode("ascii")
         except UnicodeDecodeError:
-            raise ValueError("remote materialization plan index is malformed") from None
+            raise ProviderRecoveryRefusal(
+                "remote materialization plan index is malformed"
+            ) from None
         if len(materialization_identity) != 64 or any(
             character not in "0123456789abcdef" for character in materialization_identity
         ):
-            raise ValueError("remote materialization plan index is malformed")
+            raise ProviderRecoveryRefusal("remote materialization plan index is malformed")
         data = self._read(f"{materialization_identity}.materialization")
         if data is None:
-            raise ValueError("remote materialization plan index is incomplete")
+            raise ProviderRecoveryRefusal("remote materialization plan index is incomplete")
         record = RemoteExternalBootMaterializationRecord.from_canonical_json(data)
         materialization = record.materialization
         if (
@@ -1567,7 +1603,7 @@ class RemoteModuleVolumePreparationStore:
             or materialization.ownership.system_id != binding.system_id
             or materialization.ownership.run_id != binding.run_id
         ):
-            raise ValueError("remote teardown materialization differs from activation")
+            raise ProviderRecoveryRefusal("remote teardown materialization differs from activation")
         return record
 
     def teardown_recovery(
@@ -1588,7 +1624,7 @@ class RemoteModuleVolumePreparationStore:
             raise FileNotFoundError("remote materialization record is absent")
         record = RemoteExternalBootMaterializationRecord.from_canonical_json(data)
         if record.materialization != materialization:
-            raise ValueError("remote materialization differs from durable record")
+            raise ProviderRecoveryRefusal("remote materialization differs from durable record")
         return record
 
     def publish_recovery(self, recovery: RemoteExternalBootRecoveryRecord) -> OpaqueProviderRef:
@@ -1610,16 +1646,16 @@ class RemoteModuleVolumePreparationStore:
         try:
             identity = index.decode("ascii")
         except UnicodeDecodeError:
-            raise ValueError("remote recovery object index is malformed") from None
+            raise ProviderRecoveryRefusal("remote recovery object index is malformed") from None
         data = self._read(f"{identity}.recovery")
         if (
             data is None
             or hashlib.sha256(b"kdive-remote-recovery-v1\0" + data).hexdigest() != identity
         ):
-            raise ValueError("remote recovery object index is unauthenticated")
+            raise ProviderRecoveryRefusal("remote recovery object index is unauthenticated")
         recovery = RemoteExternalBootRecoveryRecord.from_canonical_json(data)
         if reference not in recovery.recovery_objects:
-            raise ValueError("remote recovery object differs from durable record")
+            raise ProviderRecoveryRefusal("remote recovery object differs from durable record")
         return recovery
 
     @staticmethod
@@ -1638,15 +1674,15 @@ class RemoteModuleVolumePreparationStore:
         try:
             identity = index.decode("ascii")
         except UnicodeDecodeError:
-            raise ValueError("remote recovery index is malformed") from None
+            raise ProviderRecoveryRefusal("remote recovery index is malformed") from None
         data = self._read(f"{identity}.recovery")
         if data is None:
             raise FileNotFoundError("remote recovery record is absent")
         if hashlib.sha256(b"kdive-remote-recovery-v1\0" + data).hexdigest() != identity:
-            raise ValueError("remote recovery record identity mismatched")
+            raise ProviderRecoveryRefusal("remote recovery record identity mismatched")
         recovery = RemoteExternalBootRecoveryRecord.from_canonical_json(data)
         if recovery.binding != binding or recovery.plan_identity != plan_identity:
-            raise ValueError("remote recovery index differs from durable record")
+            raise ProviderRecoveryRefusal("remote recovery index differs from durable record")
         return RecoveryPoint(
             binding=binding,
             plan_identity=plan_identity,
@@ -1662,7 +1698,7 @@ class RemoteModuleVolumePreparationStore:
         if data is None:
             raise FileNotFoundError("remote recovery record is absent")
         if hashlib.sha256(b"kdive-remote-recovery-v1\0" + data).hexdigest() != identity:
-            raise ValueError("remote recovery record identity mismatched")
+            raise ProviderRecoveryRefusal("remote recovery record identity mismatched")
         recovery = RemoteExternalBootRecoveryRecord.from_canonical_json(data)
         if (
             recovery.binding != point.binding
@@ -1671,7 +1707,7 @@ class RemoteModuleVolumePreparationStore:
             or recovery.source_state != point.source_state
             or recovery.target_state != point.target_state
         ):
-            raise ValueError("remote recovery point differs from durable record")
+            raise ProviderRecoveryRefusal("remote recovery point differs from durable record")
         return recovery
 
     @staticmethod
@@ -1852,7 +1888,7 @@ class RemoteModuleVolumePreparationStore:
             return []
         identity = index.decode("ascii", errors="replace")
         if len(identity) != 64 or any(value not in "0123456789abcdef" for value in identity):
-            raise ValueError("remote materialization plan index is malformed")
+            raise ProviderRecoveryRefusal("remote materialization plan index is malformed")
         data = self._read(f"{identity}.materialization")
         if data is not None:
             ownership = RemoteExternalBootMaterializationRecord.from_canonical_json(
@@ -1970,7 +2006,7 @@ class RemoteModuleVolumePreparationStore:
         if data is None:
             return None
         if hashlib.sha256(b"kdive-remote-recovery-v1\0" + data).hexdigest() != identity:
-            raise ValueError("remote recovery record identity mismatched")
+            raise ProviderRecoveryRefusal("remote recovery record identity mismatched")
         return RemoteExternalBootRecoveryRecord.from_canonical_json(data)
 
     def cleanup_quarantine_for_object(
@@ -2422,7 +2458,9 @@ class RemoteExternalBootRecoveryRecord(BaseModel):
             raise ValueError("remote recovery module state differs")
         encoded = self.to_canonical_json()
         if len(encoded) > _MAX_RECORD_BYTES:
-            raise ValueError("remote recovery record exceeds 1048576 bytes")
+            # Pydantic rewraps this as ValidationError; the type keeps the reason off plain
+            # ValueError, and from_canonical_json raises the same refusal unwrapped.
+            raise ProviderRecoveryRefusal("remote recovery record exceeds 1048576 bytes")
         return self
 
     def to_canonical_json(self) -> bytes:
@@ -2436,10 +2474,10 @@ class RemoteExternalBootRecoveryRecord(BaseModel):
     @classmethod
     def from_canonical_json(cls, data: bytes) -> Self:
         if len(data) > _MAX_RECORD_BYTES:
-            raise ValueError("remote recovery record exceeds 1048576 bytes")
+            raise ProviderRecoveryRefusal("remote recovery record exceeds 1048576 bytes")
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("remote recovery record is not canonical JSON")
+            raise ProviderRecoveryRefusal("remote recovery record is not canonical JSON")
         return value
 
 
@@ -2468,16 +2506,16 @@ class RemoteExternalBootMaterializationRecord(BaseModel):
     def to_canonical_json(self) -> bytes:
         encoded = _canonical_model_bytes(self)
         if len(encoded) > _MAX_RECORD_BYTES:
-            raise ValueError("remote materialization record exceeds 1048576 bytes")
+            raise ProviderRecoveryRefusal("remote materialization record exceeds 1048576 bytes")
         return encoded
 
     @classmethod
     def from_canonical_json(cls, data: bytes) -> Self:
         if len(data) > _MAX_RECORD_BYTES:
-            raise ValueError("remote materialization record exceeds 1048576 bytes")
+            raise ProviderRecoveryRefusal("remote materialization record exceeds 1048576 bytes")
         value = cls.model_validate_json(data)
         if value.to_canonical_json() != data:
-            raise ValueError("remote materialization record is not canonical JSON")
+            raise ProviderRecoveryRefusal("remote materialization record is not canonical JSON")
         return value
 
 
@@ -2589,14 +2627,16 @@ class RemoteExternalBootCoordinator:
         authority: OpaqueProviderRef,
     ) -> ExternalBootMaterialization:
         if binding.system_id != plan.ownership.system_id or binding.run_id != plan.ownership.run_id:
-            raise ValueError("remote materialization binding differs from the requested plan")
+            raise ProviderRecoveryRefusal(
+                "remote materialization binding differs from the requested plan"
+            )
         materialization = self._operations.materialize(plan, binding, authority, self._deadline())
         if (
             materialization.plan_identity != plan.identity
             or materialization.ownership.system_id != plan.ownership.system_id
             or materialization.ownership.run_id != plan.ownership.run_id
         ):
-            raise ValueError("remote materialization differs from the requested plan")
+            raise ProviderRecoveryRefusal("remote materialization differs from the requested plan")
         self._store.publish_materialization(plan, materialization)
         return materialization
 
@@ -2647,7 +2687,7 @@ class RemoteExternalBootCoordinator:
             or request.binding != predecessor.binding
             or request.plan.identity != predecessor.plan.identity
         ):
-            raise ValueError("preparation predecessor cannot be adopted")
+            raise ProviderRecoveryRefusal("preparation predecessor cannot be adopted")
         adopted = receipt.model_copy(
             update={
                 "authority": request.authority,
@@ -2674,7 +2714,7 @@ class RemoteExternalBootCoordinator:
         ) is not None:
             recovery = recovery.model_copy(update={"prior_power": recorded})
         if recovery.binding != binding or recovery.materialization != materialization:
-            raise ValueError("remote preparation returned a different activation")
+            raise ProviderRecoveryRefusal("remote preparation returned a different activation")
         reference = self._store.publish_recovery(recovery)
         return RecoveryPoint(
             binding=recovery.binding,
@@ -2874,7 +2914,9 @@ class RemoteExternalBootAuthorityAdapter:
         request: AuthorityPreparationMutationRequestV1,
     ) -> ExternalBootPreparationRequest:
         if request.operation not in {AuthorityOperation.MATERIALIZE, AuthorityOperation.PREPARE}:
-            raise ValueError("remote preparation request has a non-preparation operation")
+            raise ProviderRecoveryRefusal(
+                "remote preparation request has a non-preparation operation"
+            )
         phase: Literal["materialize", "prepare"] = (
             "materialize" if request.operation is AuthorityOperation.MATERIALIZE else "prepare"
         )
@@ -2916,7 +2958,7 @@ class RemoteExternalBootAuthorityAdapter:
                 context.operation_identity != request.operation_identity
                 or context.attempt_id != request.attempt_id
             ):
-                raise ValueError("preparation commit context differs from request")
+                raise ProviderRecoveryRefusal("preparation commit context differs from request")
             receipt = await self._executor.run(
                 lambda: self._coordinator.execute_preparation(self._preparation_request(request))
             )
@@ -2970,7 +3012,9 @@ class RemoteExternalBootAuthorityAdapter:
             or context.operation_identity != request.operation_identity
             or context.attempt_id != request.attempt_id
         ):
-            raise ValueError("remote external-boot commit context differs from request")
+            raise ProviderRecoveryRefusal(
+                "remote external-boot commit context differs from request"
+            )
         return operation
 
     def _matched_point(self, request: AuthorityMutationRequestV1) -> RecoveryPoint:
@@ -3063,7 +3107,7 @@ class RemoteExternalBootAuthorityAdapter:
             or context.operation_identity != request.operation_identity
             or context.attempt_id != request.attempt_id
         ):
-            raise ValueError("remote System teardown context differs from request")
+            raise ProviderRecoveryRefusal("remote System teardown context differs from request")
         return RemoteSystemTeardownAnchorV1(
             authority_id=request.authority_id,
             generation=request.generation,
@@ -3157,7 +3201,7 @@ class RemoteExternalBootAuthorityAdapter:
             if state.terminal is not None:
                 host = self._remote_module_host
                 if host is None:
-                    raise ValueError("remote module teardown host is unavailable")
+                    raise ProviderRecoveryRefusal("remote module teardown host is unavailable")
                 await host.execute_system_teardown(
                     RemoteModuleSystemTeardownRequestV1(authority=request, budget_seconds=300)
                 )
@@ -3432,7 +3476,9 @@ class RemoteExternalBootAuthorityAdapter:
             return None
         state = await self._executor.run(lambda: self._coordinator.observe_state(point))
         if _composite_state(request, state) != request.expected_observed_composite:
-            raise ValueError("remote conflict resolution observation changed before restore")
+            raise ProviderRecoveryRefusal(
+                "remote conflict resolution observation changed before restore"
+            )
         return (state.preserved, state.boot) if state.definition == "other" else None
 
     async def observe_running(
@@ -3447,7 +3493,9 @@ class RemoteExternalBootAuthorityAdapter:
                 point.source_state.definition != request.expected_source_identity
                 or point.target_state.definition != request.intended_target_identity
             ):
-                raise ValueError("remote running observation identities differ from request")
+                raise ProviderRecoveryRefusal(
+                    "remote running observation identities differ from request"
+                )
             return self._coordinator.observe(point, authority)
 
         return await self._executor.run(read)
