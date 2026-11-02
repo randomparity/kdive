@@ -313,7 +313,8 @@ This amendment narrows the #3419 sentence "Nothing removes a store's files excep
   reads none of the activation's records, so a half-collected store cannot refuse a retry or an
   observation; the recovery volumes were read absent before `complete` was written.
 - Other activations of the same System, and stores torn down before this change, keep their
-  files.
+  files. Each System's `.teardown` record stays for the life of the host, as before, and is now
+  the late-stage refusal.
 
 Considered & rejected:
 

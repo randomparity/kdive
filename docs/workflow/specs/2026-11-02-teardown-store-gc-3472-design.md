@@ -122,6 +122,8 @@ acquisition makes two threads of one process exclude each other.
      the volumes.
    - A managed receipt, its recovery record and its recovery index stay until the operator
      removes them. Accepted: ADR-0787 2026-11-01 amendment; this amendment names the files.
+   - Each System's `.teardown` record stays for the life of the host, now as the late-stage
+     refusal. Accepted: one file per System, which the store kept before this change too.
    - A second process writing the same store. Accepted: not deployed (ADR-0787 #3419).
    - Once the `.teardown` record is `complete`, a teardown retry or observation no longer
      re-reads the activation's recovery volumes. Accepted: `complete` is written only after
