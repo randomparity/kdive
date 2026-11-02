@@ -253,6 +253,18 @@ removes no store file, so the receipt survived there.
   before adoption carries an unmanaged copy and does not own the receipt.
 - Remote store collection at teardown (#3472) may remove the activation's other files,
   including that marker, and keeps a `managed` receipt.
+- Local adoption and finalize decide under one lock. Nothing serializes an adoption against
+  System teardown of the same System: the authority's System lane releases its lock for the
+  provider call (`execute_mutation` in
+  `src/kdive/providers/external_boot_authority/service.py`), the recovery-orphan serializer
+  takes that lock without checking the active operation, `ops.resolve_recovery_orphan` checks
+  no System state, and both run on the local adapter's shared thread pool. So
+  `RecoveryMetadataStore.finalize_tombstone` and `adopt_cleanup_quarantine` each hold an
+  exclusive `flock` on the activation's recovery directory across their read and write.
+  Finalize re-reads the receipt under it and keeps a `managed` one with its tombstone, as the
+  adopted discard branch does; an adoption that finds the receipt gone fails as changed. This
+  corrects the earlier "System lane already serializes" judgment for this pair; it does not
+  cover `record_cleanup_quarantine`.
 
 Considered & rejected:
 

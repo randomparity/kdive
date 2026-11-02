@@ -57,6 +57,10 @@ Local only; remote already behaves this way.
    - Teardown completes (domain, overlay, baseline and recovery absent) with it standing.
    - An unmanaged or absent receipt is torn down exactly as before on both providers.
    - The local absence change applies only to the five System-teardown callers.
+   - An adoption racing the unmanaged discard path never loses its receipt. Nothing upstream
+     serializes the two (ADR-0787 amendment), so the local store's `finalize_tombstone` and
+     `adopt_cleanup_quarantine` hold an exclusive `flock` on the activation's recovery
+     directory across read and write, and finalize keeps a receipt it reads as `managed`.
 3. **Accepted failure classes.**
    - Adopted receipts accumulate on hosts. Accepted: one small directory or file per adoption,
      bounded by audited operator decisions; the ADR amendment names who removes it.
@@ -91,5 +95,9 @@ Local only; remote already behaves this way.
 - Success 5: `focused-test`,
   `tests/providers/remote_libvirt/test_external_boot_authority.py::test_remote_system_teardown_keeps_an_adopted_receipt`.
   It passes on base; its red is a controlled fault that finalizes the receipt during teardown.
+- The adoption race: `focused-test`,
+  `test_system_teardown_keeps_a_receipt_adopted_after_its_unmanaged_read` (adoption injected
+  between the discard path's read and finalize) and
+  `test_receipt_decisions_wait_for_the_activation_directory_lock` in the same file.
 - Success 1: `task-test-not-applicable`. The amendment is prose with no executable consumer;
   `just records` checks the record shape.

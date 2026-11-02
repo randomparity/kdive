@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -3999,17 +4000,25 @@ class RecoveryMetadataStore:
             raise ValueError("cleanup tombstone does not match recovery point")
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
+            # The receipt is re-read under the lock adoption takes, so an adoption that lands
+            # after a caller's own read is kept rather than deleted (ADR-0787, #3467).
+            fcntl.flock(directory_fd, fcntl.LOCK_EX)
             entries = self._checked_tombstone_entries(directory_fd, expected)
-            with suppress(FileNotFoundError):
-                os.unlink(_QUARANTINE_NAME, dir_fd=directory_fd)
-            for residual in (_INTENT_NAME, _PREPARATION_NAME):
-                if residual in entries:
-                    os.unlink(residual, dir_fd=directory_fd)
-                    os.fsync(directory_fd)
-            os.unlink(_TOMBSTONE_NAME, dir_fd=directory_fd)
-            os.fsync(directory_fd)
+            receipt = self._read_cleanup_quarantine_at(directory_fd, recovery.binding)
+            adopted = receipt is not None and receipt.managed
+            if receipt is not None and adopted and receipt.tombstone != expected:
+                raise ValueError("adopted cleanup receipt does not match recovery point")
+            _drop_residue(directory_fd, entries)
+            if not adopted:
+                with suppress(FileNotFoundError):
+                    os.unlink(_QUARANTINE_NAME, dir_fd=directory_fd)
+                os.unlink(_TOMBSTONE_NAME, dir_fd=directory_fd)
+                os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+        if adopted:
+            self.prune_empty_activation_parents(recovery.binding)
+            return
         os.rmdir(name, dir_fd=self._root_fd)
         os.fsync(self._root_fd)
         try:
@@ -4035,11 +4044,7 @@ class RecoveryMetadataStore:
         )
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
-            entries = self._checked_tombstone_entries(directory_fd, expected)
-            for residual in (_INTENT_NAME, _PREPARATION_NAME):
-                if residual in entries:
-                    os.unlink(residual, dir_fd=directory_fd)
-                    os.fsync(directory_fd)
+            _drop_residue(directory_fd, self._checked_tombstone_entries(directory_fd, expected))
         finally:
             os.close(directory_fd)
         self.prune_empty_activation_parents(recovery.binding)
@@ -4087,30 +4092,41 @@ class RecoveryMetadataStore:
         except FileNotFoundError:
             return None
         try:
-            try:
-                data = _read_private_file(directory_fd, _QUARANTINE_NAME)
-            except FileNotFoundError:
-                return None
-            receipt = CleanupQuarantineReceiptV1.model_validate_json(data)
-            if _cleanup_quarantine_bytes(receipt) != data:
-                raise ValueError("cleanup quarantine receipt is not canonical JSON")
-            if receipt.tombstone.binding != binding:
-                raise ValueError("cleanup quarantine receipt ownership changed")
-            return receipt
+            return self._read_cleanup_quarantine_at(directory_fd, binding)
         finally:
             os.close(directory_fd)
 
+    @staticmethod
+    def _read_cleanup_quarantine_at(
+        directory_fd: int, binding: ExternalBootActivationBinding
+    ) -> CleanupQuarantineReceiptV1 | None:
+        try:
+            data = _read_private_file(directory_fd, _QUARANTINE_NAME)
+        except FileNotFoundError:
+            return None
+        receipt = CleanupQuarantineReceiptV1.model_validate_json(data)
+        if _cleanup_quarantine_bytes(receipt) != data:
+            raise ValueError("cleanup quarantine receipt is not canonical JSON")
+        if receipt.tombstone.binding != binding:
+            raise ValueError("cleanup quarantine receipt ownership changed")
+        return receipt
+
     def adopt_cleanup_quarantine(self, receipt: CleanupQuarantineReceiptV1) -> None:
         self._require_open()
-        current = self.read_cleanup_quarantine(receipt.tombstone.binding)
-        if current != receipt:
-            raise ValueError("cleanup quarantine receipt changed before adoption")
+        binding = receipt.tombstone.binding
+        changed = ValueError("cleanup quarantine receipt changed before adoption")
         adopted = receipt.model_copy(update={"managed": True})
-        name = recovery_directory_name(
-            receipt.tombstone.recovery_point.recovery_ref, receipt.tombstone.binding
-        )
-        directory_fd = _open_private_directory(self._root_fd, name)
         try:
+            directory_fd = _open_private_directory(
+                self._root_fd, recovery_directory_name(_recovery_ref(binding), binding)
+            )
+        except FileNotFoundError:
+            raise changed from None
+        try:
+            # Held across the compare and the replace; finalize_tombstone takes it too (#3467).
+            fcntl.flock(directory_fd, fcntl.LOCK_EX)
+            if self._read_cleanup_quarantine_at(directory_fd, binding) != receipt:
+                raise changed
             _replace_private_file(
                 directory_fd,
                 ".cleanup-quarantine.next",
@@ -4613,6 +4629,13 @@ def _require_private_owned_directory(fd: int, label: str) -> None:
         or opened.st_uid != os.geteuid()
     ):
         raise ValueError(f"{label} must be an owner-only service-owned directory")
+
+
+def _drop_residue(directory_fd: int, entries: set[str]) -> None:
+    for residual in (_INTENT_NAME, _PREPARATION_NAME):
+        if residual in entries:
+            os.unlink(residual, dir_fd=directory_fd)
+            os.fsync(directory_fd)
 
 
 def _open_private_directory(parent_fd: int, name: str) -> int:
