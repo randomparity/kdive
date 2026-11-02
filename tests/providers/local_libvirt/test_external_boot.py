@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import fcntl
 import hashlib
 import io
 import itertools
@@ -11,6 +12,7 @@ import json
 import os
 import stat
 import tarfile
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
@@ -5739,6 +5741,155 @@ def test_re_recording_never_un_adopts_a_cleanup_quarantine(tmp_path: Path) -> No
         store.record_cleanup_quarantine(point, _cleanup_proof_for(point))
         held = store.read_cleanup_quarantine(point.binding)
     assert held == receipt.model_copy(update={"managed": True})
+
+
+def test_system_teardown_keeps_an_adopted_receipt(tmp_path: Path) -> None:
+    """#3467: teardown leaves an adopted receipt, as release finalize does (#3435)."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    io = _system_teardown_io(root, _SystemTeardownSession())
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+    assert not io.system_teardown_recovery_is_absent(intent, authority)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+
+    # A session opened before ADR-0710 re-creates the activation's empty parents (#2898).
+    parent = root
+    for name in (_BINDING.system_id, _BINDING.run_id, _BINDING.activation_id):
+        parent = parent / name
+        parent.mkdir(mode=0o700)
+
+    io.discard_system_teardown_recovery(intent, point, _cleanup_proof_for(point), authority)
+
+    directory = root / recovery_directory_name(point.recovery_ref, point.binding)
+    assert directory.is_dir()
+    assert sorted(path.name for path in directory.iterdir()) == [
+        "cleanup-quarantine.json",
+        "tombstone.json",
+    ]
+    assert not (root / _BINDING.system_id).exists()
+    assert io.system_teardown_recovery_is_absent(intent, authority)
+    assert io.begin_system_teardown(intent, authority).recovery_absent
+    assert io.teardown_system(intent, authority).complete
+    observed = io.observe_system_teardown(intent, authority)
+    assert observed.recovery_absent
+    assert not observed.quarantine_retained
+    with RecoveryMetadataStore(root) as store:
+        assert store.read_cleanup_quarantine(point.binding) == receipt.model_copy(
+            update={"managed": True}
+        )
+        assert not store.exact_recovery_absence(point.binding)
+
+
+def test_system_teardown_drops_residue_beside_an_adopted_receipt(tmp_path: Path) -> None:
+    """A crash inside publish_tombstone leaves the intent beside the receipt it later proves."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    directory = root / recovery_directory_name(point.recovery_ref, point.binding)
+    residue = directory / "intent.json"
+    residue.write_bytes(external_boot_module._metadata_bytes(_metadata("recovered")))
+    residue.chmod(0o600)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+    io = _system_teardown_io(root, _SystemTeardownSession())
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+    assert io.system_teardown_recovery_point(intent, authority) == point
+
+    io.discard_system_teardown_recovery(intent, point, _cleanup_proof_for(point), authority)
+
+    assert sorted(path.name for path in directory.iterdir()) == [
+        "cleanup-quarantine.json",
+        "tombstone.json",
+    ]
+    assert io.teardown_system(intent, authority).complete
+
+
+def test_system_teardown_absence_refuses_a_tombstone_the_adopted_receipt_does_not_name(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+    moved = point.model_copy(update={"plan_identity": "sha256:" + "7" * 64})
+    other = CleanupTombstoneV1(
+        binding=point.binding,
+        recovery_point=moved,
+        point_digest=LocalLibvirtExternalBoot.point_digest(moved),
+    )
+    directory = root / recovery_directory_name(point.recovery_ref, point.binding)
+    (directory / "tombstone.json").write_bytes(external_boot_module._tombstone_bytes(other))
+
+    with RecoveryMetadataStore(root) as store:
+        assert not store.exact_recovery_absence(point.binding, adopted_receipt_absent=True)
+
+
+def test_system_teardown_keeps_a_receipt_adopted_after_its_unmanaged_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3467: an adoption landing between the discard path's read and finalize is kept."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    io = _system_teardown_io(root, _SystemTeardownSession())
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+    cleanup_complete = RecoveryMetadataStore.cleanup_complete
+
+    def adopt_then_check(
+        store: RecoveryMetadataStore, reference: OpaqueProviderRef, recovery: RecoveryPoint
+    ) -> bool:
+        with RecoveryMetadataStore(root) as racing:
+            racing.adopt_cleanup_quarantine(receipt)
+        return cleanup_complete(store, reference, recovery)
+
+    monkeypatch.setattr(RecoveryMetadataStore, "cleanup_complete", adopt_then_check)
+
+    io.discard_system_teardown_recovery(intent, point, _cleanup_proof_for(point), authority)
+
+    with RecoveryMetadataStore(root) as store:
+        assert store.read_cleanup_quarantine(point.binding) == receipt.model_copy(
+            update={"managed": True}
+        )
+    assert io.teardown_system(intent, authority).complete
+
+
+@pytest.mark.parametrize("operation", ["adopt", "finalize"])
+def test_receipt_decisions_wait_for_the_activation_directory_lock(
+    tmp_path: Path, operation: str
+) -> None:
+    """#3467: adoption and finalize serialize on one lock over the receipt's directory."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    directory = root / recovery_directory_name(point.recovery_ref, point.binding)
+
+    def run() -> None:
+        with RecoveryMetadataStore(root) as store:
+            if operation == "adopt":
+                store.adopt_cleanup_quarantine(receipt)
+            else:
+                store.finalize_tombstone(point.recovery_ref, point, _cleanup_proof_for(point))
+
+    held = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(timeout=0.5)
+        assert worker.is_alive()
+        assert (directory / "cleanup-quarantine.json").read_bytes() == (
+            external_boot_module._cleanup_quarantine_bytes(receipt)
+        )
+    finally:
+        os.close(held)
+    worker.join(timeout=10)
+    assert not worker.is_alive()
 
 
 @pytest.mark.parametrize("disposition", ["delete", "adopt"])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -1775,7 +1776,9 @@ class RealLocalExternalBootIO:
             inspection = session.inspect()
             with RecoveryMetadataStore(self._recovery_root) as store:
                 store.begin_system_teardown(intent, inspection)
-                recovery_absent = store.exact_recovery_absence(intent.binding)
+                recovery_absent = store.exact_recovery_absence(
+                    intent.binding, adopted_receipt_absent=True
+                )
             return _system_teardown_facts(
                 intent, inspection, recovery_absent, None, intent.reservation
             )
@@ -1800,7 +1803,9 @@ class RealLocalExternalBootIO:
                     # ADR-0620 (#2921): this generation never reached `begin`; the earlier
                     # generation's record is not its own, so it observes as if absent.
                     retained = None
-                recovery_absent = store.exact_recovery_absence(anchor.binding)
+                recovery_absent = store.exact_recovery_absence(
+                    anchor.binding, adopted_receipt_absent=True
+                )
             completed_at = (
                 retained.completed_at
                 if retained is not None and retained.phase == "complete"
@@ -1850,7 +1855,7 @@ class RealLocalExternalBootIO:
             self._open_system_teardown(intent, authority),
             RecoveryMetadataStore(self._recovery_root) as store,
         ):
-            return store.exact_recovery_absence(intent.binding)
+            return store.exact_recovery_absence(intent.binding, adopted_receipt_absent=True)
 
     def discard_system_teardown_recovery(
         self,
@@ -1877,6 +1882,13 @@ class RealLocalExternalBootIO:
                 or proof.point_digest != LocalLibvirtExternalBoot.point_digest(recovery)
             ):
                 raise ValueError("external-boot cleanup proof does not match recovery point")
+            standing = store.read_cleanup_quarantine(recovery.binding)
+            if standing is not None and standing.managed:
+                # An adopted receipt is the operator's; teardown keeps it (ADR-0787, #3467).
+                if standing.tombstone.recovery_point != recovery:
+                    raise ValueError("adopted cleanup receipt does not match recovery point")
+                store.drop_tombstone_residue(recovery)
+                return
             if not store.cleanup_complete(reference, recovery):
                 metadata = store.reopen(reference, recovery.binding)
                 if _recovery_point_of(metadata, reference) != recovery:
@@ -1891,7 +1903,7 @@ class RealLocalExternalBootIO:
                     LocalLibvirtExternalBoot.point_digest(recovery),
                     require_recovered=False,
                 )
-            if store.read_cleanup_quarantine(recovery.binding) is None:
+            if standing is None:
                 store.record_cleanup_quarantine(recovery, proof)
             store.finalize_tombstone(reference, recovery, proof)
 
@@ -1902,7 +1914,7 @@ class RealLocalExternalBootIO:
             inspection = session.inspect()
             with RecoveryMetadataStore(self._recovery_root) as store:
                 record = store.begin_system_teardown(intent, inspection)
-                if not store.exact_recovery_absence(intent.binding):
+                if not store.exact_recovery_absence(intent.binding, adopted_receipt_absent=True):
                     return _system_teardown_facts(
                         intent, inspection, False, None, intent.reservation
                     )
@@ -1919,7 +1931,9 @@ class RealLocalExternalBootIO:
                     record = store.record_system_teardown_phase(record, phase)
             final = session.inspect()
             with RecoveryMetadataStore(self._recovery_root) as store:
-                recovery_absent = store.exact_recovery_absence(intent.binding)
+                recovery_absent = store.exact_recovery_absence(
+                    intent.binding, adopted_receipt_absent=True
+                )
                 physically_absent = (
                     final.domain_absent
                     and final.overlay_absent
@@ -3986,23 +4000,25 @@ class RecoveryMetadataStore:
             raise ValueError("cleanup tombstone does not match recovery point")
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
-            entries = set(os.listdir(directory_fd))
-            allowed = {_TOMBSTONE_NAME, _INTENT_NAME, _PREPARATION_NAME, _QUARANTINE_NAME}
-            if entries - allowed:
-                raise ValueError("cleanup tombstone directory contains unexpected payload")
-            if self._read_tombstone(directory_fd) != expected:
-                raise ValueError("cleanup tombstone changed before finalization")
-            self._validate_tombstone_residue(directory_fd, entries, expected)
-            with suppress(FileNotFoundError):
-                os.unlink(_QUARANTINE_NAME, dir_fd=directory_fd)
-            for residual in (_INTENT_NAME, _PREPARATION_NAME):
-                if residual in entries:
-                    os.unlink(residual, dir_fd=directory_fd)
-                    os.fsync(directory_fd)
-            os.unlink(_TOMBSTONE_NAME, dir_fd=directory_fd)
-            os.fsync(directory_fd)
+            # The receipt is re-read under the lock adoption takes, so an adoption that lands
+            # after a caller's own read is kept rather than deleted (ADR-0787, #3467).
+            fcntl.flock(directory_fd, fcntl.LOCK_EX)
+            entries = self._checked_tombstone_entries(directory_fd, expected)
+            receipt = self._read_cleanup_quarantine_at(directory_fd, recovery.binding)
+            adopted = receipt is not None and receipt.managed
+            if receipt is not None and adopted and receipt.tombstone != expected:
+                raise ValueError("adopted cleanup receipt does not match recovery point")
+            _drop_residue(directory_fd, entries)
+            if not adopted:
+                with suppress(FileNotFoundError):
+                    os.unlink(_QUARANTINE_NAME, dir_fd=directory_fd)
+                os.unlink(_TOMBSTONE_NAME, dir_fd=directory_fd)
+                os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+        if adopted:
+            self.prune_empty_activation_parents(recovery.binding)
+            return
         os.rmdir(name, dir_fd=self._root_fd)
         os.fsync(self._root_fd)
         try:
@@ -4012,6 +4028,26 @@ class RecoveryMetadataStore:
             self.prune_empty_activation_parents(recovery.binding)
             return
         raise ValueError("cleanup tombstone remained after finalization")
+
+    def drop_tombstone_residue(self, recovery: RecoveryPoint) -> None:
+        """Drop residue beside an exact tombstone, keeping it and the receipt; prune parents.
+
+        System teardown keeps an adopted receipt and its tombstone (ADR-0787, #3467), but a
+        crash inside ``publish_tombstone`` can leave the intent beside them.
+        """
+        self._require_open()
+        name = recovery_directory_name(recovery.recovery_ref, recovery.binding)
+        expected = CleanupTombstoneV1(
+            binding=recovery.binding,
+            recovery_point=recovery,
+            point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
+        )
+        directory_fd = _open_private_directory(self._root_fd, name)
+        try:
+            _drop_residue(directory_fd, self._checked_tombstone_entries(directory_fd, expected))
+        finally:
+            os.close(directory_fd)
+        self.prune_empty_activation_parents(recovery.binding)
 
     def record_cleanup_quarantine(
         self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
@@ -4056,30 +4092,41 @@ class RecoveryMetadataStore:
         except FileNotFoundError:
             return None
         try:
-            try:
-                data = _read_private_file(directory_fd, _QUARANTINE_NAME)
-            except FileNotFoundError:
-                return None
-            receipt = CleanupQuarantineReceiptV1.model_validate_json(data)
-            if _cleanup_quarantine_bytes(receipt) != data:
-                raise ValueError("cleanup quarantine receipt is not canonical JSON")
-            if receipt.tombstone.binding != binding:
-                raise ValueError("cleanup quarantine receipt ownership changed")
-            return receipt
+            return self._read_cleanup_quarantine_at(directory_fd, binding)
         finally:
             os.close(directory_fd)
 
+    @staticmethod
+    def _read_cleanup_quarantine_at(
+        directory_fd: int, binding: ExternalBootActivationBinding
+    ) -> CleanupQuarantineReceiptV1 | None:
+        try:
+            data = _read_private_file(directory_fd, _QUARANTINE_NAME)
+        except FileNotFoundError:
+            return None
+        receipt = CleanupQuarantineReceiptV1.model_validate_json(data)
+        if _cleanup_quarantine_bytes(receipt) != data:
+            raise ValueError("cleanup quarantine receipt is not canonical JSON")
+        if receipt.tombstone.binding != binding:
+            raise ValueError("cleanup quarantine receipt ownership changed")
+        return receipt
+
     def adopt_cleanup_quarantine(self, receipt: CleanupQuarantineReceiptV1) -> None:
         self._require_open()
-        current = self.read_cleanup_quarantine(receipt.tombstone.binding)
-        if current != receipt:
-            raise ValueError("cleanup quarantine receipt changed before adoption")
+        binding = receipt.tombstone.binding
+        changed = ValueError("cleanup quarantine receipt changed before adoption")
         adopted = receipt.model_copy(update={"managed": True})
-        name = recovery_directory_name(
-            receipt.tombstone.recovery_point.recovery_ref, receipt.tombstone.binding
-        )
-        directory_fd = _open_private_directory(self._root_fd, name)
         try:
+            directory_fd = _open_private_directory(
+                self._root_fd, recovery_directory_name(_recovery_ref(binding), binding)
+            )
+        except FileNotFoundError:
+            raise changed from None
+        try:
+            # Held across the compare and the replace; finalize_tombstone takes it too (#3467).
+            fcntl.flock(directory_fd, fcntl.LOCK_EX)
+            if self._read_cleanup_quarantine_at(directory_fd, binding) != receipt:
+                raise changed
             _replace_private_file(
                 directory_fd,
                 ".cleanup-quarantine.next",
@@ -4089,6 +4136,19 @@ class RecoveryMetadataStore:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+
+    def _checked_tombstone_entries(
+        self, directory_fd: int, expected: CleanupTombstoneV1
+    ) -> set[str]:
+        """The directory's entries, after proving the tombstone and every residue file exact."""
+        entries = set(os.listdir(directory_fd))
+        allowed = {_TOMBSTONE_NAME, _INTENT_NAME, _PREPARATION_NAME, _QUARANTINE_NAME}
+        if entries - allowed:
+            raise ValueError("cleanup tombstone directory contains unexpected payload")
+        if self._read_tombstone(directory_fd) != expected:
+            raise ValueError("cleanup tombstone changed before finalization")
+        self._validate_tombstone_residue(directory_fd, entries, expected)
+        return entries
 
     def _validate_tombstone_residue(
         self,
@@ -4362,6 +4422,18 @@ class RecoveryMetadataStore:
             for descriptor in descriptors[1:]:
                 os.close(descriptor)
 
+    def _holds_only_adopted_receipt(
+        self, directory_fd: int, binding: ExternalBootActivationBinding
+    ) -> bool:
+        if set(os.listdir(directory_fd)) != {_TOMBSTONE_NAME, _QUARANTINE_NAME}:
+            return False
+        receipt = self.read_cleanup_quarantine(binding)
+        return (
+            receipt is not None
+            and receipt.managed
+            and self._read_tombstone(directory_fd) == receipt.tombstone
+        )
+
     def _read_optional_abort_receipt(self, name: str) -> LocalPartialAbortReceiptV1 | None:
         try:
             data = _read_private_file(self._root_fd, name)
@@ -4374,16 +4446,30 @@ class RecoveryMetadataStore:
             raise ValueError("partial abort receipt is not canonical")
         return receipt
 
-    def exact_recovery_absence(self, binding: ExternalBootActivationBinding) -> bool:
-        """Read-only proof that every exact activation-owned storage location is absent."""
+    def exact_recovery_absence(
+        self, binding: ExternalBootActivationBinding, *, adopted_receipt_absent: bool = False
+    ) -> bool:
+        """Read-only proof that every exact activation-owned storage location is absent.
+
+        System teardown passes ``adopted_receipt_absent``: a recovery directory holding only its
+        tombstone and an adopted receipt is the operator's, not the activation's (ADR-0787,
+        #3467).
+        """
         name = recovery_directory_name(_recovery_ref(binding), binding)
         for candidate in (name, f".{name}.partial"):
             try:
                 descriptor = _open_private_directory(self._root_fd, candidate)
             except FileNotFoundError:
                 continue
-            else:
+            try:
+                adopted = (
+                    adopted_receipt_absent
+                    and candidate == name
+                    and self._holds_only_adopted_receipt(descriptor, binding)
+                )
+            finally:
                 os.close(descriptor)
+            if not adopted:
                 return False
         if self._read_optional_abort_receipt(f".{name}.abort.json") is not None:
             return False
@@ -4543,6 +4629,13 @@ def _require_private_owned_directory(fd: int, label: str) -> None:
         or opened.st_uid != os.geteuid()
     ):
         raise ValueError(f"{label} must be an owner-only service-owned directory")
+
+
+def _drop_residue(directory_fd: int, entries: set[str]) -> None:
+    for residual in (_INTENT_NAME, _PREPARATION_NAME):
+        if residual in entries:
+            os.unlink(residual, dir_fd=directory_fd)
+            os.fsync(directory_fd)
 
 
 def _open_private_directory(parent_fd: int, name: str) -> int:

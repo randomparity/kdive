@@ -4276,6 +4276,42 @@ async def test_remote_finalize_leaves_an_adopted_receipt_in_place(tmp_path: Path
     adapter.close()
 
 
+class _ReapingModuleHost:
+    async def execute_system_teardown(self, _exact: object) -> object:
+        return object()
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_keeps_an_adopted_receipt(tmp_path: Path) -> None:
+    """#3467: teardown leaves an adopted receipt in place, as release finalize does (#3435)."""
+    adapter, record, request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+    authority = authority_reference(request)
+    adopted = await adapter.adopt_recovery_object(
+        observed.binding, authority, observed.observed_digest
+    )
+    teardown_adapter = RemoteExternalBootAuthorityAdapter(
+        RemoteExternalBootCoordinator(
+            cast(Any, _CompletingTeardownOperations()), store, lambda: 300.0
+        ),
+        RemoteModulePreparationExecutor(),
+        remote_module_host=cast(Any, _ReapingModuleHost()),
+        teardown_clock=lambda: datetime(2026, 9, 6, tzinfo=UTC),
+    )
+    teardown = _remote_teardown_request()
+
+    result = await teardown_adapter.execute_system_teardown(
+        teardown, _remote_teardown_context(teardown), _REMOTE_TEARDOWN_RESERVATION
+    )
+
+    assert result.complete
+    assert await adapter.observe_recovery_object(observed.binding, authority) == adopted
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None and receipt.managed
+    adapter.close()
+
+
 @pytest.mark.anyio
 async def test_remote_recovery_record_delete_finalizes_the_exact_record(tmp_path: Path) -> None:
     adapter, record, request, _context = await _cleaned_release(tmp_path)
