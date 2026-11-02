@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import fcntl
 import inspect
 import os
 import re
@@ -97,6 +98,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationResponseV1,
     RemoteModuleVolumePreparationStore,
     RemoteSystemTeardownInspection,
+    RemoteSystemTeardownIntentV1,
     RemoteSystemTeardownState,
     authority_reference,
 )
@@ -4309,6 +4311,290 @@ async def test_remote_system_teardown_keeps_an_adopted_receipt(tmp_path: Path) -
     assert await adapter.observe_recovery_object(observed.binding, authority) == adopted
     receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
     assert receipt is not None and receipt.managed
+    identity = external_boot_authority._recovery_identity(receipt.recovery_ref)
+    index = f"{store._recovery_key(record.binding, record.plan_identity)}.recovery-index"
+    assert _store_names(store) == {
+        _teardown_name(store),
+        f"{identity}.recovery",
+        f"{identity}.cleanup-quarantine",
+        index,
+    }
+    adapter.close()
+
+
+class _CollectingTeardownOperations(_CompletingTeardownOperations):
+    """Completing teardown host that also proves a finalized activation's preparation absent."""
+
+    def unfinished_preparation_absent(self, _state: object) -> bool:
+        return True
+
+
+def _collecting_teardown_adapter(
+    store: RemoteModuleVolumePreparationStore, operations: _CompletingTeardownOperations
+) -> RemoteExternalBootAuthorityAdapter:
+    return RemoteExternalBootAuthorityAdapter(
+        RemoteExternalBootCoordinator(cast(Any, operations), store, lambda: 300.0),
+        RemoteModulePreparationExecutor(),
+        remote_module_host=cast(Any, _ReapingModuleHost()),
+        teardown_clock=lambda: datetime(2026, 9, 6, tzinfo=UTC),
+    )
+
+
+async def _system_teardown(
+    store: RemoteModuleVolumePreparationStore,
+    operations: _CompletingTeardownOperations | None = None,
+) -> bool:
+    adapter = _collecting_teardown_adapter(store, operations or _CollectingTeardownOperations())
+    request = _remote_teardown_request()
+    try:
+        result = await adapter.execute_system_teardown(
+            request, _remote_teardown_context(request), _REMOTE_TEARDOWN_RESERVATION
+        )
+    finally:
+        adapter.close()
+    return result.complete
+
+
+async def _observe_teardown(
+    store: RemoteModuleVolumePreparationStore, operations: _CompletingTeardownOperations
+) -> bool:
+    adapter = _collecting_teardown_adapter(store, operations)
+    request = _remote_teardown_request()
+    try:
+        result = await adapter.observe_system_teardown(request, _remote_teardown_context(request))
+    finally:
+        adapter.close()
+    return result.complete
+
+
+def _teardown_name(store: RemoteModuleVolumePreparationStore) -> str:
+    return f"{store._system_teardown_key(_record().binding)}.teardown"
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_collects_a_never_finalized_activation(
+    tmp_path: Path,
+) -> None:
+    """#3472: teardown removes every file of an activation finalize never ran for."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    other = record.model_copy(
+        update={
+            "binding": record.binding.model_copy(
+                update={"activation_id": "00000000-0000-4000-8000-0000000000aa"}
+            )
+        }
+    )
+    _publish_terminal(store, other)
+    _seed_activation_residue(store, other)
+    before = _store_names(store)
+
+    assert await _system_teardown(store)
+
+    after = _store_names(store)
+    assert after - before == {_teardown_name(store)}
+    assert {name.rsplit(".", 1)[1] for name in before - after} == {
+        "terminal",
+        "restored",
+        "request",
+        "result",
+        "completion",
+        "lifecycle-request",
+        "lifecycle-completion",
+        "materialization",
+        "materialization-index",
+        "preparation",
+        "prior-power",
+        "prior-power-owner",
+        "recovery",
+        "recovery-index",
+        "object-index",
+        "cleanup-quarantine",
+    }
+    other_key = store._terminal_key(
+        other.binding.system_id,
+        other.binding.activation_id,
+        other.binding.run_id,
+        other.plan_identity,
+    )
+    assert f"{other_key}.terminal" in after
+    assert sum(name.endswith((".request", ".result", ".completion")) for name in after) == 3
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_collects_a_finalized_activation(tmp_path: Path) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    await adapter.finalize(request, context)
+    assert store._finalized_name(record.binding, record.plan_identity) in _store_names(store)
+
+    assert await _system_teardown(store)
+
+    assert _store_names(store) == {_teardown_name(store)}
+    await adapter.finalize(request, context)
+    assert _store_names(store) == {_teardown_name(store)}
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_stage_after_system_teardown_is_refused(tmp_path: Path) -> None:
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    terminal = store.reopen_terminal(record.binding, record.plan_identity)
+    lifecycle = _module_lifecycle_request(terminal.request, action="restore")
+    assert await _system_teardown(store)
+    names = _store_names(store)
+    finalized_error = external_boot_authority.RemoteCleanupFinalizedError
+
+    with pytest.raises(finalized_error, match="System teardown"):
+        store.stage(terminal.request, 1.0)
+    with pytest.raises(finalized_error):
+        store.stage_lifecycle(lifecycle, 1.0)
+    assert _store_names(store) == names
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_after_teardown_collection_writes_nothing(tmp_path: Path) -> None:
+    """#3472: an orphan delete that read the receipt before collection publishes no marker."""
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    assert await _system_teardown(store)
+
+    store.finalize_cleanup_quarantine(receipt)
+
+    assert _store_names(store) == {_teardown_name(store)}
+    adapter.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("finalized", [False, True])
+async def test_remote_teardown_collection_resumes_after_a_crash_at_any_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finalized: bool
+) -> None:
+    """#3472: the service's recovery observation finishes an interrupted collection."""
+    real_unlink = os.unlink
+    crashes = 0
+    for crash_at in range(1, 100):
+        root = tmp_path / f"crash-{crash_at}"
+        root.mkdir()
+        adapter, record, request, context, store = await _finalized_release_store(root)
+        staged = store.reopen_terminal(record.binding, record.plan_identity).request
+        if finalized:
+            await adapter.finalize(request, context)
+        operations = _CollectingTeardownOperations()
+        seen = 0
+
+        def failing(path: str, *args: Any, _at: int = crash_at, **kwargs: Any) -> None:
+            nonlocal seen
+            if not path.startswith("."):
+                seen += 1
+                if seen == _at:
+                    raise OSError("injected crash")
+            real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(external_boot_authority.os, "unlink", failing)
+        try:
+            assert await _system_teardown(store, operations)
+        finally:
+            monkeypatch.setattr(external_boot_authority.os, "unlink", real_unlink)
+        crashed = seen >= crash_at
+        if crashed:
+            crashes += 1
+            with pytest.raises(external_boot_authority.RemoteCleanupFinalizedError):
+                store.stage(staged, 1.0)
+            assert await _observe_teardown(store, operations)
+        assert _store_names(store) == {_teardown_name(store)}
+        adapter.close()
+        if not crashed:
+            break
+    assert crashes >= (5 if finalized else 10)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["adopt", "collect"])
+async def test_remote_receipt_decisions_wait_for_the_store_lock(
+    tmp_path: Path, operation: str
+) -> None:
+    """#3472: adoption and collection serialize on one lock over the store directory."""
+    adapter, record, _request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    name = store._quarantine_name(receipt.recovery_ref)
+    before = store._read(name)
+
+    def run() -> None:
+        if operation == "adopt":
+            store.adopt_cleanup_quarantine(receipt)
+        else:
+            store.collect_torn_down_activation(record.binding, record.plan_identity)
+
+    held = os.open(".", os.O_RDONLY | os.O_DIRECTORY, dir_fd=store._root_fd)
+    try:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(timeout=0.5)
+        assert worker.is_alive()
+        assert store._read(name) == before
+    finally:
+        os.close(held)
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_adoption_during_teardown_collection_fails_as_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3472: an adoption arriving after collection read the receipt cannot lose it."""
+    adapter, record, _request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    outcome: list[BaseException | None] = []
+
+    def adopt() -> None:
+        try:
+            store.adopt_cleanup_quarantine(receipt)
+        except BaseException as error:  # noqa: BLE001 - the outcome is the assertion
+            outcome.append(error)
+        else:
+            outcome.append(None)
+
+    worker = threading.Thread(target=adopt)
+    real_receipt = store._receipt
+
+    def receipt_then_adopt(reference: OpaqueProviderRef) -> object:
+        read = real_receipt(reference)
+        if not worker.is_alive() and not outcome:
+            worker.start()
+            worker.join(timeout=0.5)
+        return read
+
+    monkeypatch.setattr(store, "_receipt", receipt_then_adopt)
+    store.collect_torn_down_activation(record.binding, record.plan_identity)
+    worker.join(timeout=10)
+
+    (error,) = outcome
+    assert isinstance(error, ProviderRecoveryRefusal)
+    assert store._read(store._quarantine_name(receipt.recovery_ref)) is None
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_adoption_after_teardown_collection_fails_as_changed(tmp_path: Path) -> None:
+    adapter, record, _request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    assert await _system_teardown(store)
+
+    with pytest.raises(ProviderRecoveryRefusal, match="changed"):
+        store.adopt_cleanup_quarantine(receipt)
+    assert _store_names(store) == {_teardown_name(store)}
     adapter.close()
 
 
@@ -4482,10 +4768,18 @@ def _seed_activation_residue(
     )
 
 
-def _seed_system_teardown_intent(store: RemoteModuleVolumePreparationStore, name: str) -> str:
-    key = store._system_teardown_key(_record().binding)
-    store._publish(f"{key}.teardown", name.encode())
-    return f"{key}.teardown"
+def _seed_system_teardown_intent(store: RemoteModuleVolumePreparationStore) -> str:
+    """A real in-progress teardown record, so the torn-down check can parse it."""
+    request = _remote_teardown_request()
+    anchor = RemoteExternalBootAuthorityAdapter._teardown_anchor(
+        request, _remote_teardown_context(request)
+    )
+    store.begin_system_teardown(
+        RemoteSystemTeardownIntentV1.model_validate(
+            anchor.model_dump(exclude={"schema_"}) | {"reservation": _REMOTE_TEARDOWN_RESERVATION}
+        )
+    )
+    return _teardown_name(store)
 
 
 def _store_names(store: RemoteModuleVolumePreparationStore) -> set[str]:
@@ -4512,7 +4806,7 @@ async def test_remote_finalize_deletes_the_activations_files_and_keeps_the_marke
     tmp_path: Path,
 ) -> None:
     adapter, record, request, context, store = await _finalized_release_store(tmp_path)
-    teardown = _seed_system_teardown_intent(store, "intent")
+    teardown = _seed_system_teardown_intent(store)
     other = record.model_copy(
         update={
             "binding": record.binding.model_copy(
@@ -4608,7 +4902,7 @@ async def test_remote_reads_of_a_finalized_activation_say_finalized_not_unknown(
     tmp_path: Path,
 ) -> None:
     adapter, record, request, context, store = await _finalized_release_store(tmp_path)
-    teardown = _seed_system_teardown_intent(store, "intent")
+    teardown = _seed_system_teardown_intent(store)
     await adapter.finalize(request, context)
     finalized_error = external_boot_authority.RemoteCleanupFinalizedError
 

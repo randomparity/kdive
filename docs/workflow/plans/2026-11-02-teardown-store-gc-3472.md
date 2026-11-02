@@ -208,11 +208,12 @@ Steps:
        reference = OpaqueProviderRef(ref=f"remote-external-boot/{identity}")
        record = self._recovery_record(identity)
        receipt = self._receipt(reference)
-       for owner in (record, receipt):
-           if owner is not None and (owner.binding != binding or owner.plan_identity != plan_identity):
-               raise ProviderRecoveryRefusal(
-                   "remote recovery record differs from the torn-down activation"
-               )
+       if record is not None and (record.binding != binding or record.plan_identity != plan_identity):
+           raise ProviderRecoveryRefusal("remote recovery index differs from durable record")
+       if receipt is not None and (
+           receipt.binding != binding or receipt.plan_identity != plan_identity
+       ):
+           raise ProviderRecoveryRefusal("remote cleanup quarantine receipt differs from its owner")
        owned = identity.encode("ascii")
        names = (
            []
