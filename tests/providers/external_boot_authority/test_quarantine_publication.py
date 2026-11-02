@@ -7,8 +7,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -34,7 +33,7 @@ from kdive.providers.ports.external_boot import (
 from tests.db.conftest import _migrated_db as _migrated_db  # noqa: F401
 from tests.db.conftest import migrated_url as migrated_url  # noqa: F401
 from tests.db.conftest import postgres_url as postgres_url  # noqa: F401
-from tests.jobs.handlers.external_boot.seeding import seed_case
+from tests.jobs.handlers.external_boot.seeding import insert_release_authority, seed_case
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
 
 
@@ -205,68 +204,6 @@ def test_authority_publication_replays_conflicts_and_fences_release_cleanup(
     asyncio.run(run())
 
 
-async def _insert_release_authority(
-    seed: psycopg.AsyncConnection,
-    vehicle: Any,
-    case: Any,
-    *,
-    generation: int,
-    state: str,
-    acknowledged: bool = True,
-) -> tuple[UUID, str, str]:
-    """Insert one release authority generation; return its id and derived cleanup binding."""
-    authority_id = uuid4()
-    root_identity = _digest(str(generation))
-    root_digest = _digest("b")
-    superseded = "now()" if state == "superseded" else "NULL"
-    acknowledged_at = "now()" if acknowledged else "NULL"
-    await seed.execute(
-        "INSERT INTO external_boot_authorities "
-        "(id, system_id, allocation_id, activation_id, run_id, plan_identity, job_id, "
-        "job_attempt, purpose, provider_kind, authority_instance, worker_incarnation, "
-        "operation, operation_identity, operation_digest, generation, state, "
-        f"acknowledged_at, superseded_at) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,1,'release','local-libvirt','authority-vehicle',"
-        f"%s,'release',%s,%s,%s,%s,{acknowledged_at},{superseded})",
-        (
-            authority_id,
-            vehicle.system_id,
-            case.allocation_id,
-            vehicle.activation_id,
-            vehicle.run_id,
-            vehicle.plan_identity,
-            case.job_id,
-            case.worker_incarnation,
-            root_identity,
-            root_digest,
-            generation,
-            state,
-        ),
-    )
-    root = {
-        "authority_id": str(authority_id),
-        "generation": generation,
-        "system_id": str(vehicle.system_id),
-        "activation_id": str(vehicle.activation_id),
-        "run_id": str(vehicle.run_id),
-        "plan_identity": vehicle.plan_identity,
-        "provider_kind": "local-libvirt",
-        "authority_instance": "authority-vehicle",
-        "worker_incarnation": case.worker_incarnation,
-        "root_operation_identity": root_identity,
-        "root_operation_digest": root_digest,
-    }
-    row = await (
-        await seed.execute(
-            "SELECT operation_identity, operation_digest "
-            "FROM derive_external_boot_release_phase_binding(%s, 'cleanup')",
-            (Jsonb(root),),
-        )
-    ).fetchone()
-    assert row is not None
-    return authority_id, row[0], row[1]
-
-
 def test_publication_admits_an_earlier_release_cleanup_identity(
     migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
@@ -278,13 +215,13 @@ def test_publication_admits_an_earlier_release_cleanup_identity(
             case = await seed_case(
                 seed, vehicle, purpose="release", operation="release", activation_state="active"
             )
-            _first_id, adopted_identity, _ = await _insert_release_authority(
+            _first_id, adopted_identity, _ = await insert_release_authority(
                 seed, vehicle, case, generation=1, state="superseded"
             )
-            _unacknowledged_id, unacknowledged_identity, _ = await _insert_release_authority(
+            _unacknowledged_id, unacknowledged_identity, _ = await insert_release_authority(
                 seed, vehicle, case, generation=2, state="superseded", acknowledged=False
             )
-            authority_id, cleanup_identity, cleanup_digest = await _insert_release_authority(
+            authority_id, cleanup_identity, cleanup_digest = await insert_release_authority(
                 seed, vehicle, case, generation=3, state="current"
             )
             other_vehicle = build_vehicle()
@@ -295,7 +232,7 @@ def test_publication_admits_an_earlier_release_cleanup_identity(
                 operation="release",
                 activation_state="active",
             )
-            _other_id, other_lineage_identity, _ = await _insert_release_authority(
+            _other_id, other_lineage_identity, _ = await insert_release_authority(
                 seed, other_vehicle, other_case, generation=1, state="superseded"
             )
             binding = AuthorityBinding(
