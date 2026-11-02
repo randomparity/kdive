@@ -295,7 +295,8 @@ This amendment narrows the #3419 sentence "Nothing removes a store's files excep
   finds every remaining file; a never-finalized activation has no marker to find its record
   through. Observe collects too because the service recovers an interrupted teardown by
   observing it. A collection failure is logged and the call still reports the completed
-  teardown; the next call collects again.
+  teardown. The service's observation right after the execute collects again; if that fails
+  too, the files stay once the teardown is journaled terminal.
 - A `managed` receipt, the recovery record it quarantines and the recovery index stay, as the
   2026-11-01 amendment requires, so the binding lookup and the recovery-object port still find
   it. The operator who removes an adopted receipt after teardown removes all three:

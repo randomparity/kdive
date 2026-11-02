@@ -2961,7 +2961,7 @@ class RemoteExternalBootCoordinator:
         return self._store.checkpoint_system_teardown(record, phase, completed_at=completed_at)
 
     def collect_torn_down_activation(self, record: RemoteSystemTeardownRecordV1) -> None:
-        """Collect a completed teardown's activation files; a failure waits for the next call.
+        """Collect a completed teardown's activation files; a failure is logged, not raised.
 
         The System is already destroyed and the ``complete`` record keeps refusing late stages,
         so a failure is logged rather than turned into a teardown refusal (ADR-0787, #3472).
@@ -2972,7 +2972,7 @@ class RemoteExternalBootCoordinator:
             self._store.collect_torn_down_activation(
                 record.intent.binding, record.intent.plan_identity
             )
-        except Exception:  # noqa: BLE001 - the next execute or observe collects again
+        except Exception:  # noqa: BLE001 - the service's following observe collects again
             logger.exception("remote store collection after System teardown failed")
 
     def inspect_system_teardown(

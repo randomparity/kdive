@@ -64,10 +64,12 @@ always find the record through it; a never-finalized activation has no marker.
 Both adapter teardown calls collect when the record they hold is `complete`:
 `execute_system_teardown` before returning its facts, and `observe_system_teardown` inside its
 executor call, after reading the record. The service recovers an interrupted teardown through
-`observe_system_teardown` (`AuthorityService._recovery_observation`), so an interrupted
-collection finishes on the next call of either kind. A collection exception is logged with
+`observe_system_teardown` (`AuthorityService._recovery_observation`), so a collection a process
+crash interrupted finishes on the recovery observation. A collection exception is logged with
 `logger.exception` and the call still returns its `complete` facts: the System is already
-destroyed, the `.teardown` record keeps refusing late stages, and the next call collects again.
+destroyed and the `.teardown` record keeps refusing late stages. The service observes right
+after executing, so that observation collects again; once the service journals the teardown
+terminal it makes no further teardown call for it.
 
 `RemoteExternalBootCoordinator.system_teardown_state` returns a state with every record field
 `None` when `torn_down` is true. A half-collected store would otherwise refuse a retry or an
@@ -114,9 +116,11 @@ acquisition makes two threads of one process exclude each other.
    - A sibling activation of the same System, run and plan loses the shared materialization
      record. Accepted: finalize already removes it the same way, and the teardown destroyed the
      System.
-   - A collection that fails on every call (a foreign binding, a file mode the store refuses)
-     leaves the files and logs on each teardown call. Accepted: the teardown result stays
-     correct and the late-stage refusal stands; the log names the failure.
+   - A collection that fails on the execute call and on the observation after it (a foreign
+     binding, a file mode the store refuses, an I/O error on both) leaves the files after the
+     teardown is journaled terminal, with one log line per failed call. Accepted: the teardown
+     result stays correct and the late-stage refusal stands; collecting such leftovers belongs
+     to a later sweep, which this issue excludes.
    - After collection, a recovery-object row for a volume kind cannot be observed through the
      object index. Accepted: finalize already leaves that state (#3326), and teardown removed
      the volumes.
