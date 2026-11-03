@@ -18,7 +18,7 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, Literal, cast
+from typing import Any, BinaryIO, Literal, cast
 from uuid import UUID
 
 import pytest
@@ -5857,6 +5857,43 @@ def test_system_teardown_keeps_a_receipt_adopted_after_its_unmanaged_read(
             update={"managed": True}
         )
     assert io.teardown_system(intent, authority).complete
+
+
+def test_record_cleanup_quarantine_keeps_a_receipt_adopted_before_its_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3492: an adoption cannot land between the managed check and the replace."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    replace = external_boot_module._replace_private_file
+    outcome: list[object] = []
+
+    def adopt_first(*args: Any, **kwargs: Any) -> object:
+        if outcome:  # only the writer under test is hooked, not the racing adoption's replace
+            return replace(*args, **kwargs)
+
+        def adopt() -> None:
+            with RecoveryMetadataStore(root) as racing:
+                racing.adopt_cleanup_quarantine(receipt)
+
+        worker = threading.Thread(target=adopt)
+        outcome.append(worker)
+        worker.start()
+        worker.join(timeout=0.5)  # blocked on the directory lock while the writer holds it
+        return replace(*args, **kwargs)
+
+    monkeypatch.setattr(external_boot_module, "_replace_private_file", adopt_first)
+    with RecoveryMetadataStore(root) as store:
+        store.record_cleanup_quarantine(point, _cleanup_proof_for(point))
+    monkeypatch.undo()
+    worker = outcome[0]
+    assert isinstance(worker, threading.Thread)
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    with RecoveryMetadataStore(root) as store:
+        held = store.read_cleanup_quarantine(point.binding)
+    assert held == receipt.model_copy(update={"managed": True})
 
 
 @pytest.mark.parametrize("operation", ["adopt", "finalize"])
