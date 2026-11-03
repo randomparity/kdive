@@ -403,6 +403,59 @@ def test_authority_semantic_identity_permits_libvirt_generated_device_fields() -
     ) != owned_system_semantic_identity(changed_kernel, SYSTEM_ID, OVERLAY)
 
 
+def _with_machine(arch: str | None, machine: str | None) -> str:
+    attrs = "".join(
+        f' {name}="{value}"' for name, value in (("arch", arch), ("machine", machine)) if value
+    )
+    return _xml().replace("<os>", f"<os><type{attrs}>hvm</type>")
+
+
+@pytest.mark.parametrize(
+    ("arch", "alias", "canonical"),
+    [
+        ("x86_64", "q35", "pc-q35-10.2"),
+        ("x86_64", "q35", "pc-q35-rhel9.4.0"),
+        ("ppc64le", "pseries", "pseries-9.0"),
+    ],
+)
+def test_authority_semantic_identity_tolerates_the_versioned_machine(
+    arch: str, alias: str, canonical: str
+) -> None:
+    rendered = _with_machine(arch, alias)
+
+    assert owned_system_semantic_identity(
+        rendered, SYSTEM_ID, OVERLAY
+    ) == owned_system_semantic_identity(_with_machine(arch, canonical), SYSTEM_ID, OVERLAY)
+
+
+@pytest.mark.parametrize(
+    ("arch", "alias", "other"),
+    [
+        ("x86_64", "q35", "pc-i440fx-10.2"),
+        ("x86_64", "q35", "pseries-9.0"),
+        ("ppc64le", "pseries", "pc-q35-10.2"),
+        ("ppc64le", "pseries", "powernv9"),
+    ],
+)
+def test_authority_semantic_identity_keeps_a_different_machine_type(
+    arch: str, alias: str, other: str
+) -> None:
+    assert owned_system_semantic_identity(
+        _with_machine(arch, alias), SYSTEM_ID, OVERLAY
+    ) != owned_system_semantic_identity(_with_machine(arch, other), SYSTEM_ID, OVERLAY)
+
+
+@pytest.mark.parametrize(("arch", "machine"), [(None, "pc-q35-10.2"), ("x86_64", None)])
+def test_authority_semantic_identity_handles_a_partial_os_type(
+    arch: str | None, machine: str | None
+) -> None:
+    xml = _with_machine(arch, machine)
+
+    assert owned_system_semantic_identity(xml, SYSTEM_ID, OVERLAY) != (
+        owned_system_semantic_identity(_with_machine(arch, "other"), SYSTEM_ID, OVERLAY)
+    )
+
+
 _BASE = "/var/lib/kdive/provider-authority/bases/base.qcow2"
 _UNRELABELED_BACKING = (
     f'<backingStore type="file"><format type="qcow2"/><source file="{_BASE}">'
