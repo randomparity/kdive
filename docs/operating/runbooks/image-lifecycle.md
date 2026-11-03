@@ -339,11 +339,12 @@ false, behavior is exactly as before (`restrict=on`, no egress).
 
 **Security — host loopback is reachable too.** With `restrict=off`, QEMU user-mode networking
 maps the guest's gateway address, `10.0.2.2`, to the host's loopback interface. An egress-enabled
-guest can connect to any service that listens only on host loopback, as the account that runs
-QEMU: the worker's account for an ordinary local System, and the provider-authority account for
-an authority System with `guest_egress` in its manifest (remote authority Systems included, once
-they can start, #3310). Your network-zone firewall does not see these
-connections, because they never leave the host. Before enabling `guest_egress`, treat every
+guest can open TCP connections to any service that listens only on the host's IPv4 loopback
+address, as the account libvirt runs QEMU as: the libvirt QEMU user under `qemu:///system`, the
+invoking account under `qemu:///session`. For an authority System with `guest_egress` in its
+manifest, remote authority Systems included, it is the authority account that owns the private
+session daemon.
+Your network-zone firewall does not see these connections, because they terminate on the host. Before enabling `guest_egress`, treat every
 loopback-only service on that host as reachable by the guest's kernel and userspace, or do not
 enable it on that host. Whether kdive will mitigate this is tracked in #3496; until then the
 exposure is part of what you accept (ADR-0313, amendment of 2026-11-03).

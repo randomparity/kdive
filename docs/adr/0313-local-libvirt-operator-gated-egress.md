@@ -162,16 +162,18 @@ describes only outbound use of the NIC, and the §3 statement that egress opens 
 exposure. The NIC is a raw `-netdev user,...,restrict=...,hostfwd=...` argument on the domain's
 `qemu:commandline`. With `restrict=off`, QEMU user-mode networking maps its gateway address,
 `10.0.2.2`, to the host's loopback interface. An egress-enabled guest can therefore open TCP
-connections to services that listen only on host loopback, not only to external destinations.
+TCP connections to services that listen only on the host's IPv4 loopback address, not only to
+external destinations.
 
-- **Exposed account.** The guest reaches those services as the account that runs QEMU. That is
-  the worker's account for an ordinary local-libvirt System, and the provider-authority account
-  for an authority System whose manifest sets `guest_egress`. That includes remote authority
-  Systems, which share the user-mode NIC, once they can start (#3310).
+- **Exposed account.** The guest reaches those services as the account libvirt runs QEMU as.
+  For an ordinary local-libvirt System that is the libvirt QEMU user under `qemu:///system`, or
+  the invoking account under `qemu:///session`. For an authority System whose manifest sets
+  `guest_egress`, including a remote authority System, whose only NIC is this user-mode NIC
+  (ADR-0804), it is the authority account that owns the private session daemon.
 - **The zone firewall does not cover it.** The residual-threat bullet names the operator's
   network-zone firewall as the enforcement boundary. That firewall filters traffic that leaves
-  the host. A connection to `10.0.2.2` terminates in the host's own loopback and never crosses
-  it, so the opt-in's safety argument does not extend to this path.
+  the host. A connection to `10.0.2.2` terminates in the host's own loopback, so the network-zone
+  firewall does not see it and the opt-in's safety argument does not extend to this path.
 - **Unaffected.** With `guest_egress` absent or `false`, `restrict=on` blocks the path along
   with all other guest-initiated traffic. The inbound `hostfwd` SSH forward is unchanged.
   Ordinary remote-libvirt guests use a libvirt network, not user-mode networking.
