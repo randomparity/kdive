@@ -304,7 +304,7 @@ class RemoteModuleVolumePreparationRequestV1(BaseModel):
             or operation.run_id != str(authority.run_id)
             or operation.plan_identity != authority.plan_identity
             or operation.release != authority.plan.module_obligation.release
-            or operation.source_manifest != authority.plan.module_obligation.source_manifest
+            or operation.source_manifest != authority.plan.module_tree_manifest
         ):
             raise ValueError("remote module operation differs from authority binding")
         return self

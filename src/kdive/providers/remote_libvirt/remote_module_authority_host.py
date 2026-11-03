@@ -325,7 +325,7 @@ class ConcreteRemoteModuleAuthorityHost:
                 operation_nonce=receipt.operation_nonce,
                 release=plan.module_obligation.release,
                 root_volume={"key": root.name, "identity": root.digest},
-                source_manifest=plan.module_obligation.source_manifest,
+                source_manifest=plan.module_tree_manifest,
                 appliance_image_digest=configured.appliance_image_digest,
             )
 
@@ -335,7 +335,7 @@ class ConcreteRemoteModuleAuthorityHost:
         self,
         authority: AuthorityPreparationMutationRequestV1,
         operation: RemoteModuleOperationV1,
-        archive: Path,
+        directory: Path,
     ) -> VolumeRequest:
         configured = self._configuration.volumes
         return VolumeRequest(
@@ -355,7 +355,10 @@ class ConcreteRemoteModuleAuthorityHost:
                 )
             ),
             work_dir=configured.work_dir,
-            archive=archive,
+            archive=directory / "modules",
+            debuginfo=(
+                None if authority.plan.module_tree_debuginfo is None else directory / "debuginfo"
+            ),
         )
 
     def _appliance_request(
@@ -500,7 +503,7 @@ class ConcreteRemoteModuleAuthorityHost:
                 )
             volumes = prepare_attempt_volumes(
                 volumes_config.storage,
-                self._volume_request(request.authority, operation, directory / "modules"),
+                self._volume_request(request.authority, operation, directory),
                 admit_mutation=lambda: self._require_deadline(deadline),
             )
         appliance_request = self._appliance_request(operation, volumes, root, deadline)
@@ -745,7 +748,7 @@ class ConcreteRemoteModuleAuthorityHost:
             self._stop_system_domain(UUID(restore.system_id), deadline)
             volumes = prepare_attempt_volumes(
                 configured.storage,
-                self._volume_request(terminal.request.authority, restore, directory / "modules"),
+                self._volume_request(terminal.request.authority, restore, directory),
                 admit_mutation=lambda: self._require_deadline(deadline),
             )
         root = self._configuration.appliance.root(restore)
