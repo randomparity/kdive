@@ -14,7 +14,8 @@ unlike `_pending_absence`.
 
 - `finalize` and `_commit` read the map under `context.operation_identity`, the key `_apply`
   stores under. For a non-adopted operation the two identities are equal, so behavior is
-  unchanged there.
+  unchanged there. Only the `finalize` read is test-guarded; the `_commit` read is a fallback that
+  runs only when no durable receipt resolves the point, and is switched for key consistency.
 - `_observe` has no context and keeps its request-keyed read. It runs only after a commit with
   equal identities, or for an adopted retry, where the durable receipt resolves the point.
 - Storing goes through `_remember_cleanup_point`, which drops the oldest entry at
