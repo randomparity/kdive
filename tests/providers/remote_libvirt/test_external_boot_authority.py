@@ -86,10 +86,12 @@ from kdive.providers.remote_libvirt.authority_client import module_operation as 
 from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
     DurableRemoteModuleVolumePreparationHost,
+    RemoteCleanupQuarantineV1,
     RemoteExternalBootAuthorityAdapter,
     RemoteExternalBootCoordinator,
     RemoteExternalBootOperations,
     RemoteExternalBootRecoveryRecord,
+    RemoteFinalizedTeardownRefsV1,
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
@@ -4505,6 +4507,109 @@ async def test_remote_stage_of_a_sibling_after_system_teardown_is_refused(
     assert store.cleanup_finalized(sibling.binding, sibling.plan_identity)
     store.finalize_cleanup_quarantine(sibling_receipt)
     assert _store_names(store) == names
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_system_activations_find_every_activation_by_content(
+    tmp_path: Path,
+) -> None:
+    """#3486: discovery reads each anchor's content and skips another System's files."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    sibling = _sibling(record, "00000000-0000-4000-8000-0000000000aa")
+    _publish_terminal(store, sibling)
+    foreign = record.binding.model_copy(
+        update={"system_id": "00000000-0000-4000-8000-0000000000bb"}
+    )
+    store.record_cleanup_quarantine(
+        RemoteCleanupQuarantineV1(
+            binding=foreign,
+            plan_identity=record.plan_identity,
+            recovery_ref=OpaqueProviderRef(ref="remote-external-boot/" + "c" * 64),
+            operation_identity="cleanup-foreign",
+            attempt_id=uuid4(),
+            journal_sequence=3,
+            journal_digest="sha256:" + "d" * 64,
+        )
+    )
+
+    found = store.system_activations(record.binding.system_id)
+
+    assert found == sorted(
+        [(record.binding, record.plan_identity), (sibling.binding, sibling.plan_identity)],
+        key=lambda item: (item[0].run_id, item[0].activation_id, item[1]),
+    )
+    assert store.system_activations(foreign.system_id) == [(foreign, record.plan_identity)]
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_activation_claims_name_every_volume_and_none_once_finalized(
+    tmp_path: Path,
+) -> None:
+    """#3486: claims carry the module volumes, nonce and boot artifacts the records name."""
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    claims = store.activation_claims(record.binding, record.plan_identity)
+    module = store.reopen_terminal(record.binding, record.plan_identity).response.recovery
+    recovery = record.module_recovery
+
+    assert claims is not None
+    assert set(claims.module_volumes) == {
+        (module.pool.ref, module.source_volume.ref),
+        (module.pool.ref, module.scratch_volume.ref),
+        (recovery.pool.ref, recovery.source_volume.ref),
+        (recovery.pool.ref, recovery.scratch_volume.ref),
+    }
+    assert claims.operation_nonce is not None
+    assert record.materialization.artifacts.kernel.ref in {
+        item.ref for item in claims.boot_artifacts
+    }
+    await adapter.finalize(request, context)
+    assert store.activation_claims(record.binding, record.plan_identity) is None
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_proven_activation_is_kept_when_its_claims_grew(tmp_path: Path) -> None:
+    """#3486: a record written after the proof keeps every file of that activation."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    sibling = _sibling(record, "00000000-0000-4000-8000-0000000000aa")
+    proven = RemoteFinalizedTeardownRefsV1(
+        module_volumes=(), operation_nonce=None, boot_artifacts=()
+    )
+    _publish_terminal(store, sibling)
+    before = _store_names(store)
+
+    assert not store.collect_proven_activation(
+        sibling.binding, sibling.plan_identity, proven, keep_plan=False
+    )
+    assert _store_names(store) == before
+    claims = store.activation_claims(sibling.binding, sibling.plan_identity)
+    assert store.collect_proven_activation(
+        sibling.binding, sibling.plan_identity, claims, keep_plan=True
+    )
+    assert store.system_activations(record.binding.system_id) == [
+        (record.binding, record.plan_identity)
+    ]
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_collection_with_keep_plan_keeps_the_materialization(
+    tmp_path: Path,
+) -> None:
+    """#3486: a kept activation of the same Run still needs the plan's materialization."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    stem = record.plan_identity.removeprefix("sha256:")
+    identity = record.materialization.identity.removeprefix("sha256:")
+    pair = {f"{stem}.materialization-index", f"{identity}.materialization"}
+    assert pair <= _store_names(store)
+
+    store.collect_torn_down_activation(record.binding, record.plan_identity, keep_plan=True)
+
+    assert pair <= _store_names(store)
+    store.collect_torn_down_activation(record.binding, record.plan_identity)
+    assert not pair & _store_names(store)
     adapter.close()
 
 
