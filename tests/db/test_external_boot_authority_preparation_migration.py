@@ -425,6 +425,9 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
             "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)",
             open_arguments,
         )
+    _assert_retry_generation_gate(
+        migrated_url, authority_role_dsns, case.system_id, authority_id, open_arguments
+    )
     with psycopg.connect(migrated_url) as admin:
         admin.execute(
             "UPDATE jobs SET lease_expires_at=now()-interval '1 second' WHERE id=%s",
@@ -437,6 +440,60 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
             "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)",
             open_arguments,
         ).fetchone() == (None,)
+
+
+def _assert_retry_generation_gate(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    system_id: UUID,
+    authority_id: UUID,
+    open_arguments: tuple[object, ...],
+) -> None:
+    """A generation above 1 opens the attempt only on an adopted committed preparation (#3370).
+
+    The fixture moves the current authority to generation 2 and leaves the generation-1
+    materialize/result_committed row in place, which is what an adopting retry generation sees.
+    The audit and binding tables are immutable, so the move runs with triggers off.
+    """
+    retry_arguments = (open_arguments[0], authority_id, 2, *open_arguments[3:])
+    open_sql = "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)"
+    with psycopg.connect(migrated_url, autocommit=True) as admin:
+        admin.execute("SET session_replication_role = replica")
+        for table, column in (
+            ("external_boot_authorities", "id"),
+            ("external_boot_authority_acknowledgements", "authority_id"),
+            ("external_boot_authority_journal_heads", "authority_id"),
+        ):
+            admin.execute(f"UPDATE {table} SET generation = 2 WHERE {column} = %s", (authority_id,))
+        admin.execute(
+            "UPDATE external_boot_authority_counters SET last_generation = 2 WHERE system_id = %s",
+            (system_id,),
+        )
+        with psycopg.connect(
+            authority_role_dsns("kdive_provider_authority"), autocommit=True
+        ) as provider:
+            adopted = provider.execute(open_sql, retry_arguments).fetchone()
+            assert adopted is not None and adopted[0] is not None
+            original = admin.execute(
+                "SELECT plan_identity, authority_instance, generation "
+                "FROM external_boot_authority_audit "
+                "WHERE authority_id = %s AND operation = 'materialize'",
+                (authority_id,),
+            ).fetchone()
+            assert original is not None
+            for column, value, restored in (
+                ("plan_identity", "sha256:" + "e" * 64, original[0]),
+                ("authority_instance", "other-instance", original[1]),
+                ("generation", 3, original[2]),
+            ):
+                update = (
+                    f"UPDATE external_boot_authority_audit SET {column} = %s "
+                    "WHERE authority_id = %s AND operation = 'materialize'"
+                )
+                admin.execute(update, (value, authority_id))
+                assert provider.execute(open_sql, retry_arguments).fetchone() == (None,)
+                admin.execute(update, (restored, authority_id))
+                assert provider.execute(open_sql, retry_arguments).fetchone() != (None,)
 
 
 def test_sql_plan_identity_matches_python_with_and_without_debuginfo(migrated_url: str) -> None:

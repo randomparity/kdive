@@ -123,7 +123,7 @@ async def prepare_remote_module_on_authority_host(
         operation.system_id != str(authority.system_id)
         or operation.run_id != str(authority.run_id)
         or operation.plan_identity != authority.plan_identity
-        or operation.source_manifest != authority.plan.module_obligation.source_manifest
+        or operation.source_manifest != authority.plan.module_tree_manifest
         or operation.release != authority.plan.module_obligation.release
     ):
         raise ValueError("authority-derived remote module operation differs from worker plan")

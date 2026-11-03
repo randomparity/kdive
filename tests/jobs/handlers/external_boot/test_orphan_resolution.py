@@ -97,6 +97,9 @@ class _LocalSessionFactoryBoundary:
     def open(self, _lease: object, _expected: object) -> _LocalSessionBoundary:
         return _LocalSessionBoundary()
 
+    def open_pinned(self, _lease: object, _expected: object) -> _LocalSessionBoundary:
+        return _LocalSessionBoundary()
+
 
 class _InterruptBeforeSecondDisposition:
     """Interrupt one observe after the preceding object's provider and SQL commits."""
