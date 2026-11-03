@@ -10,8 +10,9 @@ not recognise its own System (it fails closed).
 ## Decision
 
 - Project `<cpu>` only in the forms KDIVE renders: `host-passthrough` / `host-model` (KVM), or a
-  pinned `custom` element with `check='partial'` (ADR-0369). A `custom` element whose `check` is absent or `none` is libvirt's default and projects as
-  absent; `partial` and `full` stay in the digest.
+  pinned `custom` element with `check='partial'` (ADR-0369). A `custom` element whose `check` is
+  absent or `none` is libvirt's default and projects as absent. Any other `custom` element projects
+  as `(mode, model)`, so `check='partial'` and `check='full'` hash identically.
 - Every KDIVE-renderable form projects exactly as before, so stored digests are unchanged and the
   schema string `kdive-local-authority-domain-semantics-v2` does not move.
 - Rejected: comparing against the intent's rendered XML. The identity function is deliberately
