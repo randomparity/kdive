@@ -47,6 +47,36 @@ text is one of a closed set of literals and so never carries provider output (op
 keeping ADR-0584's rule that provider output stays out of the operator trail. The refusal text
 still passes URL-userinfo redaction and a 512-character bound as defence in depth.
 
+### Amendment (2026-11-03): interpolated remote-adapter refusals stay class-only (#3476)
+
+This qualifies the closed-literal rule above. Some remote-adapter refusals are raised as plain
+`ValueError` with an f-string that interpolates store file names or System, run and plan
+identifiers (for example `f"remote preparation {detail}"` in
+`src/kdive/providers/remote_libvirt/external_boot_authority.py`). They are not a
+`ProviderRecoveryRefusal`, so their text is not a closed literal. The decision is that they stay
+class-only: the provider-boundary warning names the exception type and never the interpolated
+text, at any log level (operator decision, 2026-11-03). The logging rule is unchanged; this
+amendment confirms it covers these refusals and does not widen the `ProviderRecoveryRefusal`
+exception.
+
+The rationale is the existing ruling that an adapter message must not reach any log level (see
+the rejected options below) and ADR-0584's rule that provider output stays out of the operator
+trail. Interpolated identifiers are exactly the data that rule keeps out of the authority log.
+
+A refusal whose text should be loggable is converted to a fixed-literal `ProviderRecoveryRefusal`,
+as #3464 and #3483 did for the fixed-literal refusals. Nothing is logged for an interpolated one.
+
+Rejected for interpolated refusals:
+
+- **Redact identifiers to a fixed shape and log the result.** judgment (operator): redaction must
+  recognise every identifier form in free text and a missed form leaks to the trail; the
+  redactor would also become a second place that must track each refusal's wording. The
+  existing URL-userinfo pass is defence in depth for fixed literals, not a licence to log
+  interpolated text.
+- **Log them under an explicit allowlist amendment.** judgment (operator): an allowlist of
+  interpolating call sites admits identifiers by listing them, which is the decision this record
+  declines to make, and each new refusal would need a further amendment to stay consistent.
+
 ## Consequences
 
 - A teardown of such an activation restarts a prior-running source domain and waits for readiness
