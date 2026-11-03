@@ -10,7 +10,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, LiteralString, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -67,6 +67,8 @@ from tests.mcp.systems_support import (
 )
 from tests.services.external_boot.admission_support import GUARDED_TOOLS
 from tests.services.external_boot.conftest import SeedActivation
+
+pytestmark = pytest.mark.usefixtures("resource_routed_to_server_authority")
 
 _STATE = ExternalBootActivationState
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -196,7 +198,6 @@ async def _prepare_external_boot_admission(
     pool: AsyncConnectionPool, system_id: str, run_id: str
 ) -> None:
     """Persist the immutable evidence and fixed route required for external boot admission."""
-    await runs_support.mark_authority_owned(pool, system_id, "authority-local")
     digest = "sha256:" + "1" * 64
     async with pool.connection() as conn:
         investigation = await (
@@ -354,18 +355,7 @@ def test_configured_authority_boot_preserves_public_admission_denial(
 ) -> None:
     async def run() -> tuple[ToolResponse, tuple[int, ...], tuple[int, ...]]:
         async with runs_support.pool(migrated_url) as pool:
-            system_id, run_id = await _ready_system_with_run(pool)
-            await runs_support.mark_authority_owned(pool, system_id, "authority-local")
-            async with pool.connection() as conn:
-                seeded = await seeded_activation(
-                    conn, state=state, system_id=UUID(system_id), run_id=UUID(run_id)
-                )
-                await conn.execute(
-                    "UPDATE authority_system_ownership SET state='activated', "
-                    "first_activation_id=%s WHERE system_id=%s",
-                    (seeded.activation.id, UUID(system_id)),
-                )
-            restricted = _Restricted(pool=pool, system_id=system_id, owning_run_id=run_id)
+            restricted = await _restricted_ready_system(pool, seeded_activation, state=state)
             await _mark_installed(pool, restricted.owning_run_id)
             config_registry.load({"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-local"})
             async with pool.connection() as conn:
@@ -412,6 +402,70 @@ def test_public_boot_atomically_admits_configured_external_boot(migrated_url: st
     response = asyncio.run(run())
     assert response.status == "queued", response.model_dump()
     assert response.data["replayed"] is False
+
+
+async def _count(pool: AsyncConnectionPool, query: LiteralString) -> int:
+    async with pool.connection() as conn:
+        row = await (await conn.execute(query)).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+@pytest.mark.parametrize(
+    ("resource_route", "owner", "reason"),
+    [
+        (None, None, "authority_resource_route_mismatch"),
+        ("other-authority", None, "authority_resource_route_mismatch"),
+        ("authority-local", "other-authority", "authority_system_binding_mismatch"),
+    ],
+)
+def test_boot_refuses_an_authority_that_does_not_own_the_system(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    resource_route: str | None,
+    owner: str | None,
+    reason: str,
+) -> None:
+    """The defect case of #3138: no job and no activation, even for a replayed key (ADR-0752)."""
+    monkeypatch.setattr(
+        "kdive.services.external_boot.routing.authority_instance_for_resource",
+        lambda _kind, _name: resource_route,
+    )
+
+    async def run() -> tuple[ToolResponse, ToolResponse, int, int]:
+        async with runs_support.pool(migrated_url) as pool:
+            system_id, run_id = await _ready_system_with_run(pool)
+            await _mark_installed(pool, run_id)
+            await _prepare_external_boot_admission(pool, system_id, run_id)
+            if owner is not None:
+                await runs_support.mark_authority_owned(pool, system_id, owner)
+            refused = await boot_run(
+                pool, _ctx(), run_id, resolver=_resolver(), idempotency_key="boot-key"
+            )
+            replay = await boot_run(
+                pool, _ctx(), run_id, resolver=_resolver(), idempotency_key="boot-key"
+            )
+            jobs = await _count(pool, "SELECT count(*) FROM jobs WHERE kind = 'boot'")
+            activations = await _count(pool, "SELECT count(*) FROM external_boot_activations")
+            return refused, replay, jobs, activations
+
+    refused, replay, jobs, activations = asyncio.run(run())
+    for response in (refused, replay):
+        assert response.error_category == "configuration_error", response.model_dump()
+        assert response.data["reason"] == reason
+    assert (jobs, activations) == (0, 0)
+
+
+def test_boot_admits_an_authority_that_owns_the_system(migrated_url: str) -> None:
+    async def run() -> ToolResponse:
+        async with runs_support.pool(migrated_url) as pool:
+            system_id, run_id = await _ready_system_with_run(pool)
+            await _mark_installed(pool, run_id)
+            await _prepare_external_boot_admission(pool, system_id, run_id)
+            await runs_support.mark_authority_owned(pool, system_id, "authority-local")
+            return await boot_run(pool, _ctx(), run_id, resolver=_resolver())
+
+    assert asyncio.run(run()).status == "queued"
 
 
 def test_external_boot_rechecks_install_after_a_queued_restage(
@@ -494,7 +548,6 @@ def test_force_preflight_failure_preserves_settled_boot_evidence(
     async def run() -> tuple[ToolResponse, tuple[int, int], tuple[int, int]]:
         async with runs_support.pool(migrated_url) as pool:
             system_id, run_id = await _ready_system_with_run(pool)
-            await runs_support.mark_authority_owned(pool, system_id, "authority-local")
             await _mark_installed(pool, run_id)
             async with pool.connection() as conn:
                 await conn.execute(
@@ -1693,10 +1746,10 @@ def test_an_install_admitted_before_the_activation_still_replays(
     assert replay.object_id == first.object_id
 
 
-def test_an_ordinary_boot_is_not_replayed_through_an_unowned_authority_route(
+def test_a_boot_admitted_before_the_activation_still_replays(
     migrated_url: str, seeded_activation: SeedActivation
 ) -> None:
-    """A route configured after an ordinary boot refuses before replay (ADR-0752)."""
+    """The boot path carries the same replay fence, and marks the envelope ``replayed``."""
 
     async def _run() -> tuple[ToolResponse, ToolResponse, int]:
         async with runs_support.pool(migrated_url) as conn_pool:
@@ -1710,6 +1763,7 @@ def test_an_ordinary_boot_is_not_replayed_through_an_unowned_authority_route(
 
     first, replay, enqueued = asyncio.run(_run())
     assert first.status == "queued", first.model_dump()
-    assert replay.error_category == "configuration_error", replay.model_dump()
-    assert replay.data["reason"] == "authority_system_binding_missing"
+    assert replay.error_category is None, replay.model_dump()
+    assert replay.object_id == first.object_id
+    assert replay.data["replayed"] is True
     assert enqueued == 1

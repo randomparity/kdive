@@ -88,6 +88,8 @@ from tests.services.external_boot.conftest import seed_activation
 from tests.support.object_store import INERT_OBJECT_STORE
 from tests.support.worker_fence import dequeue_as_current_worker, incarnation_credential
 
+pytestmark = pytest.mark.usefixtures("resource_routed_to_server_authority")
+
 _INSTALL_CREDENTIAL = incarnation_credential("runs-install-handler")
 
 
@@ -3687,10 +3689,8 @@ async def _insert_root_provenance(
     return system_id
 
 
-async def _mark_authority_owned(pool: AsyncConnectionPool, run_id: str) -> None:
-    await runs_support.mark_authority_owned(
-        pool, await _system_id_of(pool, run_id), _AUTHORITY_INSTANCE
-    )
+async def _mark_authority_owned(pool: AsyncConnectionPool, run_id: str, owner: str) -> None:
+    await runs_support.mark_authority_owned(pool, await _system_id_of(pool, run_id), owner)
 
 
 async def _install_job(pool: AsyncConnectionPool, response: ToolResponse) -> Job:
@@ -4762,7 +4762,6 @@ def test_authority_install_enqueues_exact_server_root_snapshot(
         _configure_install_authority()
         async with runs_support.pool(migrated_url) as admin:
             run_id = await _seed_succeeded_run(admin)
-            await _mark_authority_owned(admin, run_id)
             await _insert_root_provenance(admin, run_id)
             async with runs_support.pool(authority_role_dsns("kdive_server")) as server:
                 response = await install_run(
@@ -4777,6 +4776,77 @@ def test_authority_install_enqueues_exact_server_root_snapshot(
         assert job.payload["run_id"] == run_id
         assert job.payload["root_spec"] == _ROOT_SPEC
         assert job.payload["authority_instance"] == _AUTHORITY_INSTANCE
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("resource_route", "owner", "reason"),
+    [
+        (None, None, "authority_resource_route_mismatch"),
+        ("other-authority", None, "authority_resource_route_mismatch"),
+        (_AUTHORITY_INSTANCE, "other-authority", "authority_system_binding_mismatch"),
+    ],
+)
+def test_authority_install_refuses_a_system_the_authority_does_not_own(
+    migrated_url: str,
+    authority_role_dsns: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    resource_route: str | None,
+    owner: str | None,
+    reason: str,
+) -> None:
+    """The defect case of #3138: refused before any job, even with a replayed key (ADR-0752)."""
+    monkeypatch.setattr(
+        "kdive.services.external_boot.routing.authority_instance_for_resource",
+        lambda _kind, _name: resource_route,
+    )
+
+    async def _run() -> None:
+        _configure_install_authority()
+        async with runs_support.pool(migrated_url) as admin:
+            run_id = await _seed_succeeded_run(admin)
+            await _insert_root_provenance(admin, run_id)
+            if owner is not None:
+                await _mark_authority_owned(admin, run_id, owner)
+            async with runs_support.pool(authority_role_dsns("kdive_server")) as server:
+                responses = [
+                    await install_run(
+                        server,
+                        ctx(),
+                        run_id,
+                        idempotency_key="install-key",
+                        resolver=provider_resolver(profile_policy=LOCAL_PROFILE_POLICY),
+                    )
+                    for _ in range(2)
+                ]
+            jobs = await _count(admin, "SELECT count(*) AS n FROM jobs", ())
+
+        for response in responses:
+            assert response.error_category == "configuration_error", response.model_dump()
+            assert response.data["reason"] == reason
+        assert jobs == 0
+
+    asyncio.run(_run())
+
+
+def test_authority_install_admits_a_system_the_authority_owns(
+    migrated_url: str, authority_role_dsns: Any
+) -> None:
+    async def _run() -> None:
+        _configure_install_authority()
+        async with runs_support.pool(migrated_url) as admin:
+            run_id = await _seed_succeeded_run(admin)
+            await _insert_root_provenance(admin, run_id)
+            await _mark_authority_owned(admin, run_id, _AUTHORITY_INSTANCE)
+            async with runs_support.pool(authority_role_dsns("kdive_server")) as server:
+                response = await install_run(
+                    server,
+                    ctx(),
+                    run_id,
+                    resolver=provider_resolver(profile_policy=LOCAL_PROFILE_POLICY),
+                )
+        assert response.status == "queued", response.model_dump()
 
     asyncio.run(_run())
 
@@ -4796,12 +4866,16 @@ def test_authority_install_refuses_stale_run_system_binding(migrated_url: str) -
                     "UPDATE runs SET system_id = %s WHERE id = %s",
                     (replacement_system_id, run_id),
                 )
+                binding = await provider_resolver().binding_for_system(
+                    conn, UUID(replacement_system_id)
+                )
                 response = await _restage_and_enqueue_install(
                     conn,
                     ctx(),
                     stale_run,
                     None,
                     None,
+                    binding,
                     _AUTHORITY_INSTANCE,
                 )
             jobs = await _count(admin, "SELECT count(*) AS n FROM jobs", ())
@@ -4836,7 +4910,6 @@ def test_authority_install_refuses_missing_or_malformed_root_before_enqueue(
         _configure_install_authority()
         async with runs_support.pool(migrated_url) as admin:
             run_id = await _seed_succeeded_run(admin)
-            await _mark_authority_owned(admin, run_id)
             if root_spec is not None:
                 await _insert_root_provenance(admin, run_id, root_spec)
             async with runs_support.pool(authority_role_dsns("kdive_server")) as server:
@@ -4955,7 +5028,6 @@ def test_authority_staging_worker_uses_payload_without_root_table_access(
         _configure_install_authority()
         async with runs_support.pool(migrated_url) as admin:
             run_id = await _seed_succeeded_run(admin)
-            await _mark_authority_owned(admin, run_id)
             await _insert_root_provenance(admin, run_id)
             async with runs_support.pool(authority_role_dsns("kdive_server")) as server:
                 response = await install_run(

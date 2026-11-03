@@ -10,6 +10,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 import psycopg
+import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
@@ -43,6 +44,8 @@ from tests.integration.external_boot_support import (
 )
 from tests.mcp.lifecycle import runs_support
 from tests.mcp.systems_support import provider_resolver
+
+pytestmark = pytest.mark.usefixtures("resource_routed_to_server_authority")
 
 
 class _ReleasingProvider(PreparingProvider):
