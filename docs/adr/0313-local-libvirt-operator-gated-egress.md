@@ -162,8 +162,7 @@ describes only outbound use of the NIC, and the §3 statement that egress opens 
 exposure. The NIC is a raw `-netdev user,...,restrict=...,hostfwd=...` argument on the domain's
 `qemu:commandline`. With `restrict=off`, QEMU user-mode networking maps its gateway address,
 `10.0.2.2`, to the host's loopback interface. An egress-enabled guest can therefore open TCP
-TCP connections to services that listen only on the host's IPv4 loopback address, not only to
-external destinations.
+connections to services that listen only on host loopback, not only to external destinations.
 
 - **Exposed account.** The guest reaches those services as the account libvirt runs QEMU as.
   For an ordinary local-libvirt System that is the libvirt QEMU user under `qemu:///system`, or
