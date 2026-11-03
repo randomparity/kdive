@@ -33,7 +33,8 @@ on the domain's `qemu:commandline` (`src/kdive/providers/local_libvirt/lifecycle
 
 Read from upstream source at the release tags named below, and from distribution package indexes on
 2026-11-03. None of it was exercised on a running guest; the QEMU and libslirp findings are code
-reads, and the table is package metadata.
+reads, the table is package metadata apart from the Fedora row, and the one executed check is the
+QEMU start-up test below.
 
 **QEMU user-mode netdev has no host-loopback switch.** `NetdevUserOptions` (qapi/net.json, v10.2.2)
 offers `restrict`, `ipv4`, `ipv6`, `net`, `host`, `dns`, `hostfwd`, `guestfwd` and the DHCP/TFTP/SMB
@@ -84,7 +85,8 @@ Rocky and openSUSE QEMU builds compile it in was not checked.
 
 Every row carries libvirt at or above 9.0.0, which introduced `<backend type='passt'/>` (libvirt
 formatdomain, "Since 9.0.0"), so passt is available everywhere; the gap is the missing control, not the backend. Debian was not checked.
-The non-Fedora rows are package-index metadata, not installed and run. Ubuntu 24.04 already needed an AppArmor workaround for libguestfs'
+The Fedora row comes from installed packages; the other rows are package-index metadata, not
+installed and run. Ubuntu 24.04 already needed an AppArmor workaround for libguestfs'
 passt ([ADR-0222](0222-ubuntu-build-fs-libguestfs-diagnostics.md)), a signal that confinement
 policy for passt differs per distribution.
 
@@ -96,21 +98,30 @@ We will accept the host-loopback exposure under `guest_egress`, document it as a
 
 The exposure is a named property of `guest_egress = true`, not an unknown. An operator who enables
 it accepts that an untrusted guest kernel can reach services bound to the worker host's loopback,
-and must either keep such services off loopback-only trust or not enable egress on that host.
+including kdive's own per-System SSH and gdbstub listeners. The operator must not rely on loopback
+binding as an access control on that host, or must not enable egress on it.
 
-Revisit when any of these changes: QEMU exposes libslirp's `disable_host_loopback`; libvirt exposes
-passt's `--no-map-gw` or `--map-host-loopback`; or QEMU's own passt netdev becomes usable under
-libvirt's sandbox. Each gives a mitigation that keeps the current `qemu:commandline` NIC shape.
+Egress being off does not remove the exposure entirely: the customization-boot NIC is
+`restrict=off` whatever `guest_egress` says, so build-time code in that boot has the same reach. An
+operator cannot opt out of that one.
+
+Revisit when any of these changes: QEMU exposes libslirp's `disable_host_loopback` (the one change
+that keeps today's NIC and addressing); libvirt exposes passt's `--no-map-gw` or
+`--map-host-loopback`; or QEMU's own passt netdev becomes usable under libvirt's sandbox. The last
+two keep the `qemu:commandline` route but still bring the addressing change below.
 
 ## Consequences
 
 - No code, schema, migration or tool change. `restrict=on` stays the default; the default path is
   unaffected.
 - The `guest_egress` threat statement in ADR-0313 stays as written; #3495 adds the loopback
-  specifics to it and to the runbooks.
-- Host-side controls are operator-owned and untested by this record. The fixed worker slot accounts
-  run the session libvirt daemon, so QEMU runs under them; a firewall rule scoped to those uids and
-  to new loopback connections is a candidate recipe. It needs a live proof on a lab host before any
+  specifics to it and to the runbooks. [ADR-0804](0804-remote-authority-systems-have-only-the-forward-nic.md)'s
+  residual-risk bullet, which already mentions the mapping for remote authority Systems, needs the
+  same update.
+- Host-side controls are operator-owned and untested by this record. On local-libvirt the fixed
+  worker slot accounts run the session libvirt daemon, so QEMU runs under them; a firewall rule
+  scoped to those uids and to new loopback connections is a candidate recipe. A remote authority
+  host (ADR-0804) runs QEMU as the authority account and would need its own analysis. It needs a live proof on a lab host before any
   runbook recommends it, and it does not apply where QEMU shares a uid with kdive's own services.
   Running with no default route on the host also disables passt's mapping, but not slirp's.
 - ADR-0721's dispatcher and the three return-route helpers are untouched.
@@ -128,9 +139,9 @@ libvirt's sandbox. Each gives a mitigation that keeps the current `qemu:commandl
   containment for every guest running an untrusted kernel, trading a smaller boundary for a larger
   one. It also needs QEMU 10.1 or later (not Leap 16), a MAC-policy answer for QEMU executing passt
   on each distribution, and a move to host-derived guest addressing (below).
-- **A passt started outside QEMU** (a per-System service, joined by `-netdev stream`). This gives
-  the control without the sandbox change, and it is the strongest alternative to accepting the
-  exposure. Rejected for now: kdive would own passt's lifecycle, cleanup and confinement per
+- **A passt started outside QEMU** (a per-System service, joined by `-netdev stream`). By design it
+  gives the control without the sandbox change; this was not tested, and it is the strongest
+  alternative to accepting the exposure. Rejected for now: kdive would own passt's lifecycle, cleanup and confinement per
   System, which the provider has no channel for (the same ground on which ADR-0721 rejected a host
   relay), and it carries the addressing change below. It is the option to cost if an operator
   requires the mitigation.
