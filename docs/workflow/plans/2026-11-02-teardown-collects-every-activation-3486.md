@@ -92,8 +92,13 @@ Steps:
    def _sibling(
        record: RemoteExternalBootRecoveryRecord, activation_id: str
    ) -> RemoteExternalBootRecoveryRecord:
-       return record.model_copy(
-           update={"binding": record.binding.model_copy(update={"activation_id": activation_id})}
+       """A valid record of another activation of the same Run and plan."""
+       binding = record.binding.model_copy(update={"activation_id": activation_id})
+       definition = record.definition.model_copy(update={"binding": binding})
+       return RemoteExternalBootRecoveryRecord.model_validate(
+           record.model_copy(update={"binding": binding, "definition": definition}).model_dump(
+               mode="python", by_alias=True
+           )
        )
 
 
@@ -572,6 +577,49 @@ Steps:
 
    Body as today, but return `(indexes, [] if managed else [f"{identity}.recovery",
    self._quarantine_name(reference)], managed)`.
+
+   Change `_collected_identities` to also find identities by content, so the recovery index can
+   go before the records it names (an index left last is stranded once they are gone):
+
+   ```python
+   def _collected_identities(
+       self,
+       binding: ExternalBootActivationBinding,
+       plan_identity: str,
+       index: str,
+       marker: str,
+   ) -> list[str]:
+       """Recovery identities the index, the marker or the activation's own records name."""
+       references: list[OpaqueProviderRef] = []
+       if (named := self._read(index)) is not None:
+           identity = named.decode("ascii", errors="replace")
+           references.append(OpaqueProviderRef(ref=f"remote-external-boot/{identity}"))
+       if (data := self._read(marker)) is not None:
+           references.append(_parse_finalized_marker(data)[0].recovery_ref)
+       identities = [_recovery_identity(reference) for reference in references]
+
+       def owner(value: RemoteExternalBootRecoveryRecord | RemoteCleanupQuarantineV1) -> bool:
+           return value.binding == binding and value.plan_identity == plan_identity
+
+       identities += [
+           name.removesuffix(".recovery")
+           for name in self._scan_owned(
+               ".recovery",
+               lambda data: owner(RemoteExternalBootRecoveryRecord.from_canonical_json(data)),
+           )
+       ]
+       identities += [
+           name.removesuffix(".cleanup-quarantine")
+           for name in self._scan_owned(
+               ".cleanup-quarantine",
+               lambda data: owner(RemoteCleanupQuarantineV1.from_canonical_json(data)),
+           )
+       ]
+       return list(dict.fromkeys(identities))
+   ```
+
+   A scanned `.recovery` name is its identity (`publish_recovery` names it by content hash) and a
+   receipt's name is its `recovery_ref` identity, so `_recovery_files` reads the same names.
 9. Replace the store's `collect_torn_down_activation` with the lock wrapper, the proven variant
    and the shared body:
 
@@ -614,18 +662,18 @@ Steps:
    def _collect(
        self, binding: ExternalBootActivationBinding, plan_identity: str, *, keep_plan: bool
    ) -> None:
-       """Unlink non-anchors, then anchors, then the recovery index and marker that name them."""
+       """Unlink non-anchors (the recovery index among them), then anchors, records, marker."""
        index = f"{self._recovery_key(binding, plan_identity)}.recovery-index"
        marker = self._finalized_name(binding, plan_identity)
        derived, anchors = self._activation_file_groups(binding, plan_identity, keep_plan=keep_plan)
        records: list[str] = []
        adopted = False
-       for identity in self._collected_identities(index, marker):
+       for identity in self._collected_identities(binding, plan_identity, index, marker):
            indexes, files, managed = self._recovery_files(identity, binding, plan_identity)
            derived += indexes
            records += files
            adopted = adopted or managed
-       names = [*derived, *anchors, *records, *([] if adopted else [index]), marker]
+       names = [*derived, *([] if adopted else [index]), *anchors, *records, marker]
        for name in names:
            with suppress(FileNotFoundError):
                os.unlink(name, dir_fd=self._root_fd)
@@ -851,7 +899,25 @@ Steps:
 3. Extend `test_remote_teardown_collection_resumes_after_a_crash_at_any_unlink`: after
    `_finalized_release_store(root)`, add a sibling
    `sibling = _sibling(record, "00000000-0000-4000-8000-0000000000aa")`,
-   `_publish_terminal(store, sibling)` and `_seed_activation_residue(store, sibling)`; use
+   `_publish_terminal(store, sibling)`, `_seed_activation_residue(store, sibling)`, and a
+   recovery record with its receipt so the recovery index and records are on the crash path:
+
+   ```python
+   reference = store.publish_recovery(sibling)
+   store.record_cleanup_quarantine(
+       RemoteCleanupQuarantineV1(
+           binding=sibling.binding,
+           plan_identity=sibling.plan_identity,
+           recovery_ref=reference,
+           operation_identity="cleanup-sibling",
+           attempt_id=uuid4(),
+           journal_sequence=6,
+           journal_digest="sha256:" + "a" * 64,
+       )
+   )
+   ```
+
+   Then use
    `operations = _ProvingTeardownOperations()`; keep the final
    `_store_names(store) == {_teardown_name(store)}`; raise the floor to
    `crashes >= (10 if finalized else 20)`.
@@ -938,6 +1004,8 @@ Steps:
    - in `_prove_siblings`, set `absent = True` unconditionally → the mixed test fails (kept
      sibling collected);
    - in `_collect`, move `*anchors` before `*derived` → the crash test fails (orphans remain);
+   - in `_collect`, move the recovery index back after `*records` → the crash test fails (a
+     stranded `.recovery-index`);
    - in `collect_proven_activation`, drop the `_claims_within` check → the claims-grew test fails;
    - in `cleanup_finalized`, replace `self.system_torn_down(binding.system_id)` with the #3472
      per-activation check `False` → the Task 1 sibling-stage test fails.
@@ -971,11 +1039,14 @@ Steps:
    torn down before #3472, and activations whose volumes were still present, keep their files.
    To clear them once:
 
-   1. Tear down or drain every System on the host, so no System of this host is active, then stop
-      the authority: `sudo systemctl stop kdive-external-boot-authority.service`.
-   2. List the storage pool and confirm that no `kdive-module-<system id>-…` or
-      `kdive-boot-v1-…-<system id>-…` volume remains for a torn-down System. Those records are the
-      only pointer to such a volume; remove or account for the volume before its records.
+   Use it only when every System ever placed on this host is `torn_down`. With a System in any
+   other state, including `failed`, its records may be the only pointer to its volumes; leave the
+   store alone.
+
+   1. Stop the authority: `sudo systemctl stop kdive-external-boot-authority.service`.
+   2. List the storage pool (`virsh vol-list <pool>`) and confirm that it holds no
+      `kdive-module-…` or `kdive-boot-v1-…` volume. If one remains, resolve it first: the store
+      records are its only pointer.
    3. Copy the directory aside, then remove every file in it except:
       - each `<key>.teardown` record (it refuses a late stage of that System);
       - each `<identity>.cleanup-quarantine` whose JSON has `"managed":true`, its

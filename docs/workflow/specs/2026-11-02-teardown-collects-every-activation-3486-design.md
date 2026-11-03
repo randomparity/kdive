@@ -90,8 +90,11 @@ pool volume the activation's records name, in the existing refs shape:
 - plus the kernel and initrd of every owned `.preparation` receipt that carries a
   materialization (strict scan).
 
-Module volumes and boot artifacts are deduplicated and sorted. Any parse or binding failure
-raises; the coordinator treats a raise as "not proven" and keeps the activation.
+Module volumes and boot artifacts are deduplicated and sorted. A `.materialization-index` whose
+record is already gone (a collection interrupted between the two unlinks) reads as no
+materialization instead of `teardown_materialization`'s "incomplete" refusal; the earlier pass
+proved those artifacts absent. Any other parse or binding failure raises; the coordinator treats
+a raise as "not proven" and keeps the activation.
 
 ### Proof
 
@@ -130,27 +133,36 @@ unlink, suppressing `FileNotFoundError`, then fsync, in this order:
 2. the terminal-key files `.restored`, `.prior-power-owner`, `.prior-power`;
 3. the plan's `.materialization` then `.materialization-index`, unless `keep_plan` (a kept
    sibling of the same Run shares the plan's materialization);
-4. per recovery identity named by the recovery index or the marker: the `.object-index` files
-   naming it;
-5. the anchors `.lifecycle-request`, `.request`, `.preparation`, `.terminal`;
-6. per recovery identity, unless its receipt is `managed`: `.recovery`, `.cleanup-quarantine`;
-7. the `.recovery-index`, unless a `managed` receipt was found;
+4. per recovery identity: the `.object-index` files naming it;
+5. the `.recovery-index`, unless a `managed` receipt was found;
+6. the anchors `.lifecycle-request`, `.request`, `.preparation`, `.terminal`;
+7. per recovery identity, unless its receipt is `managed`: `.recovery`, `.cleanup-quarantine`;
 8. the `cleanup-finalized` marker.
 
+The recovery identities are those named by the recovery index, by the marker's receipt, and by
+the content of the activation's own `.recovery` and `.cleanup-quarantine` files (lenient scans),
+deduplicated. Finding them by content is what lets the index go before the records: the index is
+not an anchor, so removing it last would strand it after a crash once the records are gone. This
+replaces the #3472 order (index after record) for the named activation as well.
+
 Every file that is not an anchor goes before the anchors, so a crash at any unlink leaves the
-activation discoverable by a later collection. Finalize keeps using `_activation_files`, whose
-order changes to steps 1, 2, 3, 5; finalize writes its marker first, so its order does not matter.
+activation discoverable by a later collection, the named one through its `.teardown` record and a
+sibling through `system_activations`. Finalize keeps using `_activation_files`, whose order
+changes to steps 1, 2, 3, 6; finalize writes its marker first, so its order does not matter.
 
 The proof is taken outside the lock because it is libvirt I/O. Volumes of a torn-down System do
 not reappear: every stage of it is refused System-wide before collection starts.
 
 ### Pre-#3472 stores
 
-A manual remedy, not a sweep, in `docs/operating/runbooks/remote-libvirt-host-setup.md`: stop
-`kdive-external-boot-authority.service` with no System of that host active, confirm no
-`kdive-module-*` or `kdive-boot-v1-*` volume of a torn-down System remains in the pool, then
-remove the store files other than each `.teardown` record and each `managed` receipt with its
-`.recovery` and the `.recovery-index` naming it.
+A manual remedy, not a sweep, in `docs/operating/runbooks/remote-libvirt-host-setup.md`, for a
+host every one of whose Systems is `torn_down`. The precondition is what makes deleting by name
+safe: every store file then belongs to a torn-down System, so no per-file `system_id` match is
+needed. The operator stops `kdive-external-boot-authority.service`, confirms that the pool holds
+no `kdive-module-*` or `kdive-boot-v1-*` volume at all (any one found is resolved first, because
+these records are its only pointer), keeps a copy, then removes every store file other than each
+`.teardown` record and each `managed` receipt with its `.recovery` and the `.recovery-index`
+naming it. A host with any System in another state (including `failed`) does not use it.
 
 ## Failure model
 
@@ -172,6 +184,12 @@ remove the store files other than each `.teardown` record and each `managed` rec
      as #3472 accepted;
    - a crash mid-collection may shrink a sibling's claims on retry: the first pass proved the
      superset absent before any unlink;
+   - every teardown execute and observe call re-proves each kept sibling, and each adopted one
+     whose trio stays, with one libvirt connection each, and logs a warning per kept sibling: the
+     cost is bounded by the System's activation count, and a libvirt error keeps the sibling;
+   - all sibling proofs run before the named collection, so a slow libvirt delays it: the named
+     collection needs the kept plans, and the facts are returned only after collection, as in
+     #3472;
    - a second authority instance writing the same store directory breaks the System-lane
      assumption, as `refuse_finalized` already documents.
 4. **Covered elsewhere**
