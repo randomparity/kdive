@@ -86,6 +86,11 @@ class InitrdSource(ArtifactSource):
 
 class DebuginfoSource(ArtifactSource):
     size_bytes: Annotated[int, Field(ge=1, le=_DEBUGINFO_MAX_BYTES)]
+    # The module source manifest with this file added as ``vmlinux`` (#3131). Omitted when
+    # absent so plans stored before #3131 keep their identity.
+    staged_module_source_manifest: Digest | None = Field(
+        None, exclude_if=lambda value: value is None
+    )
 
 
 class PlanOwnership(_ClosedValue):
@@ -190,6 +195,20 @@ class ExternalBootPlan(_ClosedValue):
     root: RootSpecV1
     # Omitted when absent so plans persisted before #3129 keep their canonical identity.
     debuginfo: DebuginfoSource | None = Field(None, exclude_if=lambda value: value is None)
+
+    @property
+    def module_tree_debuginfo(self) -> DebuginfoSource | None:
+        """The member a module-tree install stages, or None when the plan does not carry it."""
+        member = self.debuginfo
+        return member if member and member.staged_module_source_manifest else None
+
+    @property
+    def module_tree_manifest(self) -> Digest:
+        """The manifest of the module source tree the install writes."""
+        member = self.module_tree_debuginfo
+        if member is None or member.staged_module_source_manifest is None:
+            return self.module_obligation.source_manifest
+        return member.staged_module_source_manifest
 
     @field_validator("platform_arguments")
     @classmethod

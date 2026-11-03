@@ -1729,6 +1729,7 @@ def _build_mutation_service(
             system_service=system_service,
         )
 
+    from kdive.providers.remote_libvirt.debuginfo_module_tree import DebuginfoModuleTreeStager
     from kdive.providers.remote_libvirt.external_boot_authority import (
         DurableRemoteModuleVolumePreparationHost,
         RemoteExternalBootAuthorityAdapter,
@@ -1774,7 +1775,8 @@ def _build_mutation_service(
     def provider_connection() -> Iterator[Any]:
         yield connection
 
-    artifact_stager = build_authority_artifact_stager(object_store)
+    base_stager = build_authority_artifact_stager(object_store)
+    artifact_stager = DebuginfoModuleTreeStager(base_stager, object_store, fetch=True)
     module_factory = RemoteModuleAuthorityHostFactory(
         connection=connection,
         pool_name=config.remote_libvirt_storage_pool,
@@ -1797,7 +1799,7 @@ def _build_mutation_service(
         pool_name=config.remote_libvirt_storage_pool,
         capacity_bytes=REMOTE_MATERIALIZATION_CAPACITY_BYTES,
         monotonic=monotonic,
-        artifact_stager=artifact_stager,
+        artifact_stager=DebuginfoModuleTreeStager(base_stager, object_store, fetch=False),
     )
     operations = ConcreteRemoteExternalBootOperations(
         materializer,
