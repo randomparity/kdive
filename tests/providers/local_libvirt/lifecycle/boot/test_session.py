@@ -67,6 +67,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     owned_system_semantic_identity,
     prove_no_foreign_system_storage_references,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import LocalArtifactRoot
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     OpaqueProviderRef,
@@ -289,6 +290,39 @@ def test_teardown_session_rejects_xml_ownership_mismatch_before_mutation(
     assert baseline.exists()
 
 
+def test_teardown_session_cleans_payloads_under_the_activation_root_without_a_domain(
+    tmp_path: Path,
+) -> None:
+    """#3341: discarding a conflicted activation must not need its domain."""
+    events: list[str] = []
+    domain = _TeardownDomain(events)
+    domain.defined = False
+    factory, _overlay, _baseline = _teardown_factory(tmp_path, events, domain)
+    recovery_root = tmp_path / "recovery"
+    recovery_root.mkdir(mode=0o700)
+    factory._open_artifact_root = LocalArtifactRoot(recovery_root).open
+    cleaned: list[tuple[str, int]] = []
+
+    def record(fd: int, _metadata: object) -> None:
+        cleaned.append((os.readlink(f"/proc/self/fd/{fd}"), fd))
+
+    factory._cleanup_payloads = record
+    session = factory.open_teardown(_lease(), _expected())
+    mismatched = cast(Any, type("M", (), {"binding": object()})())
+
+    with pytest.raises(ValueError, match="does not match session ownership"):
+        session.cleanup_payloads(mismatched)
+    assert not cleaned
+
+    session.cleanup_payloads(cast(Any, type("M", (), {"binding": BINDING})()))
+    session.close()
+
+    [(root, fd)] = cleaned
+    assert root == str(recovery_root / BINDING.system_id / BINDING.run_id / BINDING.activation_id)
+    with pytest.raises(OSError):
+        os.fstat(fd)
+
+
 def test_teardown_session_absent_replay_is_read_only_and_creates_nothing(tmp_path: Path) -> None:
     events: list[str] = []
     domain = _TeardownDomain(events)
@@ -367,6 +401,47 @@ def test_authority_semantic_identity_permits_libvirt_generated_device_fields() -
     assert owned_system_semantic_identity(
         rendered, SYSTEM_ID, OVERLAY
     ) != owned_system_semantic_identity(changed_kernel, SYSTEM_ID, OVERLAY)
+
+
+_BASE = "/var/lib/kdive/provider-authority/bases/base.qcow2"
+_UNRELABELED_BACKING = (
+    f'<backingStore type="file"><format type="qcow2"/><source file="{_BASE}">'
+    '<seclabel model="selinux" relabel="no"/></source><backingStore/></backingStore>'
+)
+
+
+def _with_backing(backing: str) -> str:
+    return _xml().replace(f'<source file="{OVERLAY}"/>', f'<source file="{OVERLAY}"/>{backing}')
+
+
+def test_authority_semantic_identity_permits_the_live_backing_store_index() -> None:
+    rendered = _with_backing(_UNRELABELED_BACKING)
+    live = rendered.replace('<backingStore type="file">', '<backingStore type="file" index="1">')
+
+    assert owned_system_semantic_identity(
+        rendered, SYSTEM_ID, OVERLAY
+    ) == owned_system_semantic_identity(live, SYSTEM_ID, OVERLAY)
+
+
+@pytest.mark.parametrize(
+    "drifted",
+    [
+        pytest.param(
+            _UNRELABELED_BACKING.replace('<seclabel model="selinux" relabel="no"/>', ""),
+            id="seclabel-missing",
+        ),
+        pytest.param(
+            _UNRELABELED_BACKING.replace('relabel="no"', 'relabel="yes"'),
+            id="relabel-yes",
+        ),
+        pytest.param(_UNRELABELED_BACKING.replace(_BASE, "/elsewhere/base.qcow2"), id="base"),
+        pytest.param("", id="backing-absent"),
+    ],
+)
+def test_authority_semantic_identity_reports_base_relabel_drift(drifted: str) -> None:
+    assert owned_system_semantic_identity(
+        _with_backing(_UNRELABELED_BACKING), SYSTEM_ID, OVERLAY
+    ) != owned_system_semantic_identity(_with_backing(drifted), SYSTEM_ID, OVERLAY)
 
 
 def test_authority_semantic_identity_accepts_sanitized_native_inactive_readback() -> None:

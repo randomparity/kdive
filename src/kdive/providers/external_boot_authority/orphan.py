@@ -93,8 +93,11 @@ class RecoveryOrphanAuthorityService:
         connections: AuthorityConnectionFactory,
         ports: ExternalBootRecoveryObjectPorts,
         executor: RecoveryObjectExecutor | None = None,
+        *,
+        authority_instance: str,
     ) -> None:
         self._connections = connections
+        self._authority_instance = authority_instance
         self._ports = ports
         self._executor = executor
         self._lanes: dict[UUID, asyncio.Lock] = {}
@@ -142,7 +145,7 @@ class RecoveryOrphanAuthorityService:
         if not rows:
             raise AuthorityServiceError("superseded")
         try:
-            return tuple(
+            selections = tuple(
                 _Selection(
                     object_id=row["object_id"],
                     system_id=row["system_id"],
@@ -167,6 +170,13 @@ class RecoveryOrphanAuthorityService:
             raise AuthorityServiceError(
                 "journal_conflict", reason="orphan_selection_malformed"
             ) from None
+        # A row another host published must not reach this host's provider (ADR-0615, #3439).
+        own = self._authority_instance
+        if any(selection.authority_instance != own for selection in selections):
+            raise AuthorityServiceError(
+                "configuration_error", reason="orphan_row_foreign_authority"
+            )
+        return selections
 
     async def _commit(
         self,
@@ -175,7 +185,10 @@ class RecoveryOrphanAuthorityService:
         selection: _Selection,
         observed_digest: str,
     ) -> None:
-        async with self._connections() as conn:
+        # The host's connection is not autocommit and closes without committing, so the write
+        # needs its own transaction (as the repository's mutations have): without one the
+        # disposition rolls back while the response still reports it completed.
+        async with self._connections() as conn, conn.transaction():
             row = await (
                 await conn.execute(
                     "SELECT commit_external_boot_recovery_orphan_disposition(%s,%s,%s,%s,%s,%s,%s)",

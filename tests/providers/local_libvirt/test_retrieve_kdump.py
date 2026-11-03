@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -178,7 +178,7 @@ def _kdump_capture_via_reader(reader: _FakeReader, spool: Path) -> None:
         host_dump_capture=lambda _s: pytest.fail("host_dump seam used on the kdump path"),
         secret_registry=SecretRegistry(),
     )
-    retriever.capture(_SYS, _RUN, CaptureMethod.KDUMP)
+    retriever.capture(_SYS, _RUN, CaptureMethod.KDUMP, execution_id=uuid4())
 
 
 def test_capture_incomplete_core_is_readiness_failure_with_remediation(tmp_path: Path) -> None:
@@ -389,7 +389,8 @@ def test_live_vm_kdump_capture_arc_no_staging() -> None:  # pragma: no cover - l
     # streams the core to a worker spool dir, then uploads it to the object store.
     retriever = _build_live_proof_retriever()
     run_id = _RUN
-    out = retriever.capture(system_id, run_id, CaptureMethod.KDUMP)
+    execution_id = uuid4()
+    out = retriever.capture(system_id, run_id, CaptureMethod.KDUMP, execution_id=execution_id)
 
     # The core was real: non-empty build-id and positive byte count.
     assert out.vmcore_build_id, "vmcore_build_id is empty — core may be corrupt or wrong method"
@@ -399,12 +400,14 @@ def test_live_vm_kdump_capture_arc_no_staging() -> None:  # pragma: no cover - l
     # address, reached in one hop with no staging object in between. Asserted as full-key
     # equality rather than a substring so a wrong tenant, owner kind, owner id, or name each
     # fail here; `artifact_key` is the same helper the production writers build keys with.
-    assert out.raw.key == artifact_key(_TENANT, "runs", str(run_id), "vmcore-kdump"), (
+    assert out.raw.key == artifact_key(
+        _TENANT, "runs", str(run_id), f"vmcore-kdump-{execution_id}"
+    ), (
         f"unexpected raw artifact key {out.raw.key!r}: expected "
         f"{_TENANT}/runs/<run_id>/vmcore-kdump (ADR-0244 §2, cores are Run-owned)"
     )
     assert out.redacted.key == artifact_key(
-        _TENANT, "runs", str(run_id), "vmcore-kdump-redacted"
+        _TENANT, "runs", str(run_id), f"vmcore-kdump-{execution_id}-redacted"
     ), (
         f"unexpected redacted artifact key {out.redacted.key!r}: expected "
         f"{_TENANT}/runs/<run_id>/vmcore-kdump-redacted (ADR-0244 §2)"

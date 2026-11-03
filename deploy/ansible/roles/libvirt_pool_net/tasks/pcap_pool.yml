@@ -1,0 +1,167 @@
+---
+# The remote capturer pre-creates kdive-pcap-<system>-<job>.pcap here, owned by the domain's QEMU
+# user with mode 0600, and the confined QEMU's filter-dump writes it; the worker fetches it back as
+# a volume of this pool (ADR-0432 amendment, #3316). The directory is root's: QEMU may search it but
+# cannot list, create, unlink, rename or symlink in it, so the root storage daemon never follows a
+# QEMU-made link on fetch-back.
+- name: Create the traffic-capture pcap pool directory
+  ansible.builtin.file:
+    path: "{{ libvirt_pool_net_pcap_pool_target }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ libvirt_pool_net_pcap_pool_mode }}"
+
+# define is a no-op for an existing pool, so the target check below catches a stale definition. The
+# XML permissions pin root:root and the mode should anyone later run a pool build.
+- name: Define the traffic-capture pcap storage pool
+  community.libvirt.virt_pool:
+    name: "{{ libvirt_pool_net_pcap_pool_name }}"
+    command: define
+    xml: |
+      <pool type='dir'>
+        <name>{{ libvirt_pool_net_pcap_pool_name }}</name>
+        <target>
+          <path>{{ libvirt_pool_net_pcap_pool_target }}</path>
+          <permissions>
+            <mode>{{ libvirt_pool_net_pcap_pool_mode }}</mode>
+            <owner>0</owner>
+            <group>0</group>
+          </permissions>
+        </target>
+      </pool>
+
+# The capturer writes wherever the pool's own target points, not where this role created a directory.
+- name: Read the traffic-capture pcap storage pool definition
+  community.libvirt.virt_pool:
+    name: "{{ libvirt_pool_net_pcap_pool_name }}"
+    command: get_xml
+  register: libvirt_pool_net_pcap_pool_xml
+
+- name: Require the pcap pool to target the provisioned directory
+  ansible.builtin.assert:
+    that:
+      - ('<path>' ~ libvirt_pool_net_pcap_pool_target ~ '</path>') in libvirt_pool_net_pcap_pool_xml.get_xml
+    fail_msg: >-
+      libvirt pool {{ libvirt_pool_net_pcap_pool_name }} already exists with a different target than
+      {{ libvirt_pool_net_pcap_pool_target }}; run 'virsh pool-destroy
+      {{ libvirt_pool_net_pcap_pool_name }}; virsh pool-undefine {{ libvirt_pool_net_pcap_pool_name }}'
+      on the provider host and rerun site.yml.
+
+- name: Start the traffic-capture pcap storage pool
+  community.libvirt.virt_pool:
+    name: "{{ libvirt_pool_net_pcap_pool_name }}"
+    state: active
+
+- name: Autostart the traffic-capture pcap storage pool
+  community.libvirt.virt_pool:
+    name: "{{ libvirt_pool_net_pcap_pool_name }}"
+    autostart: true
+
+# getenforce, not the selinux fact, decides, as ADR-0640 does locally: the fact needs the libselinux
+# Python binding, and a host missing it would silently skip the label. libvirt_stack installs
+# sefcontext's bindings on the RedHat and SUSE families, which ship SELinux.
+- name: Read the SELinux mode for the pcap pool label
+  ansible.builtin.command:
+    argv: [getenforce]
+  register: libvirt_pool_net_selinux_mode
+  changed_when: false
+  failed_when: false
+
+# svirt_t may write svirt_image_t, and svirt_image_t:s0 is reachable by every domain through MCS
+# dominance, so the pre-created pcap is writable by its QEMU. Being s0 rather than the domain's
+# categories, another domain could open it by path; the 0711 directory hides the names.
+- name: Install the pcap pool svirt_image_t fcontext rule
+  community.general.sefcontext:
+    target: "{{ libvirt_pool_net_pcap_pool_target }}(/.*)?"
+    setype: svirt_image_t
+    state: present
+  when: libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'
+
+# Plain restorecon, not -F: svirt_image_t is a customizable type (ADR-0640).
+- name: Relabel the pcap pool directory
+  ansible.builtin.command:
+    argv: [restorecon, -R, -v, "{{ libvirt_pool_net_pcap_pool_target }}"]
+  register: libvirt_pool_net_pcap_relabel
+  changed_when: "'Relabeled' in libvirt_pool_net_pcap_relabel.stdout"
+  when: libvirt_pool_net_selinux_mode.stdout | default('') == 'Enforcing'
+
+- name: Check for libvirt's AppArmor QEMU abstraction
+  ansible.builtin.stat:
+    path: /etc/apparmor.d/abstractions/libvirt-qemu
+  register: libvirt_pool_net_apparmor_abstraction
+
+- name: Read libvirt's AppArmor QEMU abstraction
+  ansible.builtin.slurp:
+    src: /etc/apparmor.d/abstractions/libvirt-qemu
+  register: libvirt_pool_net_apparmor_abstraction_text
+  when: libvirt_pool_net_apparmor_abstraction.stat.exists
+
+# A drop-in nothing includes would leave every capture denied with no provisioning error.
+- name: Require the abstraction to include its libvirt-qemu.d drop-ins
+  ansible.builtin.assert:
+    that:
+      - "'abstractions/libvirt-qemu.d' in (libvirt_pool_net_apparmor_abstraction_text.content | b64decode)"
+    fail_msg: >-
+      /etc/apparmor.d/abstractions/libvirt-qemu does not include <abstractions/libvirt-qemu.d>, so
+      the kdive-pcap rule would never load. Upgrade libvirt, or add
+      '{{ libvirt_pool_net_pcap_pool_target }}/kdive-pcap-*.pcap w,' to the QEMU profile by hand.
+  when: libvirt_pool_net_apparmor_abstraction.stat.exists
+
+- name: Create the libvirt-qemu.d AppArmor drop-in directory
+  ansible.builtin.file:
+    path: /etc/apparmor.d/abstractions/libvirt-qemu.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: libvirt_pool_net_apparmor_abstraction.stat.exists
+
+# Write only: QEMU opens the pre-created file O_WRONLY. AppArmor has no MCS, so the rule admits any
+# domain's QEMU, but DAC (owner and mode 0600 per file) still keeps it to its own capture. Domains
+# read the rule when libvirt generates their profile, so it applies to domains started after this.
+- name: Allow the confined QEMU to write capture pcaps
+  ansible.builtin.copy:
+    dest: /etc/apparmor.d/abstractions/libvirt-qemu.d/kdive-pcap
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by kdive libvirt_pool_net (#3316): remote traffic-capture pcaps.
+      {{ libvirt_pool_net_pcap_pool_target }}/kdive-pcap-*.pcap w,
+  when: libvirt_pool_net_apparmor_abstraction.stat.exists
+
+- name: Verify the pcap pool directory ownership and mode
+  ansible.builtin.stat:
+    path: "{{ libvirt_pool_net_pcap_pool_target }}"
+  register: libvirt_pool_net_pcap_pool_stat
+
+- name: Assert the pcap pool directory is root's
+  ansible.builtin.assert:
+    that:
+      - libvirt_pool_net_pcap_pool_stat.stat.isdir
+      - libvirt_pool_net_pcap_pool_stat.stat.mode == libvirt_pool_net_pcap_pool_mode
+      - libvirt_pool_net_pcap_pool_stat.stat.pw_name == 'root'
+      - libvirt_pool_net_pcap_pool_stat.stat.gr_name == 'root'
+    fail_msg: >-
+      pcap pool {{ libvirt_pool_net_pcap_pool_target }} is not a root:root
+      {{ libvirt_pool_net_pcap_pool_mode }} directory: {{ libvirt_pool_net_pcap_pool_stat.stat | default({}) }}
+
+# The directory's own owner and mode say nothing about its ancestors: QEMU must still reach a
+# pre-created file through them, and must not be able to write the directory itself. runuser
+# checks DAC only; the label is the fcontext rule's job above.
+- name: Require the QEMU runtime user to search but not write the pcap pool directory
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ libvirt_pool_net_pcap_pool_owner_by_family[ansible_os_family] }}"
+      - --
+      - test
+      - -x
+      - "{{ libvirt_pool_net_pcap_pool_target }}"
+      - -a
+      - "!"
+      - -w
+      - "{{ libvirt_pool_net_pcap_pool_target }}"
+  changed_when: false

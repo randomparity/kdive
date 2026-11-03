@@ -17,6 +17,8 @@ import pytest
 
 from kdive.providers.remote_libvirt.console.snapshot import RemoteLibvirtConsoleSnapshotter
 from kdive.providers.remote_libvirt.console.wiring import RemoteConsolePartStore
+from kdive.security.secrets.redaction import REDACTION
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
 from tests.providers.remote_libvirt.fakes import FakeObjectStore
 
@@ -168,3 +170,33 @@ def test_snapshot_returns_none_when_no_parts(
     key = f"remote-libvirt/systems/{system_id}/console-{run_id}"
     assert key not in store.objects
     assert asyncio.run(_count_rows(migrated_url, system_id, key)) == 0
+
+
+def test_snapshot_redacts_a_secret_split_across_two_parts(migrated_url: str) -> None:
+    # An idle seal (ADR-0806) can leave the two halves of a secret in adjacent parts; only the
+    # joined bytes hold the whole value, so the snapshot must redact after assembling.
+    secret = "abcdefghijklmnop"  # pragma: allowlist secret - synthetic test redaction target
+    registry = SecretRegistry()
+    registry.register(secret, scope=None)
+    store = FakeObjectStore()
+    system_id, run_id = uuid4(), uuid4()
+    _seed_parts(
+        store,
+        system_id,
+        [b"boot " + secret[:8].encode(), secret[8:].encode() + b"\n"],
+        migrated_url,
+    )
+
+    async def _run():
+        async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
+            return await RemoteLibvirtConsoleSnapshotter(
+                cast("ObjectStore", store), secret_registry=registry
+            ).snapshot(conn, system_id, run_id)
+
+    snap = asyncio.run(_run())
+
+    assert snap is not None
+    assert secret.encode() not in snap.data
+    assert REDACTION.encode() in snap.data
+    stored = store.get_artifact(snap.object_key, None).data
+    assert secret.encode() not in stored

@@ -11,10 +11,11 @@ inject firstboot → customization boot → seal → verify → output`` (ADR-03
 from __future__ import annotations
 
 import hashlib
+import os
 import stat
 import subprocess
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import cast
 
@@ -48,7 +49,10 @@ from kdive.images.rootfs.catalog import (
     resolve_rootfs_entry,
 )
 from kdive.providers.local_libvirt import rootfs_build
-from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import (
+    BaselineKernel,
+    select_kernel_and_initrd,
+)
 from kdive.providers.local_libvirt.rootfs_build import (
     _EXT4_INCOMPATIBLE_FEATURE,
     LocalLibvirtRootfsBuildPlane,
@@ -100,9 +104,9 @@ def test_feature_strip_needed_false_on_malformed_or_substring() -> None:
 def _spec(**overrides: object) -> RootfsBuildSpec:
     base: dict[str, object] = {
         "provider": "local-libvirt",
-        "name": "fedora-kdive-ready-43",
+        "name": "fedora-kdive-ready-44",
         "arch": "x86_64",
-        "releasever": "43",
+        "releasever": "44",
         "packages": ("openssh-server", "drgn"),
         "source_image_digest": "ignored:caller-declared",
         "capabilities": ("agent", "kdump", "drgn"),
@@ -375,7 +379,14 @@ def test_customize_context_threads_cloud_image_flag(tmp_path: Path) -> None:
     assert ctx.readiness_unit_path.suffix == ".service"
 
     rec2 = _Recorder()
-    _plane(tmp_path, rec2).build(_spec(name="fedora-kdive-ready-43"))
+    _plane(
+        tmp_path,
+        rec2,
+        probe_boot_entries=lambda _: [
+            "vmlinuz-6.18.5-200.fc43.x86_64",
+            "initramfs-6.18.5-200.fc43.x86_64.img",
+        ],
+    ).build(_spec(name="fedora-kdive-ready-43"))
     assert rec2.customize_ctxs[0].is_cloud_image is False, "a virt-builder row is not a cloud image"
 
 
@@ -409,10 +420,14 @@ def test_readiness_unit_is_rendered_with_the_family_kdump_unit(tmp_path: Path) -
     )
 
 
-def test_provenance_source_digest_for_virt_builder_entry(tmp_path: Path) -> None:
+def test_provenance_source_digest_for_virt_builder_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     rec = _Recorder()
-    out = _plane(tmp_path, rec).build(_spec(name="fedora-kdive-ready-43", releasever="42"))
-    entry = resolve_rootfs_entry("fedora-kdive-ready-43")
+    # Exercise generic virt-builder provenance without the optional retention postcondition.
+    entry = replace(resolve_rootfs_entry("fedora-kdive-ready-43"), retained_kernel=None)
+    monkeypatch.setattr(rootfs_build, "_resolve_entry", lambda spec: entry)
+    out = _plane(tmp_path, rec).build(_spec(name=entry.name, releasever="42"))
     assert isinstance(entry.source, VirtBuilderSource)
     assert out.provenance == {
         "plane": "local-libvirt",
@@ -1122,3 +1137,203 @@ def test_cloud_init_self_check_uses_the_scaled_budget(
 ) -> None:
     rootfs_build._run_cloud_init_guestfish(tmp_path / "img.qcow2", "is-file /etc/hosts\n")
     assert _timeouts(scaled_budget) == [_SCALED_SENTINEL]
+
+
+@pytest.mark.parametrize("mask", [0o022, 0o077])
+def test_hypervisor_handoff_preserves_identity_and_shares_only_disk_write(
+    tmp_path: Path, mask: int
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    work.chmod(0o2700)
+    previous = os.umask(mask)
+    try:
+        kernel_dir = work / "baseline"
+        kernel_dir.mkdir()
+        kernel = kernel_dir / "kernel"
+        kernel.write_bytes(b"kernel")
+        disk = work / "staged.qcow2"
+        disk.write_bytes(b"disk")
+    finally:
+        os.umask(previous)
+    before = {p: p.stat() for p in (work, kernel_dir, kernel, disk)}
+    rootfs_build._grant_hypervisor_traversal(work, disk)
+    for path, original in before.items():
+        now = path.stat()
+        extra = 0o011 if path.is_dir() else 0o044 | (0o020 if path == disk else 0)
+        assert stat.S_IMODE(now.st_mode) == stat.S_IMODE(original.st_mode) | extra
+        assert (now.st_uid, now.st_gid) == (original.st_uid, original.st_gid)
+    assert kernel.read_bytes() == b"kernel" and disk.read_bytes() == b"disk"
+    published = _build_common.publish_qcow2(tmp_path, image_name="published", scratch=disk)
+    assert stat.S_IMODE(published.stat().st_mode) == stat.S_IMODE(before[disk].st_mode) | 0o064
+
+
+@pytest.mark.parametrize(
+    "kind", ["symlink", "directory-symlink", "fifo", "foreign", "missing-disk"]
+)
+def test_handoff_rejects_unsafe_tree_before_any_permission_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir(mode=0o700)
+    disk = work / "disk"
+    disk.write_bytes(b"disk")
+    disk.chmod(0o600)
+    outsider = tmp_path / "outside"
+    outsider.mkdir(mode=0o700)
+    leaf = work / "unsafe"
+    if kind == "symlink":
+        leaf.symlink_to(disk)
+    elif kind == "directory-symlink":
+        leaf.symlink_to(outsider, target_is_directory=True)
+    elif kind == "fifo":
+        os.mkfifo(leaf)
+    elif kind == "foreign":
+        monkeypatch.setattr(rootfs_build.os, "geteuid", lambda: work.stat().st_uid + 1)
+    elif kind == "missing-disk":
+        disk = work / "absent"
+    before = {p: p.stat() for p in (work, work / "disk", outsider)}
+    with pytest.raises(CategorizedError):
+        rootfs_build._grant_hypervisor_traversal(work, disk)
+    for path, original in before.items():
+        assert path.stat().st_mode == original.st_mode
+
+
+def test_handoff_rejects_replaced_node_and_closes_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    disk = work / "disk"
+    disk.write_bytes(b"original")
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"replacement")
+    replacement.chmod(0o600)
+    opened: list[int] = []
+    real_open = os.open
+
+    def replace_on_open(path: Path, flags: int) -> int:
+        if path == disk:
+            replacement.replace(disk)
+        fd = real_open(path, flags)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(rootfs_build.os, "open", replace_on_open)
+    with pytest.raises(CategorizedError):
+        rootfs_build._grant_hypervisor_traversal(work, disk)
+    assert disk.read_bytes() == b"replacement"
+    assert stat.S_IMODE(disk.stat().st_mode) == 0o600
+    for fd in opened:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_handoff_rejects_hard_link_outside_workspace(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"untouched")
+    outside.chmod(0o600)
+    disk = work / "disk"
+    disk.hardlink_to(outside)
+    with pytest.raises(CategorizedError):
+        rootfs_build._grant_hypervisor_traversal(work, disk)
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    ("versions", "hint", "expected"),
+    [
+        ("a b", "b", "b"),
+        ("a b", "vmlinuz-b", "b"),
+        ("a", None, "a"),
+        ("a b", None, None),
+        ("a", "stale", None),
+        ("0-rescue-a", "0-rescue-a", None),
+    ],
+)
+def test_retained_kernel_reaches_exact_selector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    versions: str,
+    hint: str | None,
+    expected: str | None,
+) -> None:
+    calls = _RecordingBootTools()
+    entry = replace(resolve_rootfs_entry("fedora-kdive-ready-44"), retained_kernel=hint)
+    monkeypatch.setattr(rootfs_build, "_resolve_entry", lambda spec: entry)
+    acquisition, customization, provenance = calls.as_dependencies()
+    selected: list[tuple[str, str | None]] = []
+
+    def extract(base: Path, dest: Path, forwarded: str | None) -> BaselineKernel:
+        entries = [
+            name for v in versions.split() for name in (f"vmlinuz-{v}", f"initramfs-{v}.img")
+        ]
+        kernel, initrd = select_kernel_and_initrd(entries, forwarded)
+        selected.append((kernel, initrd))
+        return BaselineKernel(dest / kernel, dest / initrd if initrd else None)
+
+    plane = LocalLibvirtRootfsBuildPlane(
+        workspace=tmp_path / "work",
+        acquisition=acquisition,
+        customization=replace(customization, extract_baseline_kernel=extract),
+        provenance=replace(
+            provenance,
+            probe_boot_entries=lambda _: [f"vmlinuz-{expected}", f"initramfs-{expected}.img"],
+        ),
+    )
+    if expected is None:
+        with pytest.raises(CategorizedError):
+            plane.build(_spec(name=entry.name))
+        assert not calls.customization_boot_ran
+        assert not (tmp_path / "work" / f"{entry.name}.qcow2").exists()
+    else:
+        plane.build(_spec(name=entry.name))
+        assert selected == [(f"vmlinuz-{expected}", f"initramfs-{expected}.img")]
+        assert calls.customization_boot_ran
+        assert calls.inject_script is not None
+        assert ("rpm --erase" in calls.inject_script) == (hint is not None)
+
+
+@pytest.mark.parametrize(
+    "inventory",
+    [
+        ["vmlinuz-selected", "initramfs-selected.img"],
+        [],
+        ["vmlinuz-selected"],
+        ["vmlinuz-stale", "initramfs-stale.img"],
+        ["vmlinuz-selected", "initramfs-selected.img", "vmlinuz-other"],
+        ["vmlinuz-0-rescue-selected"],
+        None,
+        "probe-error",
+    ],
+)
+def test_retained_kernel_requires_final_unhinted_boot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inventory: list[str] | str | None
+) -> None:
+    calls = _RecordingBootTools()
+    entry = replace(resolve_rootfs_entry("fedora-kdive-ready-44"), retained_kernel="selected")
+    monkeypatch.setattr(rootfs_build, "_resolve_entry", lambda spec: entry)
+    acquisition, customization, provenance = calls.as_dependencies()
+
+    def probe(path: Path) -> list[str] | None:
+        assert calls.customization_boot_ran
+        if isinstance(inventory, str):
+            raise CategorizedError("probe failed", category=ErrorCategory.CONFIGURATION_ERROR)
+        return inventory
+
+    plane = LocalLibvirtRootfsBuildPlane(
+        workspace=tmp_path / "work",
+        acquisition=acquisition,
+        customization=customization,
+        provenance=replace(provenance, probe_boot_entries=probe),
+    )
+    if inventory == ["vmlinuz-selected", "initramfs-selected.img"]:
+        plane.build(_spec(name=entry.name))
+        assert calls.sealed
+    else:
+        with pytest.raises(CategorizedError):
+            plane.build(_spec(name=entry.name))
+        assert not calls.sealed
+        assert not (tmp_path / "work" / f"{entry.name}.qcow2").exists()

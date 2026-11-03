@@ -29,6 +29,7 @@ from kdive.providers.remote_libvirt.settings import (
     REMOTE_LIBVIRT_BOOT_ARTIFACT_POOL,
     REMOTE_LIBVIRT_MACHINE,
     REMOTE_LIBVIRT_NETWORK,
+    REMOTE_LIBVIRT_PCAP_POOL,
     REMOTE_LIBVIRT_STORAGE_POOL,
 )
 
@@ -88,6 +89,7 @@ class RemoteLibvirtConfig:
     machine: str = _DEFAULT_MACHINE
     boot_artifact_pool: str = "kdive-boot-artifacts"
     boot_artifact_max_bytes: int = 10 * 1024 * 1024 * 1024
+    pcap_pool: str = "kdive-pcap"
     gdb_addr: str | None = None
     gdb_port_min: int = 47000
     gdb_port_max: int = 47099
@@ -373,6 +375,7 @@ def _build_config(instance: RemoteLibvirtInstance) -> RemoteLibvirtConfig:
         boot_artifact_max_bytes=(
             config.get(REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES) or 10 * 1024 * 1024 * 1024
         ),
+        pcap_pool=config.get(REMOTE_LIBVIRT_PCAP_POOL) or "kdive-pcap",
         gdb_addr=instance.gdb_addr,
         gdb_port_min=gdb_port_min,
         gdb_port_max=gdb_port_max,

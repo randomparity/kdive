@@ -8,7 +8,7 @@ loaded by pytest's own machinery, and importing it as an ordinary module would l
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
@@ -24,6 +24,7 @@ from kdive.domain.external_boot_activation import (
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityTeardownMutationRequestV1,
     AuthorityTeardownProofV1,
@@ -264,3 +265,27 @@ def marked_job(
     return build_job(
         JobKind.BOOT, {"run_id": str(run_id), EXTERNAL_BOOT_AUTHORITY_MARKER_KEY: fields}
     )
+
+
+class RecordingExecutor:
+    def __init__(
+        self, category: Literal["absent", "source", "target", "mixed", "unreadable", "conflict"]
+    ) -> None:
+        self.category = category
+        self.requests: list[AuthorityMutationRequestV1] = []
+
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return AuthorityObservationV1(
+            observation_id=uuid4(), category=self.category, composite_state="sha256:" + "8" * 64
+        )
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityMutationRequestV1
+    ) -> AuthorityObservationV1:
+        return await self.execute(request)
+
+    async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        self.requests.append(request)
+        return AuthorityObservationV1(
+            observation_id=uuid4(), category=self.category, composite_state="sha256:" + "8" * 64
+        )

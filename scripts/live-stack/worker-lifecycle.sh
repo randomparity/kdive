@@ -13,6 +13,15 @@ source "${here}/libvirt-uri.sh"
 readonly LIFECYCLE_SOCKET=/run/kdive/live-worker-lifecycle.sock
 readonly WORKER_PYTHON=/opt/kdive-live-worker-lifecycle/.venv/bin/python
 readonly WORKER_EXECUTABLE="${here}/worker-from-checkout"
+# Test-staging seam, not an operator knob (no KDIVE_ prefix): the root-published route file.
+: "${AUTHORITY_ROUTE_ENV:=/etc/kdive/live-worker-authority.env}"
+AUTHORITY_ROUTE_NAMES=(
+  KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE
+  KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET
+  KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF
+  KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF
+  KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF
+)
 
 usage() {
   echo "usage: scripts/live-stack/worker-lifecycle.sh" \
@@ -56,10 +65,6 @@ require_start_prerequisites() {
     echo "installed worker Python is missing: ${WORKER_PYTHON}" >&2
     return 1
   }
-  [[ "${KDIVE_KERNEL_SRC:-}" == /* && -d "${KDIVE_KERNEL_SRC}" ]] || {
-    echo "worker kernel source must be an existing absolute directory" >&2
-    return 1
-  }
   for slot in {1..8}; do
     id "kdive-worker-${slot}" >/dev/null 2>&1 || {
       echo "missing provisioned worker account kdive-worker-${slot}" >&2
@@ -93,7 +98,6 @@ require_start_prerequisites() {
   require_worker_path_access "$WORKER_PYTHON" rx "installed worker Python" || return 1
   require_worker_path_access "$WORKER_EXECUTABLE" rx "checkout worker launcher" || return 1
   require_worker_path_access "${repo_root}/src" rx "checkout worker source" || return 1
-  require_worker_path_access "${KDIVE_KERNEL_SRC}" rx "worker kernel source" || return 1
   require_worker_path_access "$KDIVE_ROOTFS_DIR" rwx "worker rootfs directory" || return 1
   require_worker_path_access "$KDIVE_BUILD_WORKSPACE" rwx "worker build workspace" || return 1
   require_worker_path_access "$KDIVE_INSTALL_STAGING" rwx "worker install staging" || return 1
@@ -179,6 +183,41 @@ require_worker_path_access() {
   done
 }
 
+# Forward the installed fixed-worker authority route (ADR-0770, #3215). An absent file is a host
+# without a worker authority client; a present one must be exact, and a contradicting preset is
+# refused rather than honoured, because a worker on another route fails only later, at the
+# authority. The content is literal data: names are matched against the allowlist before the
+# indirect expansion, and nothing is evaluated.
+load_published_authority_route() {
+  local line name value seen=" "
+  local invalid="${AUTHORITY_ROUTE_ENV} must contain exactly the five worker authority route"
+  invalid+=" assignments"
+  local -a lines
+  [[ -e "$AUTHORITY_ROUTE_ENV" || -L "$AUTHORITY_ROUTE_ENV" ]] || return 0
+  require_exact_file "$AUTHORITY_ROUTE_ENV" 644 || return 1
+  mapfile -t lines <"$AUTHORITY_ROUTE_ENV"
+  ((${#lines[@]} == ${#AUTHORITY_ROUTE_NAMES[@]})) || {
+    echo "$invalid" >&2
+    return 1
+  }
+  for line in "${lines[@]}"; do
+    name="${line%%=*}"
+    value="${line#*=}"
+    [[ $line == *=* && -n $value && " ${AUTHORITY_ROUTE_NAMES[*]} " == *" ${name} "* &&
+      $seen != *" ${name} "* ]] || {
+      echo "$invalid" >&2
+      return 1
+    }
+    seen+="${name} "
+    if [[ -n ${!name:-} && ${!name} != "$value" ]]; then
+      echo "${name} contradicts the installed route in ${AUTHORITY_ROUTE_ENV};" \
+        "unset it to use the installed route" >&2
+      return 1
+    fi
+    export "${name}=${value}"
+  done
+}
+
 # Print the inventory path the operator's server and reconciler resolve, but only when it declares
 # a [[remote_libvirt]] instance: a local-only stack sends today's request unchanged (#3086).
 resolve_worker_inventory() {
@@ -215,6 +254,7 @@ request() {
   if [[ "$operation" == start ]]; then
     require_start_prerequisites || return 1
     libvirt_uri="$(load_published_libvirt_uri)" || return 1
+    load_published_authority_route || return 1
     inventory="$(resolve_worker_inventory)" || return
     if [[ -n "$inventory" ]]; then
       require_worker_path_access "$inventory" r "worker inventory" || return 1
@@ -222,11 +262,11 @@ request() {
     fi
   fi
   env -u KDIVE_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
-    -u KDIVE_RECONCILER_DATABASE_URL KDIVE_LIFECYCLE_OPERATION="$operation" \
+    -u KDIVE_RECONCILER_DATABASE_URL -u KDIVE_HARNESS_DATABASE_URL \
+    KDIVE_LIFECYCLE_OPERATION="$operation" \
     KDIVE_LIFECYCLE_COUNT="$count" \
     KDIVE_LIFECYCLE_LIBVIRT_URI="$libvirt_uri" KDIVE_WORKER_PYTHON="$WORKER_EXECUTABLE" \
     LIFECYCLE_SYSTEMS_TOML="$inventory" \
-    KDIVE_SOURCE_ROOT="${KDIVE_KERNEL_SRC:-}" \
     KDIVE_EXPECTED_SLOTS="${KDIVE_LIFECYCLE_EXPECTED_SLOTS:-}" "$py" - <<'PY'
 import os
 import sys
@@ -254,7 +294,6 @@ try:
                 "worker_count": count,
                 "settings": {
                     "python": os.environ["KDIVE_WORKER_PYTHON"],
-                    "source_root": os.environ["KDIVE_SOURCE_ROOT"],
                     "rootfs_dir": os.environ["KDIVE_ROOTFS_DIR"],
                     "build_workspace": os.environ["KDIVE_BUILD_WORKSPACE"],
                     "build_component_roots": os.environ["KDIVE_BUILD_COMPONENT_ROOTS"],

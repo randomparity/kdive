@@ -13,15 +13,17 @@ from __future__ import annotations
 import io
 from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from threading import Barrier
 from types import MappingProxyType
 from typing import IO, Any, cast
 from uuid import uuid4
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 import kdive.config as config
@@ -279,14 +281,22 @@ class ObjectStore:
             "sensitivity": request.sensitivity.value,
             "retention-class": request.retention_class,
         }
+        kwargs: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": request.key,
+            "IfNoneMatch": "*",
+            "Metadata": metadata,
+        }
+        if request.sha256_b64 is not None:
+            kwargs["ChecksumSHA256"] = request.sha256_b64
         try:
-            response = self._client.put_object(
-                Bucket=self._bucket,
-                Key=request.key,
-                Body=request.data,
-                IfNoneMatch="*",
-                Metadata=metadata,
+            body_context = (
+                request.data.open("rb")
+                if isinstance(request.data, Path)
+                else nullcontext(request.data)
             )
+            with body_context as body:
+                response = self._client.put_object(**kwargs, Body=body)
         except ClientError as err:
             code = err.response.get("Error", {}).get("Code")
             status = err.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
@@ -295,6 +305,8 @@ class ObjectStore:
             raise _infrastructure_error("put_object", request.key, err) from err
         except BotoCoreError as err:
             raise _infrastructure_error("put_object", request.key, err) from err
+        except OSError as err:
+            raise _local_stream_error(request.key, str(request.data), err) from err
         reply = _StoreReply("put_object", self._bucket, request.key, response)
         return artifact_types.StoredArtifact(
             request.key,
@@ -729,6 +741,9 @@ class ObjectStore:
     ) -> artifact_types.PresignedUpload:
         """Mint a presigned PUT that signs the checksum + object metadata into the URL.
 
+        Conditional requests also sign If-None-Match; callers must forward it unchanged.
+        Execution metadata is signed alongside sensitivity and retention class (ADR-0786).
+
         The agent must send the returned ``required_headers`` (the signed
         ``x-amz-checksum-sha256`` and ``x-amz-meta-*`` metadata) **and nothing else**: the URL
         is SigV4-signed over exactly this header set, so any extra header the client adds — most
@@ -746,18 +761,22 @@ class ObjectStore:
                 (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
         """
         metadata = {
+            **request.metadata,
             "sensitivity": request.sensitivity.value,
             "retention-class": request.retention_class,
         }
+        params: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": request.key,
+            "ChecksumSHA256": request.sha256,
+            "Metadata": metadata,
+        }
+        if request.if_absent:
+            params["IfNoneMatch"] = "*"
         try:
             url = self._client.generate_presigned_url(
                 "put_object",
-                Params={
-                    "Bucket": self._bucket,
-                    "Key": request.key,
-                    "ChecksumSHA256": request.sha256,
-                    "Metadata": metadata,
-                },
+                Params=params,
                 ExpiresIn=request.expires_in,
                 HttpMethod="PUT",
             )
@@ -765,9 +784,10 @@ class ObjectStore:
             raise _infrastructure_error("presign_put", request.key, err) from err
         headers = {
             "x-amz-checksum-sha256": request.sha256,
-            "x-amz-meta-sensitivity": request.sensitivity.value,
-            "x-amz-meta-retention-class": request.retention_class,
+            **{f"x-amz-meta-{name}": value for name, value in metadata.items()},
         }
+        if request.if_absent:
+            headers["if-none-match"] = "*"
         return artifact_types.PresignedUpload(url=url, required_headers=headers)
 
     def presign_get(self, key: str, *, expires_in: int, version_id: str | None = None) -> str:
@@ -1163,11 +1183,17 @@ class ObjectStore:
         return self.head(key) is not None
 
 
+#: Pins SigV4. Without it botocore presigns SigV2, which carries no ``X-Amz-Date`` for the vmcore
+#: deadline and signs no ``If-None-Match`` for the conditional-PUT fence (#3313). SigV4 signs the
+#: Host header, so a presigned URL works only at the ``KDIVE_S3_ENDPOINT_URL`` it was minted for.
+S3_CLIENT_CONFIG = Config(signature_version="s3v4")
+
+
 def object_store_from_env() -> ObjectStore:
     """Build an :class:`ObjectStore` from the ``KDIVE_S3_*`` environment.
 
     Reads ``KDIVE_S3_ENDPOINT_URL``, ``KDIVE_S3_BUCKET``, and ``KDIVE_S3_REGION``
-    (default ``us-east-1`` — boto3 signs with SigV4 and needs a region). Credentials
+    (default ``us-east-1`` — the client signs with SigV4 and needs a region). Credentials
     come from boto3's default chain (the standard ``AWS_*`` vars).
 
     Raises:
@@ -1188,7 +1214,9 @@ def object_store_from_env() -> ObjectStore:
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     region = config.get(S3_REGION) or _DEFAULT_REGION
-    client = boto3.client("s3", endpoint_url=endpoint_url, region_name=region)
+    client = boto3.client(
+        "s3", endpoint_url=endpoint_url, region_name=region, config=S3_CLIENT_CONFIG
+    )
     store = ObjectStore(client, bucket)
     store.validate_versioning()
     return store

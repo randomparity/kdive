@@ -157,10 +157,16 @@ class _ContractIO:
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
         return _OBSERVATION
 
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def recover_modules(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        del acknowledged
         self.record_phase(metadata, "module-restored")
 
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def define_source(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        del acknowledged
         self.record_phase(metadata, "source-restored")
 
     def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None:

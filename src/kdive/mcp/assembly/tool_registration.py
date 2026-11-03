@@ -28,6 +28,7 @@ from kdive.mcp.tools.catalog import (
 from kdive.mcp.tools.catalog import images as catalog_images
 from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_tools
 from kdive.mcp.tools.debug.introspection import registrar as introspect
+from kdive.mcp.tools.debug.operations.runtime import DebugRuntimeResolver
 from kdive.mcp.tools.debug.sessions import registrar as debug_tools
 from kdive.mcp.tools.identity import projects, session
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_tools
@@ -64,6 +65,7 @@ class AppAssembly:
     """Provider/env ports assembled once for MCP tool registration."""
 
     resolver: ProviderResolver
+    debug_runtime: DebugRuntimeResolver
     secret_registry: SecretRegistry
     reaper: InfraReaper
     dump_volume_reaper: DumpVolumeReaper
@@ -154,6 +156,7 @@ def _vmcore_tools_registrar(
 
 def _debug_tools_registrar(
     resolver: ProviderResolver,
+    runtime: DebugRuntimeResolver,
     secret_registry: SecretRegistry,
     telemetry: DebugSessionTelemetry,
 ) -> PlaneRegistrar:
@@ -164,6 +167,7 @@ def _debug_tools_registrar(
             resolver=resolver,
             secret_registry=secret_registry,
             telemetry=telemetry,
+            runtime=runtime,
         )
 
     return _register
@@ -294,6 +298,7 @@ def build_plane_registrars(assembly: AppAssembly) -> tuple[PlaneRegistrar, ...]:
         _vmcore_tools_registrar(assembly.resolver, assembly.secret_registry),
         _debug_tools_registrar(
             assembly.resolver,
+            assembly.debug_runtime,
             assembly.secret_registry,
             assembly.debug_session_telemetry,
         ),

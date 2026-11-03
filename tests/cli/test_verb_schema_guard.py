@@ -222,7 +222,9 @@ def _invocations(verb: GeneratedVerb, schema: Mapping[str, Any]) -> list[list[st
 
     def with_options(flags: Sequence[GeneratedFlag]) -> list[str]:
         extra = itertools.chain.from_iterable(
-            [flag.name] if flag.action == "store_true" else [flag.name, value(flag.dest)]
+            [flag.name]
+            if flag.action in {"store_true", "bool_optional"}
+            else [flag.name, value(flag.dest)]
             for flag in flags
         )
         return [*base, *extra]

@@ -18,7 +18,7 @@ def test_0102_is_retained_in_migration_history(pg_conn: psycopg.Connection) -> N
 def test_0102_precedes_worker_incarnation_migration() -> None:
     migrations = migrate.discover_migrations()
 
-    assert [(migration.version, migration.filename) for migration in migrations[-65:]] == [
+    assert [(migration.version, migration.filename) for migration in migrations[-79:]] == [
         ("0103", "0103_worker_incarnations.sql"),
         ("0104", "0104_worker_fence_roles.sql"),
         ("0105", "0105_worker_fence_functions.sql"),
@@ -84,4 +84,18 @@ def test_0102_precedes_worker_incarnation_migration() -> None:
         ("0168", "0168_tearing_down_authority_teardown.sql"),
         ("0169", "0169_ended_allocation_authority_teardown.sql"),
         ("0170", "0170_repeated_provider_conflict_terminal.sql"),
+        ("0171", "0171_authority_system_discharge.sql"),
+        ("0172", "0172_settled_install_build_use_release.sql"),
+        ("0175", "0175_capture_publication_upload_fence.sql"),
+        ("0176", "0176_vmcore_retention_write_fence.sql"),
+        ("0177", "0177_recovery_orphan_quarantine_row_lock.sql"),
+        ("0178", "0178_external_boot_conflict_from_head.sql"),
+        ("0179", "0179_external_boot_prestop_system_holders.sql"),
+        ("0180", "0180_remote_module_activate_evidence.sql"),
+        ("0181", "0181_release_fail_while_recovering.sql"),
+        ("0182", "0182_release_cleanup_evidence_phase.sql"),
+        ("0183", "0183_authority_first_activation_proof.sql"),
+        ("0184", "0184_cleanup_evidence_drop_resolve_conflict.sql"),
+        ("0185", "0185_recover_fail_while_recovering.sql"),
+        ("0186", "0186_quarantine_publication_adopted_identity.sql"),
     ]

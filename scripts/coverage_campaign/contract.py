@@ -12,8 +12,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
 from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
+from kdive.mcp.tools.lifecycle.vmcore.handlers import VMCORE_METHODS
 from kdive.providers.core.runtime import ProviderSupport
 from kdive.providers.local_libvirt.composition import build_runtime as build_local_runtime
 from kdive.providers.remote_libvirt.composition import build_runtime as build_remote_runtime
@@ -31,6 +33,45 @@ _KERNEL_INPUTS = (
     "compiler_id",
     "kernel_build_id",
 )
+# The local x86_64 control cells of #2815's group that #3115 proves; #2815 keeps power and the
+# snapshot tools (campaign scope, 2026-10-07).
+_LOCAL_CONTROL_TOOLS = frozenset(
+    {"control.capture_traffic", "control.diagnostic_sysrq", "control.watch_for_crash"}
+)
+# List tools that answer a denied caller with an empty page instead of a failure (ADR-0756 and
+# its 2026-10-14 amendment): their rejection cells prove denied visibility against a positive
+# control.
+FILTERED_LIST_BOUNDARIES = frozenset(
+    {
+        ("investigations.list", "authorization"),
+        ("investigations.list", "project-isolation"),
+        ("artifacts.list", "project-isolation"),
+        *(
+            (tool, boundary)
+            for tool in (
+                "runs.list",
+                "systems.list",
+                "jobs.list",
+                "allocations.list",
+                "debug.list_sessions",
+            )
+            for boundary in ("authorization", "project-isolation")
+        ),
+    }
+)
+# Reviewed admission refusals: the server answers these functional cells synchronously, so they
+# observe the server host alone, with no guest, image or accelerator.
+_ADMISSION_REFUSALS = {
+    ("remote-libvirt", "images.publish"): (
+        "ADR-0759: images.publish refuses remote-libvirt with not_implemented before enqueue"
+    ),
+}
+# vmcore.fetch admits only core-producing methods; it refuses any other advertised method itself,
+# on every lane, with no capability_unsupported envelope (ADR-0722, 2026-10-20 amendment).
+_CORE_METHODS = frozenset(method.value for method in VMCORE_METHODS)
+HANDLER_REFUSAL = "vmcore.fetch handler: method does not produce a vmcore"
+# #3099 owns the kdivectl translation cells of the core service tools (ADR-0795).
+_CLI_OWNER = 3099
 
 
 class OperationGroup(BaseModel):
@@ -39,6 +80,8 @@ class OperationGroup(BaseModel):
     execution: Literal["service", "provider"]
     kernel: bool = False
     authority: bool = False
+    cli: bool = False
+    guest_observing: list[str] = Field(default_factory=list)
     tools: dict[str, str]
     capabilities: dict[str, str] = Field(default_factory=dict)
     role_overrides: dict[str, list[Literal["server", "worker", "reconciler", "authority"]]] = Field(
@@ -145,8 +188,16 @@ def _validate_mapping(mapping: ContractMapping, inventory: Inventory) -> None:
             raise ValueError("tool mapping needs a concrete observable assertion")
         if (set(group.capabilities) | set(group.role_overrides)) - set(group.tools):
             raise ValueError("capability mapping names an unknown tool")
+        if group.guest_observing and group.execution != "service":
+            raise ValueError("guest_observing marks service tools only; provider cells have guests")
+        if set(group.guest_observing) - set(group.tools):
+            raise ValueError("guest_observing names an unknown tool")
         if any(name.split(".")[0] not in support_fields for name in group.capabilities.values()):
             raise ValueError("unknown provider capability owner")
+        if group.cli and group.execution != "service":
+            raise ValueError("cli exposure covers service tools only; remove cli from the group")
+        if group.cli and set(group.tools) - {verb.tool for verb in GENERATED_VERBS}:
+            raise ValueError("cli tool has no generated kdivectl verb; run just cli-verbs")
     if not inventory.arches or any(
         image.arch not in inventory.arches for image in inventory.images.values()
     ):
@@ -172,6 +223,7 @@ def _capability_variants(
 
 def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> list[Cell]:
     cells: list[Cell] = []
+    observes_guest = row.tool in group.guest_observing
     lanes = (
         [("service", None)]
         if group.execution == "service"
@@ -181,6 +233,10 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
             for arch in sorted(inventory.arches)
         ]
     )
+    if observes_guest:
+        # The functional scenario boots a lane System, so its cell is the lane host's, per
+        # architecture. The rejection cells observe no guest and stay on the host-only lane.
+        lanes += [("service", arch) for arch in sorted(inventory.arches)]
     for provider, arch in lanes:
         variants = (
             [("default", True, None)]
@@ -191,8 +247,13 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
             accelerator = "none" if arch is None else ("kvm" if arch == "x86_64" else "kvm-hv")
             if variant == "fadump" and arch is not None and not arch_traits(arch).fadump_capture:
                 supported, source = False, "ArchTraits.fadump_capture; native ppc64le/KVM-HV only"
+            refused = row.tool == "vmcore.fetch" and supported and variant not in _CORE_METHODS
+            if refused:
+                supported, source = False, HANDLER_REFUSAL
             for configuration in row.configurations:
-                for exposure in ("direct", "gateway"):
+                for exposure in (
+                    ("direct", "gateway", "cli") if group.cli else ("direct", "gateway")
+                ):
                     scenario = f"tool/{row.tool}/{variant}"
                     identity = (
                         f"{scenario}/{configuration}/{exposure}/{provider}/{arch or 'service'}"
@@ -208,14 +269,29 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                     if group.authority:
                         roles = (*roles, "authority")
                     owner = group.owner
-                    # Lifecycle and break-glass ppc64le cells wait for the POWER lane (#2818);
-                    # x86_64 remote System cells are #3080's, remote run/image cells #3120's.
-                    if group.owner in (3062, 3112, 3119) and arch == "ppc64le":
+                    # Lifecycle, break-glass, debug, capture and power/snapshot ppc64le cells
+                    # wait for the POWER lane (#2818); x86_64 remote System cells are #3080's,
+                    # remote run/image cells #3120's, remote debug cells #3113's, remote capture
+                    # cells #3114's, remote power/snapshot/control cells #3116's.
+                    if (
+                        group.owner in (2813, 2814, 2815, 3062, 3098, 3112, 3119)
+                        and arch == "ppc64le"
+                    ):
                         owner = 2818
+                    elif group.owner == 2813 and provider == "remote-libvirt":
+                        owner = 3113
+                    elif group.owner == 2814 and provider == "remote-libvirt":
+                        owner = 3114
                     elif group.owner == 3062 and provider == "remote-libvirt":
                         owner = 3080
                     elif group.owner == 3119 and provider == "remote-libvirt":
                         owner = 3120
+                    elif group.owner == 2815 and provider == "remote-libvirt":
+                        owner = 3116
+                    elif group.owner == 2815 and row.tool in _LOCAL_CONTROL_TOOLS:
+                        owner = 3115
+                    if exposure == "cli":
+                        owner = _CLI_OWNER
                     cell = Cell(
                         identity + "/functional",
                         scenario_id + "/functional",
@@ -234,7 +310,11 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         kind="functional" if supported else "unsupported",
                         unsupported_reason=None if supported else source,
                     )
-                    cells.append(cell)
+                    refusal = _ADMISSION_REFUSALS.get((provider, row.tool))
+                    if not (observes_guest and arch is None):
+                        cells.append(cell if refusal is None else _admission_refusal(cell, refusal))
+                    if provider == "service" and arch is not None:
+                        continue
                     boundaries = ["authentication"]
                     if row.scopes:
                         boundaries.append("authorization")
@@ -242,7 +322,9 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         boundaries.append("project-isolation")
                     if row.parameters.get("properties"):
                         boundaries.append("validation")
-                    if group.capabilities.get(row.tool):
+                    # A supported capability's functional cell is its proof; only an
+                    # unsupported verdict has a refusal to prove (ADR-0722, 2026-10-13).
+                    if group.capabilities.get(row.tool) and not supported and not refused:
                         boundaries.append("capability")
                     cells.extend(
                         replace(
@@ -251,7 +333,11 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                             scenario_id=scenario_id + "/" + boundary,
                             kind="rejection",
                             observation=(
-                                f"Verify {boundary} rejection for {row.tool} "
+                                f"Verify {boundary} denies visibility for {row.tool}: a known "
+                                "item listed to a viewer, an empty page to the denied caller, "
+                                "and unchanged protected state."
+                                if (row.tool, boundary) in FILTERED_LIST_BOUNDARIES
+                                else f"Verify {boundary} rejection for {row.tool} "
                                 "and unchanged protected state."
                             ),
                             assertions=(boundary, "unchanged-state", "cleanup"),
@@ -262,6 +348,22 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                         for boundary in boundaries
                     )
     return cells
+
+
+def _admission_refusal(cell: Cell, rule: str) -> Cell:
+    return replace(
+        cell,
+        observation=(
+            f"Verify {cell.operation} refuses {cell.provider} with not_implemented before enqueue "
+            "and leaves its catalog rows, build jobs and platform state unchanged."
+        ),
+        roles=("server",),
+        guest_arch=None,
+        accelerator="none",
+        inputs=(),
+        kind="unsupported",
+        unsupported_reason=rule,
+    )
 
 
 def image_family(image: RootfsCatalogEntry) -> str:
@@ -409,7 +511,13 @@ def _matrix_cells(inventory: Inventory) -> list[Cell]:
             ):
                 cell = _native_cell(
                     "failure-resource",
-                    2816,
+                    2818
+                    if guest == "ppc64le"
+                    else (
+                        3117
+                        if failure in {"worker-interruption", "lost-response", "backing-service"}
+                        else 3118
+                    ),
                     guest,
                     provider,
                     "Prove operation-specific recovery, no duplicate resources, "
@@ -419,15 +527,35 @@ def _matrix_cells(inventory: Inventory) -> list[Cell]:
                     replace(
                         cell,
                         id=f"{cell.id}/{failure}",
-                        scenario_id=f"failure-resource/{failure}",
+                        scenario_id=f"failure-resource/{provider}/{guest}/{failure}",
                         assertions=(failure, "no-duplicates", "protected-state", "cleanup"),
                     )
                 )
+        quiescence = _native_cell(
+            "remote-quiescence",
+            2816 if guest == "x86_64" else 2818,
+            guest,
+            "remote-libvirt",
+            "Prove an accepted remote monitor mutation orders a fresh TLS absence probe.",
+        )
+        cells.append(
+            replace(
+                quiescence,
+                scenario_id=f"remote-quiescence/{guest}",
+                inputs=("image_sha256",),
+                assertions=(
+                    "accepted-mutation",
+                    "client-terminated",
+                    "fresh-monitor-ordering",
+                    "cleanup",
+                ),
+            )
+        )
         for case in ("case-1", "case-2"):
             for revision in ("broken", "fixed"):
                 cell = _native_cell(
                     "kernel-corpus",
-                    2817,
+                    2818 if guest == "ppc64le" else 2817,
                     guest,
                     "local-libvirt",
                     "Run the same qualified reproducer/config; verify the specific broken or fixed "

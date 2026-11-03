@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -534,19 +535,16 @@ def test_post_spawn_attestation_faults_abort_before_release(
             return {pid: identity, impossible.pid: impossible}
 
         monkeypatch.setattr(launcher_module, "_process_group_members", _extra_handoff_member)
-        original_cleanup = launcher_module._cleanup_failed_launch
+    original_cleanup = launcher_module._cleanup_failed_launch
 
-        async def _cleanup_after_gate_eof(
-            process: asyncio.subprocess.Process, **kwargs: Any
-        ) -> None:
-            # Pin the EOF-exit schedule: the invented member forces a recovery scan,
-            # which otherwise races the real leader's exit and can replace our injected
-            # handoff error with a membership-change error. Keep the real cleanup and
-            # absence proof; this test targets the handoff fault, not cleanup races.
-            await asyncio.wait_for(process.wait(), timeout=5)
-            await original_cleanup(process, **kwargs)
+    async def _cleanup_after_gate_eof(process: asyncio.subprocess.Process, **kwargs: Any) -> None:
+        # Each fault forces recovery without a complete attested process identity.
+        # Pin the EOF-exit schedule so /proc churn from the leader cannot replace
+        # the injected fault. Keep the real cleanup and complete absence proof.
+        await asyncio.wait_for(process.wait(), timeout=5)
+        await original_cleanup(process, **kwargs)
 
-        monkeypatch.setattr(launcher_module, "_cleanup_failed_launch", _cleanup_after_gate_eof)
+    monkeypatch.setattr(launcher_module, "_cleanup_failed_launch", _cleanup_after_gate_eof)
 
     aborts: list[LaunchAbortEvidence] = []
     expected_error = (
@@ -1135,3 +1133,83 @@ def test_process_group_enumeration_binds_observed_start_ticks(
             tmp_path,
             host_instance="host-a",
         )
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_attempt_directory_normalizes_inherited_setgid(
+    tmp_path: Path, launch_token: str, existing: bool
+) -> None:
+    parent = tmp_path / "workspace"
+    parent.mkdir(mode=0o2770)
+    parent.chmod(0o2770)
+    root = parent / "runtime"
+    if existing:
+        root.mkdir(mode=0o700)
+        assert stat.S_IMODE(root.stat().st_mode) == 0o2700
+    request = _request()
+    operation = _operation(request, launch_token)
+    launcher = GatedCaptureLauncher(runtime_root=root)
+    attempt = launcher._attempt_directory(operation, request)
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(attempt.stat().st_mode) == 0o700
+    assert (attempt / "request.json").read_bytes() == request.to_canonical_json()
+    spool._write_configuration(attempt, b"configuration")
+    assert (attempt / "configuration.json").read_bytes() == b"configuration"
+    assert launcher.dispose_operation_spool(operation.id)
+    assert not attempt.exists()
+
+
+@pytest.mark.parametrize("mode", [0o770, 0o755, 0o1700, 0o4700, 0o6700])
+def test_attempt_directory_rejects_unsafe_root(
+    tmp_path: Path, launch_token: str, mode: int
+) -> None:
+    root = tmp_path / "runtime"
+    root.mkdir()
+    root.chmod(mode)
+    request = _request()
+    operation = _operation(request, launch_token)
+    with pytest.raises(PermissionError):
+        GatedCaptureLauncher(runtime_root=root)._attempt_directory(operation, request)
+    assert stat.S_IMODE(root.stat().st_mode) == mode
+    assert not (root / str(operation.id)).exists()
+
+
+def test_attempt_directory_rejects_symlink_root(tmp_path: Path, launch_token: str) -> None:
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    root = tmp_path / "runtime"
+    root.symlink_to(target, target_is_directory=True)
+    request = _request()
+    with pytest.raises(OSError):
+        GatedCaptureLauncher(runtime_root=root)._attempt_directory(
+            _operation(request, launch_token), request
+        )
+    assert not list(target.iterdir())
+
+
+def test_attempt_directory_rejects_foreign_owner(
+    tmp_path: Path, launch_token: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request()
+    operation = _operation(request, launch_token)
+    root = tmp_path / "runtime"
+    root.mkdir(mode=0o700)
+    monkeypatch.setattr(launcher_module.os, "geteuid", lambda: root.stat().st_uid + 1)
+    with pytest.raises(PermissionError):
+        GatedCaptureLauncher(runtime_root=root)._attempt_directory(operation, request)
+    assert not list(root.iterdir())
+
+
+def test_attempt_directory_revalidates_after_chmod(
+    tmp_path: Path, launch_token: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "runtime"
+    root.mkdir(mode=0o700)
+    root.chmod(0o2700)
+    monkeypatch.setattr(launcher_module.os, "fchmod", lambda _fd, _mode: None)
+    request = _request()
+    with pytest.raises(PermissionError):
+        GatedCaptureLauncher(runtime_root=root)._attempt_directory(
+            _operation(request, launch_token), request
+        )
+    assert not list(root.iterdir())

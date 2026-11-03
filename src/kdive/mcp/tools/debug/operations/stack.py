@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Annotated
 
 from fastmcp import FastMCP
@@ -18,6 +19,10 @@ from kdive.mcp.tools.debug.operations.runtime import (
     run_engine_op_with_resolver,
 )
 from kdive.providers.ports.debug import GdbMiAttachment, GdbMiEngine
+from kdive.providers.shared.debug_common.gdbmi.commands.stack import (
+    MAX_FRAME_VARIABLES,
+    MAX_VARIABLE_TEXT,
+)
 from kdive.serialization import JsonValue
 
 
@@ -25,6 +30,16 @@ def register(app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResol
     _register_debug_backtrace(app, pool, runtime)
     _register_debug_read_frame(app, pool, runtime)
     _register_debug_disassemble(app, pool, runtime)
+
+
+def _with_variable_bounds[F: Callable[..., object]](func: F) -> F:
+    """Interpolate read_frame's enforced variable bounds into its docstring (ADR-0781)."""
+    if func.__doc__ is None:
+        raise AssertionError("debug.read_frame states its variable bounds in its docstring")
+    func.__doc__ = func.__doc__.format(
+        max_variables=MAX_FRAME_VARIABLES, max_text=MAX_VARIABLE_TEXT
+    )
+    return func
 
 
 def _backtrace_op(session_id: str, max_frames: int) -> _EngineOp:
@@ -50,7 +65,11 @@ def _read_frame_op(session_id: str, level: int) -> _EngineOp:
             session_id,
             "read",
             suggested_next_actions=["debug.read_registers", "debug.read_memory"],
-            data={"level": level, "frame": frame.model_dump(mode="json", exclude_none=True)},
+            data={
+                "level": level,
+                "frame": frame.model_dump(mode="json", exclude_none=True, exclude={"truncated"}),
+                "truncated": frame.truncated,
+            },
         )
 
     return op
@@ -121,6 +140,7 @@ def _register_debug_read_frame(
         annotations=_docmeta.read_only(),
         meta=_gdbmi_maturity(),
     )
+    @_with_variable_bounds
     async def debug_read_frame(
         session_id: Annotated[
             str, Field(description="The live DebugSession to inspect a stack frame on.")
@@ -134,6 +154,12 @@ def _register_debug_read_frame(
 
         The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); frame
         selection is only valid at a halt.
+
+        data.frame holds the frame's location plus args and locals, each a name, gdb's type and,
+        for a scalar or pointer, gdb's printed value (a struct or array shows its type only). Up
+        to {max_variables} variables return and each type and value is cut at {max_text}
+        characters; data.truncated says whether anything was cut. gdb may follow an argument with
+        a <name>@entry row holding its value at function entry.
         """
         return await run_engine_op_with_resolver(
             pool,

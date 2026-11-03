@@ -70,6 +70,7 @@ class RootfsCatalogEntry:
     source: RootfsSource
     makedumpfile_version: str
     drgn_version: str | None
+    retained_kernel: str | None = None
 
 
 def _catalog_error(message: str, field: str) -> CategorizedError:
@@ -115,6 +116,13 @@ def _parse_entry(row: dict[str, Any]) -> RootfsCatalogEntry:
     family = _require_str(row, "family")
     if family not in _VALID_FAMILIES:
         raise _catalog_error("rootfs catalog family is not recognized", "family")
+    if "customization_kernel" in row:
+        raise _catalog_error(
+            "replace customization_kernel with retained_kernel", "customization_kernel"
+        )
+    retained = _require_str(row, "retained_kernel") if "retained_kernel" in row else None
+    if retained is not None and (row.get("distro"), row.get("arch")) != ("fedora", "x86_64"):
+        raise _catalog_error("retained_kernel requires Fedora x86_64", "retained_kernel")
     return RootfsCatalogEntry(
         name=_require_str(row, "name"),
         distro=_require_str(row, "distro"),
@@ -125,6 +133,7 @@ def _parse_entry(row: dict[str, Any]) -> RootfsCatalogEntry:
         source=_parse_source(row.get("source")),
         makedumpfile_version=_require_str(row, "makedumpfile_version"),
         drgn_version=_parse_drgn_version(row),
+        retained_kernel=retained,
     )
 
 

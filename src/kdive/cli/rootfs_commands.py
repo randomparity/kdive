@@ -61,10 +61,10 @@ def add_build_fs_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]
 
 
 def add_stage_volume_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register ``stage-volume``: upload a built qcow2 to a remote-libvirt pool + capture config."""
+    """Register ``stage-volume`` with mandatory root inspection and fresh upload."""
     stage = sub.add_parser(
         "stage-volume",
-        help="upload a built qcow2 to a remote-libvirt storage pool and capture its kernel config",
+        help="inspect and upload a qcow2 to a fresh remote volume with verified root provenance",
     )
     stage.add_argument("--provider", default="remote-libvirt", help="the target provider")
     stage.add_argument("--image", required=True, help="the declared [[image]] catalog name")

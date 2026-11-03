@@ -412,6 +412,32 @@ Rejected for this amendment:
 - **Do nothing.** verified: see the ADR-0584 amendment of 2026-10-01; the allocator refused the
   teardown, so the System stayed stranded after lease expiry.
 
+### Amendment (2026-10-26): local teardown discards retained recovery (#3341)
+
+The local authority no longer recovers an activation's retained recovery point before it
+destroys the System. It discards the point under the pinned teardown lane:
+`discard_system_teardown_recovery` removes the activation's payloads, publishes the cleanup
+tombstone from any recovery phase, records the quarantine receipt and finalizes the tombstone,
+each step idempotent across a crash. Neither a domain nor a domain definition matching the
+recovery metadata is needed. The pinned lane's ownership check still runs first, so a foreign
+definition refuses with `provider_conflict` and nothing is discarded.
+
+Before, the authority called `recover` (without a power restore, #2898), then `cleanup`. A
+`recovery_conflict` activation could never pass that: its domain matches neither the source nor
+the target XML, so `recover` refused, and an absent domain failed to open the recovery session.
+The teardown mutation stayed at `mutation-started` and the System stayed `ready`. A teardown now
+completes from `recovery_conflict`, with the domain present or already absent. Migration 0147
+already admitted that state, so no schema, request or MCP change is needed. The remote provider
+is unchanged.
+
+Rejected for this amendment:
+
+- **Discard only for `recovery_conflict` and `recovery_failed`.** judgment: it needs the
+  activation state in the authority request, which moves the lifecycle identity hash, for a
+  restore whose result the same teardown destroys.
+- **Try `recover` and fall back to a discard on refusal.** judgment: it hides recovery defects
+  behind a second path that runs on exactly the states nobody exercises.
+
 ## Consequences
 
 The server fails closed when historical authority routing is unavailable.
@@ -431,3 +457,90 @@ teardown completion constraints.
 - **Make recovery observation resume destruction.** **verified:** observation
   is a read-only classification boundary. Resuming a mutation there would give
   a recovery read capability destructive semantics.
+
+## Amendment (2026-10-28): System teardown discharges the module reap obligation
+
+The authority's System teardown reaps the module volumes from its own records, creating the
+`reaping.journal` and `reaped.journal` markers, but nothing recorded that reap on the module
+attempt's reap obligation. The obligation stayed open, so the sweep retained both marker volumes
+for ever and every torn-down activated System leaked them (#3383). The teardown job already
+carries the PREP receipt when a reap obligation was open at admission. After the authority's
+teardown returns, and unless its disposition is `retained_quarantine`, the teardown handler now
+discharges the reap obligation through the worker evidence function with that receipt, before it
+reclaims the System's core rows and finalizes the teardown receipt. A teardown with no receipt has
+nothing to discharge. A discharge the function refuses fails the job as stale, as the module
+lifecycle path does, so a leaked obligation is never reported as a clean teardown. The discharge
+is idempotent, so a retried teardown repeats it harmlessly. No schema change.
+
+## Amendment (2026-10-28): A teardown after a completed release carries no receipt
+
+Admission required a retained PREP receipt for every remote teardown except a preparing
+activation's, and the receipt exists only while a reap obligation is open. A System torn down after
+a completed release has had its reap obligation discharged by the release's CLEANUP, so its teardown
+was refused at dispatch (#3406). Admission now also accepts a teardown with no receipt when the
+activation's run has module attempts and every one has its reap discharged
+(`reap_discharged_for_run`, one statement, per run like `read_reap_preparation`). An open reap
+obligation still puts its receipt on the job, an ambiguous read still refuses, and an activated
+System with no obligation, or with an attempt that never reached a discharged reap, is still
+refused. The teardown handler already skips the discharge when it carries no receipt. No schema
+change.
+
+## Amendment (2026-10-29): A resolve-conflict reaps the restore's module volumes
+
+A remote `resolve-conflict` commits through the authority's cleanup path, which refuses while the
+attempt's module source or scratch volume is present. The worker restored the module attempt for
+the resolve but never reaped it, and the release that recorded the conflict ended before its own
+CLEANUP, so the volumes were always present and the resolve failed at the authority (#3412). The
+resolve's module lifecycle now runs the restore and then the reap, both against the resolve's own
+authority request, before the authority mutation. The reap follows the release CLEANUP rules: it
+requires the retained restored evidence, the host admits it while the System runs, and the worker
+discharges the reap obligation through the worker evidence function, with the same tolerance for a
+retry whose reap already discharged. A re-entered resolve repeats both steps harmlessly: the host
+returns its retained restore and a reaped attempt reports its volumes absent. The lifecycle wire
+validator admits a reap under a resolve-conflict authority. No schema change.
+
+## Amendment (2026-10-29): A resolve-conflict no longer reaps, and a swept reap is idempotent (#3414)
+
+This supersedes the reap step the #3412 amendment gave a remote `resolve-conflict`. The resolve now
+commits as a recovery that leaves the recovery objects ([ADR-0805](0805-authority-observed-conflict-is-recorded-from-its-journal-head.md)),
+so its module lifecycle is the restore alone and the release `cleanup` reaps once. The wire
+validator no longer admits a reap under a resolve-conflict authority, and the host no longer
+admits one while the System runs.
+
+The host's reap is also idempotent after the module-volume sweep. The sweep deletes a discharged
+attempt's `reaping`/`reaped` markers, so a reap that finds no marker and none of the attempt's
+volumes reports the volumes absent without re-reading the scratch result, for a release `cleanup`
+retried after its discharge and for a System teardown alike. A teardown with no restored evidence
+whose attempt volumes were never created, or are already gone, therefore completes instead of
+raising "restored result differs before reap". A reap with any volume present still verifies the
+scratch result first. No schema change.
+
+## Amendment (2026-10-30): A restore's crash window does not strand teardown (#3427)
+
+A remote module restore rewrites the attempt's scratch volume to the RESTORED result and only then
+writes its evidence: the `.restored` record and the lifecycle completion. A process death between
+the two points left a teardown expecting the INSTALLED result, which raised "restored result
+differs before reap" for ever. Two rules close the window. The module store now writes `.restored`
+before the completion, so a crash between them leaves evidence that the next restore turns into a
+completion, never a completion without evidence. And a System teardown with no restored evidence
+whose scratch volume holds this attempt's finished restore (the result `_restore` itself accepts:
+bound to the derived restore operation, `success`, phase `restored`) reaps against that result
+instead of refusing; a failed or unfinished restore is still refused. A restore retry needs
+nothing new: it re-runs the appliance, which resumes the `restored` phase. The teardown discards
+the reap response, so a teardown resumed after its `reaping` marker reports the installed result
+even when the volumes held the restored one; the response is not authoritative on this path. A
+store that the earlier order left with a completion and no `.restored` keeps its CLEANUP refused;
+a System teardown recovers it. No schema change.
+
+## Amendment (2026-11-01): A failed module restore is re-driven on retry (#3469)
+
+A remote module restore whose host call raised or was cancelled published a `failed-after-mutation`
+lifecycle completion, and every retry with the same lifecycle key was refused "remote module
+lifecycle requires recovery" before the host ran, so a restore that had already rewritten the
+scratch volume could only be recovered by a System teardown. A restore completion with no response
+no longer answers a retry: the retry runs the host restore again, which the appliance resumes from
+its durable phase (ADR-0585 retry table) or refuses with no further write, and a success writes
+`.restored` and then replaces the failed completion with the terminal one. A terminal completion
+is never replaced, and a failed reap completion is still refused. The host restore runs under the
+deadline of the call that runs it rather than the deadline staged by the first call, which had
+usually expired by the time of a retry. No schema change.

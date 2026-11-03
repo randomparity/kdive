@@ -29,6 +29,27 @@
     label: "{{ item.key }}"
   when: item.key in provider_authority_host_remote_module_architectures
 
+# The authority's qemu runs svirt_t, which cannot read the var_lib_t the install tree takes by
+# default, so the kernel and initramfs would fail to open (#3346). virt_content_t is readable by
+# any svirt domain. getenforce, not the selinux fact, decides, as in provider_authority_host: the
+# fact needs the libselinux binding. libvirt_stack and provider_authority_host install sefcontext's
+# bindings on the RedHat family. The rule is written before the tree, so new files inherit it.
+- name: Read the SELinux mode for the module-appliance image label
+  ansible.builtin.command:
+    argv: [getenforce]
+  register: remote_libvirt_module_appliance_selinux_mode
+  changed_when: false
+  failed_when: false
+
+- name: Install the module-appliance image virt_content_t fcontext rule
+  community.general.sefcontext:
+    target: "{{ remote_libvirt_module_appliance_install_dir | regex_escape }}(/.*)?"
+    setype: virt_content_t
+    state: present
+  when: >-
+    remote_libvirt_module_appliance_selinux_mode.stdout | default('')
+    in ['Enforcing', 'Permissive']
+
 - name: Create the read-only module-appliance image directory
   ansible.builtin.file:
     path: "{{ remote_libvirt_module_appliance_install_dir }}"
@@ -74,6 +95,41 @@
   loop_control:
     label: "{{ item.key }}"
   when: item.key in provider_authority_host_remote_module_architectures
+
+# Plain restorecon, not -F: virt_content_t is customizable, so a tree already carrying it keeps it.
+- name: Relabel the module-appliance image tree
+  ansible.builtin.command:
+    argv: [restorecon, -R, -v, "{{ remote_libvirt_module_appliance_install_dir }}"]
+  register: remote_libvirt_module_appliance_relabel
+  changed_when: "'Relabeled' in remote_libvirt_module_appliance_relabel.stdout"
+  when: >-
+    remote_libvirt_module_appliance_selinux_mode.stdout | default('')
+    in ['Enforcing', 'Permissive']
+
+- name: Read back the module-appliance image labels
+  ansible.builtin.command:
+    argv:
+      - find
+      - "{{ remote_libvirt_module_appliance_install_dir }}"
+      - "!"
+      - -context
+      - "*:virt_content_t:*"
+  register: remote_libvirt_module_appliance_label_readback
+  changed_when: false
+  when: >-
+    remote_libvirt_module_appliance_selinux_mode.stdout | default('')
+    in ['Enforcing', 'Permissive']
+
+- name: Refuse a module-appliance image qemu cannot read
+  ansible.builtin.assert:
+    that:
+      - remote_libvirt_module_appliance_label_readback.stdout | length == 0
+    fail_msg: >-
+      These module-appliance paths are not virt_content_t, so a confined qemu cannot read
+      them: {{ remote_libvirt_module_appliance_label_readback.stdout_lines | join(', ') }}
+  when: >-
+    remote_libvirt_module_appliance_selinux_mode.stdout | default('')
+    in ['Enforcing', 'Permissive']
 
 - name: Re-read installed selected module-appliance image digests
   ansible.builtin.stat:

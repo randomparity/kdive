@@ -94,14 +94,14 @@ banner "migrate (idempotent)"
 # (kdive/db/migrate.py), and no migration grants that table to the runtime capability roles, so
 # migrate connects through the migration authority (the apply-migrations.sh shape), not a member's.
 KDIVE_DATABASE_URL="${KDIVE_MIGRATION_DATABASE_URL}" \
-  env -u KDIVE_SERVER_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+  env -u KDIVE_HARNESS_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
   -u KDIVE_RECONCILER_DATABASE_URL \
   "${py[@]}" -m kdive migrate
 
 banner "seed (funding rows commit before resource discovery)"
 seed_rc=0
 if ! KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
-  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+  env -u KDIVE_HARNESS_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
   -u KDIVE_RECONCILER_DATABASE_URL \
   "${py[@]}" -m kdive seed-project \
   --project "$PROJECT" \
@@ -113,7 +113,7 @@ fi
 
 banner "verify (the hard funding gate)"
 KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
-  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+  env -u KDIVE_HARNESS_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
   -u KDIVE_RECONCILER_DATABASE_URL \
   "${py[@]}" -m kdive verify-project --project "$PROJECT"
 

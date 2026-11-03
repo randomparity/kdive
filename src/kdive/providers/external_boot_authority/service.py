@@ -9,14 +9,19 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead
+from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead, PrestopHolders
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    ModuleVolumeSweepRequestV1,
+    ModuleVolumeSweepResponseV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     _TAKEOVER_PHASES,
     GENESIS_DIGEST,
@@ -56,6 +61,7 @@ from kdive.providers.ports.external_boot import (
     RunningKernelObservation,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    PREPARATION_ABANDONED,
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
     RemoteModulePreparationBeginRequestV1,
@@ -70,6 +76,22 @@ from kdive.serialization import ServerFaultError
 _ERROR_MESSAGE_MAX = 512
 # Defence in depth for the fixed refusal text: every URL userinfo is masked.
 _URL_USERINFO = re.compile(r"(?<=://)[^/\s]*@")
+# ADR-0805: the mutations whose refusal is re-observed for a conflict before it is answered.
+_REFUSAL_OBSERVED_OPERATIONS = frozenset(
+    {AuthorityOperation.ACTIVATE, AuthorityOperation.RECOVER, AuthorityOperation.RESOLVE_CONFLICT}
+)
+# The (purpose, operation) pairs that delete recovery objects and so need cleanup evidence.
+# read_authorized_remote_module_cleanup_evidence (migration 0145) also admits ("recover",
+# "recover"), but a RECOVER of either purpose and a conflict resolution only restore the source
+# definition: the module volumes are still present, so they commit directly and the later release
+# CLEANUP reaps them and deletes the boot artifacts (#3332, #3414). Migration 0184 removed the
+# read's ("resolve-conflict", "resolve-conflict") pair (#3432).
+_CLEANUP_EVIDENCE_COMMITS = frozenset(
+    {
+        ("release", AuthorityOperation.CLEANUP),
+        ("teardown", AuthorityOperation.TEARDOWN),
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +109,10 @@ class AuthorityMutationAdapter(Protocol):
     ) -> AuthorityObservationV1: ...
 
 
+class ProofBarrierAbort(RuntimeError):
+    """The operator failed one paused cleanup finalization (ADR-0787)."""
+
+
 class AuthorityProofCheckpoint(Protocol):
     """Optional native-only pause boundary around one already-admitted provider commit."""
 
@@ -95,7 +121,7 @@ class AuthorityProofCheckpoint(Protocol):
         system_id: UUID,
         run_id: UUID,
         operation: AuthorityOperation,
-        checkpoint: Literal["before-provider", "after-provider"],
+        checkpoint: Literal["before-provider", "after-provider", "before-finalize"],
     ) -> None: ...
 
 
@@ -123,7 +149,7 @@ class AuthorityMutationFinalizer(Protocol):
 @runtime_checkable
 class AuthorityCleanupQuarantineInventory(Protocol):
     async def cleanup_quarantine_inventory(
-        self, request: AuthorityMutationRequestV1
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> tuple[RecoveryObjectObservation, ...]: ...
 
 
@@ -148,6 +174,11 @@ class AuthorityPreparationAdapter(Protocol):
     async def preparation_receipt(
         self, request: AuthorityPreparationMutationRequestV1
     ) -> ExternalBootPreparationObservation: ...
+
+
+@runtime_checkable
+class RemoteModuleExecutionProbe(Protocol):
+    def execution_started(self, request: RemoteModuleVolumePreparationRequestV1) -> bool: ...
 
 
 @runtime_checkable
@@ -243,6 +274,14 @@ class AuthorityPreparationRepository(Protocol):
         acknowledgement_digest: str,
     ) -> AuthorityBinding | None: ...
 
+    async def prestop_system_holders(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityPreparationMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> PrestopHolders | None: ...
+
 
 @runtime_checkable
 class AuthorityTeardownRepository(Protocol):
@@ -264,6 +303,12 @@ class AuthorityRemoteModuleAttemptRepository(Protocol):
         acknowledgement_sequence: int,
         acknowledgement_digest: str,
     ) -> ModuleAttemptPreparationRequestV1 | None: ...
+
+
+class ModuleVolumeSweepPort(Protocol):
+    """The authority-owned sweep of the authority's own module pool (#3386)."""
+
+    async def sweep(self, request: ModuleVolumeSweepRequestV1) -> ModuleVolumeSweepResponseV1: ...
 
 
 class RemoteModulePreparationHost(Protocol):
@@ -346,6 +391,7 @@ JournalConflictReason = Literal[
     "orphan_binding_changed",
     "orphan_binding_changed_after_disposition",
     "orphan_digest_changed",
+    "orphan_row_foreign_authority",
     "orphan_selection_malformed",
     "orphan_system_mismatch",
     "pending_predecessor_missing",
@@ -377,6 +423,7 @@ class AuthorityServiceError(RuntimeError):
             "superseded",
             "journal_conflict",
             "provider_conflict",
+            "system_held",
             "configuration_error",
         ],
         *,
@@ -486,6 +533,12 @@ class AuthorityServiceMetrics:
                 self.unresolved.pop(key)
 
 
+def _settled_digest(kind: Literal["abandoned", "refused"], operation_identity: str) -> str:
+    """The observation identity that marks a PREPARE closed without adopting anything."""
+    tag = f"kdive-prepare-{kind}-v1".encode()
+    return "sha256:" + hashlib.sha256(tag + b"\0" + operation_identity.encode()).hexdigest()
+
+
 @dataclass(slots=True)
 class _Lane:
     lock: asyncio.Lock
@@ -522,7 +575,9 @@ class ExternalBootAuthorityService:
         recovery_orphans: AuthorityRecoveryOrphanResolver | None = None,
         proof_checkpoint: AuthorityProofCheckpoint | None = None,
         system_service: AuthoritySystemService | None = None,
+        module_volume_sweeper: ModuleVolumeSweepPort | None = None,
     ) -> None:
+        self._module_volume_sweeper = module_volume_sweeper
         self._repository = repository
         self._journal_factory = journal_factory
         self._adapter = adapter
@@ -742,6 +797,28 @@ class ExternalBootAuthorityService:
             and binding.operation_digest == request.operation_digest
         )
 
+    @classmethod
+    def _candidate_matches(
+        cls,
+        binding: AuthorityBinding,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+    ) -> bool:
+        """Whether ``binding`` is the current candidate this request runs under.
+
+        A preparation phase runs under its root activate candidate, and a derived release
+        RECOVER or CLEANUP under its root release candidate; every other request must equal
+        its binding exactly.
+        """
+        if isinstance(request, AuthorityPreparationMutationRequestV1):
+            return cls._root_candidate_matches_preparation(binding, request)
+        if (
+            binding.operation is AuthorityOperation.RELEASE
+            and request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
+        ):
+            return cls._root_candidate_matches_release_phase(binding, request)
+        return cls._binding_matches(binding, request)
+
     @staticmethod
     def _root_candidate_matches_preparation(
         binding: AuthorityBinding, request: AuthorityPreparationMutationRequestV1
@@ -830,6 +907,52 @@ class ExternalBootAuthorityService:
             and record.local_timing == getattr(request, "local_timing", None)
         )
 
+    @staticmethod
+    def _prior_release_terminals(
+        records: list[JournalRecordV1], request: AuthorityMutationRequestV1
+    ) -> list[JournalRecordV1]:
+        """Earlier generations' terminal records of this release phase, oldest first."""
+        return [
+            record
+            for record in records
+            if record.phase is JournalPhase.TERMINAL
+            and record.operation == request.operation
+            and record.activation_id == request.activation_id
+            and record.generation < request.generation
+        ]
+
+    @classmethod
+    def _proven_cleanup_context(
+        cls, request: AuthorityMutationRequestV1, records: list[JournalRecordV1]
+    ) -> AuthorityCommitContextV1:
+        """Return the proof a release phase's provider receipt holds (ADR-0787).
+
+        A release adopted from an earlier generation ran no commit of its own, so its receipt
+        holds the proof of the oldest adopted operation, the one that ran: a retry that adopted
+        it and was itself interrupted leaves a later terminal (#3416, #3434).
+        """
+        terminals = (
+            cls._prior_release_terminals(records, request)
+            if request.purpose == "release"
+            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
+            else []
+        )
+        proven_identity = (
+            terminals[0].operation_identity if terminals else request.operation_identity
+        )
+        started = next(
+            (
+                record
+                for record in reversed(records)
+                if record.operation_identity == proven_identity
+                and record.phase is JournalPhase.MUTATION_STARTED
+            ),
+            None,
+        )
+        if started is None:
+            raise AuthorityServiceError("journal_conflict", reason="mutation_started_missing")
+        return AuthorityCommitContextV1.for_record(started)
+
     async def _finalize_adapter(
         self,
         request: AuthorityMutationRequestV1,
@@ -839,19 +962,18 @@ class ExternalBootAuthorityService:
             return
         if not isinstance(self._adapter, AuthorityMutationFinalizer):
             return
-        started = next(
-            (
-                record
-                for record in reversed(records)
-                if record.operation_identity == request.operation_identity
-                and record.phase is JournalPhase.MUTATION_STARTED
-            ),
-            None,
-        )
-        if started is None:
-            raise AuthorityServiceError("journal_conflict", reason="mutation_started_missing")
+        context = self._proven_cleanup_context(request, records)
+        if self._proof_checkpoint is not None:
+            # Only an operator abort is a finalize failure; a shutdown propagates unmapped and so
+            # never publishes a quarantine (ADR-0787).
+            try:
+                await self._proof_checkpoint.checkpoint(
+                    request.system_id, request.run_id, request.operation, "before-finalize"
+                )
+            except ProofBarrierAbort as error:
+                raise self._provider_error(request, error) from None
         try:
-            await self._adapter.finalize(request, AuthorityCommitContextV1.for_record(started))
+            await self._adapter.finalize(request, context)
         except AuthorityServiceError:
             raise
         except Exception as error:
@@ -863,6 +985,7 @@ class ExternalBootAuthorityService:
         binding: AuthorityBinding,
         request: AuthorityMutationRequestV1,
         terminal: JournalRecordV1,
+        records: list[JournalRecordV1],
     ) -> None:
         """Publish only a receipt re-opened by the trusted private provider boundary."""
         if not (
@@ -870,7 +993,9 @@ class ExternalBootAuthorityService:
             and isinstance(self._repository, AuthorityCleanupQuarantineRepository)
         ):
             return
-        observations = await self._adapter.cleanup_quarantine_inventory(request)
+        observations = await self._adapter.cleanup_quarantine_inventory(
+            request, self._proven_cleanup_context(request, records)
+        )
         if observations:
             await self._repository.publish_cleanup_quarantine(peer, binding, terminal, observations)
 
@@ -992,6 +1117,37 @@ class ExternalBootAuthorityService:
         records.append(record)
         return records
 
+    async def _prestop_refusal(
+        self,
+        authenticated: AuthenticatedPeer,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+        acknowledgement: JournalRecordV1,
+    ) -> AuthorityServiceError | None:
+        """ADR-0583: refuse a PREPARE while a session or another job holds the System.
+
+        Read through core's authority-bound snapshot immediately before the first stop. A held
+        System is ``system_held``; an unreadable answer is a ``provider_conflict`` (retried),
+        because neither may mutate the provider. The read and the stop are not one atomic step:
+        an attach that commits between them is not seen.
+        """
+        if not isinstance(request, AuthorityPreparationMutationRequestV1):
+            return None
+        if request.operation is not AuthorityOperation.PREPARE:
+            return None
+        if not isinstance(self._repository, AuthorityPreparationRepository):
+            return AuthorityServiceError("provider_conflict")
+        try:
+            holders = await self._repository.prestop_system_holders(
+                authenticated, request, acknowledgement.sequence, record_digest(acknowledgement)
+            )
+        except Exception as error:  # noqa: BLE001 - an unreadable answer must refuse, not raise
+            return self._provider_error(request, error)
+        if holders is None:
+            return AuthorityServiceError("superseded")
+        if holders != "clear":
+            return AuthorityServiceError("system_held")
+        return None
+
     def _provider_error(
         self,
         request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
@@ -1022,6 +1178,52 @@ class ExternalBootAuthorityService:
                 "authority provider boundary failed: %s", type(error).__qualname__, extra=extra
             )
         return AuthorityServiceError("provider_conflict", telemetry_recorded=True)
+
+    async def _answer_refusal(  # noqa: PLR0913 - the mutation path's own context, passed through
+        self,
+        authenticated: AuthenticatedPeer,
+        lane: _Lane,
+        active: _ActiveOperation,
+        binding: AuthorityBinding,
+        journal: FileAuthorityJournal,
+        records: list[JournalRecordV1],
+        request: AuthorityMutationRequestV1,
+        refusal: AuthorityServiceError,
+    ) -> AuthorityObservationV1:
+        """Answer a refused provider call with the conflict its state proves (ADR-0805).
+
+        Only an activate, recover or resolve-conflict refusal whose fresh observation is a third or
+        unowned state is journaled terminal and answered with that observation. Anything else —
+        including ``mixed``, which durable phase evidence may still resume — leaves the operation
+        at ``mutation-started`` and keeps the ADR-0714 retry, exactly as before.
+        """
+        if request.operation not in _REFUSAL_OBSERVED_OPERATIONS:
+            raise refusal
+        try:
+            observation = await self._adapter.observe(request)
+        except Exception:  # noqa: BLE001 - an unobservable refusal stays the refusal it was
+            raise refusal from None
+        if observation.category != "conflict":
+            raise refusal
+        async with lane.lock:
+            # A takeover during the unlocked observe moves the completion binding (ADR-0584).
+            binding = active.completion_binding or binding
+            for phase, changes in (
+                (JournalPhase.PROVIDER_RETURNED, {}),
+                (JournalPhase.OBSERVED, {"observation": observation}),
+                (JournalPhase.TERMINAL, {"observation": observation, "outcome": "conflict"}),
+            ):
+                records = await self._anchor(
+                    binding, journal, records, self._record(request, records, phase, **changes)
+                )
+            try:
+                await self._finalize_adapter(request, records)
+            except AuthorityServiceError:
+                await self._publish_cleanup_quarantine(
+                    authenticated, binding, request, records[-1], records
+                )
+                raise
+        return observation
 
     async def _head_still_anchors(
         self, binding: AuthorityBinding, context: AuthorityCommitContextV1
@@ -1590,16 +1792,7 @@ class ExternalBootAuthorityService:
             raise AuthorityServiceError("superseded")
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
-        candidate_matches = trusted is not None and (
-            self._root_candidate_matches_preparation(trusted, request)
-            if isinstance(request, AuthorityPreparationMutationRequestV1)
-            else self._root_candidate_matches_release_phase(trusted, request)
-            if trusted.operation is AuthorityOperation.RELEASE
-            and request.purpose == "release"
-            and request.operation in {AuthorityOperation.RECOVER, AuthorityOperation.CLEANUP}
-            else self._binding_matches(trusted, request)
-        )
-        if not candidate_matches:
+        if trusted is None or not self._candidate_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
@@ -1647,7 +1840,7 @@ class ExternalBootAuthorityService:
                             await self._finalize_adapter(request, records)
                         except AuthorityServiceError:
                             await self._publish_cleanup_quarantine(
-                                authenticated, binding, request, prior
+                                authenticated, binding, request, prior, records
                             )
                             raise
                         return prior.observation
@@ -1702,16 +1895,9 @@ class ExternalBootAuthorityService:
                         AuthorityOperation.RECOVER,
                         AuthorityOperation.CLEANUP,
                     }:
-                        prior_release_phase = next(
-                            (
-                                record
-                                for record in reversed(records)
-                                if record.phase is JournalPhase.TERMINAL
-                                and record.operation == request.operation
-                                and record.activation_id == request.activation_id
-                                and record.generation < request.generation
-                            ),
-                            None,
+                        prior_release_terminals = self._prior_release_terminals(records, request)
+                        prior_release_phase = (
+                            prior_release_terminals[-1] if prior_release_terminals else None
                         )
                         if prior_release_phase is not None:
                             candidate = request.model_copy(
@@ -1791,6 +1977,14 @@ class ExternalBootAuthorityService:
                                 "journal_conflict", reason="unresolved_binding_mismatch"
                             )
                         raise AuthorityServiceError("provider_conflict")
+                    # An adopted predecessor performs no stop, and a refusal here is answered
+                    # before any journal record so the same operation can be admitted again.
+                    if predecessor is None and (
+                        refusal := await self._prestop_refusal(
+                            authenticated, request, acknowledgement
+                        )
+                    ):
+                        raise refusal
                     records = await self._anchor(
                         binding,
                         journal,
@@ -1848,6 +2042,7 @@ class ExternalBootAuthorityService:
                         or observed.composite_state != request.expected_observed_composite
                     ):
                         raise AuthorityServiceError("superseded")
+                in_provider = False
                 try:
                     if self._proof_checkpoint is not None and adopted_release_phase is None:
                         await self._proof_checkpoint.checkpoint(
@@ -1856,6 +2051,7 @@ class ExternalBootAuthorityService:
                             request.operation,
                             "before-provider",
                         )
+                    in_provider = adopted_release_phase is None
                     if predecessor is not None:
                         if not isinstance(self._adapter, AuthorityPreparationAdopter):
                             raise AuthorityServiceError("provider_conflict")
@@ -1875,12 +2071,10 @@ class ExternalBootAuthorityService:
                             request, context, teardown_snapshot.reservation
                         )
                     elif adopted_release_phase is None:
-                        cleanup_operations = {
-                            AuthorityOperation.RECOVER,
-                            AuthorityOperation.TEARDOWN,
-                            AuthorityOperation.RESOLVE_CONFLICT,
-                        }
-                        if request.operation in cleanup_operations and isinstance(
+                        if (
+                            request.purpose,
+                            request.operation,
+                        ) in _CLEANUP_EVIDENCE_COMMITS and isinstance(
                             self._adapter, AuthorityCleanupAdapter
                         ):
                             if not isinstance(self._repository, AuthorityCleanupRepository):
@@ -1899,6 +2093,7 @@ class ExternalBootAuthorityService:
                             await self._adapter.commit_cleanup(request, context, evidence)
                         else:
                             await self._adapter.commit(request, context)
+                    in_provider = False
                     if self._proof_checkpoint is not None and adopted_release_phase is None:
                         await self._proof_checkpoint.checkpoint(
                             request.system_id,
@@ -1906,12 +2101,29 @@ class ExternalBootAuthorityService:
                             request.operation,
                             "after-provider",
                         )
-                except AuthorityServiceError:
+                except AuthorityServiceError as error:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.
-                    raise
+                    if not in_provider or error.category != "provider_conflict":
+                        raise
+                    refusal = error
                 except Exception as error:
-                    raise self._provider_error(request, error) from None
+                    refusal = self._provider_error(request, error)
+                    if not in_provider:
+                        raise refusal from None
+                else:
+                    refusal = None
+                if refusal is not None:
+                    return await self._answer_refusal(
+                        authenticated,
+                        lane,
+                        active,
+                        binding,
+                        journal,
+                        records,
+                        request,
+                        refusal,
+                    )
                 async with lane.lock:
                     completion_binding = active.completion_binding or binding
                     records = await self._anchor(
@@ -1971,7 +2183,7 @@ class ExternalBootAuthorityService:
                         await self._finalize_adapter(request, records)
                     except AuthorityServiceError:
                         await self._publish_cleanup_quarantine(
-                            authenticated, completion_binding, request, records[-1]
+                            authenticated, completion_binding, request, records[-1], records
                         )
                         raise
                     return observation
@@ -1992,6 +2204,14 @@ class ExternalBootAuthorityService:
             self._ensure_rejection(request, error)
             raise
 
+    async def sweep_module_volumes(
+        self, peer: AuthenticatedPeer | None, request: ModuleVolumeSweepRequestV1
+    ) -> ModuleVolumeSweepResponseV1:
+        """Sweep the authority's own module pool for an authenticated peer (#3386)."""
+        if peer is None or self._module_volume_sweeper is None:
+            raise AuthorityServiceError("provider_conflict")
+        return await self._module_volume_sweeper.sweep(request)
+
     async def open_remote_module_attempt(
         self,
         peer: AuthenticatedPeer | None,
@@ -2011,6 +2231,7 @@ class ExternalBootAuthorityService:
         if trusted is None or not self._root_candidate_matches_preparation(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
+        anchored_here = False
         try:
             async with lane.lock:
                 if lane.failed:
@@ -2067,6 +2288,10 @@ class ExternalBootAuthorityService:
                     )
                     if unresolved is not None:
                         raise AuthorityServiceError("provider_conflict")
+                    if refusal := await self._prestop_refusal(
+                        authenticated, request, acknowledgement
+                    ):
+                        raise refusal
                     records = await self._anchor(
                         binding,
                         journal,
@@ -2079,6 +2304,7 @@ class ExternalBootAuthorityService:
                         records,
                         self._record(mutation, records, JournalPhase.MUTATION_STARTED),
                     )
+                    anchored_here = True
                 receipt = await self._repository.open_remote_module_attempt(
                     authenticated,
                     request,
@@ -2086,6 +2312,13 @@ class ExternalBootAuthorityService:
                     record_digest(acknowledgement),
                 )
                 if receipt is None:
+                    if anchored_here:
+                        # A definitive refusal of an operation this call anchored; a re-begin
+                        # of an earlier operation may belong to a live execute, and a transient
+                        # host failure must stay retryable, so neither is settled.
+                        await self._settle_abandoned_preparation(
+                            mutation, records, journal, binding, lane, "refused", lane_locked=True
+                        )
                     raise AuthorityServiceError("superseded")
                 return await self._remote_module_host.begin(request, receipt, begin.budget_seconds)
         except AuthorityServiceError as error:
@@ -2151,6 +2384,22 @@ class ExternalBootAuthorityService:
                             raise AuthorityServiceError(
                                 "journal_conflict", reason="terminal_operation_mismatch"
                             )
+                        settled = (
+                            terminal.observation.composite_state
+                            if terminal.outcome == "source" and terminal.observation is not None
+                            else None
+                        )
+                        if settled == _settled_digest("abandoned", request.operation_identity):
+                            raise CategorizedError(
+                                "remote module preparation was abandoned",
+                                category=ErrorCategory.CONFLICT,
+                                details={"completion": "failed-after-mutation"},
+                            )
+                        if settled == _settled_digest("refused", request.operation_identity):
+                            raise (
+                                await self._prestop_refusal(authenticated, request, acknowledgement)
+                                or AuthorityServiceError("provider_conflict")
+                            )
                         result = await host.execute(remote)
                         result.validate_terminal_for(remote.operation, request)
                         return result
@@ -2178,6 +2427,15 @@ class ExternalBootAuthorityService:
                             record_digest(acknowledgement),
                         )
                         if receipt is None:
+                            await self._settle_abandoned_preparation(
+                                mutation,
+                                records,
+                                journal,
+                                binding,
+                                lane,
+                                "refused",
+                                lane_locked=True,
+                            )
                             raise AuthorityServiceError("superseded")
                         active = _ActiveOperation(
                             request.generation,
@@ -2212,7 +2470,40 @@ class ExternalBootAuthorityService:
                             "journal_conflict", reason="finish_mutation_started_missing"
                         )
                     context = AuthorityCommitContextV1.for_record(started)
-                result = await host.execute(remote)
+                # A resumed execute may already have stopped the System; refusing it now would
+                # report "refused-before-mutation" for a mutation that happened.
+                resumed = isinstance(host, RemoteModuleExecutionProbe) and host.execution_started(
+                    remote
+                )
+                if not resumed and (
+                    refusal := await self._prestop_refusal(authenticated, request, acknowledgement)
+                ):
+                    if refusal.category in {"system_held", "provider_conflict"}:
+                        await self._settle_abandoned_preparation(
+                            mutation,
+                            records,
+                            journal,
+                            active.completion_binding or binding,
+                            lane,
+                            "refused",
+                        )
+                    raise refusal
+                try:
+                    result = await host.execute(remote)
+                except Exception as failure:
+                    if (
+                        isinstance(failure, CategorizedError)
+                        and failure.details.get(PREPARATION_ABANDONED) is True
+                    ):
+                        await self._settle_abandoned_preparation(
+                            mutation,
+                            records,
+                            journal,
+                            active.completion_binding or binding,
+                            lane,
+                            "abandoned",
+                        )
+                    raise
                 result.validate_terminal_for(remote.operation, request)
                 rechecked = await self._resolve_confirmed(authenticated, mutation, acknowledgement)
                 if rechecked is None or not self._binding_matches(rechecked, mutation):
@@ -2297,7 +2588,7 @@ class ExternalBootAuthorityService:
         request = remote.authority
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
-        if trusted is None or not self._binding_matches(trusted, request):
+        if trusted is None or not self._candidate_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 
@@ -2340,6 +2631,66 @@ class ExternalBootAuthorityService:
         except AuthorityServiceError as error:
             self._ensure_rejection(request, error)
             raise
+
+    async def _settle_abandoned_preparation(
+        self,
+        mutation: AuthorityMutationRequestV1,
+        records: list[JournalRecordV1],
+        journal: FileAuthorityJournal,
+        binding: AuthorityBinding,
+        lane: _Lane,
+        kind: Literal["abandoned", "refused"],
+        *,
+        lane_locked: bool = False,
+    ) -> None:
+        """Close a PREPARE that was refused or abandoned, so a retry or teardown is not refused.
+
+        A pre-stop refusal mutated nothing, and the provider restored the System before reporting
+        an abandon, so nothing was adopted:
+        the op ends ``source`` through the same PROVIDER_RETURNED, OBSERVED, TERMINAL anchors a
+        recovered op uses. A failure here leaves the op unresolved, which is today's state, so it
+        is logged and never replaces the provider's failure.
+        """
+        digest = _settled_digest(kind, mutation.operation_identity)
+        observation = AuthorityObservationV1(
+            observation_id=uuid5(NAMESPACE_URL, digest), category="source", composite_state=digest
+        )
+        try:
+            async with nullcontext() if lane_locked else lane.lock:
+                records = await self._anchor(
+                    binding,
+                    journal,
+                    records,
+                    self._record(mutation, records, JournalPhase.PROVIDER_RETURNED),
+                )
+                records = await self._anchor(
+                    binding,
+                    journal,
+                    records,
+                    self._record(mutation, records, JournalPhase.OBSERVED, observation=observation),
+                )
+                await self._anchor(
+                    binding,
+                    journal,
+                    records,
+                    self._record(
+                        mutation,
+                        records,
+                        JournalPhase.TERMINAL,
+                        observation=observation,
+                        outcome="source",
+                    ),
+                )
+        except Exception as error:  # noqa: BLE001 -- the provider's failure is the one reported
+            superseded = getattr(error, "category", None) == "superseded"
+            (self._logger.warning if superseded else self._logger.error)(
+                "abandoned remote module preparation could not be settled",
+                extra={
+                    "error": type(error).__qualname__,
+                    "category": getattr(error, "category", None),
+                    "reason": getattr(error, "reason", None),
+                },
+            )
 
     async def execute_conflict_resolution(
         self, peer: AuthenticatedPeer | None, request: AuthorityConflictResolutionRequestV1
@@ -2499,7 +2850,7 @@ class ExternalBootAuthorityService:
     ) -> T:
         authenticated = self._require_peer(peer, request)
         trusted = await self._repository.resolve_current_candidate(authenticated, request)
-        if trusted is None or not self._binding_matches(trusted, request):
+        if trusted is None or not self._candidate_matches(trusted, request):
             raise self._reject("superseded", labels=self._trusted_labels(trusted))
         lane = self._lane(trusted.system_id)
 

@@ -20,18 +20,27 @@ resolve_libvirt_uri || return $?
 # container-INTERNAL ports never move (a service always binds its canonical port inside its netns);
 # only the host mapping does — so an operator whose host already runs e.g. Postgres on 5432 or a
 # vLLM on 8000 can relocate kdive's mapping without touching any container.
-export KDIVE_POSTGRES_PORT="${KDIVE_POSTGRES_PORT:-5432}"
-export KDIVE_SEAWEEDFS_PORT="${KDIVE_SEAWEEDFS_PORT:-8333}"
-export KDIVE_OIDC_PORT="${KDIVE_OIDC_PORT:-8090}"
+export KDIVE_POSTGRES_PORT="${KDIVE_POSTGRES_PORT:-127.0.0.1:5432}"
+export KDIVE_SEAWEEDFS_PORT="${KDIVE_SEAWEEDFS_PORT:-127.0.0.1:8333}"
+export KDIVE_OIDC_PORT="${KDIVE_OIDC_PORT:-127.0.0.1:8090}"
 export KDIVE_PROMETHEUS_PORT="${KDIVE_PROMETHEUS_PORT:-9090}"
 export KDIVE_GRAFANA_PORT="${KDIVE_GRAFANA_PORT:-3000}"
 
-database_host="localhost:${KDIVE_POSTGRES_PORT}/kdive"
+# shellcheck source=scripts/live-stack/backend-endpoint.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/backend-endpoint.sh" || return $?
+
+postgres_endpoint="$(backend_endpoint KDIVE_POSTGRES_PORT)" || return $?
+seaweedfs_endpoint="$(backend_endpoint KDIVE_SEAWEEDFS_PORT)" || return $?
+oidc_endpoint="$(backend_endpoint KDIVE_OIDC_PORT)" || return $?
+
+database_host="${postgres_endpoint}/kdive"
 # One DSN per host database authority (#1929): the migration owner plus one login member per
 # runtime process. No process may receive another authority's DSN, so there is deliberately no
 # shared KDIVE_DATABASE_URL default here; every consumer names its own variable and
-# apply-migrations.sh scrubs the runtime DSNs from the migration process environment.
-# The following four values are development credentials. # pragma: allowlist secret
+# apply-migrations.sh scrubs the runtime DSNs from the migration process environment. The live-tier
+# harness (live_stack cells, the installed authority carriers) has its own least-privilege login
+# that the role bootstrap creates (ADR-0769); tests take it as KDIVE_DATABASE_URL.
+# The following five values are development credentials. # pragma: allowlist secret
 default_migration_login="kdive-migration:kdive-migration-local" # pragma: allowlist secret
 default_migration_url="postgresql://${default_migration_login}@${database_host}"
 default_server_login="kdive-server-member:kdive-server-local" # pragma: allowlist secret
@@ -40,12 +49,15 @@ default_worker_login="kdive-worker-member:kdive-worker-local" # pragma: allowlis
 default_worker_url="postgresql://${default_worker_login}@${database_host}"
 reconciler_login="kdive-reconciler-member:kdive-reconciler-local" # pragma: allowlist secret
 default_reconciler_url="postgresql://${reconciler_login}@${database_host}"
+harness_login="kdive-harness:kdive-harness-local" # pragma: allowlist secret
+default_harness_url="postgresql://${harness_login}@${database_host}"
 export KDIVE_MIGRATION_DATABASE_URL="${KDIVE_MIGRATION_DATABASE_URL:-${default_migration_url}}"
 export KDIVE_SERVER_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL:-${default_server_url}}"
 export KDIVE_WORKER_DATABASE_URL="${KDIVE_WORKER_DATABASE_URL:-${default_worker_url}}"
 export KDIVE_RECONCILER_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL:-${default_reconciler_url}}"
-export KDIVE_OIDC_ISSUER="${KDIVE_OIDC_ISSUER:-http://localhost:${KDIVE_OIDC_PORT}/default}"
-export KDIVE_OIDC_JWKS_URI="${KDIVE_OIDC_JWKS_URI:-http://localhost:${KDIVE_OIDC_PORT}/default/jwks}"
+export KDIVE_HARNESS_DATABASE_URL="${KDIVE_HARNESS_DATABASE_URL:-${default_harness_url}}"
+export KDIVE_OIDC_ISSUER="${KDIVE_OIDC_ISSUER:-http://${oidc_endpoint}/default}"
+export KDIVE_OIDC_JWKS_URI="${KDIVE_OIDC_JWKS_URI:-http://${oidc_endpoint}/default/jwks}"
 export KDIVE_OIDC_AUDIENCE="${KDIVE_OIDC_AUDIENCE:-kdive}"
 # Lifetime (seconds) of the demo token onboard.sh and examples/local-libvirt/mint-token.sh mint.
 # Single source of truth: both scripts source this file, so this one default reaches both. The
@@ -65,7 +77,7 @@ if [[ -z "${KDIVE_OIDC_IMAGE+set}" && "$(uname -m 2>/dev/null || true)" == "ppc6
   grep -q 'emulated by qemu' /sys/firmware/devicetree/base/model 2>/dev/null; then
   export KDIVE_OIDC_IMAGE="ghcr.io/randomparity/mock-oauth2-server@sha256:e11ba633538714499356765720c05ef57ecb0ac70db4ca780f6a44d2e49a070a"
 fi
-export KDIVE_S3_ENDPOINT_URL="${KDIVE_S3_ENDPOINT_URL:-http://localhost:${KDIVE_SEAWEEDFS_PORT}}"
+export KDIVE_S3_ENDPOINT_URL="${KDIVE_S3_ENDPOINT_URL:-http://${seaweedfs_endpoint}}"
 export KDIVE_S3_BUCKET="${KDIVE_S3_BUCKET:-kdive-artifacts}"
 export KDIVE_S3_REGION="${KDIVE_S3_REGION:-us-east-1}"
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-kdive}"
@@ -100,12 +112,10 @@ export KDIVE_LOG_LEVEL="${KDIVE_LOG_LEVEL:-INFO}"
 # native job for CI. A live_vm proof that cannot resolve it now fails instead of skipping, so an
 # absent value can no longer read as a passing tier.
 #
-# KDIVE_KERNEL_SRC: warm-tree kernel source for local builds. An explicit value is honored
-# verbatim. The convenience default ${HOME}/src/linux is HOME-relative, so a privileged restart
-# ($HOME -> /root) would silently re-point it to a nonexistent /root/src/linux and every build would
-# fail configuration_error with no signal until attempted (#701). So the default is only exported
-# when it resolves to an existing directory; otherwise KDIVE_KERNEL_SRC is left unset, which
-# ops.diagnostics surfaces as an honest local_kernel_src FAIL instead of a misleading green.
+# KDIVE_KERNEL_SRC: the built kernel tree the live proofs and operator scripts read as their
+# fixture (workers never read it; ADR-0316). An explicit value is honored verbatim. The
+# HOME-relative default ${HOME}/src/linux is exported only when it exists, so a privileged
+# shell ($HOME -> /root) leaves it unset and each proof's own preflight names the gap.
 if [[ -n "${KDIVE_KERNEL_SRC:-}" ]]; then
   export KDIVE_KERNEL_SRC
 elif [[ -n "${HOME:-}" && -d "${HOME}/src/linux" ]]; then

@@ -123,15 +123,19 @@ into `boot_throwaway_domain(mode=…)`.
 - **Daemon layout follows the host distro.** The supported Debian/Ubuntu lifecycle host
   uses monolithic `libvirtd`; Red Hat-family hosts use modular `virtqemud`. Use the
   endpoint published by host provisioning rather than assuming either layout.
-- **Guest confinement is named per environment.** Under **system mode** on the
-  RHEL-family self-hosted runner, staged images must be relabeled SELinux
-  `virt_image_t`; under system mode on an Ubuntu host, AppArmor's `libvirt-qemu`
-  profile applies. **Session mode still confines the domain** — qemu runs as
-  `svirt_t` with its own MCS categories — but the unprivileged daemon performs no
-  image *relabel*, so the static label on the image tree has to be one `svirt_t`
-  can use: `svirt_image_t`
+- **Guest confinement is named per environment.** On SELinux hosts, staged images
+  use `virt_image_t` in system mode and `svirt_image_t` in session mode. SELinux
+  session guests run as `svirt_t` with per-domain MCS categories, but the
+  unprivileged daemon performs no image relabel
   ([ADR-0640](../../adr/0640-static-svirt-image-label-for-session-mode-domains.md)).
-  A session-mode tier sidesteps the relabel, not sVirt.
+  On the supported Ubuntu AppArmor session deployment, the daemon's enforcing
+  profile does **not** confine its QEMU guests: capabilities report `none` and
+  guests run `unconfined`. The system endpoint advertises AppArmor capability;
+  that observation is not a system-mode guest proof or permission to switch
+  endpoints. [ADR-0741](../../adr/0741-apparmor-session-confinement-posture.md)
+  accepts this documented session limitation without changing daemon ownership.
+  The required host-install confinement assertion still fails for unconfined
+  guests; this posture does not qualify the Debian cell or release 0.5.0.
 - **Guest image and matching debuginfo** are staged at a known location and kept
   warm between runs on the self-hosted host.
 
@@ -208,16 +212,17 @@ at that path and re-verify the SHA-256.
 **Carrier DSN.** The carrier reads authority-private tables for its evidence, for example
 `external_boot_release_cleanup_receipts`. The migrations revoke these tables from `PUBLIC` and
 give no read grant to `kdive_server`. Thus the server DSN that the other live tiers use cannot
-read them. Set `KDIVE_DATABASE_URL` to the migration-owner DSN, which is
-`KDIVE_MIGRATION_DATABASE_URL` in the
-[live-stack DSN table](live-stack.md#2-review-the-host-process-env). Before it provisions the
+read them. Set `KDIVE_DATABASE_URL` to the least-privilege harness login, which is
+`KDIVE_HARNESS_DATABASE_URL` in the
+[live-stack DSN table](live-stack.md#2-review-the-host-process-env). The role bootstrap creates
+that login and grants it `SELECT` on every table (ADR-0769). Before it provisions the
 fixture, the carrier checks that its DSN can `SELECT` each table that it reads. If the DSN
 cannot, the carrier fails before any mutation. The error names each table and the required DSN.
 
 Run only the focused carrier after provisioning and backend bring-up:
 
 ```sh
-KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL" \
+KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" \
 KDIVE_LIVE_VM_LOCAL_AUTHORITY_CONFIG=/protected/local-authority-carrier.json \
   uv run python -m pytest tests/live_vm/test_installed_local_authority.py -q
 ```
@@ -241,11 +246,15 @@ audit/history records; do not run a prefix-wide or host-wide reaper.
 Set `live_vm_host_authority_fault_proof_enabled: true` only for a disposable native proof host to
 install the disabled-by-default authority-owned socket at
 `/run/kdive/provider-authority/proof-control/control.sock`. Put that exact absolute path in the
-carrier's optional `barrier_socket`. Root may then send only bounded `arm`, `status`, and `release`
-requests. An arm binds the configured System and exact Run, one existing operation, and the fixed
-`before-provider` or `after-provider` checkpoint. It is root-only by `SO_PEERCRED`, permits one
-arm, and never selects or executes a provider action. Shutdown aborts a wait rather than releasing
-it. The fault carrier uses `after-provider` to restart the authority before it can record
+carrier's optional `barrier_socket`. Root may then send only bounded `arm`, `status`, `release`
+and `abort` requests. An arm binds the configured System and exact Run, one existing operation, and
+the fixed `before-provider` or `after-provider` checkpoint, or `before-finalize` for the `cleanup`
+operation only ([ADR-0787](../../adr/0787-abortable-finalize-proof-checkpoint.md)). `abort` is
+accepted only while that `before-finalize` arm is reached: it fails that one cleanup finalization,
+which the authority then publishes as a real recovery quarantine. It is root-only by
+`SO_PEERCRED`, permits one arm, and never selects or executes a provider action. Releasing an arm
+that was never reached clears it. Shutdown aborts a wait rather than releasing it, and a shutdown at
+`before-finalize` publishes nothing. The fault carrier uses `after-provider` to restart the authority before it can record
 `provider-returned`, then requires the real job's ordinary recovery path to finish.
 
 The barrier does not support journal deletion or synthetic stale database writes. Those #2151
@@ -263,13 +272,14 @@ overlay and console owner and the live private-daemon domain before any public i
 request. The configured System must be disposable; this setup is not a migration mechanism for
 ordinary worker-owned Systems.
 
-**Fixture cleanup.** In `create` mode the fixture script reports the five exact names it made for
+**Fixture cleanup.** In `create` mode the fixture script reports the six exact names it made for
 the configured System, and the carrier records each one in its resource ledger:
 
 - `/var/lib/kdive/provider-authority/rootfs/<uuid>-fixture-base.qcow2`
 - `/var/lib/kdive/provider-authority/rootfs/<uuid>-baseline`
 - `/var/lib/kdive/provider-authority/rootfs/<uuid>-overlay.qcow2`
 - `/var/lib/kdive/provider-authority/console/<uuid>.log`
+- `/var/lib/kdive/provider-authority/console/<uuid>.boot` (the per-start boot marker, #3254)
 - the domain `kdive-<uuid>` on the private authority daemon
 
 When the rest of the run ends, whether it passed or failed and after the Investigation close
@@ -289,6 +299,7 @@ came back. Run the same exact-name mode, domain first:
 ```sh
 uuid=<system_id>
 for name in "kdive-$uuid" \
+  "/var/lib/kdive/provider-authority/console/$uuid.boot" \
   "/var/lib/kdive/provider-authority/console/$uuid.log" \
   "/var/lib/kdive/provider-authority/rootfs/$uuid-overlay.qcow2" \
   "/var/lib/kdive/provider-authority/rootfs/$uuid-baseline" \
@@ -316,7 +327,7 @@ the allocation has external-boot history (#2966): the teardown always runs first
 
 - `create` (the default): the fixture script refuses when the System's domain still exists on
   the private authority daemon. Otherwise it removes the System's worker domain and old fixture
-  files, provisions a new fixture on the private authority daemon, and reports its five names.
+  files, provisions a new fixture on the private authority daemon, and reports its six names.
   The carrier records them and removes them when the run ends
   ([fixture cleanup](#installed-local-authority-carrier)).
 - `verify-existing`: the carrier only verifies, read-only, a fixture that is already present, and
@@ -369,12 +380,12 @@ and provision a new disposable System; otherwise authority-routed install fails 
 Run only the focused carrier after provisioning and backend bring-up on the POWER host:
 
 ```sh
-KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL" \
+KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" \
 KDIVE_LIVE_VM_POWER_AUTHORITY_CONFIG=/protected/power-authority-carrier.json \
   uv run python -m pytest tests/live_vm/test_installed_local_authority_ppc64le.py -q
 ```
 
-This carrier also needs the migration-owner DSN in `KDIVE_DATABASE_URL`, and it does the same
+This carrier also needs the harness DSN in `KDIVE_DATABASE_URL`, and it does the same
 DSN check before any mutation. See the **Carrier DSN** paragraph in
 [Installed local authority carrier](#installed-local-authority-carrier).
 
@@ -393,6 +404,285 @@ and the [live-stack runbook](live-stack.md) before running this carrier.
 The mock-OIDC image selection note in the cross-platform guide covers the POWER OIDC image
 requirement; `qemu:///system` and root-process constraints also apply.
 
+
+### Separate installed authority lanes
+
+For #3183/#3152, assign an exclusive Ubuntu 26.04 x86_64 local-authority host and a
+separate Fedora 44 x86_64 remote-authority target. Keep the ordinary remote-provider lane on
+its existing assignment: adding an authority tuple changes install/boot routing. These lanes
+establish deployment prerequisites for #3184–#3186; readiness does not qualify their HTTP cells.
+Native POWER qualification remains pending under #2818, and #2803 coverage is unchanged.
+
+Before either host changes, retain a private observation of current ownership, snapshot level,
+running consumers and jobs, nested KVM usability, confinement mode, available CPU/RAM/disk and
+exclusive availability. A snapshot called `kernel-src` proves neither an installed authority nor
+a candidate revision. Budget one live scenario at a time from observed headroom; do not overlap
+kernel builds. Record the separate ordinary-provider assignment as well.
+
+Review the exact restore and installation plans before apply. Installation approval is separate
+from permission to restore a snapshot. The installation plan names:
+
+- the clean candidate's full commit SHA, target assignment and exact provisioning invocation;
+- protected input **references**, their owners/modes and certificate lifetime, authority modes
+  and routes, capacity bytes and concurrency, plus manifest/base SHA-256 digests and provenance;
+- backend/schema prerequisites, the database LOGIN's existing role membership, S3 access scope,
+  and the readiness, denial, deployed-identity and cleanup observations to run;
+- retained installation state versus proof-owned transient state, failure handling and the
+  exact-owned retirement or separately approved snapshot restore procedure.
+
+Keep addresses, accounts, inventory paths, credential locations and raw evidence private. Public
+results use anonymous lane labels and the candidate SHA. Do not publish credential values or
+put them in command-line extra vars. `--check` is not an approval bypass: some existing preflight
+commands deliberately run in check mode.
+
+#### Local composition without runner registration
+
+Use [installed-local-authority.yml](../../../deploy/ansible/playbooks/installed-local-authority.yml).
+It targets the existing `live_vm_runners` inventory group, reuses `libvirt_stack`,
+`libvirt_pool_net` and `live_vm_host`, and registers no GitHub runner. Set
+`installed_authority_operator_user` explicitly; it maps to the host role's operator account.
+Set `live_vm_repo_version` to the reviewed full 40-character SHA, not a branch or tag.
+
+The protected vars must enable `live_vm_host_authority_enabled`,
+`live_vm_host_worker_authority_enabled` and `live_vm_host_authority_local_mutation_enabled`,
+and supply `live_vm_host_authority_system_manifest_source` with
+`live_vm_host_authority_system_local_bases`. Existing preflight validates the canonical manifest
+and the immutable base digests before host roles run. The authority DSN/server key/server
+certificate/server CA/worker-client CA/health-client certificate/health-client key use the seven
+existing `live_vm_host_authority_*_source` inputs. Add the worker-client certificate/key sources
+and protected S3 shared-credentials source described in the
+[authority input contract](self-hosted-kvm-runner.md#external-boot-authority-diagnosis).
+Supply the lifecycle witness member DSN through the protected vars, too.
+
+A custom inventory outside this directory must carry the existing
+`inventory/group_vars/all.yml` and `inventory/group_vars/live_vm_runners.yml` settings it uses;
+Ansible does not load another inventory's adjacent group vars. Override their example network
+values, checkout/venv location and reservation concurrency with reviewed lane values. The
+runner default reserves six recovery slots; select capacity from current disk headroom, not
+that example. Account for the host PostgreSQL package installed by the authority role; the
+[stack port overrides](live-stack.md) allow a separate backend port when needed.
+
+From the clean candidate checkout, with shell variables naming the approved private inventory,
+vars file and single inventory alias:
+
+```bash
+cd deploy/ansible
+uv run --with 'ansible-core==2.21.1' ansible-playbook \
+  playbooks/installed-local-authority.yml -i "$AUTHORITY_INVENTORY" \
+  --limit "$LOCAL_AUTHORITY_LANE" --extra-vars "@$LOCAL_AUTHORITY_VARS"
+```
+
+The role installs the candidate, authority, fixed worker lifecycle and client route. Its existing
+one-shot readiness probe, installed revision check and worker/reconciler path/socket denial
+checks must pass. They prove authority artifact isolation. Ubuntu session guests lack
+per-domain AppArmor confinement (ADR-0741); an enforcing daemon profile does not prove guest
+sandboxing. Retain this limitation in the lane report.
+
+#### Dedicated remote composition
+
+Stage a clean checkout at the same candidate through the reviewed private provisioning workflow.
+Provision Python 3.14 and uv on the target first through the existing host prerequisite workflow;
+record their resolved paths in `provider_authority_host_python` and
+`provider_authority_host_uv_bin` in the approved plan. The authority role validates these tools
+but does not install them.
+Use [site.yml](../../../deploy/ansible/site.yml) with the dedicated target in
+`remote_libvirt_hosts`; never include the ordinary remote-provider assignment in this limit.
+Set `provider_authority_host_source_root` to that checkout, enable the authority and its mutation
+mode, and provide its existing seven protected credential-source inputs, S3 credential source,
+canonical `provider_authority_host_system_manifest_source` and
+`provider_authority_host_system_remote_bases`. The manifest binds the selected resource,
+instance, immutable base, machine and fixed port ranges; validate it with the existing
+`validate_authority_system_provisioning.py` through role preflight, not an ad hoc format.
+An entry has no `network` field: an authority System's only NIC is its user-mode SSH forward
+([ADR-0804](../../adr/0804-remote-authority-systems-have-only-the-forward-nic.md)), and the
+preflight rejects a manifest that still names one. The entry's optional `guest_egress` (default
+`false`) opts the guest into outbound NAT through that NIC. Before deploying this manifest shape
+over an earlier one, confirm that `system-provisioning/remote/` under the authority's state
+directory holds no `*.provision.json` intent; the authority refuses an intent of the old shape.
+
+On a host where SELinux is enabled, the role labels each staged authority base `virt_content_t`
+through an exact-path fcontext rule and `restorecon -F`. It restarts the authority when that
+changes a label. The authority domain tells libvirt not to relabel the base, so the label must
+stay in place: on an enforcing host a base relabelled out of band fails its next domain start
+with a qemu permission error. Any relabel also changes the base's ctime, so the authority exits
+and must be restarted ([ADR-0623 amendment](../../adr/0623-authority-owned-system-provisioning.md)).
+Deploying this contract over an authority that already holds Systems strands them: a local
+System's recorded domain identity no longer matches, and a stored remote provision intent no
+longer loads. Deploy it only to an authority host with no live authority Systems and no stored
+provision intents.
+
+Remote System bases also require `provider_authority_host_remote_module_enabled: true` and
+`provider_authority_host_remote_module_architectures` containing the selected supported
+architectures. Enable `remote_libvirt_module_appliance_enabled` and supply the corresponding
+pinned URL/SHA256 entries in `remote_libvirt_module_appliance_images` through the existing
+[module-appliance build and installation contract](../../../deploy/remote_module_appliance/README.md).
+The authority readiness check requires those installed assets and its private storage pool;
+installation readiness does not qualify a module operation or System construction.
+
+The production authority and installer use `/var/lib/kdive/remote-module-appliance/v1`,
+outside the ordinary boot pool and the mutable authority home. Authority-enabled remote-module
+deployments reject a different `remote_libvirt_module_appliance_install_dir` before host mutation.
+Keep these assets root-owned and read-only; do not grant the authority ordinary pool group access
+or change ordinary pool permissions to make them readable. The role runs the installed loader as
+the authority before service start, then retains its post-start readiness probe. Root-only digest
+verification cannot prove the authority can traverse the installation path.
+
+For an upgrade from the former appliance location, review installation at the new location before
+starting the new candidate; retain the old tree until separately approved retirement. There is no
+fallback to the old path. Loader success does not establish QEMU access or guest confinement at
+the new location: observe those through the separate System qualification, including SELinux on
+the selected host. Do not relax host policy to substitute for that proof.
+
+Review the authority network address/port and worker TLS route separately from ordinary libvirt
+TLS. Use the existing [remote setup contract](remote-libvirt-host-setup.md) and
+[remote provider configuration](../providers/remote-libvirt.md) for client credentials and the
+resource's authority tuple. Keep TLS verification and SSH host-key checking enabled.
+
+```bash
+cd deploy/ansible
+uv run --with 'ansible-core==2.21.1' ansible-playbook site.yml \
+  -i "$AUTHORITY_INVENTORY" --limit "$REMOTE_AUTHORITY_LANE" \
+  --extra-vars "@$REMOTE_AUTHORITY_VARS"
+```
+
+The remote role preflights before host mutation and runs its configured installed readiness
+probe after firewall and service convergence. Its failure path withdraws failed readiness;
+a failed play is not usable qualification evidence. Fixed fault controls remain opt-in only
+on disposable lanes, as described below; they are not needed for routine readiness.
+
+#### Candidate evidence and cleanup
+
+After approved provisioning, use `scripts/live-stack/stack-services.sh` and `just onboard` on
+the local host, with the reviewed backend and provider configuration. Use the host stack described
+in the [live-stack runbook](live-stack.md), including its lifecycle witness member setup.
+
+The role publishes the fixed-worker authority route in `/etc/kdive/live-worker-authority.env`, and
+every worker start, including each `stack-services.sh` restart, forwards it. Do not export the
+`KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_*` values: an export that contradicts the file is refused
+(ADR-0770). A backend port variable may hold `ADDR:PORT`, for example a Postgres bound to the
+lane address; `scripts/live-stack/env.sh` then builds the default DSNs, including
+`KDIVE_HARNESS_DATABASE_URL`, from that address, so no hand-written DSN is needed. A loopback or
+wildcard address keeps `localhost`. An unparseable value stops every script that sources
+`env.sh`, `stack-down.sh` and `stack-status.sh` included, until it is corrected.
+Record the candidate full SHA and clean tree, manifest and actual immutable-base byte digests,
+and actual server, **each running worker**, reconciler and selected authority revisions.
+Resolve process build identifiers to full SHAs as ADR-0715 requires; read the installed authority
+revision at `/opt/kdive-provider-authority/revision` on the selected authority host. A missing,
+unknown, mismatched or skipped identity observation fails required evidence. Repeat identity
+observations when running a later carrier; the snapshot or this installation report is not a
+substitute. Use strict stack skew policy and retain the visible revision header for HTTP proofs.
+
+Keep a private per-lane result containing the exact command, exit code, readiness/denial
+observations, terminal effects and cleanup readback. Routine readiness creates no disposable
+System; the installation remains for downstream children. If the existing transient local
+proof is explicitly enabled, verify its incarnation is terminated and its temporary account,
+group and proof material are removed; a failed proof must retain a named cleanup obligation.
+Do not run the whole `prove-external-boot-authority-host.sh` carrier over a retained lane: it
+installs a predecessor and tears down its authority. Review any reuse of its disposable DSN
+preparation separately, including database grants. Issue and renew the lane's TLS credentials as
+described in [Renewing retained-lane TLS credentials](#renewing-retained-lane-tls-credentials).
+
+Provisioning preflight (on the controller sources) and verification (on the installed copies)
+refuse any authority or fixed-worker TLS certificate that is expired or expires within
+`live_vm_host_authority_tls_expiry_margin_seconds` (default 43200, twelve hours), naming the
+credential and its `notAfter`; the controller needs `openssl` for that check. Renew before
+provisioning. The authority unit allows five starts of any kind (automatic, manual or
+provisioning) within ten minutes; a sixth is refused and leaves the unit `failed`, stopping it if
+it was running. A provisioning run spends one or two of those starts and one pass of the
+installed-authority live proofs about three, so do not re-provision or rerun those proofs
+repeatedly within that window without first running the reset below; after replacing credentials
+on a failed unit run
+`sudo systemctl reset-failed kdive-external-boot-authority.service` before restarting it.
+
+Retire only explicitly owned proof objects after confirming terminal provider effects. Do not
+remove shared backends, bases or journals to make a failure disappear. The existing local
+`authority_host_teardown.yml` is an authority retirement operation requiring its own reviewed
+inputs, not routine per-test cleanup; remote retirement follows its separately reviewed plan.
+Preserve narrower blockers under their existing owners: #3138, #3144/#3148,
+#3130/#3131/#3135. Exhausted-job recovery (#3143) is merged; report a recurrence as a new
+issue. System framing, fault construction and HTTP qualification belong to
+#3184–#3186. Do not publish the release from this procedure.
+
+#### Renewing retained-lane TLS credentials
+
+A retained lane's authority server, health client and worker client certificates come from
+`scripts/operations/authority-pki.sh` and are installed by
+`deploy/ansible/playbooks/renew-local-authority-tls.yml` (ADR-0803). Keep the lane's CA key and
+leaf keys in one private directory on the control host that runs Ansible, for example
+`~/.local/share/kdive/authority-pki/<lane>/`. The script refuses a directory that is not owned by
+you with mode `0700`, is a symlink, or lies inside any Git work tree or `.git` directory, and it
+never copies the CA key to a lane host. Point the lane's protected vars at that directory:
+`live_vm_host_authority_server_key_source` and `..._server_certificate_source` at `server.key`
+and `server.pem`; `..._server_ca_source`, `..._worker_client_ca_source` and
+`live_vm_host_worker_authority_server_ca_source` (which defaults to the authority's server CA) at
+`ca.pem`; the health client sources at `health-client.{pem,key}`; and
+`live_vm_host_worker_authority_client_{certificate,key}_source` at `worker-client.{pem,key}`.
+Renewal rewrites those files in place, so the vars file does not change. Back the directory up
+privately: losing it forces a CA rotation.
+
+Every lifetime is your choice, in whole days, at each issuance; the script has no default. It
+refuses a leaf that would outlive the CA certificate, and a CA re-issue that existing leaves would
+outlive. The recommended lifetimes are 30-day leaves under a 365-day CA. For a new lane, with
+`D` the lane directory and `I` the lane's `live_vm_host_authority_instance`:
+
+```bash
+P=scripts/operations/authority-pki.sh
+install -d -m 0700 "$D"
+$P ca --dir "$D" --subject <lane>-authority-ca --days 365 --key new
+$P leaf --dir "$D" --name server --usage server --days 30 --key new --authority-instance "$I"
+$P leaf --dir "$D" --name health-client --usage client --days 30 --key new
+$P leaf --dir "$D" --name worker-client --usage client --days 30 --key new
+```
+
+To renew, run the same `leaf` commands with `--key existing`, which keeps every key and issues new
+certificates. When the CA certificate no longer covers a new 30-day leaf, first re-issue it from
+the same key with `ca --key existing` and the same `--subject`. Keep the printed lines (file name,
+`notAfter`, public-key hash) in the private lane result; they contain no secret.
+
+A lane installed from a revision that predates this playbook must first be reprovisioned once
+with `installed-local-authority.yml` at a revision that contains it. Then, from a clean checkout
+at exactly the installed authority revision (the value of
+`/opt/kdive-provider-authority/revision`, which must equal `live_vm_repo_version` in the vars):
+
+```bash
+cd deploy/ansible
+uv run --with 'ansible-core==2.21.1' ansible-playbook \
+  playbooks/renew-local-authority-tls.yml -i "$AUTHORITY_INVENTORY" \
+  --limit "$LOCAL_AUTHORITY_LANE" --extra-vars "@$LOCAL_AUTHORITY_VARS"
+```
+
+Before changing the host it runs the provisioning preflight (so the lane's System manifest and
+bases must still be present on the controller, and their digests are checked again), verifies the
+server certificate against both server CAs with the authority's server name and both client
+certificates against the worker-client CA, checks that each certificate matches its key, and
+refuses a dirty or different checkout. It then installs the authority credentials through the
+same `live_vm_host` task provisioning uses, runs `systemctl reset-failed` on
+`kdive-external-boot-authority.service` (clearing a failed state and the start limit), and
+restarts the authority exactly once, even when no file changed, so a rerun repairs an interrupted
+run. The restart returns only after the authority's TLS self-check passes. Only then does it
+install the fixed worker's three files, through the same tasks as provisioning. It finishes by
+checking expiry of the six installed certificates, that the authority is active, the installed
+chains, and a TLS handshake as each fixed-worker account that must verify the authority and see
+it serving the installed server certificate.
+
+The fixed workers are not restarted: a worker reads its authority certificate, key and CA on every
+request, so it uses the renewed files from its next request. Never restart a fixed worker with
+`systemctl` for a renewal; that can wedge its slot. The playbook does not perform a real
+worker-to-authority request; the first authority-backed operation afterwards is that proof.
+
+If a precondition fails, nothing on the host changed. If the authority fails to start, the
+worker files are untouched and the authority is not ready; read
+`journalctl -u kdive-external-boot-authority.service`, which names an expired or invalid
+certificate, correct the source files, and rerun the playbook. Do not rerun without a
+correction: each failed start counts against the unit's start limit.
+
+A CA rotation replaces the CA key and every leaf key. Use it when the lane directory is lost or a
+key may be exposed; there is no revocation. Move the old directory aside
+(`mv "$D" "$D.retired-$(date +%F)"`), recreate `$D` with mode `0700`, issue everything with
+`--key new` as for a new lane, and run the playbook. Between the authority restart and the worker
+file installation, worker requests fail closed, so rotate only while no job is using the authority;
+the playbook does not check this. Keep the retired directory until the rotated lane verifies, then
+destroy it if a key was exposed, or archive it like any backup.
 
 ### Installed remote authority proof prerequisite
 
@@ -428,6 +718,11 @@ is not implemented by this phase; do not report these helper-level checks as rem
 just stack-backends          # backends healthy, bucket verified, schema migrated
 just test-live-stack   # runs -m live_stack; skips cleanly if the stack is absent
 ```
+
+`just stack-backends` does not run the role bootstrap, so the runtime members and the harness login
+(`KDIVE_HARNESS_DATABASE_URL`) do not exist yet after it. The full `scripts/live-stack/stack-services.sh`
+bring-up runs the bootstrap. After a backends-only bring-up, run it yourself:
+`env -u KDIVE_MIGRATION_DATABASE_URL docker compose run --rm --no-deps role-bootstrap`.
 
 For a proof tied to a particular deployed revision, run the selected proof with
 strict skew and a visible pytest header:
@@ -637,12 +932,20 @@ uv run python -m tests.integration.live_stack.evidence assemble \
 uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
 ```
 
-Build the fixtures on the native architecture, on a Debian-family host until #3063 is fixed: on a
-host with both `rpm` and `dpkg-query` the fixture records an empty package inventory and `verify`
-rejects it. A missing `KDIVE_FIXTURE_ROOT`, a fixture that `verify` rejects, or an unregistered
-representative is `blocked` (`missing-prerequisite`); the other outcomes are those of the image
-smoke. A binding's kernel fields are null when its fixture is absent, which `qualify` reports as a
-missing required input.
+Build the fixtures on the native architecture. A missing `KDIVE_FIXTURE_ROOT`, a fixture that
+`verify` rejects, or an unregistered representative is `blocked` (`missing-prerequisite`); the other
+outcomes are those of the image smoke. A binding's kernel fields are null when its fixture is absent,
+which `qualify` reports as a missing required input.
+
+The default fragment requests `CONFIG_KEXEC_FILE=y` for RHEL-family kdump loading, alongside
+`CONFIG_KEXEC=y` and `CONFIG_CRASH_DUMP=y`. For the default x86_64 configuration, the builder
+also appends `CONFIG_FW_CFG_SYSFS=y`, required by the existing crash-capture contract. The
+assembled fragment is retained as `input.config` and hashed in the manifest. Native ppc64le
+and explicit custom config files retain their selected input unchanged. After changing these
+inputs, rebuild both baselines
+into fresh output directories and regenerate their evidence bindings. An older manifest can
+still pass integrity verification; that does not establish these options or current capture
+evidence. Check the rebuilt effective `.config` and rerun the affected live cells.
 
 After an interrupted run, release the leftover allocation with `allocations.release` (or let the
 lease expire) and check `KDIVE_INSTALL_STAGING` (`/var/lib/kdive/install` on the demo lane) for
@@ -666,12 +969,195 @@ installed kernel behind (#3078).
 | `enterprise/longterm`, `enterprise/stable` | `rocky:10` | success |
 | `suse/longterm`, `suse/stable` | `opensuse-leap:15.6` | success |
 
+#### Broken/fixed kernel corpus (#2817)
+
+`tests/integration/test_kernel_corpus_live.py::test_kernel_corpus` has one parameter for each
+`kernel-corpus` cell whose guest architecture is the host's: two cases times the `broken` and
+`fixed` revision. `fixtures/kernel/corpus.toml` pins the revisions; each `broken` commit is the
+first parent of its `fixed` commit, so both build from the same configuration fragment. The case
+notes in `docs/development/kernel-test-cases/` chose the cases and stay human-only.
+
+| Case | Note | Reproducer (same on both revisions) | `broken` | `fixed` |
+|---|---|---|---|---|
+| `case-1` | 05, dcache | install with `dhash_entries=1`; the Run declares the console crash `RIP: 0010:__d_lookup` | boot ends `expected_crash_observed`; console shows one hash bucket and the page-fault oops | ready boot, parameter in `/proc/cmdline`, two buckets, no crash signature |
+| `case-2` | 16, procfs | read the link, subdirectory and file counts of every directory under `/proc/bus/pci` | each link count is at least `2 + subdirectories + files` | each link count is `2 + subdirectories` |
+
+Every parameter verifies both fixtures of its case and requires the same `input.config` and
+`.config` digests (`same-reproducer-config`). It provisions `fedora-kdive-ready-44`, uploads its
+revision with `vmlinux`, installs and boots it, and checks that the domain boots the uploaded
+`bzImage`. `debug-or-crash-evidence` is the identity-bound artifact of the outcome:
+for `case-1/broken`, every reliable call-trace frame `symbol+0xOFF/0xSIZE` of the oops resolves
+in the fixture's `System.map` with that size (which rejects another kernel version, not the case's
+sibling revision) and the console banner names the fixture release, whose `-g<commit>` suffix
+identifies the revision; for the
+other cells, the running release and GNU build ID with the case's observation. Any other
+observation, including a timeout or a crash on a `fixed` revision, fails the cell. The frame then
+releases and proves cleanup, which also covers the halted guest of `case-1/broken`.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix            # one fresh directory per revision below it
+for c in case-1-broken case-1-fixed case-2-broken case-2-fixed; do
+  python3 scripts/kernel_fixtures.py build --baseline "$c" --arch "$(uname -m)" \
+    --source "$KDIVE_FIXTURE_ROOT/src-$c" --output "$KDIVE_FIXTURE_ROOT/$c" --jobs "$(nproc)"
+done
+examples/local-libvirt/build-image.sh fedora-kdive-ready-44
+uv run python -m tests.integration.live_stack.kernel_corpus bindings --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)
+uv run python -m pytest -m live_stack tests/integration/test_kernel_corpus_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+A missing `KDIVE_FIXTURE_ROOT`, or either revision of the case missing or rejected by `verify`, is
+`blocked` (`missing-prerequisite`). The four ppc64le cells share the node. Without a ppc64le run
+they report `missing-result`; a run on a ppc64le host today records them `blocked`, because the
+case table and representative image are x86_64 only until #2818 supplies POWER fixtures and
+cases.
+
+Last run (2026-10-15): candidate `3b35b4c82` (server, worker and reconciler at that SHA), a
+Fedora 44 x86_64 KVM lab host, the four revisions built on that host. All four x86_64 cells
+proved their outcome, `same-reproducer-config`, `debug-or-crash-evidence` and `cleanup`, and
+`qualify` reported each one qualified; no `kdive-*` domain remained afterwards.
+
+| Cell (`kernel-corpus/local-libvirt/x86_64/…`) | Observation | Outcome |
+|---|---|---|
+| `case-1/broken` | `expected_crash_observed`; 14 reliable oops frames resolved in `System.map`, first `__d_lookup+0x3c/0xf0`; banner `6.19.0-g970296997869` | success |
+| `case-1/fixed` | ready boot with `dhash_entries=1`, two hash buckets, no crash signature, build ID matched | success |
+| `case-2/broken` | `/proc/bus/pci/00` link count 12 with 10 files and no subdirectories | success |
+| `case-2/fixed` | every `/proc/bus/pci` link count equal to 2 plus its subdirectories | success |
+
+#### Local resource-boundary cells (#3118)
+
+`tests/integration/test_resource_limits_live.py::test_local_resource_boundary` has one parameter
+for each `failure-resource/local-libvirt/x86_64/{minimum-cpu-ram,insufficient-disk,slow-boot}`
+cell. Every parameter uses the `rocky-kdive-ready-10` image and the longterm fixture kernel, and
+proves its resource outcome plus `no-duplicates`, `protected-state` and `cleanup`:
+
+- `minimum-cpu-ram` requests the seeded `small` shape (1 vCPU, 1024 MiB, 10 GB). It checks the
+  domain XML and the overlay's virtual size, then uploads, installs and boots the fixture kernel
+  and reconnects over SSH.
+- `insufficient-disk` opens an investigation and mounts a 64 MiB test-owned loop filesystem
+  (`mkfs.ext4 -m 0`) at that investigation's new directory under `/var/lib/kdive/rootfs-uploads`.
+  It uploads the staged image as the investigation's rootfs and provisions it. Every attempt
+  must fail the staging precheck with `infrastructure_failure`, and nothing may be left staged or
+  defined. After release it unmounts, detaches and removes the directory, then closes the
+  investigation.
+- `slow-boot` installs the fixture kernel and times a plain `runs.boot`. It then writes a
+  `oneshot` delay unit, active only on the fixture kernel's release and ordered before
+  `kdive-ready` and the guest agent. A forced boot with a delay inside half the readiness window
+  must succeed. A delay longer than the window plus 60 s must fail every attempt with
+  `boot_timeout`. The guest's own journal must show each delay ran in full before
+  `kdive-ready` started.
+
+The test reads the fixed workers' journal (`journalctl -u 'kdive-live-worker@*'`) to label each
+attempt, so the operator needs journal access (the `systemd-journal` group). It also needs
+`sudo -n` for the loop filesystem and for reading worker-owned disks. The window is
+`KDIVE_LIBVIRT_BOOT_WINDOW_S` (default 900 s), so `slow-boot` runs for about an hour at the
+default. The test reads the variable from its own environment, so it must match the workers'
+setting.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix
+python3 scripts/kernel_fixtures.py build --baseline longterm --arch "$(uname -m)" \
+  --source "$KDIVE_FIXTURE_ROOT/src-longterm" --output "$KDIVE_FIXTURE_ROOT/longterm" --jobs "$(nproc)"
+examples/local-libvirt/build-image.sh rocky-kdive-ready-10
+uv run python -m tests.integration.live_stack.resource_limits bindings --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)
+# insufficient-disk uploads the staged image file; pytest sandboxes the XDG default inventory.
+export KDIVE_SYSTEMS_TOML=$HOME/.config/kdive/systems.toml
+uv run python -m pytest -m live_stack tests/integration/test_resource_limits_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+A cell whose loop filesystem cannot be proven unchanged keeps it mounted and records
+`bounded_mount: retained` with its target, loop device and backing image; unmount and detach
+it by hand after checking that no job is running. The three `remote-libvirt` cells are in the
+[remote runbook](remote-live-stack.md#10-remote-resource-boundary-cells-3118).
+
+Last run: candidate `3a0081d02`, a Rocky 10.2 x86_64 KVM host (SELinux enforcing) with the
+longterm fixture. All three
+cells qualified. `slow-boot` measured a 6 s baseline boot; a 66 s delay reached ready, and a
+1020 s delay against the 900 s window ended all three attempts `boot_timeout`.
+`insufficient-disk` refused the 1.2 GB upload on its single attempt with about 53 MiB
+available, leaving nothing staged. Before the uploads root joined host preparation and the
+`svirt_image_t` labels, an uploaded rootfs could not be staged at all, and qemu was denied
+reading one in place.
+
+#### Local orchestration-fault cells (#3117)
+
+`tests/integration/test_orchestration_faults_live.py::test_local_orchestration_fault` has one
+parameter for each `failure-resource/local-libvirt/x86_64/{worker-interruption,lost-response,backing-service}`
+cell. Each cell provisions the `rocky-kdive-ready-10` image at the default shape on the direct
+provision path (a stack with no installed authority) and binds the longterm fixture kernel's
+inputs without booting it. The worker pause and the Postgres outage land in the provision's
+first boot, while the domain is running and attempt 1 still holds the job; the lost-response
+replay runs while the provision job is running. Each cell proves its recovery
+outcome plus `no-duplicates`, `protected-state` and `cleanup`.
+
+- `worker-interruption` pauses the worker holding the job with `SIGSTOP`. It never restarts
+  the unit, because an out-of-band restart wedges the slot. After the 5-minute lease lapses,
+  another worker must take the job at a higher attempt and finish it. The paused worker is then
+  resumed, and its late result must leave the job row, the `ready` System, the domain and the
+  overlay unchanged.
+- `lost-response` provisions with a fresh idempotency key. It reads the committed
+  `idempotency_keys` row and drops the reply. It replays the key from a new session twice, once
+  while the job runs and once after it finishes. Both replays must return the stored job and
+  System, with exactly one provision job and one System on the Allocation.
+- `backing-service` runs `docker compose stop postgres` mid-provision. After 75 s it runs
+  `docker compose start postgres`, which must bring back the same container. Every role's
+  `/readyz` must return to ready. The job must then succeed at an attempt above 1, and the
+  worker journal labels whether it was requeued or reclaimed after its lease lapsed. No worker
+  unit's `InvocationID` or `MainPID` may change.
+
+Preconditions, checked before anything is allocated (each one missing blocks the cell):
+
+- `KDIVE_WORKER_COUNT=2` or more running fixed worker slots;
+- passwordless `sudo -n /usr/bin/python3` for the worker hold;
+- journal access (the `systemd-journal` group);
+- for `backing-service`, the docker group and the compose `postgres` service of this checkout's
+  stack.
+
+Run it against an exclusively assigned host: `backing-service` stops the stack's shared
+database.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix
+uv run python -m tests.integration.live_stack.resource_limits bindings --owner 3117 \
+  --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)
+uv run python -m pytest -m live_stack tests/integration/test_orchestration_faults_live.py \
+  -k test_local_orchestration_fault
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+After the run, check all of the following:
+
+- `scripts/live-stack/worker-lifecycle.sh status` shows every slot running;
+- every `/readyz` answers 200;
+- no `kdive-` domain the run added is still defined.
+
+A cell that stops mid-fault resumes the paused worker and restarts Postgres in its own
+`finally`. If the run itself is killed, send `SIGCONT` to the paused unit's main PID and run
+`docker compose start postgres` by hand before anything else. A wedged slot is recovered with
+`worker-lifecycle.sh recover` (see the live-stack runbook). The three `remote-libvirt` cells are
+in the [remote runbook](remote-live-stack.md#11-remote-orchestration-fault-cells-3117).
+
 #### Core tool cells and server configurations (#2811)
 
 `tests/integration/test_core_tool_cells_live.py::test_core_tool_cell` has one parameter for each
 contract cell of `session.whoami`, `projects.list`, `tools.search`, `tools.invoke`,
-`fixtures.validate` and `systems.profile_examples`: 56 cells, each a configuration (`default` or
-`recovery`), an exposure (`direct` or `gateway`) and a kind (`functional`, `authentication` or
+`fixtures.validate` and `systems.profile_examples`: 84 cells, each a configuration (`default` or
+`recovery`), an exposure (`direct` or `gateway`, or `cli` for the core service tools, which drives
+the tool's generated `kdivectl` verb per
+[ADR-0795](../../adr/0795-cli-translation-exposure.md)) and a kind (`functional`, `authentication` or
 `validation`). [ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md)
 defines what each of those means. The harness in `tests/integration/live_stack/tool_cells.py` is
 shared by the later tool-cell carriers.
@@ -683,8 +1169,8 @@ gateway's core tools also fails it, which happens when the server's `KDIVE_CLI_C
 from the test process's, and so does a missing mock-OIDC issuer. Cells of the other configuration
 skip and write no record. The server runs the `recovery` configuration only when it starts with a
 durable worker-death verifier, `docker` or `kubernetes`; `local` leaves the recovery tools out.
-On this lane `docker` has no reachable Docker death endpoint, so a recovery-tool call fails
-closed, which these cells never make. The two lanes are two bring-ups that share one evidence
+The verifier only gates registration. These cells never call a recovery tool; the
+[build-use recovery cells](#build-use-recovery-tool-cells-3111) do. The two lanes are two bring-ups that share one evidence
 root:
 
 ```bash
@@ -700,17 +1186,21 @@ uv run python -m tests.integration.live_stack.evidence assemble \
 uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
 ```
 
-Each pytest run reports 28 cells skipped for the other configuration: the second run must skip the
+Each pytest run reports 42 cells skipped for the other configuration: the second run must skip the
 `…/default/default/…` cells, not the `…/default/recovery/…` ones. Run the pytest commands with
-`KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`, the migration-owner DSN: the protected-state
-snapshot reads every table with a `project` column, some of which the server DSN cannot read, and
-it fails with `permission denied` rather than skipping one. A functional cell
-compares the tool's answer with the token's own claims, the fixture catalog and `systems.toml`
+`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`, the least-privilege harness login: the
+protected-state snapshot reads every table with a `project` column, some of which the server DSN
+cannot read. The snapshot checks its access first. It fails before any read, naming each table it
+cannot `SELECT`, rather than skipping one. A table that a newer migration added is granted on the
+next role-bootstrap run.
+
+A functional cell compares the tool's answer with the token's own claims, the fixture catalog and `systems.toml`
 read by the test process, or, for `tools.search`, the operator-direct catalog. A rejection cell
 proves its boundary (HTTP 401 for a token signed by a foreign key, where the issued token is not
-refused; a schema-validation failure for invalid arguments) and that the cell's project rows did not change. The tools create nothing, so
+refused; a schema-validation failure for invalid arguments; on `cli`, the readings of
+[ADR-0795](../../adr/0795-cli-translation-exposure.md) decision 3) and that the cell's project rows did not change. The tools create nothing, so
 there is nothing to tear down beyond the stack itself. `qualify` exits 1 because other owners'
-cells have no result; read the 56 `tool/…` rows of these six tools.
+cells have no result; read the 84 `tool/…` rows of these six tools.
 
 Last run: candidate `e3354a190` (server, worker and reconciler at that SHA in both lanes), a
 disposable Fedora 44 x86_64 lab guest with SELinux enforcing; the same result held at `09a80767c`
@@ -723,7 +1213,7 @@ recovery lane started with `local` proved `default` again, which is why the lane
 
 #### Catalog and configuration tool cells (#3095)
 
-`tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell` carries the 152 cells
+`tests/integration/test_catalog_tool_cells_live.py::test_catalog_tool_cell` carries the 228 cells
 of `images.{delete,describe,kernel_config,list,upload}`, `shapes.{delete,list,set}` and
 `resources.{availability,describe,list}` on the same harness, lanes, bindings and assembly as the
 core cells above; run both files in each lane's pytest command. The
@@ -736,7 +1226,7 @@ Before the first lane, stage the public image the image cells read, once per hos
 re-registers it on the next bring-up's reconcile. Without it the image cells record `blocked`.
 Run pytest in a shell that sourced `examples/local-libvirt/env.sh`: the cells read the object
 store (`KDIVE_S3_*`, `AWS_*`), `KDIVE_LIBVIRT_URI` and the funded `KDIVE_PROJECT`, beside
-`KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`. Also export
+`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`. Also export
 `KDIVE_SYSTEMS_TOML=~/.config/kdive/systems.toml`: the test session sandboxes the XDG default and
 keeps only an exported path for a live tier (`tests/conftest.py`). The core
 `systems.profile_examples` cell reads the same file, so once an image is declared both carriers
@@ -750,17 +1240,23 @@ whole shapes catalog to the per-project one:
   `uploads/q/<project>/` with the metadata the upload reassembly writes, register it, delete the
   image and purge every version of the quarantine key and the published object;
 - `shapes.set` and `shapes.delete` create and remove a `cov-<hex>` shape;
-- `shapes.set` and `resources.availability` take one allocation in `KDIVE_PROJECT` through
-  `allocations.request` and release it. The released row and its ledger entries stay in that
-  project as history.
+- `shapes.set` takes one allocation in `KDIVE_PROJECT` and releases it.
+- `resources.availability` requires an idle fleet with one available local host of capacity
+  one and room for 1 vCPU/1 GiB RAM/1 GB disk. It temporarily raises the funded project's
+  pending cap, preserving both concurrency caps, holds one grant and queues one by-kind and
+  one by-ID request. It compares the full queue split with the database, withdraws both queued
+  rows before releasing the grant, then verifies zero queue depth and restored quota caps.
+  Unsuitable topology is `blocked`. Failed or indeterminate withdrawal retains known blockers;
+  reconcile the reported subject and IDs, withdraw queued rows before releasing blockers,
+  and restore the recorded caps. A restored pending cap alone does not clear residual rows.
+  Released allocations and ledger entries remain as history.
 
 A cell killed mid-run can leave any of these behind; `demo-down.sh --wipe --yes` clears them.
-Queue depth is compared but not driven (#3106).
 
 #### Investigation and artifact tool cells (#3096)
 
 `tests/integration/test_investigation_tool_cells_live.py::test_investigation_tool_cell` carries the
-260 cells of `investigations.{open,get,list,set,link,unlink,close,complete_rootfs_upload}` and
+390 cells of `investigations.{open,get,list,set,link,unlink,close,complete_rootfs_upload}` and
 `artifacts.{create_investigation_upload,create_run_upload,fetch_raw,get,list}` on the same harness,
 lanes, bindings and assembly; run all three carriers in each lane's pytest command. The
 [design](../../workflow/specs/2026-10-02-investigation-tool-cells-design.md) lists what each
@@ -781,13 +1277,17 @@ live Run and the upload manifests and artifact rows they own; closed and ended o
   in `KDIVE_PROJECT` on first use (about a minute to `ready` plus a minute for its console part to
   settle) and released at the end of the module, with its domain and disks proven gone.
 - `investigations.list` authorization and project-isolation and `artifacts.list`
-  project-isolation record `blocked`, naming #3108: those tools answer an empty page instead of
-  rejecting the call. pytest still reports these cells as failed, because the cell did not prove
-  its kind. If the product starts rejecting, they run the normal assertion and qualify.
+  project-isolation answer a denied caller with an empty page instead of a failure
+  ([ADR-0756](../../adr/0756-filtered-list-boundary-evidence.md)). Each cell first lists a known
+  protected item with a viewer's token and the same arguments: the investigation its setup opened,
+  or the session System's newest console part. Then the denied call must return exactly the
+  tool's empty page, with no item, cursor or extra field. The `artifacts.list` cell protects that
+  part and the System's project instead of the fresh project. If console rotation pushes the
+  part off the viewer's first page, the cell fails rather than accepting another part.
 - The three upload tools' project-isolation cells accept `configuration_error` only when it is
   indistinguishable from the answer for a nonexistent owner, called in the same cell.
 
-A lane's expected pytest failures are exactly those 12 blocked cells (6 per lane). The System is released in a
+A lane expects no failing cell. The System is released in a
 module finalizer outside every cell, so a failed reclaim shows only as an `ERROR at teardown` of
 `test_investigation_tool_cell`; record that line, if present, with the run's result.
 
@@ -802,30 +1302,169 @@ cells of `audit.query`, `inventory.list`, `ops.diagnostics`, `ops.export_cost_cl
 harness, lanes, bindings and assembly; add it to each lane's pytest command. The
 [design](../../workflow/specs/2026-10-06-operator-tool-cells-design.md) lists what each
 functional cell compares and with which independent source. Its environment is the catalog
-carrier's: the sourced `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"` and an
+carrier's: the sourced `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"` and an
 exported `KDIVE_SYSTEMS_TOML`. The lanes are local-libvirt only; an `ops.diagnostics` cell that
 sees a remote-libvirt check stops `blocked` rather than probe a remote seam.
 
-The tools only read, so each cell works in a fresh `cov-<hex>` project whose snapshot must not
-change. What the cells leave behind is history the snapshot excludes:
+The tools only read. Except for the secret-presence fixture below, each cell works in a
+fresh `cov-<hex>` project whose snapshot must not change. What the cells leave behind is history the snapshot excludes:
 
 - `audit_log`, `platform_audit_log` and `tool_invocation` rows from the cells' own calls, which
   the `audit.query` and `ops.tool_trail` cells read back;
 - one allocation per `inventory.list` cell in `KDIVE_PROJECT`, requested and released;
 - the `diagnostics_worker_check` jobs `ops.diagnostics` enqueues.
 
-The two `secrets.list` functional cells per lane record `blocked`: the cell proves no configured
-secret value is served, but no local-lane call makes the server register a secret, so presence
-has nothing to compare with. pytest reports them as failed. `ops.export_systems_toml` is never
-called with `persist`. A cell killed mid-run can leave its allocation granted;
-`demo-down.sh --wipe --yes` clears it with the history above.
+The four `secrets.list` functional cells use an owned Fedora 44 local System, the
+verified longterm fixture under `KDIVE_FIXTURE_ROOT/longterm`, and a successful
+`debug.start_session` with `drgn-live`. The existing server path registers the
+System's bootstrap key. They require an empty server listing before setup and
+attach, then exactly `<process-global>` through the selected direct/gateway
+exposure, with no configured or owned-key value in the answer. A server already
+holding a secret blocks before creating the fixture: restart it first.
 
-Last run: candidate `86ed1b021` (server, worker and reconciler at that SHA in both lanes), a
+Run these four functional cells separately from other live cells, on an idle
+operator-owned stack. For each configuration, use the canonical stack bring-up
+with `KDIVE_WORKER_DEATH_VERIFIER=disabled` (default) or `docker` (recovery), verify
+all three role SHAs, and select one exposure's functional cell:
+
+```sh
+uv run python -m pytest tests/integration/test_operator_tool_cells_live.py \
+  -k 'secrets.list and functional and direct' -vv --tb=short
+```
+
+Repeat with `gateway`; the opposite configuration's parameter is skipped, not
+counted as proof. Each successful cell records source presence and actual owned
+session, System, disk, allocation-capacity and bootstrap-key cleanup. Terminal
+history remains. The server's global registration deliberately remains after
+resource cleanup: it lasts until that process exits. Between cells and after the
+last cell, stop the owned server through the canonical stack lifecycle, verify
+its old PID exited, start the same candidate again, and retain an authenticated
+empty `secrets.list` answer alongside the cell records. Record the old/new PID,
+configuration and candidate identity without tokens or key material. Do not use
+registry clearing, DB deletion or a synthetic response as cleanup evidence.
+
+An unavailable image/kernel or failing attach prerequisite cannot qualify the
+cell. Preserve that failure and its owned cleanup evidence. These cells prove
+secret presence, not image-builder provenance, introspection or native POWER.
+`ops.export_systems_toml` is never called with `persist`. A killed run can leave
+owned resources; use their recorded IDs for supported cleanup, preserving shared
+images and prior histories.
+
+Historical pre-positive-control run: candidate `86ed1b021` (server, worker and reconciler at that SHA in both lanes), a
 disposable Fedora 44 x86_64 lab guest; earlier runs at `44503b3bf` and `f1150fc13` gave the same
 result. Each lane recorded its 62 cells and skipped the other
 lane's 62; the `KDIVE_WORKER_DEATH_VERIFIER=docker` lane proved `recovery`. `qualify` reported
 120 of the 124 qualified, 28 `success` and 92 `rejection`, and the four `secrets.list`
 functional cells `blocked` with an empty listing and no secret served.
+
+#### Build-use recovery tool cells (#3111)
+
+The same carrier also holds the 16 cells of `ops.build_uses_list` and `ops.recover_build_use`.
+They exist only in the `recovery` configuration, so start that lane with
+`KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh`. The verifier only decides
+whether the server registers the two tools. A recovery succeeds on the durable `terminated`
+incarnation row that the systemd lifecycle witness publishes, not on any Docker endpoint
+(ADR-0722, 2026-10-14 amendment). The
+[design](../../workflow/specs/2026-10-14-build-use-recovery-cells-design.md) gives the details.
+
+The 12 rejection cells (`authentication`, `authorization`, `validation`) need nothing beyond the
+operator cells' environment. Each of the four functional cells strands a real pin:
+
+1. It provisions the lane image in a fresh project and uploads the verified `longterm` fixture
+   (`KDIVE_FIXTURE_ROOT/longterm`) with its `vmlinux`.
+2. It calls `runs.install`.
+3. It freezes the holder's `kdive-live-worker@N` unit with `sudo -n systemctl freeze` once the pin
+   row appears.
+4. Later it kills that unit with `sudo -n systemctl kill --signal=SIGKILL`, and has
+   `scripts/live-stack/worker-lifecycle.sh status` publish the termination.
+
+So the operator needs non-interactive `sudo -n` for `systemctl` (`freeze`, `thaw`, `kill`); the
+cell checks it first, and a refused `sudo` stops the cell `blocked`. What each cell proves:
+
+- The `ops.build_uses_list` cell compares the listing with the project's pin rows twice, once
+  while the holder is alive and once after it is killed. It then recovers the orphan as cleanup.
+- The `ops.recover_build_use` cell is refused while the holder is alive and the pin is retained.
+  After the kill it recovers exactly that pin, with one matching recovery row, and every other
+  pin is unchanged.
+
+A pin released before the freeze, or a holder frozen inside its release transaction, thaws the
+holder and stops the cell `blocked`; rerun it.
+
+Every cell restores the lane before its System teardown:
+
+- A live holder is thawed and finishes its install.
+- For a killed holder, any pin the cell left is recovered through the tool. The install job is
+  then canceled, and the fleet is replaced with `worker-lifecycle.sh stop`, `recover` and
+  `start <the started slot count>`.
+- The cell then requires that no pin is left.
+
+Run these cells serially on an otherwise idle stack: the restart replaces every worker slot.
+
+```sh
+uv run python -m pytest -m live_stack tests/integration/test_operator_tool_cells_live.py \
+  -k 'build_use' -vv --tb=short
+```
+
+If the witness never published the killed holder's termination, the restore cannot recover its
+pin. The cell fails naming the use id and holder: run `worker-lifecycle.sh status`, then
+`ops.recover_build_use` with that holder. Recovery rows, audit rows and the terminated
+incarnation stay as history.
+
+Last run: candidate `21250f083` (server, worker and reconciler at that SHA) on a disposable
+Fedora 44 x86_64 lab guest with one worker slot. The server's `TMPDIR` pointed at an on-disk
+directory, because Fedora's `/tmp` is a small tmpfs. `qualify` reported all 16 cells qualified:
+4 `success` and 12 `rejection`.
+
+- Both recover cells were refused while the holder was alive. After the kill, each recovered
+  exactly its pin, with recovery rows recording `authority_kind = 'local'` and outcome `killed`.
+- After the run no pin was left, no unit was frozen, the slot was started again, and every
+  System was torn down.
+- An earlier run at `c7302a912` qualified 14. Its recover cells read the expected alive refusal
+  through a helper that rejects error envelopes; that is fixed, and the restore still left the
+  lane clean on that path.
+
+#### Mutating operator tool cells (#3110)
+
+`tests/integration/test_operator_mutation_tool_cells_live.py::test_operator_mutation_tool_cell`
+carries the 216 cells of the fourteen mutating operator tools (`images.extend`,
+`images.prune_expired`, `inventory.clear_override`, `ops.reconcile_now`,
+`ops.reconcile_systems`, `ops.set_cost_class_coeff`, `ops.set_host_capacity`,
+`ops.set_queue_paused` and the six `resources.*` mutation tools) on the same harness, bindings and
+assembly as the cells above. The
+[design](../../workflow/specs/2026-10-14-operator-mutation-tool-cells-design.md) lists what each
+functional cell seeds, observes and restores.
+
+Run it on the installed local-authority lane: the `ops.reconcile_now` and `resources.drain`
+functional cells run inside the [authority-owned System frame](#authority-owned-system-frame-3184)
+and need its fixture-mode setup, and a lane with an installed authority records the authority's
+revision on every cell, so every role must run the candidate. Use the two bring-ups of the core
+cells (`KDIVE_WORKER_DEATH_VERIFIER=docker` for `recovery`) and, beside the catalog carrier's
+environment (`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`, an exported
+`KDIVE_SYSTEMS_TOML`, the staged lane image), set `LOCAL_AUTHORITY_LANE_CONFIG`.
+`inventory.clear_override` needs one declared `[[fault_inject]]` or `[[remote_libvirt]]` host
+in that inventory: the cell detaches its cap, clears the entry and waits for the reconciler to
+restore the file's cap. The authority lane's fixture inventory already declares its
+`[[remote_libvirt]]` authority host, and the cell changes only that row's database values,
+never the remote host. On a lane without one, add a `[[fault_inject]]` entry (`name`, `vcpus`,
+`memory_mb`, `cost_class`): reconcile creates its row without composing the fault-inject
+provider. Adding a `[[remote_libvirt]]` entry instead enables the remote provider for the whole
+stack. Run one cell at a time on the lane, as for the frame.
+
+Cells change shared state while they run and restore it before they finish: the queue pause,
+the lane host's cordon (`resources.drain`), the declared host's cap, and the coefficient of the
+cell-owned class `cov-tool-cells`. A killed run can leave one of them behind. Restore them with an
+operator or admin token: `ops.set_queue_paused` with `paused=false`,
+`resources.set_scheduling` with `state=schedulable` on the lane host, `inventory.clear_override`
+for the declared host (the next reconcile restores its cap). The `cov-tool-cells` coefficient
+needs no restore: only cordoned residue hosts carry the class, so no placement prices with it.
+
+What the cells leave behind is history or inert:
+
+- audit, platform-audit and tool-invocation rows;
+- allocation and ledger rows in each cell's fresh workload project;
+- one cordoned, lease-cleared runtime host per cell that placed an allocation (the retained
+  allocation rows keep a foreign key to it), owned by that workload project;
+- the `cov-tool-cells` coefficient row: no tool or reconcile deletes a coefficient.
 
 #### System lifecycle tool cells (#3062)
 
@@ -836,7 +1475,7 @@ provider-lane carrier: the tool-cell harness binds these cells with the guest's 
 the `kvm` accelerator and the staged image digest, and frames them on a real System. The
 [design](../../workflow/specs/2026-10-06-system-tool-cells-design.md) lists what each functional
 cell compares and with which independent source. Its lanes, environment and assembly are the
-catalog carrier's: the sourced `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`,
+catalog carrier's: the sourced `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`,
 an exported `KDIVE_SYSTEMS_TOML`, KVM on the host, and the staged `fedora-kdive-ready-44` image,
 which every cell boots. Stage the image before writing the bindings: each provider binding carries
 the staged bytes' SHA-256, so a rebuilt image needs new bindings. The same file also carries the
@@ -911,8 +1550,10 @@ assemble and qualify as in the System section.
   same image, so a cell stops `blocked` when its image was already published on that stack; this
   is why each configuration starts from a wiped stack. The published rows stay registered until
   the wipe.
-- The four `runs.release_external_boot` functional cells stop `blocked` (`missing-prerequisite`):
-  the demo-up lane installs no local external-boot authority. Their rejection cells run.
+- The `runs.release_external_boot` functional cells run only on the installed authority lanes
+  ([authority functional tool cells](#authority-functional-tool-cells-3186)). On the demo-up
+  lane they stop `blocked` (`missing-prerequisite`), because no authority lane config is named.
+  Their rejection cells run on either lane.
 - `runs.*` rejection cells aim at one unbound Run created in the stack's System target project.
   `runs.install` and `runs.boot` answer another project's Run with `configuration_error`,
   `runs.cancel` and `runs.release_external_boot` with `not_found`; each matches its answer for an
@@ -935,6 +1576,670 @@ customization boot could not read the worker's build workspace ("Cannot access s
 '/var/lib/kdive/build/images/rootfs-build-<random>/<image>.qcow2' ... Permission denied"). The
 build workspace held no leftovers afterwards. After `demo-down.sh --wipe --yes` the worker's
 libvirt defined no `kdive-` domain and `KDIVE_INSTALL_STAGING` was empty.
+
+#### Power and snapshot tool cells (#2815)
+
+`tests/integration/test_power_snapshot_tool_cells_live.py::test_power_snapshot_tool_cell` carries
+the 100 x86_64 local-libvirt cells of `control.power`, `systems.snapshot`, `systems.restore`,
+`systems.list_snapshots` and `systems.delete_snapshot`: 20 `functional` and 80 rejection cells.
+Both libvirt providers support snapshots, so these tools have no `capability` cell
+([ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md), amended
+2026-10-13). The [design](../../workflow/specs/2026-10-08-local-power-snapshot-proof-design.md)
+lists what each cell compares. The prerequisites are the run tool cells' above, including the
+verified `longterm` fixture; the cells need no provider authority. Run both configurations into
+one evidence root, then assemble and qualify as in the System section:
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix KDIVE_ARTIFACT_DIR=$(mktemp -d)
+export KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"
+uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+examples/local-libvirt/demo-up.sh                                     # default
+uv run python -m pytest -m live_stack tests/integration/test_power_snapshot_tool_cells_live.py
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery
+uv run python -m pytest -m live_stack tests/integration/test_power_snapshot_tool_cells_live.py
+```
+
+- Each functional cell provisions `fedora-kdive-ready-44`, boots the fixture kernel through the
+  deep-lifecycle checks and then calls only its tool through the cell's exposure. The guest
+  holds a value on disk, one in `/dev/shm` and a sentinel process. The disk value is read after
+  `sync` and `vm.drop_caches=3`, so a restore that brings back RAM alone cannot pass.
+- `systems.snapshot` and `systems.restore` restore a memory checkpoint and require the
+  checkpoint's boot ID, both values and the same process. `systems.restore` also restores
+  paused (libvirt and the System both `paused`, then `control.power` `resume`), and last a
+  disk-only checkpoint: the disk value rolls back in a new boot. A disk-only checkpoint may
+  give the domain a new overlay disk, which the cleanup proves absent with the others.
+- `systems.list_snapshots` compares two checkpoints, newest first, with libvirt's.
+  `systems.delete_snapshot` checks both ledgers and that the name can be used again.
+- `control.power` runs `off` (domain `shutoff`, System still `ready`), `on`, `reset` and
+  `cycle` (each a new boot), then `resume` from a paused restore.
+- Rejection cells aim at the stack's torn-down lane target. Beside the project rows, they
+  compare the target's `jobs` rows and check that its domain is still undefined.
+
+The ppc64le local cells share the node but are owner #2818's; the remote cells are #3116's.
+
+Last run: candidate `924de2c59` (server, worker and reconciler at that SHA in both
+configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing and no
+provider authority installed, the `longterm` fixture `v6.18.54` built on that host. Each
+configuration recorded its 50 cells in about 28 minutes and skipped the other's 50. `qualify`
+reported all 100 qualified: 20 `success` and 80 `rejection`. After `demo-down.sh --wipe --yes`
+the worker's libvirt defined no domain, no overlay disk remained and `KDIVE_INSTALL_STAGING` was
+empty.
+
+#### Capture and introspection tool cells (#2814)
+
+`tests/integration/test_capture_tool_cells_live.py::test_capture_tool_cell` carries the 164
+x86_64 local-libvirt cells of `control.force_crash`, `vmcore.fetch`, `introspect.from_vmcore`,
+`introspect.run`, `introspect.script` and `postmortem.crash`: 28 `functional`, four
+`unsupported` and 132 rejection cells, four of them `capability`. `vmcore.fetch` is proven for
+`kdump` and `host_dump`; x86_64 refuses `fadump`
+([ADR-0757](../../adr/0757-system-capture-method-architecture.md)), so its `unsupported` cell
+reads the System's `supported_capture_methods` and its `capability` cell proves the
+`capability_unsupported` refusal from a crashed, Run-bound System
+([ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md), amended
+2026-10-13). The [design](../../workflow/specs/2026-10-13-local-capture-tool-cells-design.md)
+lists what each cell compares. The prerequisites are the power and snapshot cells' above, plus
+crash(8) and drgn in the MCP server's environment (`postmortem.crash` and
+`introspect.from_vmcore` run there; installing them only for the worker is not enough) and the
+libguestfs Python binding for the worker's kdump harvest. A tool answering `missing_dependency`
+records the cell `blocked`. Run both configurations into one evidence
+root, then assemble and qualify as in the System section:
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix KDIVE_ARTIFACT_DIR=$(mktemp -d)
+export KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"
+uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+examples/local-libvirt/demo-up.sh                                     # default
+uv run python -m pytest -m live_stack tests/integration/test_capture_tool_cells_live.py
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery
+uv run python -m pytest -m live_stack tests/integration/test_capture_tool_cells_live.py
+```
+
+- Each functional cell provisions `fedora-kdive-ready-44` with its crash options, boots the
+  fixture kernel through the deep-lifecycle checks (which load `loop`) and starts a sentinel
+  process named `kcov<hex>`. `kdump` cells add `crashkernel` and wait for
+  `/sys/kernel/kexec_crash_loaded`; `host_dump` cells set `debug.preserve_on_crash` instead, so
+  the crashed domain stays up for the memory dump.
+- `control.force_crash` (admin) drains to `succeeded`, reaches `crashed`, and shows the crash in
+  new console parts of the same generation. Those parts hold either the fixture kernel's panic
+  with its release on the `CPU:` record (`crash_evidence: console_panic`), or the kdump crash
+  kernel's `Linux version <release>` banner whose `Command line:` carries `elfcorehdr=`
+  (`crash_evidence: crash_kernel`). A kdump-armed guest normally shows only the second form,
+  because the crashing kernel enters the crash kernel before its panic reaches the serial
+  console (#3254). The panic text is then only in the dump. That applies outside the harness
+  too: console panic matching cannot see a crash on a kdump-armed guest. Check the System's
+  `crashed` state or the captured core instead. `vmcore.fetch` drains the capture, checks the
+  job, Run and artifact refs, downloads the raw core twice through `artifacts.fetch_raw`
+  (identical bytes, advertised size) and requires its VMCOREINFO to name the fixture build ID
+  and release.
+- `introspect.from_vmcore` and `postmortem.crash` run over a kdump core: the fixture release,
+  the guest's node name, `loop` and, for crash(8), the sentinel. `introspect.run` and
+  `introspect.script` use a drgn-live session, which they end: the helpers match the guest's
+  release, node name and `loop`, and the script finds exactly the sentinel by pid and name.
+- Rejection cells aim at one target per stack: a torn-down fixture System with the
+  `force_crash` opt-in, its Run and an ended drgn-live session. They compare the project rows,
+  the jobs naming the System or Run, and whether its domain is defined.
+- Captured cores are Run-owned `vmcore` artifacts that nothing reclaims: a run leaves about
+  8 GiB of `host_dump` cores per configuration (2 GiB guests) and a few hundred MiB of kdump
+  cores in the object store. `demo-down.sh --wipe --yes` removes them with the store.
+
+The ppc64le local cells share the node but are owner #2818's; the remote cells are #3114's.
+
+Last run: candidate `f9a74e45c` (server, worker and reconciler at that SHA in both
+configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing, the
+`longterm` fixture `v6.18.54` built on that host. Each configuration recorded its 82 cells in
+about 31 minutes and skipped the other's 82. `qualify` reported 144 of the 164 cells qualified:
+132 `rejection` (including the four fadump `capability` refusals), 8 `success` (`introspect.run`
+and `introspect.script`) and 4 `unsupported`. Twenty did not qualify:
+
+- 16 kdump-based functional cells (`control.force_crash`, `vmcore.fetch` `kdump`,
+  `introspect.from_vmcore`, `postmortem.crash`) are `blocked`: the fixture kernel lacks
+  `CONFIG_SQUASHFS`, so the guest's `kdump.service` cannot build its initramfs (#3219).
+- 4 `vmcore.fetch` `host_dump` functional cells are `failure`: the live libvirt daemon cannot
+  write the core into the worker's private spool directory (#3220).
+
+After `demo-down.sh --wipe --yes` the worker's libvirt defined no `kdive-` domain and
+`KDIVE_INSTALL_STAGING` was empty.
+
+#### Traffic capture, SysRq and crash-watch tool cells (#3115)
+
+`tests/integration/test_control_tool_cells_live.py::test_control_tool_cell` carries the 60
+x86_64 local-libvirt cells of `control.capture_traffic`, `control.diagnostic_sysrq` and
+`control.watch_for_crash`: 12 `functional` and 48 rejection cells. local-libvirt supports all
+three, so they have no `capability` cell
+([ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md), amended
+2026-10-13). The [design](../../workflow/specs/2026-10-14-local-control-tool-cells-design.md)
+lists what each cell compares. The prerequisites are the capture cells' above: the rejection
+cells share their target, which opens a drgn-live session. Run both configurations into one
+evidence root, then assemble and qualify as in the System section:
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix KDIVE_ARTIFACT_DIR=$(mktemp -d)
+export KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"
+uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+examples/local-libvirt/demo-up.sh                                     # default
+uv run python -m pytest -m live_stack tests/integration/test_control_tool_cells_live.py
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery
+uv run python -m pytest -m live_stack tests/integration/test_control_tool_cells_live.py
+```
+
+- Each functional cell provisions `fedora-kdive-ready-44`, boots the fixture kernel through the
+  deep-lifecycle checks and then calls only its tool through the cell's exposure.
+- `control.capture_traffic` captures for 15 s while the guest sends UDP datagrams carrying a
+  fresh token to `10.0.2.2:9`. The pcap downloaded through `artifacts.fetch_raw` must hold at
+  least five of them, and the domain's QOM tree no `kdive-dump-` filter afterwards. The cleanup
+  proves `/var/lib/kdive/pcap/<system>` gone; the stored pcap is Run-owned and retained.
+- `control.diagnostic_sysrq` sets `kernel.sysrq=1` and console log level 8 in the guest, then
+  runs `show_memory`. The captured console must hold `sysrq: Show Memory` followed by
+  `Mem-Info:`, and the guest's `dmesg` one more header than before.
+- `control.watch_for_crash` runs a 20 s watch that must end `not_fired` within 30 s, then a
+  180 s watch that must fire on `Kernel panic - not syncing: <token>` lines the guest writes to
+  `/dev/kmsg` every 2 s. The written signature leaves the System `ready`; no watch job is left
+  queued or running.
+- Rejection cells aim at the capture cells' torn-down, Run-bound target. The System tools answer
+  a foreign target `configuration_error`, the Run-resolved `capture_traffic` `not_found`.
+
+The ppc64le local cells share the node but are owner #2818's; the remote cells are #3116's.
+
+Last run: candidate `cf8275e80` (server, worker and reconciler at that SHA in both
+configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing, the
+`longterm` fixture `v6.18.54` built on that host. Each configuration recorded its 30 cells in
+about 33 minutes and skipped the other's 30. `qualify` reported 56 of the 60 cells qualified:
+48 `rejection` and 8 `success` (`control.diagnostic_sysrq` and `control.watch_for_crash`). The
+4 `control.capture_traffic` functional cells are `failure`: the worker rejects its own
+capture spool directory, which inherits the build workspace's setgid bit, and the failed job
+stays `running` until the cell's drain deadline (#3225). After `demo-down.sh --wipe --yes` the
+worker's libvirt defined no `kdive-` domain and `KDIVE_INSTALL_STAGING` was empty.
+
+#### GDB debug tool cells (#2813)
+
+`tests/integration/test_debug_tool_cells_live.py::test_debug_tool_cell` carries the 440 x86_64
+local-libvirt cells of the 21 `debug.*` tools: 88 `functional` (`debug.start_session` as both
+`gdbstub` and `drgn-live`) and 352 rejection cells. Local-libvirt supports both transports, so
+no `capability` cell exists. The `debug.list_sessions` `authorization` and `project-isolation`
+cells prove denied visibility against a viewer who sees the target session
+([ADR-0756](../../adr/0756-filtered-list-boundary-evidence.md), amended 2026-10-14). The
+[design](../../workflow/specs/2026-10-14-local-debug-tool-cells-design.md) lists what each cell
+compares. The prerequisites are the capture cells' above (drgn for the `drgn-live` variant)
+plus `gdb` on the MCP server's PATH, which runs the debugger beside QEMU's loopback gdbstub,
+and `objdump` on the test host, which decodes the fixture `vmlinux` for the `debug.advance` and
+`debug.disassemble` cells; either missing records the cell `blocked`. Each attach stages a copy
+of the Run's `vmlinux` (about 437 MB for `longterm`) in the server's temp directory, and ending
+the session removes it (#3229), so that directory needs room for one copy per live session.
+Run both configurations into one evidence root:
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix KDIVE_ARTIFACT_DIR=$(mktemp -d)
+export KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"
+uv run python -m tests.integration.live_stack.tool_cells bindings --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+examples/local-libvirt/demo-up.sh                                     # default
+uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_live.py
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery
+uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_live.py
+```
+
+- Each functional cell provisions `fedora-kdive-ready-44` with `debug.gdbstub` (no
+  `crashkernel`, so the boot carries `nokaslr`) and boots the fixture kernel through the
+  deep-lifecycle checks, which upload its `vmlinux` and load `loop`. Before any attach halts the
+  guest, it reads `/proc/version`, `/proc/kallsyms` and `loop`'s `.text` base over SSH, and
+  requires `vfs_read` at its fixture `System.map` address.
+- A `vfs_read` breakpoint stop is the controlled workload: an SSH client banner written while the
+  guest resumes makes guest `sshd` call `read(2)`. Addresses, registers, frames, disassembly,
+  the `jiffies_64` watchpoint, `linux_banner` bytes, `loop`'s base and a `loop` function's
+  relocated address are compared with the guest's own values, and instruction steps and
+  disassembly with the fixture binary's instruction boundaries; session cells compare the
+  session rows and prove the guest halts while attached and answers again after the detach.
+- The `debug.read_frame` cell requires the stop at `vfs_read`'s entry and compares frame 0's
+  arguments with its v6.18 signature (`file`, `buf`, `count`, `pos`) and their values with the
+  `rdi`, `rsi`, `rdx` and `rcx` registers, plus a user-half `buf` and a `ret` local (ADR-0781).
+  gdb's `<name>@entry` rows are set aside for the name check and must equal the same register.
+  The `debug.list_breakpoints` cell compares each listed row's
+  number, kind, function and address with the installed breakpoints (ADR-0780).
+- The `debug.interrupt` cell leaves the guest running with `debug.continue` `wait=false`
+  (ADR-0783), requires `halted_by=interrupt` with `signal-received`, records which path the
+  `vfs_read` breakpoint stop took (`resume_reply` or `waiting_continue`), and ends the session
+  while the guest runs, requiring it to answer again.
+- Rejection cells aim at one target per stack: a torn-down fixture System, its Run and an ended
+  gdbstub session. They compare the project rows (including its debug sessions), the jobs naming
+  the System or Run, and whether its domain is defined.
+
+The ppc64le local cells share the node but are owner #2818's; the remote cells are #3113's.
+
+Last run: candidate `e5215fc6d` (server, worker and reconciler at that SHA in both
+configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing, the
+`longterm` fixture `v6.18.54` built on that host. Each configuration ran on a freshly wiped stack
+and recorded its 220 cells in about 80 minutes, skipping the other's 220. A first default run
+filled the guest's 16 GB quota-limited `/tmp` with leaked debuginfo staging (#3229) and failed 16
+cells with `Disk quota exceeded`. Both reported configurations therefore ran with the server's
+`TMPDIR` on disk (operator decision, 2026-10-15), and the leaked directories were deleted
+before each run. `qualify` reported 420 of the 440 cells qualified: all 352 `rejection` and 68
+`success`. Twenty are `failure`:
+
+- 12 known gaps, each after its observable proof: `debug.list_breakpoints` (count only),
+  `debug.read_frame` (no arguments or locals) and `debug.interrupt` (the started session's
+  guest was already halted), four each.
+- 8 `debug.clear_breakpoint` and `debug.clear_watchpoint` cells: their 5 s continue timed out
+  and the engine's interrupt dropped the stop reported in its own reply, answering
+  `transport_stall` (#3230).
+
+After `demo-down.sh --wipe --yes` neither libvirt defined a `kdive-` domain,
+`KDIVE_INSTALL_STAGING` was empty, and no staging directory remained in either temp directory.
+
+A later rerun at the #3229 candidate `9697b4caa` ran 10 `gdbstub` `default`/`direct` functional
+cells (`start_session`, `end_session`, `load_module_symbols`, `list_modules`, `read_memory`,
+`read_registers`, `resolve_symbol`, `set_breakpoint`, `backtrace`, `disassemble`) with the
+server's `TMPDIR` on a tmpfs whose per-user quota was 1200 MB, below three staged copies. All 10
+recorded `success`; 11 staging directories came and went, never more than one at a time, and
+the temp directory was empty after the cells and after `demo-down.sh --wipe --yes`.
+
+A rerun at the #3242 candidate `424f2fb40` ran the four `debug.list_breakpoints` `gdbstub`
+functional cells (`default` and `recovery`, each `direct` and `gateway`) on the same kind of
+guest, with the server's `TMPDIR` on the same 1200 MB quota tmpfs; the `recovery` configuration
+came up after a plain `demo-down.sh` with `KDIVE_WORKER_DEATH_VERIFIER=docker`. All four recorded
+`success`, each listing its `vfs_read` and `vfs_write` breakpoints by the numbers they were set
+with, as `breakpoint` rows whose addresses fall inside those functions in `/proc/kallsyms`, and
+only the `vfs_write` row after the first was cleared. After `demo-down.sh --wipe --yes` no
+`kdive-` domain remained and the temp directory held no staging directory.
+
+#### Break-glass provider tool cells (#3112)
+
+`tests/integration/test_breakglass_tool_cells_live.py::test_breakglass_tool_cell` carries the 136
+x86_64 cells of `ops.force_release`, `ops.force_teardown`, `ops.resolve_recovery_orphan` and
+`systems.resolve_external_boot_conflict` on both lanes: 68 local-libvirt cells, and 68
+remote-libvirt cells on the provider lane of the
+[remote runbook](remote-live-stack.md#8-remote-system-tool-cells-3080). The
+[design](../../workflow/specs/2026-10-07-breakglass-tool-cells-design.md) lists what each cell
+compares. `ops.force_teardown` alone does not require the provider `authority` role
+([ADR-0788](../../adr/0788-authority-tool-cells-bind-the-serving-authority.md) amends the
+2026-10-07 operator decision for `ops.force_release`).
+
+- An `ops.force_teardown` functional cell provisions the lane image in a fresh `cov-<hex>`
+  project. A platform admin who holds no role in that project then tears it down through the
+  cell's exposure. The cell proves the System `torn_down`, the domain undefined and its disks
+  gone on the provider. It also proves the provider's other `kdive-` domains and the lane's
+  staged base untouched, and one `platform_audit_log` row for the call. The frame then releases
+  the allocation and proves capacity returned.
+- The `ops.force_release`, `ops.resolve_recovery_orphan` and
+  `systems.resolve_external_boot_conflict` functional cells run only on the installed authority
+  lanes ([authority functional tool cells](#authority-functional-tool-cells-3186)). On the
+  demo-up lane they stop `blocked`. A blocked remote cell first probes the provider host, so its
+  record carries that host.
+- A rejection cell aims at the stack's System target for its provider: a torn-down System and its
+  released allocation.
+  - The three `ops.*` tools refuse a `platform_operator` with `authorization_denied` before they
+    resolve the object.
+  - `systems.resolve_external_boot_conflict` refuses a contributor of the target's project. It
+    answers another project's System with `not_found`, identical to its answer for an absent
+    System.
+  - A validation cell mistypes the id.
+
+Run the cells on a stack prepared as for the System cells above, with the remote prerequisites
+of the remote runbook's §8. The provider host serves only this run while it lasts: another
+stack's remote cells would change its domain set during a teardown cell.
+
+```bash
+sha=$(git rev-parse HEAD)
+export REMOTE_PROVIDER_SSH=<user>@<provider-host> KDIVE_SYSTEMS_TOML=<the stack's systems.toml>
+uv run python -m tests.integration.live_stack.tool_cells bindings --remote --candidate "$sha" --out inputs.json
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both configurations
+examples/local-libvirt/demo-up.sh             # default configuration
+uv run python -m pytest -m live_stack tests/integration/test_breakglass_tool_cells_live.py
+examples/local-libvirt/demo-down.sh --wipe --yes
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery configuration
+uv run python -m pytest -m live_stack tests/integration/test_breakglass_tool_cells_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+On the demo-up lane, each configuration records 68 cells (4 `success`, 52 `rejection` and 12
+`blocked`) and skips the
+other configuration's 68. `qualify` then qualifies 112 of the 136 and lists the 24 blocked cells,
+so it exits non-zero by design. `demo-down.sh --wipe --yes` clears the stack and the worker's
+libvirt, but it does not reach the provider host. So before each wipe, including the one between
+the configurations, check the provider: `virsh list --all` there must show no `kdive-` domain,
+and the pool must hold no `kdive-` overlay volume. A cell killed mid-run can leave both. While
+the stack is still up, release the leftover's allocation as §7 of the remote runbook says, and
+let its teardown finish. Anything still on the provider after that, or after a wipe, is removed by
+hand: `virsh destroy` and `virsh undefine` on the domain, and `virsh vol-delete --pool <pool>` on
+its overlay volume.
+
+Last run: candidate `967755fa0` (server, worker and reconciler at that SHA in both configurations;
+later commits change only this runbook). The control plane was a disposable Fedora 44 x86_64 lab
+guest with SELinux enforcing. The provider was a separate disposable Rocky Linux 10.2 x86_64 KVM
+guest, prepared with `site.yml` (a fresh PKI from `playbooks/pki.yml`) and staging only
+`fedora-kdive-remote-base-43`, with no provider authority on either host. One provider-host step
+existed only because of an open defect and is not product coverage: firewalld was installed and
+enabled before `site.yml` (#3083). Each configuration ran on a freshly wiped stack and recorded
+its 68 cells in about three and a half minutes: 4 `success`, 52 `rejection` and 12 `blocked`.
+`qualify` reported 112 of the 136 qualified: the 8 `ops.force_teardown` functional cells and all
+104 rejection cells. The 24 blocked functional cells were blocked as designed. Their `qualify`
+rows also list input-context and digest mismatches, because they stop before any guest is
+observed, and the resolve rows list the missing `authority` role. On these hosts the provider's
+other-domain set was empty, so the teardown cells' proof that unrelated resources stay rests on
+the staged base surviving. Remote records carry the provider host as `rocky:10.2`. No record or
+artifact carried a host name or address. After the run, neither the worker's libvirt nor the
+provider defined a `kdive-` domain, and the provider pool held only its base volume.
+
+#### Authority-owned System frame (#3184)
+
+`tests/integration/live_stack/authority_lane.py` frames a System on the installed local-authority
+lane for the HTTP tool cells that need one. A carrier selects it explicitly through
+`on_authority_system`; the ordinary `on_lane_system` and `lane_target` frames do not change. The
+frame observes the System on the authority's private daemon and private roots, never over SSH.
+A `remote-libvirt` cell runs the remote branch below.
+
+`LOCAL_AUTHORITY_LANE_CONFIG` names an owner-only mode-`0400` or mode-`0600` JSON file
+with exactly `installed_revision` (the full 40-character SHA), `authority_service` (the literal
+`kdive-external-boot-authority.service`) and `system_mode`. An unset variable stops the cell
+`blocked`. `system_mode: "public"` stops `blocked` before any mutation: public authority-owned
+provisioning is blocked by #3144 and #3148, and an attempt strands its allocation.
+`system_mode: "fixture"` is the runnable path:
+
+1. The frame checks the authority unit, the installed revision, the `/readyz` revision of the
+   server and every running fixed worker slot, the installed routes and the harness DSN's read
+   access, then lists the authority daemon's domains, the two private roots' entries and the
+   worker daemon's domains.
+2. It acquires the lane image, requests an allocation and provisions a System over HTTP with the
+   fixed rootfs `/var/lib/kdive/rootfs/live-vm-provisioned-rootfs.qcow2` pinned to that image's
+   registered digest. Stage the lane image's bytes there first, as for the installed carrier.
+   The allocated resource must carry no `authority_instance` in the lane's `systems.toml`;
+   otherwise the frame releases the allocation and stops `blocked`. Export
+   `KDIVE_SYSTEMS_TOML` naming the exact file the running server and fixed workers were started
+   with: the frame checks routing in its own process, the test session sandboxes the XDG default,
+   and the frame stops `blocked` without the variable. It also stops `blocked`, before any
+   allocation, when that file fails to load or routes every `[[local_libvirt]]` entry through an
+   `authority_instance`.
+3. It moves the System onto the private daemon with `provision-authority-fixture.py`, runs the
+   confinement probes and the fixture's read-only verification, then runs the cell body.
+4. Cleanup drains every open job of the System and its Runs, closes the Investigations the body
+   recorded (a body releases every external boot it starts itself; a held activation fails the
+   cleanup), removes the five fixture names, tears the System down, releases the allocation, and
+   requires the step-1 listing and the capacity in use to be unchanged. A cleanup failure fails
+   the cell.
+
+**Fixture-mode inventory.** A lane has one local-libvirt resource: resource rows are one per
+worker libvirt endpoint, so a plain `[[local_libvirt]]` entry cannot sit beside the routed one.
+Keep the lane's routed inventory file unchanged and make a separate copy in which only the
+`[[local_libvirt]]` entry's `authority_instance` line is removed. Place the copy beside the
+routed file with the same ownership and mode: the fixed workers read it, and a start refuses an
+inventory a worker slot cannot read. The `[[remote_libvirt]]`
+authority tuple stays the same in both, and the copy also declares the registered lane image.
+Bring the whole stack up on the copy (`KDIVE_SYSTEMS_TOML` naming it for `stack-services.sh`),
+and export the same path to the frame. Until #3144 and #3148 land, this copy is the lane's
+working inventory. To switch back, run `stack-services.sh` again with the routed file, and only
+when no authority-owned System, job or recovery is open on the lane.
+
+Use the harness DSN (`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`). Run one authority
+scenario at a time on the lane; another scenario's domains change the listing and fail the frame.
+The frame's own proof runs with:
+
+```sh
+KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" \
+KDIVE_SYSTEMS_TOML=~/.config/kdive/systems.toml \
+LOCAL_AUTHORITY_LANE_CONFIG=/protected/authority-lane.json \
+  uv run python -m pytest tests/integration/test_authority_lane_frame_live.py -m live_stack -v
+```
+
+A killed run skips cleanup. Remove its fixture with the exact-name loop under
+[fixture cleanup](#installed-local-authority-carrier), then run `systems.teardown` for the System
+with an `admin` token for its project and wait for `torn_down`, then `allocations.release`.
+
+##### Local inventory observer prerequisite (#3237)
+
+The local frame requires the proof-only collector from [ADR-0800](../../adr/0800-proof-authority-inventory-collector.md).
+Enable `live_vm_host_authority_inventory_observer_enabled` or, for the production host role,
+`provider_authority_host_inventory_observer_enabled` in the approved local-lane inputs.
+Both default to false and require local authority mutation support and the fixed private roots.
+The provider role's configurable authority interpreter does **not** satisfy the collector
+prerequisite: `/usr/bin/python3` must separately be immutable system Python 3.14.
+Provisioning refuses an older or mutable interpreter; arrange the documented host prerequisites
+before retrying. No alternate privileged interpreter or root inventory fallback is used.
+
+Both roles install the same locked, noneditable runtime under `/opt/kdive-authority-inventory`,
+with root-owned code/imports, a root-owned systemd listener and the locked
+`kdive-authority-observer` identity with no supplementary groups or sudo grant. This adds one
+runtime copy and its native build/storage cost, including existing POWER build prerequisites.
+The observer can connect only to `/run/kdive-authority-inventory/inventory.sock`; private roots
+remain authority-owned mode `0700`. The fixed collector runs as the trusted authority identity.
+Its read-only libvirt call is defense in depth; it does not make a compromised authority safe.
+The installed collector revision must match the frame's configured candidate before allocation.
+
+Each connection accepts EOF after LF or one canonical UUID plus LF (at most 37 bytes).
+A complete response is limited to 1,048,576 UTF-8 bytes; excess fails without truncation.
+The outer call and client each have a 120-second monotonic deadline from invocation/connect
+preparation, and each accepted service has a 120-second systemd lifetime including backend calls,
+with one-second stop escalation. The listener admits four active handlers and backlog 16.
+A timeout, refused connection, incomplete facts or oversize response fails the observation and
+cleanup evidence. Repair the prerequisite/backend or serialize calls, then rerun the proof;
+there is no retry, cache or reduced inventory fallback.
+
+Before changing collector bytes the roles withdraw its socket and wait for all instances to stop.
+Readiness failures leave it disabled. Disabling its opt-in withdraws its listener, units and
+root-owned runtime/client, preserving the locked account and all authority/guest state. Disable
+before rolling back to source without the collector. Re-running unchanged provisioning must
+retain the same grants. `authority_host_teardown.yml` withdraws the boundary the same way before it retires the authority.
+A connection never starts the authority: while the authority is stopped or failed, each
+accepted instance fails instead. The listener stops with the authority, so after an
+out-of-band authority stop and start, re-run the role to restore it.
+Offline tests and unit-file inspection do not prove these permissions.
+
+**Native proof remains a separately approved operation.** Review an execution packet naming the
+exact candidate, one existing idle local lane, native architecture, runtime/install budget and
+negative request bytes before running any host commands. Neither these instructions nor a green
+offline suite grants host access. Bind caller, collector scripts/imports/revision, authority and
+stack to that candidate, and check the host OS/Python/systemd/libvirt prerequisites first.
+Within that approved window, record private commands, exits, durations and hashes for:
+
+1. Zero-selection and one existing selected-System observation, compared with independent
+   trusted queries in the same quiescent state: complete domain set, both root entry sets and
+   active/type facts. No guest creation, start or deletion is needed.
+2. Observer denial of direct private RW-socket connection, private authority runtime traversal,
+   and `O_RDONLY` opening of representative rootfs/console, journal, credential and proof-control
+   files, without reading bytes. `sudo -n -u root -- /usr/bin/true` and
+   `sudo -n -u kdive-provider-authority -- /usr/bin/true` must fail as the observer.
+3. Literal `destroy UUID\n` and overlong bytes sent only to the collector, yielding EOF/failure
+   and fixed `request-rejected` evidence, with unchanged before/after inventory. Never send a
+   mutation operation to libvirt. Source/sentinel tests establish the rejection order;
+   journal evidence is not an independent syscall trace.
+4. Unchanged reconvergence, then approved collector-only disable/re-enable: compare grants,
+   prove endpoint withdrawal and restored inventory without changing private permissions.
+
+Report which native arm actually ran. Native x86_64 evidence does not qualify ppc64le; retain
+both targets and keep #3185/#3186 fault matrices outside this bounded procedure. Keep host
+identifiers and private inventory names out of public summaries.
+
+##### Remote authority branch (#3209)
+
+A `remote-libvirt` cell provisions on the installed remote authority instead. There is no fixture
+path: the frame uses public provisioning on the remote resource that routes to the authority.
+
+- `KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG` names the existing remote proof config
+  ([its contract](#installed-remote-authority-proof-prerequisite)). The frame replaces its
+  `ownership_prefix` with one minted per invocation.
+- `resource_name` must be declared in the `KDIVE_SYSTEMS_TOML` inventory with
+  `authority_instance` equal to the config's. The control-plane catalog must hold exactly one
+  registered public `remote-libvirt` image for the cell's architecture with a digest and an
+  inspected root (`root_spec`); admission refuses an authority-owned System without one. Otherwise
+  the cell stops `blocked` before any mutation.
+- Obtain these catalog facts by declaring/reconciling a public `remote-libvirt` image with
+  `source.kind = "staged"` and a **fresh** volume name, then running
+  `python -m kdive stage-volume --image IMAGE --arch ARCH --from /path/to/base.qcow2`
+  against the lane's configured database and single remote instance. Install `virt-inspector`
+  for mandatory root inspection; optional config capture uses `guestfish`. Staging copies one
+  qcow2 into a private temporary directory, rejects backing/external-data images, hashes and
+  inspects that snapshot, uploads those exact bytes, then commits its digest and `root_spec`
+  (ADR-0776).
+  Inspection or root-metadata persistence failure fails the command. Existing remote volumes
+  are refused; no overwrite/delete is implied. If metadata fails after upload, inspect and
+  manually clean up the unverified residue or declare a fresh target before retrying.
+  Kernel-config capture/attachment is advisory. Reconcile preserves inspected facts only for
+  the unchanged staged volume declaration; repointing invalidates them. Plain staged images
+  remain unverified and eligible only for their existing disk/GRUB path.
+  These facts attest stage-time bytes, not subsequent remote replacement. Separately install
+  the **same digest-pinned base** into the authority's private store using the existing
+  [authority base contract](#installed-remote-authority-proof-prerequisite); its manifest root
+  identity, private-base digest and ongoing file-identity checks remain mandatory (ADR-0623).
+- The operator's batch-mode SSH to `ssh_target` and passwordless `sudo -n -u
+  kdive-provider-authority` there are required. As that account, never root, the frame runs one
+  fixed program with the authority's interpreter. The program reads
+  the pool name from `/etc/kdive/provider-authority.env`, then lists the private daemon's domains
+  and that pool's volumes.
+
+The frame gates on the remote unit and its installed revision, the control plane's `/readyz`
+revisions and the harness DSN's read access. It then provisions, requires the System's domain to
+be running on the private daemon, and runs the body. Cleanup drains the jobs, tears the System down
+through the authority, and requires no domain and no pool volume naming the System. It then
+releases the allocation and requires the daemon's domains and the pool's volumes unchanged. Add
+the config variable to the command above to run the remote arm; run one scenario at a time on the
+remote authority.
+
+A killed remote run skips cleanup. Run `systems.teardown` and wait for `torn_down`, then
+`allocations.release`. If a `kdive-<system-id>` domain, or a volume whose name contains the System
+id (overlays and `kdive-module-<system-id>-*` preparations), is still on the authority's private
+daemon, remove it as the authority account, never root (`sudo -n -u kdive-provider-authority
+virsh -c` on the authority host), through
+`qemu+unix:///session?socket=/run/kdive/provider-authority/libvirt/libvirt-sock`:
+`virsh destroy`, then `virsh undefine` the domain, then `virsh vol-delete --pool <pool>` the volume.
+
+##### Authority recovery faults (#3185)
+
+`tests/integration/test_authority_faults_live.py` runs fault arms inside this frame. Each arm binds
+its fault to the frame's System, the Run it activates and one authority operation, and reads the
+job, journal head, quarantine rows and the authority's own daemon or receipt before it calls a
+recovery tool. A platform admin with no role in the frame's project calls the tools. Enable the
+barrier on each authority (above) and add `"barrier_socket":
+"/run/kdive/provider-authority/proof-control/control.sock"` to the local lane config. Export
+`KDIVE_KERNEL_SRC` naming a pre-built x86_64 tree: the arms upload it without a `vmlinux` and build
+no kernel.
+
+A remote arm also uploads an initrd, because remote external boot refuses a build without one
+(`remote_external_boot_initrd_required`). The arm builds it on the test client with `dracut`,
+which Ubuntu 26.04, Fedora and Rocky install by default. It runs unprivileged and skips
+`/etc/dracut.conf` and `/etc/dracut.conf.d`. The distro's `/usr/lib/dracut/dracut.conf.d` drop-ins
+still apply and can add dracut modules or files; no dracut option turns them off.
+The tree's `.config` must also set `CONFIG_BLK_DEV_INITRD=y` and `CONFIG_RD_GZIP=y`. The initrd
+holds userspace only (it resolves `root=UUID=`), so the tree's virtio and root-filesystem drivers
+must be built in, as every spine already requires. To build the same initrd by hand, with
+`<scratch>` a new directory and `<scratch>/dracut.conf.d` an empty one:
+
+```bash
+dracut --conf /dev/null --confdir <scratch>/dracut.conf.d --no-kernel --no-hostonly \
+  --no-hostonly-cmdline --no-early-microcode \
+  --kver "$(cat "$KDIVE_KERNEL_SRC/include/config/kernel.release")" \
+  --modules "base rootfs-block udev-rules systemd systemd-initrd dracut-systemd fs-lib" \
+  --gzip --force --tmpdir <scratch> <scratch>/initrd
+```
+
+Without root, dracut logs `ldconfig might need uid=0 (root) for chroot()` and still exits 0. The
+image then carries no `ld.so.cache`, and glibc's built-in search path finds the libraries.
+
+- **Held teardown (local and remote).** The arm activates and releases one external boot, arms
+  `teardown`/`after-provider`, and calls `systems.teardown`. While the effect is held it requires
+  the journal head `mutation-started`, the domain gone from the authority daemon, the allocation
+  `active`, and `ops.force_release` refused with `external_boot_system_teardown_required`. After
+  the barrier is released and the System is `torn_down`, `ops.force_release` must release. A
+  remote activation that fails stops the arm `blocked` with the job's phase.
+- **Recovery orphan (local and remote).** The arm activates, arms `cleanup`/`before-finalize`, and calls
+  `runs.release_external_boot`. While held it requires the head `terminal` for the cleanup, the
+  private `cleanup-quarantine.json` present (a fixed read-only root program under
+  `/var/lib/kdive/provider-authority/recovery`), and no quarantine row. It then aborts and requires
+  exactly one new `quarantined` `recovery-record` row naming that receipt. The release job's next
+  attempt finalizes and removes the receipt, so `ops.resolve_recovery_orphan` (`delete`) commits
+  the disposition of an already-absent object; the arm requires that row `deleted` by that job and
+  every other quarantine row unchanged. If the arm fails after the abort it resolves the rows it
+  published before the frame tears down, and names any it could not as residue on the failure.
+  The deletion of a still-present receipt by `ops.resolve_recovery_orphan` stays unproven, because
+  a receipt survives to resolution only if the release job ends terminally, whose recovery is
+  #3143.
+- **Recovery conflict (local and remote, #3327).** The arm activates, then appends one token to
+  the System's persistent kernel command line on the authority daemon, as a host administrator
+  would ([ADR-0805](../../adr/0805-authority-observed-conflict-is-recorded-from-its-journal-head.md)).
+  Locally it runs as root through the receipt observer's interpreter; remotely it runs as the
+  authority account. It then calls `runs.release_external_boot` and requires the job `failed`
+  with category `conflict`, the journal head `terminal` for `recover` with outcome `conflict`, and
+  the activation in `recovery_conflict`. The frame's project admin then calls
+  `systems.resolve_external_boot_conflict` with the head's composite. The added token is a third
+  identity the resolution acknowledges, so it restores the recorded source
+  ([ADR-0805](../../adr/0805-authority-observed-conflict-is-recorded-from-its-journal-head.md),
+  #3330): the arm requires that job to succeed, the journal head `terminal` for `resolve-conflict`
+  with outcome `source`, and the activation `recovered`. The frame's teardown then runs from
+  `recovered`. Teardown straight from an unresolved remote conflict is not covered: the remote
+  provider refuses a definition that is neither the recorded source nor target
+  ([ADR-0620](../../adr/0620-authority-owned-system-teardown.md)).
+
+Every hold waits at most 120 s and checks that the held job is still `running` at the same attempt
+with a live lease before the fault, because the worker's authority deadline is five minutes per
+attempt. No arm restarts the authority. A killed run can leave one arm, and the next arm then
+fails with a stale-arm message: restart the authority once (`sudo systemctl restart` the unit),
+which counts against its five starts in 600 s, then run the killed-run cleanup above. A killed
+run can also leave an activated Run or a published quarantine row. Before the killed-run
+`systems.teardown`, release the Run's external boot (`runs.release_external_boot` with an `admin`
+token for the frame's project) and wait for its job, then resolve every `quarantined` row naming
+the System with `ops.resolve_recovery_orphan` (`delete`) as a platform admin. Until #3321 and
+#3322 are fixed on the lane those steps fail too; roll the lane back to its pre-run snapshot
+instead. Add `tests/integration/test_authority_faults_live.py` to the command above in place of
+the frame test.
+
+##### Authority functional tool cells (#3186)
+
+The 32 x86_64 functional cells of `runs.release_external_boot`, `ops.force_release`,
+`ops.resolve_recovery_orphan` and `systems.resolve_external_boot_conflict` (both
+configurations, both exposures, both providers) run in this frame through
+`tests/integration/live_stack/authority_cells.py`, from the ordinary carriers
+`test_run_tool_cells_live.py` and `test_breakglass_tool_cells_live.py`. The
+[design](../../workflow/specs/2026-10-21-authority-tool-cells-design.md) maps each cell.
+
+- `runs.release_external_boot`: the cell activates the `longterm` fixture on the frame's System
+  and a `contributor` of its project releases it through the cell's exposure. It requires the
+  release job `succeeded`, the root-release completion evidence, the private cleanup receipt
+  absent (local), the domain still defined, and the System's private rootfs entries (local) or
+  pool volumes (remote) as they were before the activation.
+- `ops.force_release`: the held-teardown arm above, called by an outside platform admin through
+  the cell's exposure. After the refusal and the quiescent teardown it requires the allocation
+  read `released` and the capacity in use lower than while the effect was held.
+- `ops.resolve_recovery_orphan`: the recovery-orphan arm above, called the same way; remotely it
+  reads the remote module store's receipt. The
+  tool admits a local row when its publishing authority is the server's fixed route; the server
+  composes no local recovery-object port.
+- Remote `ops.resolve_recovery_orphan` runs the recovery-orphan arm and every
+  `systems.resolve_external_boot_conflict` cell runs the recovery-conflict arm above, each on the
+  frame's own client.
+- A local record's `effect` discloses its fixture-mode System: provisioned through the worker
+  and moved onto the authority by the fixture script, because of #3144/#3148. Every operation
+  under test runs against the real authority.
+- A remote cell records the provider host as its host and the bound fedora representative as
+  its guest, so the remote authority lane's single registered remote image must be
+  `fedora-kdive-remote-base-43` (the same digest-pinned base in its private store). It records the
+  remote authority's revision as its `authority` role (ADR-0788).
+
+Prerequisites, beyond the frame's: a verified `longterm` fixture under `KDIVE_FIXTURE_ROOT`
+(as for the run cells), the barrier socket in the local lane config, and the remote proof
+config. Point `REMOTE_PROVIDER_SSH` at the remote authority host, both for the bindings and for
+the run. Run one configuration at a time, as for the other tool cells; restart the stack with
+`KDIVE_WORKER_DEATH_VERIFIER=docker` for `recovery`:
+
+```sh
+sha=$(git rev-parse HEAD)
+uv run python -m tests.integration.live_stack.tool_cells bindings --remote --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" \
+LOCAL_AUTHORITY_LANE_CONFIG=/protected/authority-lane.json \
+KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG=/protected/remote-authority.json \
+  uv run python -m pytest -m live_stack -v -p no:randomly \
+  tests/integration/test_run_tool_cells_live.py tests/integration/test_breakglass_tool_cells_live.py \
+  -k "functional and (release_external_boot or force_release or resolve_recovery_orphan or resolve_external_boot_conflict)"
+```
+
+Then assemble and qualify as for the other tool cells, and report every one of the 32 cells as
+qualified, `blocked`, `failure` or not-run.
 
 ### `live_vm` (native) — a real kernel on real silicon
 
@@ -1456,9 +2761,9 @@ experiment's workers and logs, not the current slot identity contract.
   [platform support](../platform-support.md) for why the project's `uv` dependency set does not
   supply the binding.
 - **Staged images need the right label on an SELinux host** — `virt_image_t` under
-  system mode, `svirt_image_t` under session mode (ADR-0640), or the
-  `libvirt-qemu` AppArmor profile on Ubuntu — and the rootfs's parent dir must be
-  writable, because the boot stages an overlay beside it.
+  system mode, `svirt_image_t` under session mode (ADR-0640). Ubuntu session guests
+  have no per-domain AppArmor confinement (ADR-0741). The rootfs's parent dir must
+  be writable, because the boot stages an overlay beside it.
 - **`pytest -m live_vm` selects all four families.** If you run a nightly for
   only one, declare which families you intend to run and let the fail-loud gate
   catch a missing declared family, rather than skipping to green.

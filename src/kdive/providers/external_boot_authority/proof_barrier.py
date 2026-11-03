@@ -1,4 +1,4 @@
-"""Disabled-by-default native authority fault barrier (ADR-0622)."""
+"""Disabled-by-default native authority fault barrier (ADR-0622, ADR-0787)."""
 
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ from typing import Literal, cast
 from uuid import UUID
 
 from kdive.providers.external_boot_authority.protocol import AuthorityOperation
+from kdive.providers.external_boot_authority.service import ProofBarrierAbort
 from kdive.providers.external_boot_authority.transport import check_stale_socket
 
-type ProofCheckpoint = Literal["before-provider", "after-provider"]
+type ProofCheckpoint = Literal["before-provider", "after-provider", "before-finalize"]
 
 _MAX_FRAME_BYTES = 1024
 _PEER_SIZE = struct.calcsize("3i")
@@ -102,6 +103,9 @@ class AuthorityProofBarrier:
             return {"state": await self.status()}
         if action == "release" and set(data) == {"action"}:
             return {"state": await self.release()}
+        if action == "abort" and set(data) == {"action"}:
+            aborted = await self.abort()
+            return {"state": aborted} if aborted is not None else {"error": "invalid-request"}
         if action != "arm" or set(data) != {
             "action",
             "system_id",
@@ -124,7 +128,10 @@ class AuthorityProofBarrier:
             system_id = UUID(system_raw)
             run_id = UUID(run_raw)
             operation = AuthorityOperation(operation_raw)
-            if checkpoint not in {"before-provider", "after-provider"}:
+            if checkpoint not in {"before-provider", "after-provider", "before-finalize"}:
+                raise ValueError
+            # A finalize failure publishes a quarantine only for cleanup (ADR-0787).
+            if checkpoint == "before-finalize" and operation is not AuthorityOperation.CLEANUP:
                 raise ValueError
         except AttributeError, TypeError, ValueError:
             return {"error": "invalid-request"}
@@ -166,14 +173,31 @@ class AuthorityProofBarrier:
             return "reached" if armed.reached else "armed"
 
     async def release(self) -> Literal["released", "idle"]:
-        """Release the one matching arm without selecting a provider action."""
+        """Release the one matching arm; an unreached arm is cleared, so nothing waits on it."""
         async with self._lock:
             armed = self._armed
             if armed is None:
                 return "idle"
             if not armed.release.done():
                 armed.release.set_result(None)
+            if not armed.reached:
+                self._armed = None
             return "released"
+
+    async def abort(self) -> Literal["aborted"] | None:
+        """Fail one reached cleanup finalization; any other state refuses (ADR-0787)."""
+        async with self._lock:
+            armed = self._armed
+            if (
+                armed is None
+                or armed.checkpoint != "before-finalize"
+                or not armed.reached
+                or armed.release.done()
+            ):
+                return None
+            armed.release.set_exception(ProofBarrierAbort("proof checkpoint aborted by operator"))
+            self._armed = None
+            return "aborted"
 
     async def checkpoint(
         self,
@@ -195,10 +219,12 @@ class AuthorityProofBarrier:
             armed.reached = True
             self.reached.set()
             release = armed.release
-        await release
-        async with self._lock:
-            if self._armed is armed:
-                self._armed = None
+        try:
+            await release
+        finally:
+            async with self._lock:
+                if self._armed is armed:
+                    self._armed = None
 
     async def close(self) -> None:
         """Abort, never release, a checkpoint while the authority shuts down."""

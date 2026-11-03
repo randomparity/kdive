@@ -19,6 +19,8 @@ _GDB_ADDR = "10.0.0.5"
 _GDB_ADDR_B = "10.0.0.6"
 _DOMAIN = "kdive-sys"
 
+pytestmark = pytest.mark.usefixtures("fake_domain_monitor")
+
 
 def _config(gdb_addr: str = _GDB_ADDR, host: str = "host.example") -> RemoteLibvirtConfig:
     return RemoteLibvirtConfig(
@@ -223,7 +225,7 @@ def test_pki_base_dir_roots_the_materialized_pkipath(tmp_path: Path) -> None:
 
 
 def test_monitor_error_maps_to_transport_failure(tmp_path: Path) -> None:
-    domain = FakeDomain(_DOMAIN, raise_on={"qemuMonitorCommand": libvirt.VIR_ERR_OPERATION_FAILED})
+    domain = FakeDomain(_DOMAIN, raise_on={"monitor": libvirt.VIR_ERR_OPERATION_FAILED})
 
     async def scenario() -> None:
         await _resetter(domain, tmp_path).reset(

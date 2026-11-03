@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import fcntl
 import hashlib
 import io
 import itertools
@@ -11,6 +12,7 @@ import json
 import os
 import stat
 import tarfile
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
@@ -254,6 +256,7 @@ class _SystemTeardownSession:
         self.overlay_present = True
         self.baseline_present = True
         self.domain_was_validated = True
+        self.foreign_definition = False
         self.actions: list[str] = []
         self.destroy_mutations = 0
         self.undefine_mutations = 0
@@ -261,6 +264,8 @@ class _SystemTeardownSession:
 
     def inspect(self) -> LocalSystemTeardownInspection:
         self.actions.append("inspect")
+        if self.foreign_definition:
+            raise ValueError("domain definition is not owned by this System")
         return LocalSystemTeardownInspection(
             domain_absent=not self.domain_present,
             domain_validated=self.domain_present and self.domain_was_validated,
@@ -290,6 +295,10 @@ class _SystemTeardownSession:
         self.actions.append("remove-baseline")
         self.baseline_present = False
 
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
+        del metadata
+        self.actions.append("cleanup-payloads")
+
     def close(self) -> None:
         self.actions.append("close")
 
@@ -312,6 +321,152 @@ def _system_teardown_io(root: Path, session: _SystemTeardownSession) -> RealLoca
         1024,
         lambda: datetime(2026, 9, 6, tzinfo=UTC),
     )
+
+
+@pytest.mark.parametrize("domain_present", [True, False])
+@pytest.mark.parametrize("phase", ["pre-stop-intent", "target-defined", "new-live", "recovered"])
+def test_system_teardown_discards_unrecovered_point_without_a_domain_match(
+    tmp_path: Path, phase: RecoveryPhase, domain_present: bool
+) -> None:
+    """#3341: a conflicted activation cannot be recovered, so teardown discards it instead."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata(phase)
+    point = _point(metadata)
+    session = _SystemTeardownSession()
+    session.domain_present = session.domain_active = domain_present
+    session.overlay_present = session.baseline_present = domain_present
+    io = _system_teardown_io(root, session)
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+
+    io.discard_system_teardown_recovery(intent, point, _cleanup_proof_for(point), authority)
+    result = io.teardown_system(intent, authority)
+
+    assert session.actions.count("cleanup-payloads") == 1
+    assert result.complete
+    assert result.recovery_absent
+    with RecoveryMetadataStore(root) as store:
+        assert store.exact_recovery_absence(_BINDING)
+
+
+def test_system_teardown_discard_refuses_foreign_definition_and_keeps_recovery(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("target-defined")
+    point = _point(metadata)
+    session = _SystemTeardownSession()
+    session.foreign_definition = True
+    io = _system_teardown_io(root, session)
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+
+    with pytest.raises(ValueError, match="not owned"):
+        io.discard_system_teardown_recovery(
+            _teardown_intent(), point, _cleanup_proof_for(point), OpaqueProviderRef(ref="a")
+        )
+
+    assert "cleanup-payloads" not in session.actions
+    with RecoveryMetadataStore(root) as store:
+        assert store.reopen(point.recovery_ref, point.binding) == metadata
+
+
+@pytest.mark.parametrize("crash_at", ["record_cleanup_quarantine", "finalize_tombstone"])
+def test_system_teardown_discard_resumes_after_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crash_at: str
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("target-defined")
+    point = _point(metadata)
+    session = _SystemTeardownSession()
+    io = _system_teardown_io(root, session)
+    authority = OpaqueProviderRef(ref="authority/current")
+    proof = _cleanup_proof_for(point)
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+    original = getattr(RecoveryMetadataStore, crash_at)
+
+    def crash(*_args: object, **_kwargs: object) -> None:
+        raise OSError("crashed mid-discard")
+
+    monkeypatch.setattr(RecoveryMetadataStore, crash_at, crash)
+    with pytest.raises(OSError, match="crashed mid-discard"):
+        io.discard_system_teardown_recovery(_teardown_intent(), point, proof, authority)
+    monkeypatch.setattr(RecoveryMetadataStore, crash_at, original)
+    recorded: list[str] = []
+    original_record = RecoveryMetadataStore.record_cleanup_quarantine
+
+    def record(
+        self: RecoveryMetadataStore, recovery: RecoveryPoint, proof: FinalizeCleanupProof
+    ) -> None:
+        recorded.append("record")
+        original_record(self, recovery, proof)
+
+    monkeypatch.setattr(RecoveryMetadataStore, "record_cleanup_quarantine", record)
+
+    io.discard_system_teardown_recovery(_teardown_intent(), point, proof, authority)
+
+    assert session.actions.count("cleanup-payloads") == 1
+    assert recorded == (["record"] if crash_at == "record_cleanup_quarantine" else [])
+    with RecoveryMetadataStore(root) as store:
+        assert store.exact_recovery_absence(_BINDING)
+
+
+def test_system_teardown_discard_finalizes_after_a_crash_before_the_intent_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("target-defined")
+    point = _point(metadata)
+    session = _SystemTeardownSession()
+    io = _system_teardown_io(root, session)
+    authority = OpaqueProviderRef(ref="authority/current")
+    proof = _cleanup_proof_for(point)
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+    original = external_boot_module.os.unlink
+
+    def crash_on_intent(path: str, *, dir_fd: int | None = None) -> None:
+        if path == external_boot_module._INTENT_NAME:
+            raise OSError("crashed before the intent unlink")
+        original(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(external_boot_module.os, "unlink", crash_on_intent)
+    with pytest.raises(OSError, match="crashed before the intent unlink"):
+        io.discard_system_teardown_recovery(_teardown_intent(), point, proof, authority)
+    monkeypatch.setattr(external_boot_module.os, "unlink", original)
+
+    io.discard_system_teardown_recovery(_teardown_intent(), point, proof, authority)
+
+    with RecoveryMetadataStore(root) as store:
+        assert store.exact_recovery_absence(_BINDING)
+
+
+def test_system_teardown_discard_refuses_a_foreign_proof_before_deleting(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    metadata = _metadata("target-defined")
+    point = _point(metadata)
+    session = _SystemTeardownSession()
+    io = _system_teardown_io(root, session)
+    proof = _cleanup_proof_for(point).model_copy(update={"point_digest": "sha256:" + "0" * 64})
+    with RecoveryMetadataStore(root) as store:
+        store.publish(metadata)
+
+    with pytest.raises(ValueError, match="proof does not match"):
+        io.discard_system_teardown_recovery(
+            _teardown_intent(), point, proof, OpaqueProviderRef(ref="a")
+        )
+
+    assert "cleanup-payloads" not in session.actions
 
 
 @pytest.mark.parametrize(
@@ -2310,11 +2465,17 @@ class _ExternalIO:
             expected_cmdline=b"root=UUID=x",
         )
 
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def recover_modules(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        del acknowledged
         self.actions.append("recover-modules")
         self.record_phase(metadata, "module-restored")
 
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def define_source(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        del acknowledged
         self.actions.append("define-source")
         self.record_phase(metadata, "source-restored")
 
@@ -3568,6 +3729,165 @@ def test_recovery_stops_a_ready_target_cleanly_and_an_unready_one_hard(
 
     assert session.stops == [mode]
     assert session.xml == metadata.source_xml
+
+
+_THIRD_DEFINITION = "sha256:" + "7" * 64
+_THIRD_XML = "<domain><name>third</name></domain>"
+_THIRD_TREE = PresentComponentState(manifest="sha256:" + "5" * 64)
+
+
+def _third_state_fixture(
+    tmp_path: Path, *, third_xml: bool, third_tree: bool, active: bool = False
+) -> tuple[
+    LocalLibvirtExternalBoot,
+    LocalRecoveryMetadataV1,
+    _RestartSession,
+    _RestartGuest,
+    LocalObservedState,
+]:
+    ports, metadata, session, guest, _root = _restart_fixture(
+        tmp_path,
+        phase="target-defined",
+        source_present=True,
+        xml=_THIRD_XML if third_xml else _metadata().target_xml,
+        active=active,
+    )
+    live = f"/lib/modules/{metadata.release}"
+    if third_tree:
+        guest.states[live] = _THIRD_TREE
+    if third_xml:
+        session.inspection = replace(session.inspection, source_boot_identity=_THIRD_DEFINITION)
+    acknowledged = LocalObservedState(
+        definition=_THIRD_DEFINITION if third_xml else metadata.target_state.definition,
+        modules=guest.states[live],
+        active=active,
+    )
+    return ports, metadata, session, guest, acknowledged
+
+
+@pytest.mark.parametrize(
+    ("third_xml", "third_tree", "active"),
+    [
+        (True, False, False),
+        (False, True, False),
+        (True, True, False),
+        (True, True, True),
+    ],
+    ids=["third-definition", "third-module-tree", "both-third", "both-third-and-running"],
+)
+def test_resolution_restores_the_source_from_an_acknowledged_third_state(
+    tmp_path: Path, third_xml: bool, third_tree: bool, active: bool
+) -> None:
+    ports, metadata, session, guest, acknowledged = _third_state_fixture(
+        tmp_path, third_xml=third_xml, third_tree=third_tree, active=active
+    )
+
+    ports.recover(
+        _point(metadata),
+        OpaqueProviderRef(ref="authority/current"),
+        acknowledged=acknowledged,
+    )
+
+    live = f"/lib/modules/{metadata.release}"
+    assert guest.states == {live: metadata.source_state.modules}
+    assert session.xml == metadata.source_xml
+    assert session.stops == (["destroy"] if third_xml and active else [])
+
+
+def test_resolution_replaces_a_third_tree_when_the_source_had_no_modules(
+    tmp_path: Path,
+) -> None:
+    ports, metadata, session, guest, _root = _restart_fixture(
+        tmp_path,
+        phase="target-defined",
+        source_present=False,
+        xml=_THIRD_XML,
+    )
+    live = f"/lib/modules/{metadata.release}"
+    guest.states[live] = _THIRD_TREE
+    session.inspection = replace(session.inspection, source_boot_identity=_THIRD_DEFINITION)
+    acknowledged = LocalObservedState(
+        definition=_THIRD_DEFINITION, modules=_THIRD_TREE, active=False
+    )
+
+    ports.recover(
+        _point(metadata), OpaqueProviderRef(ref="authority/current"), acknowledged=acknowledged
+    )
+
+    assert guest.states == {}
+    assert session.xml == metadata.source_xml
+
+
+def test_resolution_confirms_a_module_tree_that_is_already_the_source(tmp_path: Path) -> None:
+    ports, metadata, session, guest, _ = _third_state_fixture(
+        tmp_path, third_xml=True, third_tree=False
+    )
+    live = f"/lib/modules/{metadata.release}"
+    guest.states[live] = cast(PresentComponentState, metadata.source_state.modules)
+    acknowledged = LocalObservedState(
+        definition=_THIRD_DEFINITION, modules=metadata.source_state.modules, active=False
+    )
+
+    ports.recover(
+        _point(metadata), OpaqueProviderRef(ref="authority/current"), acknowledged=acknowledged
+    )
+
+    assert session.xml == metadata.source_xml
+    assert guest.states == {live: metadata.source_state.modules}
+
+
+def test_resolution_refuses_a_module_tree_changed_since_the_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    ports, metadata, session, guest, acknowledged = _third_state_fixture(
+        tmp_path, third_xml=True, third_tree=True
+    )
+    live = f"/lib/modules/{metadata.release}"
+    guest.states[live] = PresentComponentState(manifest="sha256:" + "6" * 64)
+
+    with pytest.raises(ValueError, match="staging conflicts with metadata"):
+        ports.recover(
+            _point(metadata),
+            OpaqueProviderRef(ref="authority/current"),
+            acknowledged=acknowledged,
+        )
+
+    assert session.xml == _THIRD_XML
+    assert guest.states[live] == PresentComponentState(manifest="sha256:" + "6" * 64)
+
+
+def test_resolution_refuses_a_definition_other_than_the_acknowledged_one(tmp_path: Path) -> None:
+    ports, metadata, session, guest, acknowledged = _third_state_fixture(
+        tmp_path, third_xml=True, third_tree=True
+    )
+    session.inspection = replace(session.inspection, source_boot_identity="sha256:" + "8" * 64)
+
+    with pytest.raises(ValueError, match="does not match recovery metadata"):
+        ports.recover(
+            _point(metadata),
+            OpaqueProviderRef(ref="authority/current"),
+            acknowledged=acknowledged,
+        )
+
+    assert session.xml == _THIRD_XML
+    assert guest.states[f"/lib/modules/{metadata.release}"] == _THIRD_TREE
+
+
+@pytest.mark.parametrize(
+    ("third_xml", "third_tree"), [(True, False), (False, True)], ids=["definition", "module-tree"]
+)
+def test_ordinary_recovery_still_refuses_a_third_state(
+    tmp_path: Path, third_xml: bool, third_tree: bool
+) -> None:
+    ports, metadata, session, guest, _ = _third_state_fixture(
+        tmp_path, third_xml=third_xml, third_tree=third_tree
+    )
+    before = (session.xml, dict(guest.states))
+
+    with pytest.raises(ValueError):
+        ports.recover(_point(metadata), OpaqueProviderRef(ref="authority/current"))
+
+    assert (session.xml, guest.states) == before
 
 
 def _staging_name(metadata: LocalRecoveryMetadataV1) -> str:
@@ -5390,6 +5710,186 @@ def _assert_disposed(root: Path, point: RecoveryPoint, disposition: str) -> None
             assert store.exact_recovery_absence(point.binding)
         else:
             assert receipt is not None and receipt.managed
+
+
+def test_real_adapter_finalization_leaves_an_adopted_receipt_in_place(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+    host = _RealPreparation(_metadata("recovered"), root)
+    io, _factory = _resolving_io(root, host, _RealSession(host), [])
+    ports = LocalLibvirtExternalBoot(io)
+
+    ports.finalize_cleanup_tombstone(
+        point, _cleanup_proof_for(point), OpaqueProviderRef(ref="authority/current")
+    )
+
+    assert (root / recovery_directory_name(point.recovery_ref, point.binding)).is_dir()
+    with RecoveryMetadataStore(root) as store:
+        held = store.read_cleanup_quarantine(point.binding)
+    assert held == receipt.model_copy(update={"managed": True})
+
+
+def test_re_recording_never_un_adopts_a_cleanup_quarantine(tmp_path: Path) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+        store.record_cleanup_quarantine(point, _cleanup_proof_for(point))
+        held = store.read_cleanup_quarantine(point.binding)
+    assert held == receipt.model_copy(update={"managed": True})
+
+
+def test_system_teardown_keeps_an_adopted_receipt(tmp_path: Path) -> None:
+    """#3467: teardown leaves an adopted receipt, as release finalize does (#3435)."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    io = _system_teardown_io(root, _SystemTeardownSession())
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+    assert not io.system_teardown_recovery_is_absent(intent, authority)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+
+    # A session opened before ADR-0710 re-creates the activation's empty parents (#2898).
+    parent = root
+    for name in (_BINDING.system_id, _BINDING.run_id, _BINDING.activation_id):
+        parent = parent / name
+        parent.mkdir(mode=0o700)
+
+    io.discard_system_teardown_recovery(intent, point, _cleanup_proof_for(point), authority)
+
+    directory = root / recovery_directory_name(point.recovery_ref, point.binding)
+    assert directory.is_dir()
+    assert sorted(path.name for path in directory.iterdir()) == [
+        "cleanup-quarantine.json",
+        "tombstone.json",
+    ]
+    assert not (root / _BINDING.system_id).exists()
+    assert io.system_teardown_recovery_is_absent(intent, authority)
+    assert io.begin_system_teardown(intent, authority).recovery_absent
+    assert io.teardown_system(intent, authority).complete
+    observed = io.observe_system_teardown(intent, authority)
+    assert observed.recovery_absent
+    assert not observed.quarantine_retained
+    with RecoveryMetadataStore(root) as store:
+        assert store.read_cleanup_quarantine(point.binding) == receipt.model_copy(
+            update={"managed": True}
+        )
+        assert not store.exact_recovery_absence(point.binding)
+
+
+def test_system_teardown_drops_residue_beside_an_adopted_receipt(tmp_path: Path) -> None:
+    """A crash inside publish_tombstone leaves the intent beside the receipt it later proves."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    directory = root / recovery_directory_name(point.recovery_ref, point.binding)
+    residue = directory / "intent.json"
+    residue.write_bytes(external_boot_module._metadata_bytes(_metadata("recovered")))
+    residue.chmod(0o600)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+    io = _system_teardown_io(root, _SystemTeardownSession())
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+    assert io.system_teardown_recovery_point(intent, authority) == point
+
+    io.discard_system_teardown_recovery(intent, point, _cleanup_proof_for(point), authority)
+
+    assert sorted(path.name for path in directory.iterdir()) == [
+        "cleanup-quarantine.json",
+        "tombstone.json",
+    ]
+    assert io.teardown_system(intent, authority).complete
+
+
+def test_system_teardown_absence_refuses_a_tombstone_the_adopted_receipt_does_not_name(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+    moved = point.model_copy(update={"plan_identity": "sha256:" + "7" * 64})
+    other = CleanupTombstoneV1(
+        binding=point.binding,
+        recovery_point=moved,
+        point_digest=LocalLibvirtExternalBoot.point_digest(moved),
+    )
+    directory = root / recovery_directory_name(point.recovery_ref, point.binding)
+    (directory / "tombstone.json").write_bytes(external_boot_module._tombstone_bytes(other))
+
+    with RecoveryMetadataStore(root) as store:
+        assert not store.exact_recovery_absence(point.binding, adopted_receipt_absent=True)
+
+
+def test_system_teardown_keeps_a_receipt_adopted_after_its_unmanaged_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3467: an adoption landing between the discard path's read and finalize is kept."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    io = _system_teardown_io(root, _SystemTeardownSession())
+    intent = _teardown_intent()
+    authority = OpaqueProviderRef(ref="authority/current")
+    cleanup_complete = RecoveryMetadataStore.cleanup_complete
+
+    def adopt_then_check(
+        store: RecoveryMetadataStore, reference: OpaqueProviderRef, recovery: RecoveryPoint
+    ) -> bool:
+        with RecoveryMetadataStore(root) as racing:
+            racing.adopt_cleanup_quarantine(receipt)
+        return cleanup_complete(store, reference, recovery)
+
+    monkeypatch.setattr(RecoveryMetadataStore, "cleanup_complete", adopt_then_check)
+
+    io.discard_system_teardown_recovery(intent, point, _cleanup_proof_for(point), authority)
+
+    with RecoveryMetadataStore(root) as store:
+        assert store.read_cleanup_quarantine(point.binding) == receipt.model_copy(
+            update={"managed": True}
+        )
+    assert io.teardown_system(intent, authority).complete
+
+
+@pytest.mark.parametrize("operation", ["adopt", "finalize"])
+def test_receipt_decisions_wait_for_the_activation_directory_lock(
+    tmp_path: Path, operation: str
+) -> None:
+    """#3467: adoption and finalize serialize on one lock over the receipt's directory."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    directory = root / recovery_directory_name(point.recovery_ref, point.binding)
+
+    def run() -> None:
+        with RecoveryMetadataStore(root) as store:
+            if operation == "adopt":
+                store.adopt_cleanup_quarantine(receipt)
+            else:
+                store.finalize_tombstone(point.recovery_ref, point, _cleanup_proof_for(point))
+
+    held = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(timeout=0.5)
+        assert worker.is_alive()
+        assert (directory / "cleanup-quarantine.json").read_bytes() == (
+            external_boot_module._cleanup_quarantine_bytes(receipt)
+        )
+    finally:
+        os.close(held)
+    worker.join(timeout=10)
+    assert not worker.is_alive()
 
 
 @pytest.mark.parametrize("disposition", ["delete", "adopt"])

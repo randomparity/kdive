@@ -104,6 +104,20 @@ snapshot support. ``data.supports_traffic_capture`` likewise reports whether the
 can capture this System's traffic. Both capability fields are absent when the System's
 provider is no longer registered.
 
+``data.supported_capture_methods`` is the sorted list of the provider's capture methods
+that this System's guest architecture can use (``fadump`` is dropped on ``x86_64``). It
+is compatibility only: it does not prove the firmware, kernel, image or current System
+state is capture-ready, and ``vmcore.fetch`` still accepts only core-producing methods.
+Absent means unknown (provider unregistered or profile unreadable); ``[]`` means known
+empty. Unlike ``resources.describe``'s provider-wide set, this is the per-System view.
+
+``data.external_boot_conflict`` appears only for a caller holding admin on the System's
+project, and only while the System's external-boot recovery is in conflict: it carries
+``activation_id``, ``attempt_id``, ``observation_id``, ``composite_state``, ``observed_at``
+and the observed ``objects`` (at most 64; ``objects_truncated`` is
+``true`` when more were recorded). Pass ``composite_state`` as ``observed_identity`` to
+``systems.resolve_external_boot_conflict``. Other callers read the System unchanged.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `system_id` | string | yes | The System to render. |
@@ -343,9 +357,16 @@ the conflict and its evidence intact. Poll with `jobs.wait`.
 `data.recovery_readiness_deadline` is an absolute server-clock timestamp for this
 request's recovery job. For local libvirt it contains the configured console readiness
 window, scaled for TCG; other providers retain their own deadline. Expiry fails the job
-without renewing it. Read `systems.get` for a fresh composite identity, then submit a
+without renewing it. Read `data.external_boot_conflict.composite_state` from
+`systems.get` for a fresh composite identity, then submit a
 new `systems.resolve_external_boot_conflict` request with a new idempotency key, or use
 `systems.teardown` if recovery is unavailable. The same key replays the original job.
+`systems.get` shows `data.external_boot_conflict` only while the activation is in
+`recovery_conflict`, so resubmit only while it is present. A job that fails after it has
+begun the recovery usually ends the activation in `recovery_failed`, where only
+`systems.teardown` applies; a `conflict` failure instead returns it to
+`recovery_conflict`. If the block is absent, a resubmission with a new idempotency key is
+refused and its error names the state in `data.activation_state`.
 
 Requires admin on the System's project. Only an activation in `recovery_conflict` is
 admissible. `runs.get` reports the owning Run's current state; `systems.teardown` remains
@@ -354,7 +375,7 @@ the recovery action when the conflict cannot be resolved.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `idempotency_key` | string (nullable) | no | Optional replay key, bounded to 255 bytes encoded as UTF-8. |
-| `observed_identity` | string | yes | The composite state identity from your most recent systems.get, as 'sha256:<64 lowercase hex>'. It is durably bound to the request; the worker must freshly observe and match this exact identity before changing state. |
+| `observed_identity` | string | yes | The composite state identity from your most recent systems.get (data.external_boot_conflict.composite_state, shown to admins), as 'sha256:<64 lowercase hex>'. It is durably bound to the request; the worker must freshly observe and match this exact identity before changing state. |
 | `operation` | string | yes | The resolution to apply; the only accepted value is 'restore-recorded-source', which puts the recorded source state back. |
 | `system_id` | string | yes | The System whose external-boot recovery conflict to resolve. |
 

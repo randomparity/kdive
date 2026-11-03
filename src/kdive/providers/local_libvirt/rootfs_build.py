@@ -35,9 +35,11 @@ the whole call via ``asyncio.to_thread`` (ADR-0092).
 from __future__ import annotations
 
 import logging
+import os
 import stat
 import tempfile
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -61,6 +63,7 @@ from kdive.images.families._fedora_customize import (
 from kdive.images.families._fedora_customize import (
     readiness_unit as _readiness_unit,
 )
+from kdive.images.families._fedora_customize import retained_kernel_step
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.families.renderers import (
     partition_steps,
@@ -110,6 +113,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import (
     ExtractBaselineKernel,
     _real_extract_baseline_kernel,
     baseline_kernel_names,
+    select_kernel_and_initrd,
 )
 from kdive.providers.local_libvirt.lifecycle.rootfs.customization_boot import (
     CUSTOMIZE_SCRIPT_PATH,
@@ -230,24 +234,67 @@ def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> No
         )
 
 
-def _grant_hypervisor_traversal(work_dir: Path) -> None:
-    """Let the ``qemu:///system`` hypervisor reach the boot disk + kernel in the build workspace.
+def _grant_hypervisor_traversal(work_dir: Path, staged: Path) -> None:
+    """Prepare owned build contents for system and shared-session QEMU (ADR-0764).
 
-    The customization boot attaches the in-progress disk and the extracted baseline
-    kernel/initrd straight from the per-build workspace directory, which
-    ``tempfile.TemporaryDirectory`` creates mode ``0700``. libvirt's dynamic ownership relabels
-    and chowns the disk *file* at domain start, but never widens parent directories, so without
-    this the non-root ``qemu`` process cannot traverse the scratch directory and ``createXML``
-    fails with an opaque ``Cannot access storage file … Permission denied (as uid:107)``. Add
-    ``o+x`` to every directory in the tree (path traversal) and ``o+r`` to every file (the
-    read-only kernel/initrd; libvirt makes the disk writable via chown). Owner-only directory
-    listing is preserved — no ``o+r`` on directories.
+    Validate the complete tree before adding group traversal/read and staged-disk write.
+    Retain existing system-daemon other traversal/read; never grant directory or other write.
+    Descriptors keep chmod on the inspected inode; cooperating provider peers remain assumed.
     """
-    for path in (work_dir, *work_dir.rglob("*")):
-        mode = path.stat().st_mode
-        widened = mode | (stat.S_IXOTH if path.is_dir() else stat.S_IROTH)
-        if widened != mode:
-            path.chmod(widened)
+    path = work_dir
+    try:
+        with ExitStack() as opened:
+            nodes: list[tuple[int, int]] = []
+            disk_found = False
+            for path in (work_dir, *work_dir.rglob("*")):
+                before = path.lstat()
+                directory = stat.S_ISDIR(before.st_mode)
+                if not directory and not stat.S_ISREG(before.st_mode):
+                    raise ValueError("handoff node is not a real directory or regular file")
+                if path == work_dir and not directory:
+                    raise ValueError("build workspace is not a directory")
+                if not directory and before.st_nlink != 1:
+                    raise ValueError("handoff regular file has multiple links")
+                if before.st_uid != os.geteuid():
+                    raise ValueError("handoff node is not owned by the building worker")
+                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                fd = os.open(path, flags | (os.O_DIRECTORY if directory else 0))
+                opened.callback(os.close, fd)
+                current = os.fstat(fd)
+                if (
+                    current.st_dev,
+                    current.st_ino,
+                    current.st_mode,
+                    current.st_uid,
+                    current.st_gid,
+                    current.st_nlink,
+                ) != (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_mode,
+                    before.st_uid,
+                    before.st_gid,
+                    before.st_nlink,
+                ):
+                    raise ValueError("handoff node changed during inspection")
+                extra = 0o011 if directory else 0o044
+                if path == staged:
+                    if directory:
+                        raise ValueError("staged boot disk is not a regular file")
+                    extra |= 0o020
+                    disk_found = True
+                nodes.append((fd, stat.S_IMODE(current.st_mode) | extra))
+            if not disk_found:
+                raise ValueError("staged boot disk is absent from the build workspace")
+            for fd, mode in nodes:
+                os.fchmod(fd, mode)
+    except (OSError, ValueError) as exc:
+        raise CategorizedError(
+            "cannot prepare image build workspace for customization; verify worker ownership, "
+            "regular files and directories, and the configured workspace access policy",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"path": str(path), "reason": str(exc)},
+        ) from exc
 
 
 type AcquireBase = Callable[..., None]
@@ -487,7 +534,7 @@ class RootfsCustomization:
 
 @dataclass(frozen=True, slots=True)
 class RootfsProvenanceInspection:
-    """Advisory probes used only to describe the completed image."""
+    """Image probes; boot entries also enforce the opted-in retained-kernel postcondition."""
 
     inspect_versions: VersionInspectSeam = DEFAULT_VERSION_INSPECT
     probe_makedumpfile: MakedumpfileProbeSeam = DEFAULT_MAKEDUMPFILE_PROBE
@@ -614,6 +661,8 @@ class LocalLibvirtRootfsBuildPlane:
         self._customization.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
         family.normalize(staged)
         self._boot_customize(staged, family, work_dir, spec=spec, entry=entry)
+        if entry.retained_kernel is not None:
+            self._verify_retained_kernel(staged, entry.retained_kernel)
         self._customization.seal_customized_image(
             staged,
             unit_name=CUSTOMIZE_UNIT,
@@ -621,6 +670,20 @@ class LocalLibvirtRootfsBuildPlane:
         )
         self._customization.verify_cloud_init(staged)
         return staged
+
+    def _verify_retained_kernel(self, staged: Path, hint: str) -> None:
+        entries = self._provenance.probe_boot_entries(staged)
+        if entries is None:
+            raise CategorizedError(
+                "cannot verify retained kernel; final boot inventory is unavailable",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        kernel, initrd = select_kernel_and_initrd(entries)
+        if kernel != f"vmlinuz-{hint.removeprefix('vmlinuz-')}" or initrd is None:
+            raise CategorizedError(
+                "final kernel or initramfs does not match retained_kernel; rebuild the image",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
 
     def _boot_customize(
         self,
@@ -637,6 +700,8 @@ class LocalLibvirtRootfsBuildPlane:
         try:
             ctx = self._context(unit_path, spec=spec, entry=entry)
             file_ops, exec_ops = partition_steps(family.customize_steps(ctx))
+            if entry.retained_kernel is not None:
+                exec_ops.append(retained_kernel_step(entry.retained_kernel))
             script = render_firstboot_script(
                 exec_ops,
                 install_command=family.install_command,
@@ -648,15 +713,19 @@ class LocalLibvirtRootfsBuildPlane:
             )
             unit = render_firstboot_unit(script_path=CUSTOMIZE_SCRIPT_PATH)
             self._customization.inject_offline(staged, file_ops, script, unit)
-            self._run_boot(staged, work_dir, spec.arch)
+            self._run_boot(staged, work_dir, spec.arch, entry.retained_kernel)
         finally:
             for path in cleanup:
                 path.unlink(missing_ok=True)
 
-    def _run_boot(self, staged: Path, work_dir: Path, arch: str) -> None:
+    def _run_boot(
+        self, staged: Path, work_dir: Path, arch: str, retained_kernel: str | None
+    ) -> None:
         """Extract the baseline kernel, render the build domain XML, and drive the boot to ok."""
-        baseline = self._customization.extract_baseline_kernel(staged, work_dir / "baseline", None)
-        _grant_hypervisor_traversal(work_dir)
+        baseline = self._customization.extract_baseline_kernel(
+            staged, work_dir / "baseline", retained_kernel
+        )
+        _grant_hypervisor_traversal(work_dir, staged)
         accel, emulator = self._customization.resolve_accel(arch)
         build_id = uuid4()
         xml = render_customization_domain_xml(

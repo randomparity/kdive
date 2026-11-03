@@ -118,6 +118,14 @@ class Redactor:
         return value
 
 
+# The ``extra=`` names the JSON log may carry (ADR-0014 amendment). A closed set of audited
+# fields: each holds a bounded vocabulary or a digest, never a caller-supplied string. A new name
+# is added when its call site is audited.
+LOG_EXTRA_FIELDS: frozenset[str] = frozenset(
+    {"category", "reason", "provider_kind", "authority_instance", "digest"}
+)
+
+
 class SecretRedactionFilter(logging.Filter):
     """Handler-boundary redaction for the logging path.
 
@@ -149,6 +157,10 @@ class SecretRedactionFilter(logging.Filter):
             message = str(message)
         record.msg = redactor.redact_text(message)
         record.args = ()
+        for name in LOG_EXTRA_FIELDS:
+            value = getattr(record, name, None)
+            if isinstance(value, str):
+                setattr(record, name, redactor.redact_text(value))
         if record.exc_info:
             record.exc_text = "".join(traceback.format_exception(*record.exc_info))
             record.exc_info = None

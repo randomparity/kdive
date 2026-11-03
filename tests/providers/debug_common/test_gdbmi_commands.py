@@ -79,7 +79,9 @@ class _CommandHost(
         self.errors: dict[str, CategorizedError] = {}
         self.module_rows: list[tuple[str, int, int]] = []
         self._redactor_value = Redactor(registry=SecretRegistry())
-        self._module_resolver: Callable[[str, str], ModuleDebuginfo] = self._resolve_module
+        self._module_resolver: Callable[[GdbMiAttachment, str], ModuleDebuginfo] = (
+            self._resolve_module
+        )
 
     def execute_mi_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]:
         del attachment
@@ -119,7 +121,7 @@ class _CommandHost(
     def _mi_path(self, path: Path) -> str:
         return str(path)
 
-    def _resolve_module(self, _run_id: str, module: str) -> ModuleDebuginfo:
+    def _resolve_module(self, _attachment: GdbMiAttachment, module: str) -> ModuleDebuginfo:
         return ModuleDebuginfo(path=Path(f"/symbols/{module}.ko"), srcversion="SRC", build_id=None)
 
 

@@ -7,7 +7,6 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
-from uuid import uuid4
 
 import psycopg
 import pytest
@@ -23,6 +22,7 @@ from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import (
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthoritySuccessV1,
     _FailureResult,
     _RecoveryAttemptResult,
 )
@@ -36,32 +36,8 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, seed_case
-from tests.jobs.handlers.external_boot.support import CASES, build_job
+from tests.jobs.handlers.external_boot.support import CASES, RecordingExecutor, build_job
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
-
-
-class RecordingExecutor:
-    def __init__(
-        self, category: Literal["absent", "source", "target", "mixed", "unreadable", "conflict"]
-    ) -> None:
-        self.category = category
-        self.requests: list[AuthorityMutationRequestV1] = []
-
-    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
-        return AuthorityObservationV1(
-            observation_id=uuid4(), category=self.category, composite_state="sha256:" + "8" * 64
-        )
-
-    async def execute_conflict_resolution(
-        self, request: AuthorityMutationRequestV1
-    ) -> AuthorityObservationV1:
-        return await self.execute(request)
-
-    async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
-        self.requests.append(request)
-        return AuthorityObservationV1(
-            observation_id=uuid4(), category=self.category, composite_state="sha256:" + "8" * 64
-        )
 
 
 class _DisconnectedAuthorityTransport:
@@ -133,6 +109,7 @@ def test_sender_disconnect_returns_nonterminal_bound_failure_with_same_operation
             async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
                 prepared = await handler(worker, job, marker)
                 assert prepared.result.operation == "deadline"
+                assert isinstance(prepared, ExternalBootAuthoritySuccessV1)
                 committed_result = await queue.complete_external_boot(
                     worker,
                     job,
@@ -217,6 +194,7 @@ def test_worker_uses_authority_observation_with_only_the_readiness_read(
             async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
                 result = await handler(worker, job, marker)
                 if result.result.operation == "recovery-attempt":
+                    assert isinstance(result, ExternalBootAuthoritySuccessV1)
                     await queue.complete_external_boot(
                         worker,
                         job,
@@ -261,6 +239,7 @@ def test_activate_commits_deadline_before_provider_and_reuses_it(
                 result = await handler(worker, job, marker)
                 assert result.result.operation == "deadline"
                 assert executor.requests == []
+                assert isinstance(result, ExternalBootAuthoritySuccessV1)
                 committed = await queue.complete_external_boot(
                     worker,
                     job,
@@ -328,6 +307,7 @@ def test_local_activation_client_starts_after_preparation_and_uses_committed_dea
             async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
                 result = await handler(worker, job, marker)
                 assert result.result.operation == "deadline"
+                assert isinstance(result, ExternalBootAuthoritySuccessV1)
                 committed = await queue.complete_external_boot(
                     worker,
                     job,
@@ -418,6 +398,75 @@ def test_local_recovery_client_is_capped_by_persisted_request_deadline(
     asyncio.run(main())
 
 
+def test_reentered_local_recovery_client_gets_a_fresh_budget_after_the_request_deadline(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def main() -> None:
+        vehicle = build_vehicle()
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+        deadlines: list[float] = []
+        acknowledger = RecordingAcknowledger(authority_role_dsns("kdive_provider_authority"))
+        executor = RecordingExecutor("source")
+
+        class Client:
+            async def acknowledge(
+                self, request: AuthorityTakeoverRequestV1
+            ) -> AuthorityAcknowledgementV1:
+                return await acknowledger.acknowledge(request)
+
+            async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+                return await executor.execute(request)
+
+        def client_factory(_binding: object, _marker: object, deadline: float) -> Client:
+            deadlines.append(deadline)
+            return Client()
+
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            case = await seed_case(
+                seed,
+                vehicle,
+                purpose="recover",
+                activation_state="recovering",
+                system_state="crashed",
+                with_reservation=True,
+                with_pre_recovery=True,
+            )
+            timing = LocalExternalBootTimingV1(
+                accel="kvm", console_window_s=900, deadline_budget_s=1200
+            )
+            metadata = RecoveryRequestV1(
+                request_identity="sha256:" + "a" * 64,
+                readiness_deadline=now - timedelta(seconds=100),
+                local_timing=timing,
+            )
+            job = build_job(
+                JobKind.BOOT,
+                {
+                    "run_id": str(vehicle.run_id),
+                    "external_boot_authority_v1": case.marker,
+                    "recovery_request_v1": metadata.model_dump(mode="json", by_alias=True),
+                },
+            ).model_copy(update={"id": case.job_id, "attempt": case.attempt})
+            ports = ExternalBootHandlerPorts(
+                resolver=resolver_for(vehicle),
+                incarnation_credential=SecretStr(case.credential),
+                secret_registry=SecretRegistry(),
+                authority_client_factory=cast(Any, client_factory),
+                clock=lambda: now,
+            )
+            handler = build_operations(ports).get("recover")
+            assert handler is not None
+            marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+            before = asyncio.get_running_loop().time()
+            async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+                result = await handler(worker, job, marker)
+            after = asyncio.get_running_loop().time()
+            assert result.result.operation == "recover"
+            assert before + 1200 <= deadlines[0] <= after + 1200
+
+    asyncio.run(main())
+
+
 def test_recover_commits_attempt_before_provider_and_reuses_it(
     migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
@@ -454,6 +503,7 @@ def test_recover_commits_attempt_before_provider_and_reuses_it(
                 result = await handler(worker, job, marker)
                 assert result.result.operation == "recovery-attempt"
                 assert executor.requests == []
+                assert isinstance(result, ExternalBootAuthoritySuccessV1)
                 committed = await queue.complete_external_boot(
                     worker,
                     job,
@@ -468,20 +518,8 @@ def test_recover_commits_attempt_before_provider_and_reuses_it(
     asyncio.run(main())
 
 
-@pytest.mark.parametrize(
-    ("operation", "activation_state", "attempt_state", "category"),
-    [
-        ("activate", "activating", "recovering", "target"),
-        ("recover", "recovering", "recovering", "source"),
-    ],
-)
-def test_expired_deadline_returns_a_committable_failure_before_provider(
-    migrated_url: str,
-    authority_role_dsns: Callable[[str], str],
-    operation: str,
-    activation_state: str,
-    attempt_state: str,
-    category: Literal["source", "target"],
+def test_expired_activation_deadline_returns_a_committable_failure_before_provider(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
     async def main() -> None:
         vehicle = build_vehicle()
@@ -490,30 +528,16 @@ def test_expired_deadline_returns_a_committable_failure_before_provider(
             case = await seed_case(
                 seed,
                 vehicle,
-                purpose=operation,
-                activation_state=activation_state,
-                system_state="crashed" if operation == "recover" else "ready",
-                attempt_state=attempt_state,
-                with_reservation=operation == "recover",
-                with_pre_recovery=operation == "recover",
-            )
-            column = (
-                "activation_readiness_deadline"
-                if operation == "activate"
-                else "recovery_readiness_deadline"
-            )
-            table = (
-                "external_boot_activations"
-                if operation == "activate"
-                else "external_boot_recovery_attempts"
+                purpose="activate",
+                activation_state="activating",
+                attempt_state="recovering",
             )
             await seed.execute(
-                f"UPDATE {table} SET {column} = %s WHERE activation_id = %s"
-                if operation == "recover"
-                else f"UPDATE {table} SET {column} = %s WHERE id = %s",
+                "UPDATE external_boot_activations SET activation_readiness_deadline = %s "
+                "WHERE id = %s",
                 (now, vehicle.activation_id),
             )
-            executor = RecordingExecutor(category)
+            executor = RecordingExecutor("target")
             ports = ExternalBootHandlerPorts(
                 resolver=resolver_for(vehicle),
                 incarnation_credential=SecretStr(case.credential),
@@ -522,7 +546,7 @@ def test_expired_deadline_returns_a_committable_failure_before_provider(
                 authority_executor=executor,
                 clock=lambda: now,
             )
-            handler = build_operations(ports).get(operation)
+            handler = build_operations(ports).get("activate")
             assert handler is not None
             marker = ExternalBootAuthorityMarkerV1.model_validate(case.marker)
             job = build_job(
@@ -550,13 +574,10 @@ def test_expired_deadline_returns_a_committable_failure_before_provider(
             )
             activation_row = await row.fetchone()
             assert activation_row is not None
-            state, recovery_point, pre_recovery, recovery_deadline = activation_row
-            assert state == ("recovering" if operation == "activate" else "recovery_failed")
+            state, recovery_point, _pre_recovery, recovery_deadline = activation_row
+            assert state == "recovering"
             assert recovery_point is not None
-            if operation == "activate":
-                assert recovery_deadline == now + ports.recovery_readiness_timeout
-            if operation == "recover":
-                assert pre_recovery is not None
+            assert recovery_deadline == now + ports.recovery_readiness_timeout
 
     asyncio.run(main())
 

@@ -560,6 +560,7 @@ def test_fixture_artifacts_are_exact_system_names(
         str(rootfs_root / f"{_SYSTEM_ID}-baseline"),
         str(overlay),
         str(console),
+        str(console.with_suffix(".boot")),
         f"kdive-{_SYSTEM_ID}",
     )
 

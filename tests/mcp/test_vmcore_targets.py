@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.vmcore._vmcore_targets import (
@@ -21,6 +22,7 @@ from kdive.mcp.tools.lifecycle.vmcore._vmcore_targets import (
     vmcore_target_failure,
 )
 from kdive.security.authz.rbac import AuthorizationError, Role
+from tests.capture_store import journal_existing_test_pair
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 
 
@@ -47,6 +49,9 @@ async def _seed_vmcore_row(pool: AsyncConnectionPool, run_id: str) -> None:
             "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
             "retention_class) VALUES ('runs', %s, %s, 'e', 'sensitive', 'vmcore')",
             (run_id, f"local/runs/{run_id}/vmcore-host_dump"),
+        )
+        await journal_existing_test_pair(
+            conn, run_id, f"local/runs/{run_id}/vmcore-host_dump", method=CaptureMethod.HOST_DUMP
         )
 
 

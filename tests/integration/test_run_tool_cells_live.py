@@ -8,10 +8,13 @@ remote-libvirt cell of a guest architecture with a remote lane, of
 :func:`~tests.integration.live_stack.tool_cells.on_lane_system`, uploads the verified ``longterm``
 kernel fixture and calls the tool in the cell's exposure. The functional ``images.publish`` cell
 publishes its exposure's :data:`~tests.integration.live_stack.tool_cells.PUBLISHED_IMAGES` image
-and boots it. The
-release functional cells stop ``blocked``: the demo-up lane configures no external-boot
-authority. A remote cell runs on the provider host's remote lane; its ``images.publish``
-functional cell also stops ``blocked``, since no remote catalog image build exists. A ``runs.*``
+and boots it. A ``runs.release_external_boot`` functional cell runs on the installed authority
+lanes through :func:`~tests.integration.live_stack.authority_cells.run_authority_cell` (#3186):
+it activates the fixture on an authority-owned System and a contributor of its project releases
+it. Another remote cell runs on the provider host's remote lane, except the remote
+``images.publish`` cell: admission refuses it with ``not_implemented`` (ADR-0759), so that cell
+calls the tool on this host's stack and records ``unsupported`` once the refusal left the catalog,
+build jobs and ``platform`` state unchanged. A ``runs.*``
 rejection cell aims at one unbound Run of its provider in the stack's lane-target project; an
 ``images.publish`` one at the published image's name (the remote lane image's name remotely).
 ``docs/operating/runbooks/live-testing.md`` covers the local run, ``remote-live-stack.md`` the
@@ -22,8 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
-import os
 import platform
 import secrets
 import tempfile
@@ -39,27 +40,33 @@ import psycopg
 import pytest
 
 from kdive.domain.errors import ErrorCategory
-from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
+from kdive.images.rootfs.catalog import load_rootfs_catalog
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.ops.images.build_publish import REMOTE_PUBLISH_REFUSAL
 from scripts.coverage_campaign.contract import Cell
 from scripts.coverage_campaign.evidence import Outcome
-from scripts.kernel_fixtures import identity
+from tests.integration.live_stack.authority_cells import (
+    contributor_grants,
+    exposed,
+    released_external_boot,
+    run_authority_cell,
+)
+from tests.integration.live_stack.authority_lane import AuthoritySystem
 from tests.integration.live_stack.deep_lifecycle import (
-    FIXTURE_ROOT_ENV,
-    boot_kernel_sha256,
     deep_body,
     file_sha256,
-    load_fixture,
+    uploaded_kernel_inputs,
 )
-from tests.integration.live_stack.image_smoke import Endpoint, os_matches, ssh
+from tests.integration.live_stack.image_smoke import Endpoint, provenance_matches, ssh
 from tests.integration.live_stack.remote_lifecycle import (
     REMOTE_REPRESENTATIVES,
     guest_boot_kernel,
-    observe_host,
-    remote_host,
 )
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop, on_catalog_system
+from tests.integration.live_stack.service_cells import (
+    _fixture,
+)
 from tests.integration.live_stack.spine import (
     build_and_upload_kernel,
     build_profile,
@@ -78,12 +85,14 @@ from tests.integration.live_stack.tool_cells import (
     Guest,
     HttpCaller,
     Rejection,
+    admission_refusal,
     boundary_of,
     lane_target,
     observe_guest,
     on_lane_system,
     one,
     project_state,
+    prove_refusal,
     prove_rejection,
     run_tool_cell,
     settled,
@@ -99,28 +108,11 @@ TOOLS = (
     "runs.install",
     "runs.release_external_boot",
 )
-# The kernel fixture every runs.* cell uploads; write the bindings with
-# ``--kernel-baseline longterm``.
-BASELINE = "longterm"
 _LOCAL = "local-libvirt"
 _REMOTE = "remote-libvirt"
 _BUILD_DEADLINE_S = 3600.0
 _BOOT_ID = "cat /proc/sys/kernel/random/boot_id"
-_NO_AUTHORITY = (
-    "runs.release_external_boot needs a configured local external-boot authority and an "
-    "authority-lane System frame; the demo-up lane installs neither"
-)
-_NO_REMOTE_AUTHORITY = (
-    "runs.release_external_boot needs a remote provider authority (provider_authority_host and "
-    "the [[remote_libvirt]] authority tuple) and an authority-lane System frame; no runbook "
-    "provisions one, and an authority would route every remote install and boot through "
-    "external boot"
-)
-_NO_REMOTE_PUBLISH = (
-    "images.publish builds catalog images for local-libvirt only: the IMAGE_BUILD handler "
-    "answers remote-libvirt with configuration_error (not implemented); remote base images are "
-    "staged with deploy/ansible/playbooks/image.yml"
-)
+_RELEASE = "runs.release_external_boot"
 
 
 def _grants(project: str, role: str) -> Grants:
@@ -142,19 +134,6 @@ async def _call(
     caller: HttpCaller, tool: str, args: Mapping[str, object], token: str
 ) -> ToolResponse:
     return one(await caller.call(tool, args, token, discover=True))
-
-
-def _fixture() -> tuple[Path, dict[str, Any]]:
-    """The verified ``longterm`` fixture; ``blocked`` before any stack mutation when absent."""
-    root = os.environ.get(FIXTURE_ROOT_ENV)
-    if not root:
-        raise ScenarioStop(
-            Outcome.BLOCKED, f"{FIXTURE_ROOT_ENV} unset; build the {BASELINE} fixture"
-        )
-    try:
-        return load_fixture(Path(root), BASELINE, platform.machine())
-    except ValueError as exc:
-        raise ScenarioStop(Outcome.BLOCKED, f"{BASELINE} fixture: {exc}") from None
 
 
 async def _create_run(
@@ -222,7 +201,9 @@ async def _step(
         manifest=manifest,
         tmp=tmp,
         # A remote install is in-guest: the kernel lands in the guest's own /boot.
-        installed_kernel=guest_boot_kernel
+        installed_kernel=partial(
+            guest_boot_kernel, family=REMOTE_LANE_FAMILIES[guest.lane.entry.arch]
+        )
         if guest.lane.provider == _REMOTE
         else partial(_domain_kernel, guest.lane.xml),
         step=through,
@@ -301,14 +282,7 @@ async def _cancel(
         ok(await scalar(op, "runs.cancel", run_id=freed), "cancel-freed")
     finally:
         await _close(op, investigation)
-    record = json.loads((upload / "upload.json").read_text(encoding="utf-8"))
-    run.observed |= {
-        "kernel_sha256": boot_kernel_sha256(tree, manifest["arch"]),
-        "kernel_build_id": record["build_id"],
-        "kernel_source_sha": manifest["source"]["commit"],
-        "kernel_config_sha256": file_sha256(upload / "effective_config"),
-        "compiler_id": identity(manifest["toolchain"]),
-    }
+    run.observed |= uploaded_kernel_inputs(tree, manifest, upload)
     return {
         "run": "canceled",
         "held_before_cancel": "system_has_live_run",
@@ -339,14 +313,6 @@ async def _described(op: LiveStackClient, name: str, arch: str) -> ToolResponse:
             return ok(await scalar(op, "images.describe", image_id=match.object_id), "describe")
         cursor = listing.data.get("next_cursor") if listing.data.get("truncated") else None
         assert cursor, f"{name} is not in the catalog after its publication"
-
-
-def _provenance_matches(described: ToolResponse, entry: RootfsCatalogEntry) -> None:
-    """The build-recorded ``os_release`` and ``arch`` name the catalog row's platform."""
-    provenance = cast(Mapping[str, Any], described.data.get("provenance") or {})
-    release = {str(k): str(v) for k, v in (provenance.get("os_release") or {}).items()}
-    built = {**release, "machine": str(provenance.get("arch"))}
-    assert os_matches(entry, built), f"provenance names {built.get('ID')} {built.get('VERSION_ID')}"
 
 
 async def _build_jobs(db_url: str, provider: str, name: str) -> int:
@@ -402,7 +368,7 @@ async def _publish(
         assert described.data.get("state") == "registered", "the published row is not registered"
         assert digest.startswith("sha256:") and len(digest) == 71, f"digest {digest!r}"
         assert await _pending_rows(db_url, name) == 0, f"a pending {name} row remains"
-        _provenance_matches(described, entry)
+        provenance_matches(described, entry)
         with tempfile.TemporaryDirectory() as scratch:
             await observe_guest(run, op, system_id, Path(scratch), entry)
         run.prove(
@@ -423,22 +389,28 @@ async def _publish(
     run.observed["image_sha256"] = None
 
 
+async def _release(
+    run: CellRun, caller: HttpCaller, base_url: str, issuer: OidcIssuer, db_url: str
+) -> None:
+    """Release an external boot of an authority-owned System as a contributor of its project."""
+    project = f"cov-{secrets.token_hex(4)}"
+    call = exposed(caller, caller.token(contributor_grants(project)))
+
+    async def body(
+        system: AuthoritySystem, tree: Path, manifest: dict[str, Any]
+    ) -> dict[str, object]:
+        return await released_external_boot(run, call, db_url, system, tree, manifest)
+
+    await run_authority_cell(run, base_url, issuer, db_url, body, project=project)
+
+
 async def _functional(
     run: CellRun, caller: HttpCaller, base_url: str, issuer: OidcIssuer, db_url: str
 ) -> None:
     tool = run.cell.operation
-    remote = run.cell.provider == _REMOTE
-    blocked = {"runs.release_external_boot": _NO_AUTHORITY}
-    if remote:
-        blocked = {
-            "runs.release_external_boot": _NO_REMOTE_AUTHORITY,
-            PUBLISH_TOOL: _NO_REMOTE_PUBLISH,
-        }
-    if tool in blocked:
-        if remote:
-            # A read-only probe, so the blocked record carries the provider host like the rest.
-            observe_host(run, remote_host())
-        raise ScenarioStop(Outcome.BLOCKED, blocked[tool])
+    if tool == _RELEASE:
+        await _release(run, caller, base_url, issuer, db_url)
+        return
     if tool == PUBLISH_TOOL:
         await _publish(run, caller, base_url, issuer, db_url)
         return
@@ -556,8 +528,26 @@ def _rejected_image(cell: Cell) -> str:
     return PUBLISHED_IMAGES[(platform.machine(), cell.exposure)]
 
 
+async def _refused_publish(run: CellRun, caller: HttpCaller, db_url: str) -> None:
+    """ADR-0759: a platform operator's remote publish is refused before any write.
+
+    The name is fresh, so a leaked job or catalog row would be this call's alone.
+    """
+    name = f"cov-refused-{secrets.token_hex(4)}"
+    await prove_refusal(
+        run,
+        caller,
+        Rejection({"provider": _REMOTE, "name": name}, _platform_operator()),
+        REMOTE_PUBLISH_REFUSAL,
+        partial(_publish_state, db_url, _REMOTE, name),
+    )
+
+
 async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str) -> None:
     caller = HttpCaller(cast(Exposure, run.cell.exposure), base_url, issuer)
+    if run.cell.kind == "unsupported":
+        await _refused_publish(run, caller, db_url)
+        return
     if run.cell.kind == "functional":
         await _functional(run, caller, base_url, issuer, db_url)
         return
@@ -581,6 +571,8 @@ def _cells() -> list[Cell]:
         for c in tool_cells(TOOLS)
         if (c.provider == _LOCAL and c.guest_arch == host)
         or (c.provider == _REMOTE and c.guest_arch in REMOTE_LANE_FAMILIES)
+        # ADR-0759's server-only admission refusals run on the stack of their architecture.
+        or (admission_refusal(c) and c.host_arch == host)
     ]
 
 

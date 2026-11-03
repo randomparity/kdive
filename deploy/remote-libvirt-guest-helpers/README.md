@@ -81,3 +81,52 @@ rule is insufficient for all helper children. Preserve the host's separate confi
 Signed bundle GET and core PUT URLs must be reachable from the guest. A loopback object-store
 address points back into that guest, not to the control plane. Configure the endpoint and guest
 network using the [remote-libvirt setup](../../docs/operating/providers/remote-libvirt.md).
+
+## Debian-family installation
+
+The image role selects `debian/kdive-install-kernel` for Ubuntu/Debian while retaining
+the same installed helper path and command/exit contract. Rebuild the image to receive
+it. Ubuntu uses `update-initramfs`, `update-grub` and `grub-reboot`; the catalog supplies
+these prerequisites. Uploaded artifacts live below `/boot/kdive` so native kernel
+discovery does not move the distribution's default boot entry. One `42_kdive` generator
+replaces the KDIVE slot; only `boot` selects it for the next boot.
+
+For the `kdump` method the helper selects its actual kernel/initramfs in the existing
+kdump-tools configuration and enables the service; unrelated settings are retained.
+The native tool may report ordinary-layout discovery diagnostics before using these
+explicit paths. Positive crash-loaded status after reboot is required arming evidence.
+A missing uploaded kernel configuration can also produce an initramfs compression
+warning: installation alone does not prove the resulting image boots. These are not
+crash-capture results. See [ADR-0766](../../docs/adr/0766-debian-remote-kernel-install-helper.md).
+
+## SUSE Leap installation and networking
+
+The pinned prepared image completes the native JeOS firstboot marker before
+staging, with vendor-unit and override admission. Stock sshd generates host keys
+on untouched first boot; existing guests require a clean supported-image rebuild.
+
+The Leap15.6 catalog row selects `suse/kdive-install-kernel`, using native dracut,
+`grub2-mkconfig` and `grub2-reboot` with the same helper protocol. Uploaded artifacts
+remain in `/boot/kdive`; persistent distribution boot selection is unchanged.
+The kdump method selects that kernel through native `KDUMP_KERNELVER`. Service
+installation or enablement alone is not evidence of a boot or armed crash kernel.
+
+The clean pinned image gains per-device native Wicked hardware-class DHCPv4 policies. Its generic
+updater invokes the private `kdive-wicked/netconfig` adapter, which delegates to
+native netconfig before reconciling the existing source return route. It preserves
+DNS and unrelated IPv6/non-DHCP processing. Only the slirp interface's DHCP default
+is removed from the main table; static and primary-interface routes remain.
+Native nanny startup encodes actual Ethernet names, checks selected native persisted
+policy ownership and uses existing busctl createPolicy without transparent updates.
+Exact owned policy loaded at startup is reused; foreign/duplicate/unsafe state or
+a live collision fails visibly. Native persistence is checked before enabling devices
+and replaying current leases; unsupported native names require a clean supported
+topology. No temporary interface configuration or new daemon is installed. Native batch startup probing remains enabled by the executable name.
+
+Foreign network policy or native reader changes stop image construction: rebuild
+from the supported clean source instead of overwriting operator configuration.
+Adapter errors reach stderr and syslog; Wicked readiness is not a routing barrier.
+Verify native lease/rule/route state, authenticated forwarded SSH and primary egress
+again after lease changes, daemon restart and reboot. See
+[ADR-0767](../../docs/adr/0767-suse-remote-kernel-install-helper.md) and
+[ADR-0768](../../docs/adr/0768-suse-wicked-remote-guest-network-policy.md).

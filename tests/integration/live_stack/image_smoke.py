@@ -15,15 +15,16 @@ import platform
 import shlex
 import subprocess  # noqa: S404 - fixed ssh argv, no shell  # nosec B404
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import NamedTuple, Protocol
+from typing import Any, NamedTuple, Protocol, cast
 
 from kdive.images.families import family_for
 from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
 from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.model import StagedPathSource
 from kdive.inventory.path import systems_toml_path
+from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.contract import Cell, build_contract
 from scripts.coverage_campaign.evidence import Context, InputBindings
 from tests.integration.live_stack.evidence import key_values, os_identity
@@ -83,6 +84,18 @@ def os_matches(entry: GuestIdentity, probe: dict[str, str]) -> bool:
     )
 
 
+def provenance_matches(described: ToolResponse, entry: RootfsCatalogEntry) -> None:
+    """The build-recorded ``os_release`` and ``arch`` name the catalog row's platform."""
+    provenance = cast(Mapping[str, Any], described.data.get("provenance") or {})
+    release = {str(k): str(v) for k, v in (provenance.get("os_release") or {}).items()}
+    built = {
+        "ID": release.get("id", ""),
+        "VERSION_ID": release.get("version_id", ""),
+        "machine": str(provenance.get("arch", "")),
+    }
+    assert os_matches(entry, built), f"provenance names {built.get('ID')} {built.get('VERSION_ID')}"
+
+
 def toolchain_command(entry: RootfsCatalogEntry) -> str:
     """Prove the build row's package set is installed and ``make``/``gcc`` build a program."""
     packages = family_for(entry.family).packages("build", entry.distro, entry.version)
@@ -96,7 +109,12 @@ def toolchain_command(entry: RootfsCatalogEntry) -> str:
 
 
 def ssh(
-    endpoint: Endpoint, key: Path, command: str, *, deadline_s: float = 300.0
+    endpoint: Endpoint,
+    key: Path,
+    command: str,
+    *,
+    deadline_s: float = 300.0,
+    timeout_s: float = 120.0,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``command`` as root at ``endpoint``, retrying while sshd is down."""
     argv = [
@@ -122,7 +140,7 @@ def ssh(
     deadline = time.monotonic() + deadline_s
     while True:
         result = subprocess.run(  # noqa: S603 - fixed argv  # nosec B603
-            argv, capture_output=True, text=True, timeout=120.0, check=False
+            argv, capture_output=True, text=True, timeout=timeout_s, check=False
         )
         # 255 is ssh's own failure (sshd not answering yet); anything else is the command's.
         if result.returncode != 255 or time.monotonic() >= deadline:

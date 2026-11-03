@@ -281,6 +281,7 @@ class BlockingLifecycleContext:
         self.cancel_secret = "async-context-cancel-secret"  # pragma: allowlist secret
         self.entered = threading.Event()
         self.entry_cancelled = threading.Event()
+        self.exit_entered = threading.Event()
         self.exit_cancelled = threading.Event()
 
     async def __aenter__(self) -> FakeLifecycle:
@@ -299,6 +300,7 @@ class BlockingLifecycleContext:
 
     async def __aexit__(self, *_exc: object) -> None:
         if self.block == "exit":
+            self.exit_entered.set()
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -373,9 +375,14 @@ def test_deadline_wraps_blocked_async_context_exit_and_cancels_cleanup(tmp_path:
         "deadline_exceeded",
         "retry_same_operation",
     )
-    assert lifecycle.operations == ["status"]
+    # As with entry, the child budget may expire before dispatch is scheduled.
+    # Cancellation is required only after the blocked exit has actually begun.
+    if context.exit_entered.is_set():
+        assert lifecycle.operations == ["status"]
+        assert context.exit_cancelled.is_set()
+    else:
+        assert lifecycle.operations == []
     assert lifecycle.deadlines == factory_deadlines
-    assert context.exit_cancelled.is_set()
     assert b"deadline_exceeded" in fake_socket.sent
     assert context.cancel_secret.encode() not in fake_socket.sent
     _assert_lock_released(lock_path)

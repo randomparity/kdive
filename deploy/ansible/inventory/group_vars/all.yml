@@ -58,10 +58,9 @@ kdive_external_boot_userland_programs:
 
 # The catalog. Each entry: logical name, distro/version, source kind, optional
 # per-entry overrides (packages/helpers/arches/host_distros/root_device/cloud_image_url/force).
-# The in-guest helpers are Fedora/RHEL-family (grubby/dracut): the full kdive
-# build->install->boot->debug arc ships for fedora + rocky; the ubuntu image stages,
-# boots, and connects its guest agent (provision/host_dump) but runs.install needs a
-# Debian helper variant (tracked separately).
+# The install helper follows each image family: Fedora/RHEL uses grubby/dracut;
+# Ubuntu uses its native initramfs/GRUB tools through the same installed entrypoint.
+# Other capabilities still require their documented guest packages and fixtures.
 kdive_image_catalog:
   - name: fedora-kdive-remote-base-43
     distro: fedora
@@ -76,14 +75,42 @@ kdive_image_catalog:
       image_arch_alias }}.img
     kdump_service: kdump-tools.service  # Debian unit name (the kdump-tools package)
     packages:  # Debian names; drgn is not in the default Ubuntu repos
+      - netplan.io
+      - networkd-dispatcher
+      - iproute2
       - qemu-guest-agent
       - kexec-tools
       - makedumpfile
       - kdump-tools
+      - initramfs-tools
+      - grub2-common
+      - kmod
       - curl
       - tar
       - openssl
       - python3
+  - name: opensuse-leap-15.6-kdive-remote-base
+    distro: opensuse-leap
+    version: "15.6"
+    source: cloud-image
+    arches: [x86_64]
+    cloud_image_url: >-
+      https://download.opensuse.org/distribution/leap/15.6/appliances/openSUSE-Leap-15.6-Minimal-VM.x86_64-15.6.0-Cloud-Build19.146.qcow2
+    cloud_image_checksum: sha256:0a5720416d423f98aacaa793a57d56ec045e3dd25cd88713952660ad00da53bd
+    packages:
+      - qemu-guest-agent
+      - kdump
+      - kexec-tools
+      - makedumpfile
+      - dracut
+      - grub2
+      - curl
+      - tar
+      - openssl
+      - python3
+      - coreutils
+      - openssh
+      - iproute2
   - name: rocky-10-kdive-remote-base
     distro: rocky
     version: "10"
@@ -91,6 +118,7 @@ kdive_image_catalog:
     cloud_image_url: >-
       https://dl.rockylinux.org/pub/rocky/10/images/{{ ansible_architecture
       }}/Rocky-10-GenericCloud-Base.latest.{{ ansible_architecture }}.qcow2
+  # No remote SSH parity: no sshd or network policy. Bootability remains unvalidated.
   - name: bare-kdive-remote-base
     distro: bare
     version: "1"

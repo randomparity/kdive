@@ -280,7 +280,9 @@ def test_local_fresh_probe_waits_for_prior_accepted_monitor_mutation() -> None:
         command = json.loads(raw)
         assert "id" not in command
         if command["execute"] == "object-del":
-            raise libvirt.libvirtError("DeviceNotFound")
+            return json.dumps(
+                {"error": {"class": "DeviceNotFound", "desc": "absent"}, "id": "libvirt-15"}
+            )
         with monitor_lock:
             return json.dumps({"return": [], "id": "libvirt-16"})
 
@@ -344,3 +346,59 @@ def test_local_composition_snapshots_allowlisted_uri_for_post_release_spool(
     assert configuration.resource_id == resource_id
     assert configuration.uri == "qemu:///session"
     assert b"KDIVE_DATABASE_URL" not in encoded
+
+
+def test_local_quiescence_treats_a_raised_not_found_as_a_control_failure_not_absence() -> None:
+    """Absence arrives only as a QMP reply; a raised "not found" is not proof of absence (#3270)."""
+    resource_id = uuid4()
+
+    def monitor(domain: object, raw: str, flags: int) -> str:
+        raise libvirt.libvirtError("Device 'kdive-dump-job' not found")
+
+    probe = LocalLibvirtCaptureQuiescence(
+        resource_id=resource_id,
+        connect=lambda: _ProbeConnection([]),
+        monitor=monitor,
+    )
+
+    with pytest.raises(CategorizedError, match="detach failed") as excinfo:
+        probe.prove_absent(resource_id, "kdive-local", "kdive-dump-job")
+    assert excinfo.value.category is ErrorCategory.CONTROL_FAILURE
+
+
+_REFUSED = {"error": {"class": "GenericError", "desc": "busy"}, "id": "libvirt-9"}
+
+
+@pytest.mark.parametrize(
+    ("detach_reply", "query_reply", "message"),
+    [
+        (None, "[]", "malformed"),
+        (None, json.dumps({"return": [], "id": ""}), "did not correlate"),
+        (None, json.dumps({"return": []}), "did not correlate"),
+        (json.dumps(_REFUSED), None, "inconclusive"),
+        (None, json.dumps(_REFUSED), "inconclusive"),
+    ],
+    ids=["malformed", "empty-id", "missing-id", "refused-detach", "refused-query"],
+)
+def test_local_quiescence_rejects_uncorrelated_or_refused_replies(
+    detach_reply: str | None, query_reply: str | None, message: str
+) -> None:
+    resource_id = uuid4()
+    absent = json.dumps({"error": {"class": "DeviceNotFound", "desc": "gone"}, "id": "libvirt-8"})
+    listed = json.dumps({"return": [], "id": "libvirt-10"})
+
+    def monitor(domain: object, raw: str, flags: int) -> str:
+        del domain, flags
+        if json.loads(raw)["execute"] == "object-del":
+            return detach_reply or absent
+        return query_reply or listed
+
+    probe = LocalLibvirtCaptureQuiescence(
+        resource_id=resource_id,
+        connect=lambda: _ProbeConnection([]),
+        monitor=monitor,
+    )
+
+    with pytest.raises(CategorizedError, match=message) as excinfo:
+        probe.prove_absent(resource_id, "kdive-local", "kdive-dump-job")
+    assert excinfo.value.category is ErrorCategory.CONTROL_FAILURE

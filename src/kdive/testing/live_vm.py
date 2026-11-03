@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import os
 import socket
+import stat
 import subprocess
 import time
 import uuid
@@ -308,18 +309,44 @@ def create_overlay(base: Path, dest: Path) -> None:
 
 @dataclass(slots=True)
 class _SessionRuntime:
-    """Records the XDG_CONFIG_HOME redirect for a session-mode boot so teardown can restore it."""
+    """Owns the created session directory and XDG redirect (ADR-0801)."""
 
     prior: str | None
     short_dir: Path
+    identity: tuple[int, int, int]
+    _removed: bool = False
+    retain_directory: bool = False
 
     def restore(self) -> None:
+        if self._removed:
+            return
         if self.prior is None:
             os.environ.pop("XDG_CONFIG_HOME", None)
         else:
             os.environ["XDG_CONFIG_HOME"] = self.prior
-        with contextlib.suppress(OSError):
+        if self.retain_directory:
+            return
+        try:
+            current = self.short_dir.lstat()
+        except FileNotFoundError:
+            self._removed = True
+            return
+        except OSError as error:
+            raise RuntimeError(
+                f"cannot inspect session runtime {self.short_dir}; retain for ownership diagnosis"
+            ) from error
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino, current.st_uid) != self.identity
+        ):
+            raise RuntimeError(f"session runtime {self.short_dir} ownership changed; retained")
+        try:
             self.short_dir.rmdir()
+        except OSError as error:
+            raise RuntimeError(
+                f"cannot remove session runtime {self.short_dir}; inspect retained directory"
+            ) from error
+        self._removed = True
 
 
 def prepare_session_runtime(uri: str) -> _SessionRuntime | None:
@@ -327,15 +354,34 @@ def prepare_session_runtime(uri: str) -> _SessionRuntime | None:
 
     Session-mode libvirt derives its per-domain QMP socket under $XDG_CONFIG_HOME; a deep pytest
     tmp path overflows the 108-byte UNIX socket limit. Process-global — one session-mode boot at a
-    time per process (see module docstring).
+    time per process (see module docstring). Collisions and unproved ownership fail without
+    changing XDG_CONFIG_HOME; uncertain directories remain for diagnosis (ADR-0801).
     """
     if not uri.startswith("qemu:///session"):
         return None
     prior = os.environ.get("XDG_CONFIG_HOME")
     short_dir = Path(f"/tmp/kdive-cl-{uuid.uuid4().hex[:8]}")  # noqa: S108 - short path for QMP socket
-    short_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        short_dir.mkdir(mode=0o700)
+    except OSError as error:
+        raise RuntimeError(
+            f"cannot create session runtime {short_dir}; retain path and choose a fresh name"
+        ) from error
+    try:
+        created = short_dir.lstat()
+    except OSError as error:
+        raise RuntimeError(
+            f"cannot establish session runtime {short_dir} ownership; retained, XDG unchanged"
+        ) from error
+    if not stat.S_ISDIR(created.st_mode) or created.st_uid != os.getuid():
+        raise RuntimeError(
+            f"session runtime {short_dir} ownership uncertain; retained, XDG unchanged"
+        )
+    runtime = _SessionRuntime(
+        prior=prior, short_dir=short_dir, identity=(created.st_dev, created.st_ino, created.st_uid)
+    )
     os.environ["XDG_CONFIG_HOME"] = str(short_dir)
-    return _SessionRuntime(prior=prior, short_dir=short_dir)
+    return runtime
 
 
 def connect_libvirt(uri: str) -> _LibvirtConn:  # pragma: no cover - live_vm
@@ -529,6 +575,7 @@ def boot_gdbstub_domain(
     ssh_port: int | None = None,
     wait_timeout_s: float = 30.0,
     _connect: Callable[[str], _TransientConn] = connect_libvirt,
+    _lifecycle: Callable[[str], None] | None = None,
 ) -> Iterator[LiveDomain]:
     """Boot a transient gdbstub domain from caller-rendered production XML (ADR-0392).
 
@@ -542,7 +589,12 @@ def boot_gdbstub_domain(
     ``XDG_CONFIG_HOME`` redirect prevents the 108-byte QMP-socket overflow under
     ``qemu:///session`` (#1323). The caller chooses readiness: ``panic`` reads ``console_log``,
     ``ssh`` probes the production XML's forwarded ``ssh_port``, and ``active`` checks libvirt
-    state. The harness yields after readiness and guarantees domain + connection teardown.
+    state. The harness yields after readiness and attempts owned domain + connection teardown.
+    ADR-0802 requires positive destroy completion; uncertain native work or receipt failure
+    retains the runtime directory after restoring XDG. Callers still own their disks.
+    The optional lifecycle observer receives create/destroy submitting/returned phases.
+    Failed destroy-submitting observation never suppresses an otherwise possible teardown.
+    Cleanup failures are raised; multiple primary/cleanup errors form a BaseExceptionGroup.
 
     Raises ``LiveVmBootTimeout`` if the selected condition is not reached before the deadline.
     """
@@ -551,9 +603,24 @@ def boot_gdbstub_domain(
     runtime = prepare_session_runtime(uri)
     conn: _TransientConn | None = None
     domain: _TransientDomain | None = None
+    errors: list[BaseException] = []
+    submitted = pending = receipt_failed = False
+
+    def notify(phase: str) -> None:
+        nonlocal receipt_failed
+        if _lifecycle is not None:
+            try:
+                _lifecycle(phase)
+            except BaseException:
+                receipt_failed = True
+                raise
+
     try:
         conn = _connect(uri)
+        notify("create-submitting")
+        submitted = pending = True
         domain = conn.createXML(xml, 0)
+        notify("create-returned")
         if not _await_condition(
             wait_for,
             domain,
@@ -573,15 +640,37 @@ def boot_gdbstub_domain(
             ssh_port=ssh_port,
             console_log=console_log,
         )
+    except BaseException as error:
+        errors.append(error)
     finally:
+        cleanup_failed = False
         if domain is not None:
-            import libvirt  # noqa: PLC0415  # operator-provided; only reached once a domain exists
-
-            with contextlib.suppress(libvirt.libvirtError):
-                if domain.isActive():
-                    domain.destroy()
+            try:
+                if not domain.isActive():
+                    raise RuntimeError("native domain cleanup unproven: no destroy completion")
+                try:
+                    notify("destroy-submitting")
+                except BaseException as error:
+                    errors.append(error)
+                domain.destroy()
+                pending = False
+                notify("destroy-returned")
+            except BaseException as error:
+                errors.append(error)
+                cleanup_failed = True
         if conn is not None:
-            with contextlib.suppress(Exception):
+            try:
                 conn.close()
+            except BaseException as error:
+                errors.append(error)
+                cleanup_failed = True
         if runtime is not None:
-            runtime.restore()
+            runtime.retain_directory |= pending or (submitted and receipt_failed) or cleanup_failed
+            try:
+                runtime.restore()
+            except BaseException as error:
+                errors.append(error)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("transient domain operation and cleanup failed", errors)

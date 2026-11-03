@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from datetime import UTC
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import pytest
@@ -28,6 +29,7 @@ from kdive.artifacts.storage import (
     ConditionalCreateConflict,
     HeadResult,
     ObjectVersion,
+    PresignPutRequest,
     StoredArtifact,
     VersionBatch,
     VersionPage,
@@ -35,6 +37,7 @@ from kdive.artifacts.storage import (
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.store.objectstore import (
+    S3_CLIENT_CONFIG,
     ObjectStore,
     _infrastructure_error,
     _local_stream_error,
@@ -1672,7 +1675,11 @@ def test_object_store_from_env_defaults_region(monkeypatch: pytest.MonkeyPatch) 
     assert store._client is client
     assert store._bucket == "bucket"
     assert client.versioning_calls == 1
-    assert client_kwargs == {"endpoint_url": "http://localhost:9000", "region_name": "us-east-1"}
+    assert client_kwargs == {
+        "endpoint_url": "http://localhost:9000",
+        "region_name": "us-east-1",
+        "config": S3_CLIENT_CONFIG,
+    }
 
 
 def test_object_store_from_env_uses_configured_region(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1699,7 +1706,57 @@ def test_object_store_from_env_uses_configured_region(monkeypatch: pytest.Monkey
     assert client_kwargs == {
         "endpoint_url": "http://minio.internal:9000",
         "region_name": "eu-west-1",
+        "config": S3_CLIENT_CONFIG,
     }
+
+
+@pytest.mark.parametrize(
+    "endpoint", ["http://10.0.0.5:8333", "https://s3.example.test", "http://localhost:9000"]
+)
+def test_object_store_from_env_presigns_sigv4_with_path_style_urls(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, endpoint: str
+) -> None:
+    # The production factory, not a hand-built client: botocore presigns SigV2 unless the client
+    # pins s3v4, and SigV2 neither carries X-Amz-Date (the vmcore deadline parser's input) nor
+    # signs If-None-Match (the conditional-PUT write fence) (#3313). Presigning is offline.
+    monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", endpoint)
+    monkeypatch.setenv("KDIVE_S3_BUCKET", "artifacts")
+    for name in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SESSION_TOKEN", "KDIVE_S3_REGION"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "absent-config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "absent-credentials"))
+    monkeypatch.setattr(ObjectStore, "validate_versioning", lambda _self: None)
+    store = object_store_from_env()
+
+    get_url = urlsplit(store.presign_get("t/runs/r1/vmcore", expires_in=900))
+    put_url = urlsplit(
+        store.presign_put(
+            PresignPutRequest(
+                key="t/runs/r1/vmcore-raw",
+                sha256=base64.b64encode(hashlib.sha256(b"core").digest()).decode(),
+                size_bytes=4,
+                sensitivity=Sensitivity.SENSITIVE,
+                retention_class="vmcore",
+                expires_in=3600,
+                if_absent=True,
+            )
+        ).url
+    )
+
+    for url, path in (
+        (get_url, "/artifacts/t/runs/r1/vmcore"),
+        (put_url, "/artifacts/t/runs/r1/vmcore-raw"),
+    ):
+        query = parse_qs(url.query)
+        assert query["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+        assert "AWSAccessKeyId" not in query
+        assert f"{url.scheme}://{url.netloc}" == endpoint
+        assert url.path == path
+    assert parse_qs(get_url.query)["X-Amz-Expires"] == ["900"]
+    put_signed = parse_qs(put_url.query)["X-Amz-SignedHeaders"][0].split(";")
+    assert {"host", "if-none-match", "x-amz-checksum-sha256"} <= set(put_signed)
 
 
 def test_put_get_round_trip(minio_store: ObjectStore, key_ns: str) -> None:
@@ -2281,3 +2338,54 @@ def test_get_range_maps_client_error_to_infrastructure() -> None:
         store.get_range("k", start=0, length=4)
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert str(excinfo.value) == "object-store get_range for 'k' failed: boom"
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_conditional_path_stream_checksums_and_closes(tmp_path: Path, conflict: bool) -> None:
+    from io import BufferedReader
+
+    class Client(_RecordingPutClient):
+        body: BufferedReader | None = None
+
+        def put_object(self, **kwargs: object) -> dict[str, object]:
+            assert isinstance(kwargs["Body"], BufferedReader)
+            self.body = kwargs["Body"]
+            reply = super().put_object(**kwargs)
+            if conflict:
+                raise ClientError({"Error": {"Code": "PreconditionFailed"}}, "PutObject")
+            return reply
+
+    spool = tmp_path / "vmcore"
+    spool.write_bytes(b"core")
+    client = Client()
+    result = ObjectStore(client, "bucket").create_if_absent(
+        ConditionalArtifactWriteRequest(
+            key="local/runs/test/vmcore-host_dump-execution",
+            data=spool,
+            sha256_b64=_sha256_b64(spool),
+            metadata={"vmcore-kind": "capture"},
+            sensitivity=Sensitivity.SENSITIVE,
+            retention_class="vmcore",
+        )
+    )
+    assert isinstance(result, ConditionalCreateConflict if conflict else StoredArtifact)
+    assert client.body is not None and client.body.closed
+    assert client.last_kwargs is not None
+    assert client.last_kwargs["IfNoneMatch"] == "*"
+    assert client.last_kwargs["ChecksumSHA256"] == _sha256_b64(spool)
+    assert client.last_kwargs["Body"] == b"core"
+    assert spool.read_bytes() == b"core"
+
+
+def test_conditional_missing_spool_is_typed(tmp_path: Path) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        ObjectStore(object(), "bucket").create_if_absent(
+            ConditionalArtifactWriteRequest(
+                key="local/runs/test/vmcore-host_dump-execution",
+                data=tmp_path / "missing",
+                metadata={},
+                sensitivity=Sensitivity.SENSITIVE,
+                retention_class="vmcore",
+            )
+        )
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE

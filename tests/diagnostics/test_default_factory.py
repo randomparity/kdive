@@ -9,6 +9,7 @@ is the check's ``error`` boundary, not a ``fail``.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -590,12 +591,13 @@ def test_factory_keeps_substitution_when_no_pool(monkeypatch, tmp_path: Path) ->
     }
 
 
-def test_factory_substitutes_every_enabled_worker_contribution_without_pool(
-    monkeypatch, tmp_path: Path
+@pytest.mark.parametrize("target", [None, "provider-a"])
+def test_factory_substitutes_selected_worker_contributions_without_pool(
+    monkeypatch, tmp_path: Path, target: str | None
 ) -> None:
     _set_env(monkeypatch, tmp_path)
     service = default_service_factory(
-        None,
+        target,
         provider_contributions=(
             _enabled_worker_contribution("provider-a", "worker-a"),
             _enabled_worker_contribution("provider-b", "worker-b"),
@@ -606,11 +608,15 @@ def test_factory_substitutes_every_enabled_worker_contribution_without_pool(
         (check.id, check.provider)
         for check in service._worker_mode.checks  # noqa: SLF001
     }
-    assert unavailable == {("worker-a", "provider-a"), ("worker-b", "provider-b")}
+    expected = {("worker-a", "provider-a")}
+    if target is None:
+        expected.add(("worker-b", "provider-b"))
+    assert unavailable == expected
 
 
-def test_factory_dispatches_every_enabled_worker_contribution_with_pool(
-    monkeypatch, tmp_path: Path
+@pytest.mark.parametrize("target", [None, "provider-a"])
+def test_factory_dispatches_selected_worker_contributions_with_pool(
+    monkeypatch, tmp_path: Path, target: str | None
 ) -> None:
     from typing import cast
 
@@ -647,7 +653,7 @@ def test_factory_dispatches_every_enabled_worker_contribution_with_pool(
         diagnostics_service, "JobWorkerCheckDispatcher", RecordingWorkerCheckDispatcher
     )
     service = default_service_factory(
-        None,
+        target,
         pool=cast(AsyncConnectionPool, object()),
         provider_contributions=(
             _enabled_worker_contribution("provider-a", "worker-a"),
@@ -661,8 +667,11 @@ def test_factory_dispatches_every_enabled_worker_contribution_with_pool(
         for result in report.results
         if result.check_id.startswith("worker-")
     }
-    assert created == [("provider-a", ("worker-a",)), ("provider-b", ("worker-b",))]
-    assert worker_results == {("worker-a", "provider-a"), ("worker-b", "provider-b")}
+    expected = [("provider-a", ("worker-a",))]
+    if target is None:
+        expected.append(("provider-b", ("worker-b",)))
+    assert created == expected
+    assert worker_results == {(ids[0], provider) for provider, ids in expected}
 
 
 def test_factory_dispatches_local_libvirt_when_pool_but_remote_not_configured(
@@ -678,3 +687,71 @@ def test_factory_dispatches_local_libvirt_when_pool_but_remote_not_configured(
     _no_remote_instance(monkeypatch, tmp_path)
     service = _factory(None, pool=cast(AsyncConnectionPool, object()))
     assert isinstance(service._worker_mode, WorkerVantageDispatchMode)  # noqa: SLF001
+
+
+@pytest.mark.parametrize("target", [None, "provider-a"])
+def test_factory_selects_server_and_egress_hooks_before_construction(
+    monkeypatch, tmp_path: Path, target: str | None
+) -> None:
+    _set_env(monkeypatch, tmp_path)
+    calls: list[tuple[str, str]] = []
+
+    def contribution(provider: str) -> DiagnosticProviderContribution:
+        def enabled() -> bool:
+            calls.append((provider, "enabled"))
+            return True
+
+        def checks() -> tuple[Check, ...]:
+            calls.append((provider, "checks"))
+            return (_FakeEgressCheck(),)
+
+        def egress() -> tuple[Check, ...]:
+            calls.append((provider, "egress"))
+            return (_FakeEgressCheck(),)
+
+        return replace(
+            _enabled_worker_contribution(provider, provider + "-worker"),
+            enabled=enabled,
+            checks=checks,
+            egress_checks=egress,
+        )
+
+    service = default_service_factory(
+        target,
+        with_egress=True,
+        provider_contributions=(contribution("provider-a"), contribution("provider-b")),
+    )
+    expected = {"provider-a"} if target else {"provider-a", "provider-b"}
+    assert set(calls) == {
+        (provider, hook) for provider in expected for hook in ("enabled", "checks", "egress")
+    }
+    assert service._checks[0].id == SECRET_REF_ID  # noqa: SLF001
+    assert len(service._checks) == 1 + 2 * len(expected)  # noqa: SLF001
+
+
+@pytest.mark.parametrize("target", ["unknown", "", "provider-a", "provider-b"])
+def test_factory_rejects_unknown_or_disabled_target_before_hooks(
+    monkeypatch, tmp_path: Path, target: str
+) -> None:
+    _set_env(monkeypatch, tmp_path)
+
+    def forbidden() -> bool:
+        pytest.fail("unselected provider enablement must not run")
+
+    disabled = replace(_enabled_worker_contribution("provider-a", "a"), enabled=lambda: False)
+    unrelated = replace(_enabled_worker_contribution("unrelated", "b"), enabled=forbidden)
+    with pytest.raises(CategorizedError) as caught:
+        default_service_factory(target, provider_contributions=(disabled, unrelated))
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_factory_does_not_take_egress_from_unselected_provider(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    selected = _enabled_worker_contribution("provider-a", "a")
+    other = replace(
+        _enabled_worker_contribution("provider-b", "b"), egress_checks=lambda: (_FakeEgressCheck(),)
+    )
+    with pytest.raises(CategorizedError, match="guest_egress"):
+        default_service_factory(
+            "provider-a", with_egress=True, provider_contributions=(selected, other)
+        )

@@ -44,6 +44,9 @@ live_vm_host_authority_account: kdive-provider-authority
 live_vm_host_authority_runtime_root: /run/kdive/provider-authority
 live_vm_host_authority_runtime_install: /opt/kdive-provider-authority
 live_vm_host_authority_credentials_dir: /etc/kdive/credentials/provider-authority
+# Preflight and verify refuse authority/worker TLS certificates expiring within this many
+# seconds. Keep it below the disposable proof carrier's one-day certificate lifetime.
+live_vm_host_authority_tls_expiry_margin_seconds: 43200
 live_vm_host_authority_environment: /etc/kdive/provider-authority.env
 live_vm_host_authority_instance: "{{ inventory_hostname }}"
 live_vm_host_authority_database_login: kdive_authority_host
@@ -103,3 +106,6 @@ live_vm_host_authority_denied_paths:
   - /run/kdive/provider-authority
   - /run/kdive/provider-authority/request
   - /run/kdive/provider-authority/libvirt
+
+# Local proof-only inventory mediator (ADR-0800).
+live_vm_host_authority_inventory_observer_enabled: false

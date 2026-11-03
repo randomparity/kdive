@@ -86,6 +86,7 @@
                 assert type(architectures) is list
                 assert all(type(architecture) is str for architecture in architectures)
                 if remote_module:
+                    assert value['appliance_root'] == '/var/lib/kdive/remote-module-appliance/v1'
                     assert local_mutation
                     assert 1 <= len(architectures) <= 2
                     assert len(set(architectures)) == len(architectures)
@@ -140,6 +141,8 @@
           'region': provider_authority_host_s3_region,
           's3_credentials': provider_authority_host_s3_credentials_source,
           'remote_module': provider_authority_host_remote_module_enabled,
+          'appliance_root': remote_libvirt_module_appliance_install_dir |
+            default('/var/lib/kdive/remote-module-appliance/v1'),
           'architectures': provider_authority_host_remote_module_architectures,
           'pool': provider_authority_host_remote_libvirt_storage_pool,
           'system_manifest': provider_authority_host_system_manifest_source,

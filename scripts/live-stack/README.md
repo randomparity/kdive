@@ -10,6 +10,9 @@ kdive processes. Server and reconciler run as the configured operator; workers r
 fixed accounts in `kdive-live-worker@1..8.service` through the provisioned lifecycle socket.
 Install that host contract first with the `live_vm_host` Ansible role. The supported worker URI is
 the explicit operator-owned session socket published in `/etc/kdive/live-worker-libvirt.env`.
+Where the role enabled the fixed-worker authority client, it also publishes the worker's
+authority route in `/etc/kdive/live-worker-authority.env`; every worker start forwards it, and an
+exported route value that contradicts the file is refused (ADR-0770).
 
 Libvirt bring-up follows the configured endpoint: against the published dedicated session
 endpoint, `stack-services.sh` recovers a down daemon by starting the operator-owned session daemon as the

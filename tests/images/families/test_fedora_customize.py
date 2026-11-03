@@ -23,7 +23,7 @@ from kdive.images.families._fedora_customize import (
     readiness_unit,
 )
 from kdive.images.families.base import CustomizeContext
-from kdive.images.families.steps import Mkdir, RunCommand, Step, WriteFile
+from kdive.images.families.steps import Mkdir, RunCommand, StageFile, Step, WriteFile
 from kdive.images.planes._build_common import (
     DRGN_MARKER_GUEST_PATH,
     MAKEDUMPFILE_MARKER_GUEST_PATH,
@@ -141,6 +141,26 @@ def _ci_steps(tmp_path: Path, *, is_cloud_image: bool) -> list[Step]:
     return cloud_init_first_boot_steps(_ci_ctx(tmp_path, is_cloud_image=is_cloud_image))
 
 
+@pytest.mark.parametrize("is_cloud_image", [False, True])
+@pytest.mark.parametrize("existing_config_dir", [False, True])
+def test_cloud_init_files_stage_before_package_install(
+    tmp_path: Path, is_cloud_image: bool, existing_config_dir: bool
+) -> None:
+    guest = tmp_path / "guest"
+    (guest / "etc").mkdir(parents=True)
+    if existing_config_dir:
+        (guest / "etc/cloud/cloud.cfg.d").mkdir(parents=True)
+    for step in _ci_steps(tmp_path, is_cloud_image=is_cloud_image):
+        match step:
+            case Mkdir(path):
+                (guest / path.lstrip("/")).mkdir(parents=True, exist_ok=True)
+            case StageFile(path, content) | WriteFile(path, content):
+                (guest / path.lstrip("/")).write_text(content)
+    assert (guest / KDIVE_CLOUD_CFG_PATH.lstrip("/")).read_text() == (
+        _fedora_customize.KDIVE_CLOUD_CFG_CONTENT
+    )
+
+
 def test_cloud_init_helper_writes_authoritative_cfg(tmp_path: Path) -> None:
     cfg = baked_contents(_ci_steps(tmp_path, is_cloud_image=True))[KDIVE_CLOUD_CFG_PATH]
     assert "datasource_list: [ NoCloud ]" in cfg
@@ -193,3 +213,72 @@ def test_cloud_init_helper_installs_cloud_init_only_on_non_cloud_base(tmp_path: 
     scratch = installed(_ci_steps(tmp_path, is_cloud_image=False))
     assert "cloud-init" not in cloud  # ships cloud-init already
     assert "cloud-init" in scratch  # virt-builder base needs it installed
+
+
+@pytest.mark.parametrize("hint", ["selected", "vmlinuz-selected", "selected; touch injected"])
+@pytest.mark.parametrize(
+    "failure", ["", "running", "core", "wrong-core", "inventory", "test", "erase", "no-old"]
+)
+def test_retained_kernel_transaction(
+    tmp_path: Path, hint: str, failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keep = hint.removeprefix("vmlinuz-")
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    monkeypatch.setenv("KEEP", keep)
+    monkeypatch.setenv("FAILURE", failure)
+    monkeypatch.setenv("RPM_LOG", str(tmp_path / "rpm.log"))
+    uname = tmp_path / "uname"
+    uname.write_text(
+        '#!/bin/sh\nif [ "$FAILURE" = running ]; then echo other; else echo "$KEEP"; fi\n'
+    )
+    uname.chmod(0o755)
+    rpm = tmp_path / "rpm"
+    rpm.write_text("""#!/bin/sh
+case "$1" in
+-q)
+    [ "$FAILURE" != core ] || exit 13
+    if [ "$FAILURE" = wrong-core ]; then echo other; else printf '%s' "$KEEP"; fi ;;
+-qa)
+    [ "$FAILURE" != inventory ] || exit 14
+    printf 'kernel-core\\t%s\\tselected-core\\n' "$KEEP"
+    printf 'unrelated\\told\\tunrelated-package\\n'
+    if [ "$FAILURE" != no-old ]; then
+        for name in kernel kernel-core kernel-modules-core kernel-modules kernel-modules-extra; do
+            printf '%s\\told\\t%s-old\\n' "$name" "$name"
+        done
+    fi ;;
+--erase)
+    printf '%s\\n' "$@" >> "$RPM_LOG"
+    if [ "$2" = --test ]; then
+        [ "$FAILURE" != test ] || exit 15
+    else
+        [ "$FAILURE" != erase ] || exit 16
+    fi ;;
+*) exit 99 ;;
+esac
+""")
+    rpm.chmod(0o755)
+    result = subprocess.run(
+        ["/bin/sh", "-ec", _fedora_customize.retained_kernel_step(hint).sh],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) == (failure in ("", "no-old")), result.stderr
+    assert not (tmp_path / "injected").exists()
+    log = tmp_path / "rpm.log"
+    if failure in ("running", "core", "wrong-core", "inventory", "no-old"):
+        assert not log.exists()
+    else:
+        transaction = [
+            "kernel-old",
+            "kernel-core-old",
+            "kernel-modules-core-old",
+            "kernel-modules-old",
+            "kernel-modules-extra-old",
+        ]
+        expected = ["--erase", "--test", *transaction]
+        if failure != "test":
+            expected += ["--erase", *transaction]
+        assert log.read_text().splitlines() == expected

@@ -9,8 +9,20 @@ from pathlib import Path
 import pytest
 import yaml
 
+from kdive.kernel_config.parse import parse_kernel_config
+from kdive.kernel_config.requirements import (
+    CRASH_CAPTURE,
+    CRASH_CAPTURE_RHEL_GUEST,
+    feature_requirement,
+)
+from kdive.kernel_config.support import unmet_advertised_clauses, unmet_clauses
 from scripts import kernel_fixtures as fixture
 from tests.scripts.kernel_fixture_support import repository as repository
+
+
+@pytest.mark.parametrize("symbol", ["KEXEC", "KEXEC_FILE", "CRASH_DUMP"])
+def test_default_fragment_requests_kdump_syscalls(symbol: str) -> None:
+    assert fixture.config_values(fixture.CONFIG.read_text()).get(f"CONFIG_{symbol}") == "y"
 
 
 @pytest.mark.parametrize(
@@ -27,6 +39,63 @@ def test_host_provisioning_covers_kernel_build_tools(family, headers, btf) -> No
     )
     required = {"gcc", "binutils", "bison", "flex", "bc", "perl", "make", "tar", btf, *headers}
     assert required <= set(defaults[f"libvirt_stack_packages_{family}"])
+
+
+@pytest.mark.parametrize(
+    "inventories,expected",
+    [
+        ({"dpkg-query": "", "rpm": "gcc=16.1-1"}, "gcc=16.1-1"),
+        ({"dpkg-query": "gcc=16.1", "rpm": ""}, "gcc=16.1"),
+        ({"rpm": "gcc=16.1-1"}, "gcc=16.1-1"),
+        ({"dpkg-query": "gcc=16.1"}, "gcc=16.1"),
+    ],
+)
+def test_toolchain_records_nonempty_package_inventory(monkeypatch, inventories, expected) -> None:
+    monkeypatch.setattr(fixture.shutil, "which", lambda tool: tool if tool in inventories else None)
+
+    def command(argv):
+        return "test version" if argv[-1] == "--version" else inventories[argv[0]]
+
+    monkeypatch.setattr(fixture, "command", command)
+    assert fixture.toolchain_identity()["packages"] == expected
+
+
+@pytest.mark.parametrize("inventories", [{}, {"dpkg-query": ""}, {"dpkg-query": "", "rpm": ""}])
+def test_empty_package_inventory_stops_before_fetch_or_build(tmp_path, monkeypatch, inventories):
+    monkeypatch.setattr(fixture.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(fixture.shutil, "which", lambda tool: tool if tool in inventories else None)
+
+    def command(argv, **kwargs):
+        if argv[-1] == "--version":
+            return "test version"
+        assert argv[0] in inventories, "build started without package provenance"
+        return inventories[argv[0]]
+
+    monkeypatch.setattr(fixture, "command", command)
+    output = tmp_path / "out"
+    with pytest.raises(ValueError, match="package inventory"):
+        fixture.build(
+            tmp_path / "source",
+            output,
+            baseline="longterm",
+            arch="x86_64",
+            config=fixture.CONFIG,
+            jobs=1,
+        )
+    assert not output.exists()
+
+
+def test_package_query_failure_is_not_hidden(monkeypatch):
+    monkeypatch.setattr(fixture.shutil, "which", lambda tool: tool)
+
+    def command(argv):
+        if argv[-1] == "--version":
+            return "test version"
+        raise subprocess.CalledProcessError(2, argv)
+
+    monkeypatch.setattr(fixture, "command", command)
+    with pytest.raises(subprocess.CalledProcessError):
+        fixture.toolchain_identity()
 
 
 def _outputs(root: Path) -> None:
@@ -91,6 +160,38 @@ def test_record_round_trip_and_identity(built: Path) -> None:
     assert manifest["artifacts"]["input.config"] == manifest["fragment_sha256"]
 
 
+def test_changed_defaults_change_identity_without_invalidating_retained_inputs(built: Path) -> None:
+    current = fixture.CONFIG.read_text()
+    older = (
+        "\n".join(
+            line
+            for line in current.splitlines()
+            if not line.startswith(("CONFIG_SQUASHFS", "CONFIG_EROFS", "CONFIG_OVERLAY"))
+        )
+        + "\n"
+    )
+    previous_id = ""
+    for fragment in (older, current):
+        for name in ("input.config", ".config"):
+            (built / name).write_text(fragment)
+        manifest = fixture.record(
+            built,
+            baseline="longterm",
+            arch="x86_64",
+            config_digest=fixture.digest(built / "input.config"),
+            toolchain={"gcc": "test gcc", "packages": "gcc=1"},
+            builder="a" * 40,
+            source_epoch=1,
+        )
+        # Retained older defaults remain valid; current defaults are not a verify policy.
+        assert fixture.verify(built, baseline="longterm", arch="x86_64") == manifest
+        assert manifest["fixture_id"] != previous_id
+        previous_id = manifest["fixture_id"]
+    (built / "input.config").write_text(older)
+    with pytest.raises(ValueError, match="input.config"):
+        fixture.verify(built, baseline="longterm", arch="x86_64")
+
+
 def test_kbuild_object_order_resolves_retained_modules(built: Path) -> None:
     (built / "modules.order").write_text("drivers/block/loop.o\n")
     assert "drivers/block/loop.ko" in fixture.members(built, "x86_64")
@@ -133,6 +234,61 @@ def test_output_tampering_fails(built: Path, name: str) -> None:
     (built / name).write_bytes(b"changed")
     with pytest.raises(ValueError):
         fixture.verify(built, baseline="longterm", arch="x86_64")
+
+
+def test_selections_cover_the_baselines_and_the_corpus() -> None:
+    selected = fixture.selections()
+    assert set(selected) == {
+        "longterm",
+        "stable",
+        "case-1-broken",
+        "case-1-fixed",
+        "case-2-broken",
+        "case-2-fixed",
+    }
+    assert selected["stable"]["repository"].endswith("/stable/linux.git")
+    assert selected["case-1-fixed"]["repository"].endswith("/torvalds/linux.git")
+    assert fixture.baseline_selection("case-2-broken") == selected["case-2-broken"]
+    with pytest.raises(ValueError, match="longterm, stable, case-1-broken"):
+        fixture.baseline_selection("mainline")
+
+
+def test_cli_accepts_a_corpus_selection(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            "python3",
+            str(fixture.ROOT / "scripts/kernel_fixtures.py"),
+            "verify",
+            "--baseline",
+            "case-1-broken",
+            "--arch",
+            "x86_64",
+            "--output",
+            str(tmp_path / "absent"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "missing fixture artifact: manifest.json" in result.stderr
+
+
+def test_corpus_selection_round_trips(built: Path, repository) -> None:
+    fixture.record(
+        built,
+        baseline="case-1-fixed",
+        arch="x86_64",
+        config_digest=fixture.digest(fixture.CONFIG),
+        toolchain={"gcc": "test gcc", "packages": "gcc=1"},
+        builder="a" * 40,
+        source_epoch=1,
+    )
+    assert fixture.verify(built, baseline="case-1-fixed", arch="x86_64")["baseline"] == (
+        "case-1-fixed"
+    )
+    with pytest.raises(ValueError, match="selection mismatch"):
+        fixture.verify(built, baseline="case-1-broken", arch="x86_64")
 
 
 def test_missing_manifest_and_wrong_selection_fail(built: Path) -> None:
@@ -346,4 +502,80 @@ def test_failed_compilation_never_writes_manifest(tmp_path: Path, monkeypatch) -
         fixture.build(
             source, output, baseline="longterm", arch="x86_64", config=fixture.CONFIG, jobs=1
         )
+    assert not (output / "manifest.json").exists()
+
+
+@pytest.mark.parametrize(
+    "arch,custom,dropped",
+    [
+        ("x86_64", False, ""),
+        ("ppc64le", False, ""),
+        ("x86_64", True, ""),
+        ("ppc64le", True, ""),
+        ("x86_64", False, "FW_CFG_SYSFS"),
+        *[
+            (arch, False, symbol)
+            for arch in ("x86_64", "ppc64le")
+            for symbol in (
+                "SQUASHFS",
+                "SQUASHFS_ZSTD",
+                "EROFS_FS",
+                "EROFS_FS_ZIP",
+                "EROFS_FS_ZIP_LZMA",
+                "OVERLAY_FS",
+            )
+        ],
+    ],
+)
+def test_default_capture_input_preserves_arch_and_custom_policy(
+    tmp_path: Path, monkeypatch, arch: str, custom: bool, dropped: str
+) -> None:
+    monkeypatch.setattr(fixture.platform, "machine", lambda: arch)
+    monkeypatch.setattr(fixture, "toolchain_identity", lambda: {"gcc": "test"})
+    output = tmp_path / "out"
+    config = fixture.CONFIG
+    if custom:
+        config = tmp_path / "custom.config"
+        config.write_text("CONFIG_MODULES=y\nCONFIG_FW_CFG_SYSFS=n\n")
+
+    def command(argv, **kwargs):
+        if argv[0] == "git":
+            return "1"
+        if argv[0] == "make":
+            if argv[-1] in {"defconfig", "ppc64le_defconfig"}:
+                (output / ".config").write_text("CONFIG_PROC_VMCORE=y\nCONFIG_RELOCATABLE=y\n")
+            elif argv[-1] == "olddefconfig":
+                if dropped:
+                    effective = output / ".config"
+                    effective.write_text(
+                        effective.read_text().replace(f"CONFIG_{dropped}=y", f"CONFIG_{dropped}=n")
+                    )
+            else:
+                raise RuntimeError("compilation boundary reached")
+        return ""
+
+    monkeypatch.setattr(fixture, "command", command)
+    error = ValueError if dropped else RuntimeError
+    message = f"CONFIG_{dropped}" if dropped else "compilation boundary reached"
+    with pytest.raises(error, match=message):
+        fixture.build(
+            tmp_path / "source", output, baseline="longterm", arch=arch, config=config, jobs=1
+        )
+    expected = config.read_text()
+    if arch == "x86_64" and not custom:
+        expected += "CONFIG_FW_CFG_SYSFS=y\n"
+    assert (output / "input.config").read_text() == expected
+    if not dropped:
+        missing = unmet_clauses(
+            parse_kernel_config((output / ".config").read_bytes()),
+            feature_requirement(CRASH_CAPTURE),
+            arch=arch,
+        )
+        if not custom:
+            assert not missing
+            assert not unmet_advertised_clauses(
+                parse_kernel_config((output / ".config").read_bytes()),
+                feature_requirement(CRASH_CAPTURE_RHEL_GUEST),
+                arch=arch,
+            )
     assert not (output / "manifest.json").exists()

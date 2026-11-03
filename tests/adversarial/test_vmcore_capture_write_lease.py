@@ -64,16 +64,16 @@ _NO_TTL = timedelta(0)
 _ABANDONED_ETAG = "etag-of-the-abandoned-first-attempt"
 
 
-def _core(run_id: str) -> CaptureOutput:
+def _core(run_id: str, execution_id: UUID) -> CaptureOutput:
     raw = StoredArtifact(
-        f"local/runs/{run_id}/vmcore-{_METHOD.value}",
+        f"local/runs/{run_id}/vmcore-{_METHOD.value}-{execution_id}",
         "e1",
         Sensitivity.SENSITIVE,
         "vmcore",
         version_id="test-version",
     )
     redacted = StoredArtifact(
-        f"local/runs/{run_id}/vmcore-{_METHOD.value}-redacted",
+        f"local/runs/{run_id}/vmcore-{_METHOD.value}-{execution_id}-redacted",
         "e2",
         Sensitivity.REDACTED,
         "vmcore",
@@ -101,14 +101,18 @@ class _SuspendedCapture:
         #: test needs the provider and the swept bucket to be the *same* store.
         self.write_through: _SweepableCaptureStore | None = None
 
-    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
+    def capture(
+        self, system_id: UUID, run_id: UUID, method: CaptureMethod, *, execution_id: UUID
+    ) -> CaptureOutput:
         self.entered.set()
         assert self.resume.wait(timeout=30), "the probe never released the capture"
         if self.raised is not None:
             raise self.raised
         if self.write_through is not None:
-            return self.write_through.record(_core(self._run_id))
-        return self._objects.record(_core(self._run_id))
+            return self.write_through.record(
+                _core(self._run_id, execution_id), execution_id=execution_id
+            )
+        return self._objects.record(_core(self._run_id, execution_id), execution_id=execution_id)
 
     def head(self, key: str) -> HeadResult | None:
         return self._objects.head(key)
@@ -135,7 +139,9 @@ async def _seeded_capture_job(pool: AsyncConnectionPool) -> tuple[str, Job]:
             _AUTH,
             f"{run_id}:capture_vmcore:{_METHOD.value}",
         )
-    return run_id, job
+        claimed = await dequeue_as_current_worker(conn, "w-capture-1")
+        assert claimed is not None and claimed.id == job.id
+    return run_id, claimed
 
 
 async def _leases_for(url: str, run_id: str) -> list[UUID]:
@@ -265,6 +271,9 @@ def test_a_failed_capture_leaves_its_lease_for_the_reap(migrated_url: str) -> No
         assert outcome is boom
         assert await _leases_for(migrated_url, run_id) == [job.id], "the failure path must not drop"
         async with await psycopg.AsyncConnection.connect(migrated_url) as reaper:
+            await reaper.execute(
+                "UPDATE jobs SET lease_expires_at=now()-interval '1 second' WHERE id=%s", (job.id,)
+            )
             assert await reap_stale_write_leases(reaper) == 1
         assert await _leases_for(migrated_url, run_id) == []
 
@@ -326,16 +335,17 @@ class _SweepableCaptureStore:
         for key, (etag, age) in objects.items():
             self._append_version(key, etag, age)
         self.deleted: list[str] = []
+        self._captured = WrittenObjects()
 
     @property
     def present(self) -> set[str]:
         return set(self._objects)
 
-    def record(self, output: CaptureOutput) -> CaptureOutput:
+    def record(self, output: CaptureOutput, *, execution_id: UUID) -> CaptureOutput:
         for stored in (output.raw, output.redacted):
             self._objects[stored.key] = (stored.etag, timedelta(0))
             self._append_version(stored.key, stored.etag, timedelta(0))
-        return output
+        return self._captured.record(output, execution_id=execution_id)
 
     def _append_version(self, key: str, etag: str, age: timedelta) -> None:
         prior = [replace(version, is_latest=False) for version in self._versions.get(key, ())]
@@ -401,6 +411,9 @@ class _SweepableCaptureStore:
         return batch.history_complete
 
     def head(self, key: str) -> HeadResult | None:
+        captured = self._captured.head(key)
+        if captured is not None:
+            return captured
         entry = self._objects.get(key)
         if entry is None:
             return None
@@ -427,11 +440,7 @@ async def _claimed_capture_job(pool: AsyncConnectionPool) -> tuple[str, Job]:
     with a NULL lease, so a lease it holds fences nothing — which is why the tests above, which only
     need the row's visibility, cannot stand in for this one.
     """
-    run_id, _job = await _seeded_capture_job(pool)
-    async with pool.connection() as conn:
-        claimed = await dequeue_as_current_worker(conn, "w-capture-1", lease=timedelta(minutes=5))
-    assert claimed is not None, "the capture job must be claimable"
-    return run_id, claimed
+    return await _seeded_capture_job(pool)
 
 
 async def _sweep_now(url: str, store: _SweepableCaptureStore) -> int:

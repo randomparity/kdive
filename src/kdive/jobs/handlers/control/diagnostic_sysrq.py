@@ -69,7 +69,8 @@ SEAM_OVERLAP = 4 * 1024
 """Bytes of pre-injection console included before redaction so a secret straddling the capture
 start stays contiguous and cannot leak its tail (mirrors console_rotate's seam-overlap carry)."""
 POLL_INTERVAL_SECONDS = 0.5
-MAX_POLLS = 10
+MAX_POLLS = 20
+"""Covers the remote collector's idle seal, the pump backoff and the part upload (ADR-0806)."""
 SETTLE_POLLS = 2
 """Consecutive no-growth reads (after growth past the mark) that end the poll as `stabilized`."""
 

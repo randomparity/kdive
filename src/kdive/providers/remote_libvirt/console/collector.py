@@ -12,8 +12,12 @@ collector **holds back** a trailing overlap of raw bytes from each rotation and 
 to the next part, so a secret split across the size threshold is redacted as one contiguous
 run and is **never** uploaded raw in either part (the held-back bytes are uploaded only once,
 redacted, with the next part). A crash marker in the stream forces an immediate flush so the
-panic tail is the least-lost part. Finalization (on capture or teardown) flushes the held-back
-tail and assembles the ordered parts into **one** concatenated console artifact in the shape
+panic tail is the least-lost part. A console idle for ``IDLE_FLUSH_SECONDS`` seals what it holds
+the same way, so a small burst is readable without waiting for either trigger (ADR-0806). Neither
+flush holds an overlap back, so a secret split across one is redacted in each part on its own;
+the read seam and ``finalize`` redact the joined bytes again.
+Finalization (on capture or teardown) flushes the held-back tail and assembles the ordered
+parts into **one** concatenated console artifact in the shape
 `classify_console` / `read_console_log` expect — kdive-side, not S3 multipart (the parts are
 intentionally small).
 
@@ -27,6 +31,8 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
+from collections.abc import Callable
 from typing import Protocol
 from uuid import UUID
 
@@ -39,6 +45,18 @@ _log = logging.getLogger(__name__)
 # Cap on a single console-stream read so a chatty guest cannot grow the buffer unboundedly
 # between rotations.
 DEFAULT_READ_CHUNK = 16 * 1024
+
+# A console quiet for this long seals whatever it holds as a part, so a small burst (a SysRq dump)
+# becomes readable without waiting for the size threshold or a crash marker (ADR-0806).
+IDLE_FLUSH_SECONDS = 1.0
+
+# Idle seals are at least this far apart, so a console printing a byte every few seconds yields a
+# part per interval, not per byte. The first seal after a quiet spell is immediate (ADR-0806).
+MIN_IDLE_SEAL_INTERVAL_SECONDS = 5.0
+
+# A failed tail flush keeps its bytes for the next try; this bounds what is kept while the store
+# is down so guest output cannot grow the buffer without limit.
+MAX_RETAINED_BYTES = 1024 * 1024
 
 # The same crash signature `classify_console` keys on, duplicated here (no core import from a
 # provider): a crash marker forces an immediate rotation so the panic tail is flushed promptly.
@@ -104,6 +122,10 @@ class ConsoleCollector:
         seam_overlap: int = SEAM_OVERLAP,
         read_chunk: int = DEFAULT_READ_CHUNK,
         telemetry: ConsoleRecorder | None = None,
+        idle_flush_seconds: float = IDLE_FLUSH_SECONDS,
+        min_idle_seal_interval: float = MIN_IDLE_SEAL_INTERVAL_SECONDS,
+        max_retained_bytes: int = MAX_RETAINED_BYTES,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._system_id = system_id
         self._open_console = open_console
@@ -113,6 +135,12 @@ class ConsoleCollector:
         self._seam_overlap = seam_overlap
         self._read_chunk = read_chunk
         self._telemetry = telemetry
+        self._idle_flush_seconds = idle_flush_seconds
+        self._min_idle_seal_interval = min_idle_seal_interval
+        self._max_retained_bytes = max_retained_bytes
+        self._clock = clock
+        self._last_rx = clock()
+        self._last_idle_seal: float | None = None
         self._stream: ConsoleStream | None = None
         self._buffer = bytearray()
         # Raw trailing bytes held back from the previous rotation and prepended to the next
@@ -190,13 +218,34 @@ class ConsoleCollector:
                 return False
             if chunk is None:
                 # Would-block: no data this read. Keep the stream open; the loop backs off.
+                self._flush_if_idle()
                 return False
             if not chunk:
                 self._drop_stream()
                 return False
             self._buffer.extend(chunk)
+            self._last_rx = self._clock()
             self._maybe_rotate()
             return True
+
+    def _flush_if_idle(self) -> None:
+        """Seal the held-back bytes once the console has been quiet for the idle interval.
+
+        Uses the tail-flush path, so the seam-overlap carry goes out redacted with the buffer; a
+        secret split by a pause longer than the interval is the accepted cost (ADR-0806). Once
+        flushed, the buffer and carry are empty, so further idle pumps seal nothing until new
+        bytes arrive: at most one part per idle episode, never an empty one. Seals are also
+        spaced by ``min_idle_seal_interval``; bytes that arrive sooner wait in the buffer.
+        """
+        now = self._clock()
+        if now - self._last_rx < self._idle_flush_seconds:
+            return
+        last = self._last_idle_seal
+        if last is not None and now - last < self._min_idle_seal_interval:
+            return
+        if self._carry or self._buffer:
+            self._flush_tail()
+            self._last_idle_seal = now
 
     def _maybe_rotate(self) -> None:
         if _CRASH_MARKER.search(self._buffer):
@@ -230,13 +279,30 @@ class ConsoleCollector:
         self._store.put_part(self._system_id, self._take_index(), self._redact(to_upload))
 
     def _flush_tail(self) -> None:
-        """Upload the held-back carry + buffer as the final part (no overlap held back)."""
+        """Upload the held-back carry + buffer as the final part (no overlap held back).
+
+        The buffer and carry are cleared only once the upload lands, so a store failure leaves the
+        bytes for the next flush, and the part index is given back so parts stay consecutive.
+        """
         data = self._carry + bytes(self._buffer)
-        self._buffer.clear()
-        self._carry = b""
         if not data:
             return
-        self._store.put_part(self._system_id, self._take_index(), self._redact(data))
+        index = self._take_index()
+        try:
+            self._store.put_part(self._system_id, index, self._redact(data))
+        except Exception:
+            self._next_index = index
+            self._trim_retained()
+            raise
+        self._buffer.clear()
+        self._carry = b""
+
+    def _trim_retained(self) -> None:
+        """Drop the oldest unsent bytes beyond ``max_retained_bytes`` after a failed flush."""
+        held = self._carry + bytes(self._buffer)
+        if len(held) > self._max_retained_bytes:
+            self._carry = b""
+            self._buffer = bytearray(held[-self._max_retained_bytes :])
 
     def _redact(self, data: bytes) -> bytes:
         """Redact ``data`` before it leaves the worker (untrusted guest bytes, ADR-0027).
@@ -265,9 +331,11 @@ class ConsoleCollector:
             assembled = bytearray()
             for index in sorted(self._store.list_part_indices(self._system_id)):
                 assembled.extend(self._store.read_part(self._system_id, index))
-            self._store.write_console_artifact(self._system_id, bytes(assembled))
+            # A second pass over the joined parts catches a secret an idle seal split in two.
+            artifact = self._redact(bytes(assembled))
+            self._store.write_console_artifact(self._system_id, artifact)
             if self._telemetry is not None:
-                self._telemetry.record(len(assembled))
+                self._telemetry.record(len(artifact))
             self._finalized = True
         _log.info("console collector for %s finalized into one artifact", self._system_id)
 

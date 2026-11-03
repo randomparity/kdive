@@ -1,0 +1,100 @@
+"""The shared QMP passthrough reply parser (ADR-0385 amendment, #3270)."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from kdive.providers.shared.qmp_reply import (
+    MalformedQmpReplyError,
+    parse_qmp_reply,
+)
+
+
+def test_a_return_reply_carries_its_value_and_id() -> None:
+    reply = parse_qmp_reply(json.dumps({"return": [{"name": "x"}], "id": "libvirt-7"}))
+
+    assert reply.value == [{"name": "x"}]
+    assert reply.reply_id == "libvirt-7"
+    assert reply.error_class is None
+    assert not reply.absent
+
+
+def test_an_error_reply_carries_class_and_description() -> None:
+    raw = json.dumps({"error": {"class": "GenericError", "desc": "net dump: can't open /p"}})
+    reply = parse_qmp_reply(raw)
+
+    assert reply.error_class == "GenericError"
+    assert reply.description == "net dump: can't open /p"
+    assert reply.value is None
+    assert not reply.absent
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"class": "DeviceNotFound", "desc": "gone"},
+        {"class": "GenericError", "desc": "object 'kdive-dump-J' not found"},
+        {"class": "GenericError", "desc": "Device 'x' Not Found"},
+    ],
+)
+def test_absence_is_recognized_from_the_class_or_the_description(error: dict) -> None:
+    assert parse_qmp_reply(json.dumps({"error": error})).absent
+
+
+def test_a_missing_description_reads_as_empty() -> None:
+    reply = parse_qmp_reply(json.dumps({"error": {"class": "GenericError"}}))
+
+    assert reply.description == ""
+    assert not reply.absent
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "not json",
+        "[]",
+        "{}",
+        '{"id": "libvirt-1"}',
+        '{"return": {}, "error": {"class": "GenericError"}}',
+        '{"error": "denied"}',
+        '{"error": {"desc": "no class"}}',
+        '{"error": {"class": 7}}',
+        '{"error": {"class": ""}}',
+        '{"error": {"class": "Generic Error"}}',
+        '{"error": {"class": "\\u001b[31mGenericError"}}',
+        json.dumps({"error": {"class": "E" * 65}}),
+    ],
+)
+def test_any_other_shape_is_malformed(raw: str) -> None:
+    with pytest.raises(MalformedQmpReplyError):
+        parse_qmp_reply(raw)
+
+
+@pytest.mark.parametrize(
+    ("desc", "denied"),
+    [
+        ("net dump: can't open /pool/x.pcap: Permission denied", True),
+        ("net dump: can't open /pool/x.pcap: No space left on device", False),
+        ("object 'x' not found", False),
+    ],
+)
+def test_pcap_open_denied_is_only_the_eacces_open_refusal(desc: str, denied: bool) -> None:
+    reply = parse_qmp_reply(json.dumps({"error": {"class": "GenericError", "desc": desc}}))
+
+    assert reply.pcap_open_denied is denied
+
+
+@pytest.mark.parametrize(
+    ("raw", "refused"),
+    [
+        ({"error": {"class": "GenericError", "desc": "Vhost is not supported"}}, True),
+        ({"error": {"class": "GenericError", "desc": "multiqueue is not supported"}}, False),
+        ({"return": {}}, False),
+    ],
+)
+def test_vhost_refused_is_only_the_netfilter_vhost_refusal(raw: dict, refused: bool) -> None:
+    """QEMU's netfilter_complete() refuses any netfilter on a vhost-backed netdev (#3316)."""
+    assert parse_qmp_reply(json.dumps(raw)).vhost_refused is refused

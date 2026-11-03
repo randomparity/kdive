@@ -45,6 +45,8 @@ from kdive.reconciler.cleanup.uploads.uploads import (
     _sweep_uncommitted_objects,
     repair_abandoned_uploads,
 )
+from tests.conftest import _RoleDsns
+from tests.jobs.capture_operations.conftest import _cleanup_publication, _close, _subject
 from tests.reconciler.conftest import (
     connect,
     run_repair,
@@ -465,3 +467,73 @@ def test_declines_alone_never_look_like_a_refusing_store() -> None:
     assert spared.store_refused_everything is False
     assert refused.store_refused_everything is True
     assert partly.store_refused_everything is False
+
+
+@pytest.mark.parametrize("state", ["publishing", "canceling", "discarded"])
+@pytest.mark.parametrize("role", ["kdive_server", "kdive_reconciler"])
+def test_manifest_reap_preserves_capture_owner(
+    migrated_url: str, authority_role_dsns: _RoleDsns, state: str, role: str
+) -> None:
+    async def run() -> None:
+        subject = await _subject(migrated_url)
+        try:
+            run_id = UUID(subject.job.payload["run_id"])
+            prefix = f"local/runs/{run_id}/"
+            key = f"{prefix}pcap-{subject.operation.id}"
+            other = prefix + "unrelated"
+            await _insert_manifest(subject.admin, "runs", run_id, prefix, timedelta(days=-1))
+            store = _HookedStore(prefix, [other, key], _noop)
+            await _cleanup_publication(subject, state, key, "old")
+            async with await psycopg.AsyncConnection.connect(authority_role_dsns(role)) as conn:
+                assert await repair_abandoned_uploads(conn, store) == 1
+                assert await repair_abandoned_uploads(conn, store) == 0
+            assert store.versions(key) == {"old"}
+            assert store.versions(other) == set()
+        finally:
+            await _close(subject)
+
+    asyncio.run(run())
+
+
+def test_manifest_capture_owner_committed_after_version_capture_is_rechecked(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        subject = await _subject(migrated_url)
+        try:
+            run_id = UUID(subject.job.payload["run_id"])
+            prefix = f"local/runs/{run_id}/"
+            key = f"{prefix}pcap-{subject.operation.id}"
+            other = prefix + "unrelated"
+            await _insert_manifest(subject.admin, "runs", run_id, prefix, timedelta(days=-1))
+            store = _HookedStore(prefix, [other, key], _noop)
+            original = store.capture_exact_versions
+            captured: list[str] = []
+
+            def capture(captured_key: str, limit: int) -> VersionBatch:
+                batch = original(captured_key, limit)
+                if captured_key == key:
+                    captured.extend(target.version_id for target in batch.targets)
+                    with psycopg.connect(migrated_url, autocommit=True) as writer:
+                        writer.execute(
+                            "UPDATE capture_operations SET publication_state = 'publishing', "
+                            "publication_object_key = %s, publication_started_at = now() "
+                            "WHERE id = %s",
+                            (key, subject.operation.id),
+                        )
+                return batch
+
+            monkeypatch.setattr(store, "capture_exact_versions", capture)
+            async with await psycopg.AsyncConnection.connect(
+                authority_role_dsns("kdive_reconciler")
+            ) as conn:
+                assert await repair_abandoned_uploads(conn, store) == 1
+            assert captured
+            assert not any(deleted_key == key for deleted_key, _ in store.deleted_versions)
+            assert any(deleted_key == other for deleted_key, _ in store.deleted_versions)
+        finally:
+            await _close(subject)
+
+    asyncio.run(run())

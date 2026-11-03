@@ -98,7 +98,18 @@ else
   stage="$(mktemp -d "$root/.build.XXXXXXXX")"
   trap 'rm -rf -- "$stage"' EXIT
   source_nevr="${source_rpm%.src.rpm}"
-  dnf -q download --source --enablerepo='*source*' --destdir "$stage" "$source_nevr"
+  source_repo="$(
+    . /etc/os-release
+    case "$ID" in
+    rocky | almalinux) printf '%s\n' appstream-source ;;
+    rhel) printf 'rhel-10-for-%s-appstream-source-rpms\n' "$(rpm --eval '%{_arch}')" ;;
+    *)
+      echo "EL10 guestfs source download does not support distribution: $ID" >&2
+      exit 1
+      ;;
+    esac
+  )"
+  dnf -q download --source --repo="$source_repo" --destdir "$stage" "$source_nevr"
   [[ -f $stage/$source_rpm ]] || {
     echo "source repository did not provide installed libguestfs source: $source_rpm" >&2
     exit 1

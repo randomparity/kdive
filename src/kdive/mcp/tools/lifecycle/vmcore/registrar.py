@@ -47,15 +47,21 @@ def register(
             CaptureMethod | None,
             Field(
                 description=(
-                    "Core-producing capture method (kdump/fadump/host_dump) the bound provider "
-                    "must advertise. Omit to resolve the System profile's method; a profile with "
+                    "Core-producing capture method (kdump/fadump/host_dump) listed in the "
+                    "System's systems.get supported_capture_methods; fadump is refused on "
+                    "x86_64. Omit to resolve the System profile's method; a profile with "
                     "no implicit core method requires an explicit one."
                 )
             ),
         ] = None,
         idempotency_key: Annotated[
             str | None,
-            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+            Field(
+                description=(
+                    "Replay-safe key; repeats return the prior envelope "
+                    "unless the vmcore has retired."
+                )
+            ),
         ] = None,
     ) -> ToolResponse:
         """Capture a core from a Run's bound CRASHED System. Requires contributor.
@@ -64,7 +70,8 @@ def register(
         or console signature does not mark the System CRASHED. A non-CRASHED System is refused.
         Do not force another crash just to change state; preserve existing console evidence.
         An active external boot requires the owning Run; other activation states can refuse
-        capture. The chosen core-producing method must be supported by the provider.
+        capture. The chosen core-producing method must be supported by the provider for this
+        System's guest architecture (systems.get data.supported_capture_methods).
 
         Omitting method resolves it from the System profile; a profile with no supported core
         method needs an explicit choice. Kdump/fadump admission rejects known-negative kernel
@@ -80,6 +87,9 @@ def register(
         sibling is gone while the raw core remains.
         For analysis, pass the Run ID to postmortem.crash, which resolves the raw core itself.
         For raw download use artifacts.fetch_raw(run_id, asset="vmcore") (contributor, URL-only).
+        A retired Run returns not_found with reason vmcore_retired and runs.get as recovery.
+        Retirement rejects admission and replay, including an old idempotency key; a new capture
+        cannot restore the retired evidence.
         """
         return await handlers.fetch_vmcore(
             pool,
@@ -126,6 +136,15 @@ def register(
         A declared early-boot console_crash with no core instead reports expected_console_crash
         and directs you to runs.get for console evidence. For drgn analysis of the same Run,
         use introspect.from_vmcore.
+
+        Vmcore reads return data.vmcore_retention with server_time, policy_enabled, eligible_at,
+        protected_until, retired_at and protection_reason. Timestamps are absolute UTC on the
+        PostgreSQL reference clock, per Run raw/redacted pair. eligible_at is earliest possible
+        reclamation, not a cleanup completion deadline; open Investigations remain protected.
+        A retired authorized Run returns not_found with reason vmcore_retired; use runs.get.
+        Original retired bytes cannot be restored by recapture. Reads remain protected while
+        their database session holds the Run lock; session loss returns infrastructure_failure
+        and requires retrying the read.
         """
         return await handlers.postmortem_crash(
             pool, current_context(), run_id=run_id, commands=commands

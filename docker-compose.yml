@@ -45,11 +45,13 @@ x-backends: &backends
   KDIVE_S3_ENDPOINT_URL: http://seaweedfs:8333
   KDIVE_S3_BUCKET: kdive-artifacts
   KDIVE_S3_REGION: us-east-1
+  # An absent host value remains absent; an empty string is invalid, not disabled.
+  KDIVE_VMCORE_RETENTION_DAYS:
   # kdive's object store signs with boto3's default credential chain (the standard AWS_*
   # vars, objectstore.py), so the app tier authenticates to SeaweedFS with its S3 credentials —
-  # without these the server/worker /readyz object-store check can never pass. Matches the
-  AWS_ACCESS_KEY_ID: kdive  # pragma: allowlist secret — local dev only
-  AWS_SECRET_ACCESS_KEY: kdive-demo-secret  # pragma: allowlist secret — local dev only
+  # without these the server/worker /readyz object-store check can never pass.
+  AWS_ACCESS_KEY_ID: ${COMPOSE_S3_ACCESS_KEY:-kdive}  # pragma: allowlist secret — local dev only
+  AWS_SECRET_ACCESS_KEY: ${COMPOSE_S3_SECRET_KEY:-kdive-demo-secret}  # pragma: allowlist secret — local dev only
 
 services:
   postgres:
@@ -96,18 +98,31 @@ services:
     # rather than `unless-stopped` — it matches the units' `Restart=on-failure` (ADR-0114
     # section 4) and does not make this dev-credential backend boot-persistent.
     restart: on-failure
+    # Demo defaults apply only when both signer variables are absent; presence of either
+    # requires a complete nonempty pair. The store refuses to start otherwise, so no app
+    # role can become ready. Checked here because Compose v2 evaluates a nested `:?` eagerly.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        case "$$S3_CREDENTIAL_PAIR" in ""|as) ;; *) false ;; esac \
+          && [ -n "$$AWS_ACCESS_KEY_ID" ] && [ -n "$$AWS_SECRET_ACCESS_KEY" ] \
+          || { echo "Set both COMPOSE_S3 credentials to nonempty values" >&2; exit 1; }
+        exec weed "$$@"
+      - weed
     command: ["mini", "-dir=/data"]
     # The image declares VOLUME /data; naming it keeps the artifacts bucket across a plain
     # `down` instead of orphaning an anonymous volume per `up` (ADR-0552).
     volumes:
       - kdive-seaweedfs-data:/data
     environment:
-      S3_ACCESS_KEY: kdive  # pragma: allowlist secret — local dev only
-      S3_SECRET_KEY: kdive-demo-secret # pragma: allowlist secret — local dev only
+      S3_CREDENTIAL_PAIR: "${COMPOSE_S3_ACCESS_KEY+a}${COMPOSE_S3_SECRET_KEY+s}"
+      AWS_ACCESS_KEY_ID: ${COMPOSE_S3_ACCESS_KEY-kdive}  # pragma: allowlist secret — local dev only
+      AWS_SECRET_ACCESS_KEY: ${COMPOSE_S3_SECRET_KEY-kdive-demo-secret} # pragma: allowlist secret — local dev only
     ports:
       - "${KDIVE_SEAWEEDFS_PORT:-127.0.0.1:8333}:8333"
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8333/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8333/healthz"]
       interval: 5s
       timeout: 5s
       retries: 10

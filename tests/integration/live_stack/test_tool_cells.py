@@ -6,78 +6,59 @@ import asyncio
 import base64
 import hashlib
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import cast
+from uuid import UUID
 
 import pytest
 
 from kdive.domain.errors import ErrorCategory
-from kdive.mcp.dev_harness import LiveStackToolError, OidcIssuer, make_keypair
+from kdive.mcp.dev_harness import LiveStackToolError, OidcIssuer
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools._common import capability_unsupported
+from kdive.providers.ports.traffic import pcap_volume_name
+from kdive.providers.shared.runtime_paths import pcap_dir
 from kdive.serialization import JsonValue
-from scripts.coverage_campaign.contract import Cell, build_contract
-from scripts.coverage_campaign.evidence import Outcome
+from scripts.coverage_campaign.contract import Cell, build_contract, load_mapping, read_inventory
+from scripts.coverage_campaign.evidence import Context, Evidence, Outcome
+from scripts.coverage_campaign.results import _context_errors, qualify
 from tests.integration.live_stack import scenario, tool_cells
+from tests.integration.live_stack.allocation_accounting_cells import _SYSTEM_BODIES
 from tests.integration.live_stack.evidence import EvidenceWriter, RunIdentity
-from tests.integration.live_stack.remote_lifecycle import RemoteHost
+from tests.integration.live_stack.remote_lifecycle import RemoteHost, guest_boot_kernel
 from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.integration.live_stack.tool_cell_fakes import (
+    _GRANTS,
+    _ITEM,
+    _OK,
+    _Caller,
+    _control,
+    _Filtering,
+    _list_run,
+    _listed,
+    _snapshot,
+    forge_source,
+)
 from tests.integration.live_stack.tool_cells import (
     RECOVERY_TOOLS,
+    FilteredListControl,
     Grants,
     HttpCaller,
     Rejection,
+    _empty_page,
     bindings,
     claims_of,
     configuration_of,
     forge,
     prove_functional,
+    prove_refusal,
     prove_rejection,
     rejected_by_validation,
 )
-
-_OK = ToolResponse.success("x", "ok")
-_GRANTS = Grants("agent", ("p",), {"p": "viewer"}, ("platform_auditor",))
-
-
-def forge_source(grants: Grants) -> str:
-    """A stand-in for a real-issuer token carrying ``grants``."""
-    return make_keypair().create_token(
-        subject=grants.subject,
-        issuer="https://issuer.test",
-        audience="kdive",
-        additional_claims={"projects": list(grants.projects)},
-        kid="issuer-key-1",
-    )
-
-
-@dataclass
-class _Caller:
-    exposure: str
-    result: ToolResponse | Exception = field(default_factory=lambda: _OK)
-    status: int = 401
-    calls: list[tuple[str, Mapping[str, object]]] = field(default_factory=list)
-    issued: set[str] = field(default_factory=set)
-    refuse_issued: bool = False
-
-    def token(self, grants: Grants) -> str:
-        token = forge_source(grants)
-        self.issued.add(token)
-        return token
-
-    async def call(
-        self, tool: str, args: Mapping[str, object], token: str, *, discover: bool = False
-    ) -> ToolResponse | list[ToolResponse]:
-        self.calls.append((tool, args))
-        if isinstance(self.result, Exception):
-            raise self.result
-        return self.result
-
-    async def post(self, tool: str, args: Mapping[str, object], token: str) -> int:
-        self.calls.append((tool, claims_of(token)))
-        return 200 if token in self.issued and not self.refuse_issued else self.status
 
 
 def _run(tmp_path: Path, boundary: str) -> CellRun:
@@ -87,15 +68,6 @@ def _run(tmp_path: Path, boundary: str) -> CellRun:
         if c.operation == "tools.search" and c.scenario_id.endswith("/" + boundary)
     )
     return CellRun(cell, EvidenceWriter(tmp_path))
-
-
-def _snapshot(*states: object) -> Callable[[], Awaitable[object]]:
-    values = iter(states)
-
-    async def snap() -> object:
-        return next(values)
-
-    return snap
 
 
 def test_configuration_follows_the_recovery_tools() -> None:
@@ -221,41 +193,273 @@ def test_category_boundaries_use_the_closed_set(tmp_path: Path) -> None:
         )
 
 
-_EMPTY_PAGE = ToolResponse.collection("investigations", "ok", [])
-
-
-def test_filtering_list_stops_blocked_naming_its_owner(tmp_path: Path) -> None:
-    run = _run(tmp_path, "validation")
-    filtered = Rejection({}, _GRANTS, filtered_by="#3108")
-    with pytest.raises(ScenarioStop, match="#3108") as stop:
-        asyncio.run(
-            prove_rejection(
-                run, _Caller("direct", _EMPTY_PAGE), "authorization", filtered, _snapshot(1, 1)
-            )
-        )
-    assert stop.value.outcome is Outcome.BLOCKED
-    assert "authorization" not in run.assertions
-    retained = json.loads((run.writer.root / "artifacts" / run.artifacts[-1]).read_text())
-    assert retained["filtered_by"] == "#3108" and "empty page" in retained["blocked"]
-
-
-def test_filtering_list_that_rejects_still_qualifies(tmp_path: Path) -> None:
-    run = _run(tmp_path, "validation")
-    denied = ToolResponse.failure("x", ErrorCategory.AUTHORIZATION_DENIED)
-    filtered = Rejection({}, _GRANTS, filtered_by="#3108")
-    asyncio.run(
-        prove_rejection(run, _Caller("direct", denied), "authorization", filtered, _snapshot(1, 1))
+def _capability_refusal() -> ToolResponse:
+    return capability_unsupported(
+        "sys-1", capability="snapshot", provider="local-libvirt", supported=[]
     )
-    assert set(run.assertions) == {"authorization", "unchanged-state", "cleanup"}
-    listed = ToolResponse.collection("investigations", "ok", [ToolResponse.success("i", "open")])
-    with pytest.raises(AssertionError, match="was not rejected"):
+
+
+@pytest.mark.parametrize("exposure", ["direct", "gateway"])
+def test_capability_boundary_needs_the_capability_refusal(tmp_path: Path, exposure: str) -> None:
+    run = _run(tmp_path, "validation")
+    asyncio.run(
+        prove_rejection(
+            run,
+            _Caller(exposure, _capability_refusal()),
+            "capability",
+            Rejection({}, _GRANTS),
+            _snapshot(1, 1),
+        )
+    )
+    proof = _artifact(run, "capability")
+    assert proof["capability"] == "snapshot"
+    assert proof["rejected"] == {"status": "error", "error_category": "configuration_error"}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        ToolResponse.failure("sys-1", ErrorCategory.CONFIGURATION_ERROR),
+        ToolResponse.failure(
+            "sys-1", ErrorCategory.CONFIGURATION_ERROR, data={"reason": "invalid_snapshot_name"}
+        ),
+        ToolResponse.failure(
+            "sys-1", ErrorCategory.AUTHORIZATION_DENIED, data={"reason": "capability_unsupported"}
+        ),
+        ToolResponse.success("sys-1", "queued"),
+        LiveStackToolError("systems.snapshot", "1 validation error"),
+    ],
+    ids=["bare-configuration-error", "other-reason", "other-category", "success", "tool-error"],
+)
+def test_capability_boundary_refuses_any_other_answer(
+    tmp_path: Path, answer: ToolResponse | LiveStackToolError
+) -> None:
+    with pytest.raises(AssertionError, match="was not refused for capability"):
         asyncio.run(
             prove_rejection(
                 _run(tmp_path, "validation"),
-                _Caller("direct", listed),
-                "project-isolation",
-                filtered,
+                _Caller("direct", answer),
+                "capability",
+                Rejection({}, _GRANTS),
                 _snapshot(1, 1),
+            )
+        )
+
+
+_DENIED_PAGE = ToolResponse.collection(
+    "investigations",
+    "ok",
+    [],
+    suggested_next_actions=["investigations.get", "investigations.open"],
+    data={"truncated": False, "next_cursor": None},
+)
+
+
+def _filtered(tmp_path: Path, caller: _Caller, control: FilteredListControl) -> CellRun:
+    """Prove ``investigations.list``'s authorization cell against ``caller``."""
+    run = _list_run(tmp_path)
+    rejection = Rejection({"request": {"project": "p"}}, _GRANTS, filtered=control)
+    asyncio.run(prove_rejection(run, caller, "authorization", rejection, _snapshot(1, 1)))
+    return run
+
+
+def test_filtered_list_proves_denied_visibility(tmp_path: Path) -> None:
+    caller = _Filtering("gateway", _DENIED_PAGE)
+    run = _filtered(tmp_path, caller, _control())
+    assert set(run.assertions) == {"authorization", "unchanged-state", "cleanup"}
+    assert [args["subject"] for _, args in caller.calls] == ["viewer", "agent"]
+    assert all(args["request"] == {"project": "p"} for _, args in caller.calls)
+    proof = _artifact(run, "authorization")
+    assert proof["exposure"] == "gateway"
+    assert proof["denied_visibility"] == {"status": "ok", "canonical_empty_page": True}
+    assert proof["viewer_control"] == {
+        "listed": 1,
+        "item_sha256": hashlib.sha256(_ITEM.encode()).hexdigest(),
+    }
+    artifacts = _list_run(tmp_path, "artifacts.list", "project-isolation")
+    page = ToolResponse.collection(
+        "sys-1",
+        "ok",
+        [],
+        suggested_next_actions=["artifacts.get"],
+        data={"truncated": False, "next_cursor": None},
+    )
+    listed = page.model_copy(update={"items": [ToolResponse.success(_ITEM, "redacted")]})
+    rejection = Rejection({"system_id": "sys-1"}, _GRANTS, filtered=_control())
+    asyncio.run(
+        prove_rejection(
+            artifacts,
+            _Filtering("direct", page, control=listed),
+            "project-isolation",
+            rejection,
+            _snapshot(1, 1),
+        )
+    )
+    assert "project-isolation" in artifacts.assertions
+
+
+@pytest.mark.parametrize(
+    ("control", "item", "match"),
+    [
+        (_listed(), _ITEM, "did not list the known item"),
+        (_listed("inv-2"), _ITEM, "did not list the known item"),
+        (_listed(_ITEM), "", "no independently known protected item"),
+        (ToolResponse.failure("x", ErrorCategory.NOT_FOUND), _ITEM, "control call failed"),
+    ],
+    ids=["empty", "unrelated-item", "no-oracle", "control-error"],
+)
+def test_filtered_list_requires_known_visible_item(
+    tmp_path: Path, control: ToolResponse, item: str, match: str
+) -> None:
+    caller = _Filtering("direct", _DENIED_PAGE, control=control)
+    with pytest.raises(AssertionError, match=match):
+        _filtered(tmp_path, caller, _control(item))
+    assert all(args["subject"] == "viewer" for _, args in caller.calls)
+
+
+_LEAKS = {
+    "item": _listed(_ITEM),
+    "cursor": _DENIED_PAGE.model_copy(
+        update={"data": {"truncated": True, "next_cursor": "c", "count": 0}}
+    ),
+    "extra-data": _DENIED_PAGE.model_copy(update={"data": {**_DENIED_PAGE.data, "p": "x"}}),
+    "refs": _DENIED_PAGE.model_copy(update={"refs": {"project": "p"}}),
+    "detail": _DENIED_PAGE.model_copy(update={"detail": "hidden"}),
+    "object-id": _DENIED_PAGE.model_copy(update={"object_id": "p"}),
+    "actions": _DENIED_PAGE.model_copy(update={"suggested_next_actions": ["investigations.get"]}),
+    "status": _DENIED_PAGE.model_copy(update={"status": "partial"}),
+    "failure": ToolResponse.failure("investigations", ErrorCategory.AUTHORIZATION_DENIED),
+}
+
+
+@pytest.mark.parametrize("leak", sorted(_LEAKS))
+def test_filtered_list_requires_canonical_empty_envelope(tmp_path: Path, leak: str) -> None:
+    with pytest.raises(AssertionError, match="not the empty page"):
+        _filtered(tmp_path, _Filtering("direct", _LEAKS[leak]), _control())
+
+
+def test_debug_sessions_denied_page_and_unconfigured_pages(tmp_path: Path) -> None:
+    page = ToolResponse.collection(
+        "debug_sessions",
+        "ok",
+        [],
+        suggested_next_actions=["debug.get_session"],
+        data={"truncated": False, "next_cursor": None},
+    )
+    listed = page.model_copy(update={"items": [ToolResponse.success(_ITEM, "detached")]})
+    run = _list_run(tmp_path, "debug.list_sessions", "project-isolation")
+    rejection = Rejection({"request": {"run_id": "r"}}, _GRANTS, filtered=_control())
+    caller = _Filtering("direct", page, control=listed)
+    asyncio.run(prove_rejection(run, caller, "project-isolation", rejection, _snapshot(1, 1)))
+    assert "project-isolation" in run.assertions
+    # A tool whose carrier has not configured its page fails rather than borrowing another's.
+    with pytest.raises(AssertionError, match="no canonical empty page"):
+        _empty_page("cov.unconfigured_list", {"request": {}})
+
+
+def test_allocations_list_page_names_the_project_and_no_actions(tmp_path: Path) -> None:
+    page = ToolResponse.collection(
+        "allocations",
+        "ok",
+        [],
+        suggested_next_actions=[],
+        data={"truncated": False, "next_cursor": None, "project": "p"},
+    )
+    assert _empty_page("allocations.list", {"request": {"project": "p"}}) == page
+    listed = page.model_copy(update={"items": [ToolResponse.success(_ITEM, "granted")]})
+    rejection = Rejection({"request": {"project": "p"}}, _GRANTS, filtered=_control())
+    for boundary in ("authorization", "project-isolation"):
+        run = _list_run(tmp_path, "allocations.list", boundary)
+        caller = _Filtering("gateway", page, control=listed)
+        asyncio.run(prove_rejection(run, caller, boundary, rejection, _snapshot(1, 1)))
+        assert boundary in run.assertions
+    for leak in (
+        page.model_copy(update={"data": {"truncated": False, "next_cursor": None}}),
+        page.model_copy(update={"suggested_next_actions": ["allocations.wait"]}),
+    ):
+        with pytest.raises(AssertionError, match="not the empty page"):
+            asyncio.run(
+                prove_rejection(
+                    _list_run(tmp_path, "allocations.list", "authorization"),
+                    _Filtering("direct", leak, control=listed),
+                    "authorization",
+                    rejection,
+                    _snapshot(1, 1),
+                )
+            )
+    unnamed = _Filtering("direct", page, control=listed)
+    with pytest.raises(AssertionError, match="must name a project"):
+        asyncio.run(
+            prove_rejection(
+                _list_run(tmp_path, "allocations.list", "authorization"),
+                unnamed,
+                "authorization",
+                Rejection({"request": {}}, _GRANTS, filtered=_control()),
+                _snapshot(1, 1),
+            )
+        )
+    assert unnamed.calls == []
+
+
+def test_filtered_exception_is_closed(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError, match="FILTERED_LIST_BOUNDARIES"):
+        asyncio.run(
+            prove_rejection(
+                _list_run(tmp_path),
+                _Filtering("direct", _DENIED_PAGE),
+                "authorization",
+                Rejection({}, _GRANTS),
+                _snapshot(1, 1),
+            )
+        )
+    unlisted = _list_run(tmp_path, "artifacts.list", "authorization")
+    with pytest.raises(AssertionError, match="FILTERED_LIST_BOUNDARIES"):
+        asyncio.run(
+            prove_rejection(
+                unlisted,
+                _Filtering("direct", _DENIED_PAGE),
+                "authorization",
+                Rejection({"system_id": "s"}, _GRANTS, filtered=_control()),
+                _snapshot(1, 1),
+            )
+        )
+
+
+def test_filtered_list_brackets_both_calls_and_cleans_up(tmp_path: Path) -> None:
+    state = [0]
+
+    @asynccontextmanager
+    async def setup() -> AsyncIterator[Mapping[str, object]]:
+        state[0] += 1
+        try:
+            yield {}
+        finally:
+            state[0] -= 1
+
+    async def snap() -> object:
+        return list(state)
+
+    failing = Rejection({}, _GRANTS, filtered=_control())
+    with pytest.raises(AssertionError, match="did not list"):
+        asyncio.run(
+            prove_rejection(
+                _list_run(tmp_path),
+                _Filtering("direct", _DENIED_PAGE, control=_listed()),
+                "authorization",
+                failing,
+                snap,
+                setup=setup,
+            )
+        )
+    assert state == [0]
+    with pytest.raises(AssertionError, match="protected state changed"):
+        asyncio.run(
+            prove_rejection(
+                _list_run(tmp_path),
+                _Filtering("direct", _DENIED_PAGE),
+                "authorization",
+                failing,
+                _snapshot({"t": [0]}, {"t": [1]}),
             )
         )
 
@@ -464,6 +668,56 @@ def test_bindings_cover_bound_tool_cells(tmp_path: Path) -> None:
     assert lane.image_sha256 == hashlib.sha256(b"lane").hexdigest()
 
 
+def test_guest_observing_service_cells_bind_what_their_frame_records(tmp_path: Path) -> None:
+    marked = {t for g in load_mapping().groups for t in g.guest_observing}
+    assert set(_SYSTEM_BODIES) == marked
+    _name, entry = tool_cells.lane_image()
+    cells = [
+        _bound(c)
+        for c in build_contract().cells
+        if c.operation in marked and c.kind == "functional" and c.guest_arch == entry.arch
+    ]
+    assert {c.operation for c in cells} == marked
+    image = tmp_path / "image.qcow2"
+    image.write_bytes(b"lane")
+    inputs = bindings(
+        "a" * 40,
+        host_os="fedora:44",
+        host_arch=entry.arch,
+        matrix=build_contract().matrix_sha256,
+        cells=cells,
+        staged=lambda _name: image,
+    )
+    other_arch = "ppc64le" if entry.arch == "x86_64" else "x86_64"
+    foreign = _bound(_cell("accounting.usage", "service", other_arch))
+    assert (
+        foreign.id
+        not in bindings(
+            "a" * 40,
+            host_os="fedora:44",
+            host_arch=entry.arch,
+            matrix=build_contract().matrix_sha256,
+            cells=[foreign],
+            staged=lambda _name: image,
+        ).cells
+    )
+    inventory = read_inventory()
+    for cell in cells:
+        bound = inputs.cells[cell.id]
+        recorded = Context.model_validate(
+            {
+                "host_os": "fedora:44",
+                "host_arch": entry.arch,
+                "guest_os": f"{entry.distro}:{entry.version}",
+                "guest_arch": entry.arch,
+                "accelerator": cell.accelerator,
+                "image_sha256": hashlib.sha256(b"lane").hexdigest(),
+            }
+        )
+        assert bound == recorded
+        assert _context_errors(cell, bound, recorded, inventory) == []
+
+
 def test_remote_bindings_carry_the_provider_host() -> None:
     remote = _bound(_cell("systems.ssh_info", "remote-libvirt", "x86_64"))
     foreign = _bound(_cell("systems.ssh_info", "remote-libvirt", "ppc64le"))
@@ -509,6 +763,94 @@ def test_lane_for_selects_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ScenarioStop) as stop:
         tool_cells.lane_for(_cell("systems.ssh_info", "remote-libvirt", "x86_64"))
     assert stop.value.outcome is Outcome.BLOCKED
+
+
+class _Pool:
+    def __init__(self, xml: str) -> None:
+        self.xml = xml
+
+    def XMLDesc(self, _flags: int) -> str:  # noqa: N802 - libvirt binding name
+        return self.xml
+
+
+class _PoolConn:
+    def __init__(self, xml: str) -> None:
+        self.pool, self.closed, self.named = _Pool(xml), False, ""
+
+    def storagePoolLookupByName(self, name: str) -> _Pool:  # noqa: N802 - libvirt binding name
+        self.named = name
+        return self.pool
+
+    def close(self) -> None:
+        self.closed = True
+
+
+_SYSTEM, _JOB = str(UUID(int=1)), str(UUID(int=2))
+
+
+def test_remote_pcap_spool_reads_the_pool_target_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _PoolConn("<pool><target><path>/srv/pool</path></target></pool>")
+    monkeypatch.setattr(tool_cells, "observer", lambda _dest: conn)
+    namer = tool_cells.remote_pcap_spool("op@provider.example", "kdive", _SYSTEM)
+    assert (conn.named, conn.closed) == ("kdive", True)
+    conn.named = ""
+    assert namer(_JOB) == f"/srv/pool/{pcap_volume_name(UUID(_SYSTEM), UUID(_JOB))}"
+    assert conn.named == "", "naming a job's volume read the pool again"
+
+
+def test_remote_pcap_spool_needs_a_pool_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _PoolConn("<pool><target/></pool>")
+    monkeypatch.setattr(tool_cells, "observer", lambda _dest: conn)
+    with pytest.raises(AssertionError, match="no target path"):
+        tool_cells.remote_pcap_spool("op@provider.example", "kdive", _SYSTEM)
+    assert conn.closed
+
+
+def test_pool_volume_path_joins_the_pool_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _PoolConn("<pool><target><path>/srv/pool</path></target></pool>")
+    monkeypatch.setattr(tool_cells, "observer", lambda _dest: conn)
+    path = tool_cells.pool_volume_path("op@provider.example", "kdive", "kdive-host-dump-x.kdump")
+    assert path == "/srv/pool/kdive-host-dump-x.kdump"
+    assert (conn.named, conn.closed) == ("kdive", True)
+
+
+def test_pool_volume_path_needs_a_pool_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _PoolConn("<pool><target/></pool>")
+    monkeypatch.setattr(tool_cells, "observer", lambda _dest: conn)
+    with pytest.raises(AssertionError, match="no target path"):
+        tool_cells.pool_volume_path("op@provider.example", "kdive", "v")
+    assert conn.closed
+
+
+def test_local_lane_observes_the_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tool_cells.platform, "machine", lambda: "x86_64")
+    lane = tool_cells.lane_for(_cell("control.power", "local-libvirt", "x86_64"))
+    assert lane.connect is tool_cells.worker_connect
+    assert lane.spool(_SYSTEM)(_JOB) == str(pcap_dir(UUID(_SYSTEM)))
+    assert lane.installed_kernel is tool_cells.domain_kernel
+    assert lane.pool_volume is None
+
+
+def test_remote_lane_observes_the_provider_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    host = RemoteHost(
+        "op@provider.example", "kdive", "rocky:10.2", "x86_64", "kvm", pcap_pool="lab-pcap"
+    )
+    monkeypatch.setattr(tool_cells, "remote_host", lambda: host)
+    monkeypatch.setattr(tool_cells, "staged_base_volume", lambda _image: "base.qcow2")
+    seen: list[str] = []
+    monkeypatch.setattr(tool_cells, "observer", lambda dest: seen.append(dest) or "conn")
+    lane = tool_cells.lane_for(_cell("control.power", "remote-libvirt", "x86_64"))
+    assert lane.connect() == "conn" and seen == ["op@provider.example"]
+    spool = lane.spool
+    assert isinstance(spool, partial) and spool.func is tool_cells.remote_pcap_spool
+    # The capturer writes pcaps into the dedicated pcap pool, not the disk pool (#3316).
+    assert spool.args == ("op@provider.example", "lab-pcap")
+    kernel = lane.installed_kernel
+    assert isinstance(kernel, partial) and kernel.func is guest_boot_kernel
+    assert kernel.keywords == {"family": "fedora"}
+    volume = lane.pool_volume
+    assert isinstance(volume, partial) and volume.func is tool_cells.pool_volume_path
+    assert volume.args == ("op@provider.example", "kdive")
 
 
 def test_remote_cell_is_not_skipped_by_control_plane_arch(
@@ -576,7 +918,7 @@ def test_declared_authority_fails_without_it(
     roles = {"server": sha, "worker": sha, "reconciler": sha}
     identity = RunIdentity(sha, "b" * 64, "fedora:44", "x86_64", True, roles)
     monkeypatch.setattr(scenario, "require_stack", lambda: "http://stack.test/mcp")
-    monkeypatch.setattr(scenario, "run_identity", lambda _url: identity)
+    monkeypatch.setattr(scenario, "run_identity", lambda _url, **_kw: identity)
     monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
     monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
     cell = _bound(_cell("runs.release_external_boot", "local-libvirt", "x86_64"))
@@ -588,6 +930,45 @@ def test_declared_authority_fails_without_it(
 
     with pytest.raises(AssertionError, match="missing:authority"):
         scenario.run_cell(cell, body)
+
+
+@pytest.mark.parametrize(
+    ("tool", "provider", "reads"),
+    [
+        ("ops.force_release", "remote-libvirt", True),
+        ("ops.force_release", "local-libvirt", False),
+        ("ops.force_teardown", "remote-libvirt", False),
+    ],
+)
+def test_only_a_remote_authority_cell_reads_the_remote_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str, provider: str, reads: bool
+) -> None:
+    # ADR-0788: the provider host's authority serves a remote authority cell.
+    sha = "a" * 40
+    roles = dict.fromkeys(("server", "worker", "reconciler", "authority"), sha)
+    identity = RunIdentity(sha, "b" * 64, "fedora:44", "x86_64", True, roles)
+    readers: list[object] = []
+
+    def read_identity(_url: str, *, remote_authority: object = None) -> RunIdentity:
+        readers.append(remote_authority)
+        return identity
+
+    monkeypatch.setattr(scenario, "require_stack", lambda: "http://stack.test/mcp")
+    monkeypatch.setattr(scenario, "run_identity", read_identity)
+    monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
+    monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
+    cell = next(
+        c
+        for c in tool_cells.tool_cells((tool,))
+        if c.kind == "functional" and c.provider == provider and c.guest_arch == "x86_64"
+    )
+
+    async def body(run: CellRun, *_: object) -> None:
+        for name in cell.assertions:
+            run.prove(name, {})
+
+    scenario.run_cell(cell, body)
+    assert readers == [scenario.remote_authority_revision if reads else None]
 
 
 def test_foreign_arch_cell_skips_first(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -659,7 +1040,7 @@ def test_run_cell_records_the_proven_outcome(
     sha = "a" * 40
     identity = RunIdentity(sha, "b" * 64, "fedora:44", "x86_64", True, {"server": sha})
     monkeypatch.setattr(scenario, "require_stack", lambda: "http://stack.test/mcp")
-    monkeypatch.setattr(scenario, "run_identity", lambda _url: identity)
+    monkeypatch.setattr(scenario, "run_identity", lambda _url, **_kw: identity)
     monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
     monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
     cell = replace(_run(tmp_path, "authentication").cell, node_id="tests/x.py::test_x")
@@ -721,3 +1102,489 @@ def test_published_image_binds_the_product(tmp_path: Path) -> None:
     assert inputs.cells[reject.id].guest_os == "fedora:44"
     assert inputs.cells[reject.id].image_sha256 == lane
     assert inputs.cells[install.id].image_sha256 == lane
+
+
+def _refusal(arch: str, exposure: str = "direct") -> Cell:
+    return next(
+        c
+        for c in build_contract().cells
+        if c.operation == "images.publish"
+        and c.provider == "remote-libvirt"
+        and c.kind == "unsupported"
+        and c.host_arch == arch
+        and (c.configuration, c.exposure) == ("default", exposure)
+    )
+
+
+def test_admission_refusals_bind_the_server_host_alone() -> None:
+    # ADR-0759: the refusal involves no provider host, guest, image or accelerator.
+    native, foreign = _bound(_refusal("x86_64")), _bound(_refusal("ppc64le"))
+    host = RemoteHost("operator@provider.example", "default", "rocky:10.2", "x86_64", "kvm")
+
+    def no_probe(*_: object) -> str:
+        raise AssertionError("an admission refusal must not probe a provider volume")
+
+    for remote in (None, host):
+        inputs = bindings(
+            "a" * 40,
+            host_os="fedora:44",
+            host_arch="x86_64",
+            matrix="b" * 64,
+            cells=[native, foreign],
+            staged=lambda _name: None,
+            remote=remote,
+            digest=no_probe,
+            volumes=no_probe,
+        )
+        assert set(inputs.cells) == {native.id}
+        assert inputs.cells[native.id].model_dump(exclude_none=True) == {
+            "host_os": "fedora:44",
+            "host_arch": "x86_64",
+            "accelerator": "none",
+        }
+
+
+def test_admission_refusal_runs_on_its_server_arch(monkeypatch: pytest.MonkeyPatch) -> None:
+    def stack() -> str:
+        raise RuntimeError("stack read")
+
+    async def never(*_: object) -> None:
+        raise AssertionError("the scenario must not run")
+
+    monkeypatch.setattr(tool_cells, "require_stack", stack)
+    monkeypatch.setattr(tool_cells.platform, "machine", lambda: "x86_64")
+    with pytest.raises(pytest.skip.Exception, match="ppc64le"):
+        tool_cells.run_tool_cell(_refusal("ppc64le"), never)
+    with pytest.raises(RuntimeError, match="stack read"):
+        tool_cells.run_tool_cell(_refusal("x86_64"), never)
+
+
+def _refusal_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cell: Cell,
+    host_arch: str = "x86_64",
+    candidate: str = "a" * 40,
+    proves: Outcome = Outcome.UNSUPPORTED,
+    via_frame: bool = False,
+) -> tuple[bool, tuple[str, ...]]:
+    """Record ``cell`` through the real frame on a server-only stack, then qualify it."""
+    contract = build_contract()
+    contract = replace(contract, cells=(cell,))
+    roles = {"server": candidate}
+    identity = RunIdentity(candidate, contract.matrix_sha256, "fedora:44", host_arch, True, roles)
+    monkeypatch.setattr(tool_cells, "require_stack", lambda: "http://stack.test/mcp")
+    monkeypatch.setattr(tool_cells, "require_issuer", lambda: object())
+    monkeypatch.setattr(tool_cells, "server_configuration", lambda *_: ("default", []))
+    monkeypatch.setattr(tool_cells.platform, "machine", lambda: host_arch)
+    monkeypatch.setattr(scenario, "require_stack", lambda: "http://stack.test/mcp")
+    monkeypatch.setattr(scenario, "run_identity", lambda _url, **_kw: identity)
+    monkeypatch.setattr(scenario, "prerequisites", lambda: (object(), "postgresql://x"))
+    monkeypatch.setattr(scenario, "evidence_root", lambda: tmp_path)
+
+    async def body(run: CellRun, *_: object) -> None:
+        for name in cell.assertions:
+            run.prove(name, {})
+
+    if via_frame:
+        tool_cells.run_tool_cell(cell, body)
+    else:
+        scenario.run_cell(cell, body, proves=proves)
+    (record,) = (tmp_path / "records").glob("*.json")
+    result = Evidence.model_validate_json(record.read_text())
+    inputs = bindings(
+        "a" * 40,
+        host_os="fedora:44",
+        host_arch="x86_64",
+        matrix=contract.matrix_sha256,
+        cells=[cell],
+        staged=lambda _name: None,
+    )
+    (verdict,) = qualify(contract, inputs, [result]).cells
+    return verdict.qualified, verdict.reasons
+
+
+def test_admission_refusal_record_qualifies_without_guest_or_kvm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cell = _bound(_refusal("x86_64"))
+    assert _refusal_verdict(tmp_path, monkeypatch, cell=cell, via_frame=True) == (True, ())
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"host_arch": "ppc64le"}, "input-context-mismatch"),
+        ({"candidate": "c" * 40}, "candidate-mismatch"),
+        ({"proves": Outcome.SUCCESS}, "outcome-kind-mismatch"),
+        ({"rule": None}, "unsupported-without-reviewed-rule"),
+    ],
+)
+def test_admission_refusal_record_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: dict[str, object], reason: str
+) -> None:
+    cell = _bound(_refusal("x86_64"))
+    host_arch = str(change.get("host_arch", "x86_64"))
+    candidate = str(change.get("candidate", "a" * 40))
+    proves = cast(Outcome, change.get("proves", Outcome.UNSUPPORTED))
+    if "rule" in change:
+        cell = replace(cell, unsupported_reason=None)
+    qualified, reasons = _refusal_verdict(
+        tmp_path, monkeypatch, cell=cell, host_arch=host_arch, candidate=candidate, proves=proves
+    )
+    assert not qualified and reason in reasons
+
+
+_REFUSAL = Rejection({"provider": "remote-libvirt", "name": "img"}, _GRANTS)
+_REFUSED = ToolResponse.failure("img", ErrorCategory.NOT_IMPLEMENTED, detail="stage it")
+
+
+def test_refusal_proves_the_exact_envelope_and_unchanged_state(tmp_path: Path) -> None:
+    run = CellRun(_refusal("x86_64"), EvidenceWriter(tmp_path))
+    caller = _Caller("gateway", result=_REFUSED)
+    asyncio.run(prove_refusal(run, caller, _REFUSAL, "stage it", _snapshot("s", "s")))
+    assert set(run.assertions) == {"effect", "cleanup"}
+    assert caller.calls == [("images.publish", _REFUSAL.args)]
+    assert len(run.artifacts) == 1  # the request, retained before the call
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _OK,
+        ToolResponse.denied("img"),
+        ToolResponse.failure("img", ErrorCategory.NOT_IMPLEMENTED, detail="other"),
+        ToolResponse.failure("other", ErrorCategory.NOT_IMPLEMENTED, detail="stage it"),
+        ToolResponse.failure(
+            "img", ErrorCategory.NOT_IMPLEMENTED, detail="stage it", refs={"job": "j"}
+        ),
+        ToolResponse.failure(
+            "img",
+            ErrorCategory.NOT_IMPLEMENTED,
+            detail="stage it",
+            suggested_next_actions=["jobs.wait"],
+        ),
+        ConnectionError("transport"),
+    ],
+)
+def test_refusal_fails_on_any_other_answer(
+    tmp_path: Path, result: ToolResponse | Exception
+) -> None:
+    run = CellRun(_refusal("x86_64"), EvidenceWriter(tmp_path))
+    caller = _Caller("direct", result=result)
+    with pytest.raises((AssertionError, ConnectionError)):
+        asyncio.run(prove_refusal(run, caller, _REFUSAL, "stage it", _snapshot("s", "s")))
+    assert not run.assertions
+    assert len(run.artifacts) == 1  # the failed proof still names the request
+
+
+def test_refusal_fails_when_state_changed(tmp_path: Path) -> None:
+    run = CellRun(_refusal("x86_64"), EvidenceWriter(tmp_path))
+    caller = _Caller("direct", result=_REFUSED)
+    with pytest.raises(AssertionError, match="changed protected state"):
+        asyncio.run(prove_refusal(run, caller, _REFUSAL, "stage it", _snapshot("s", "t")))
+    assert not run.assertions
+
+
+# --- the kdivectl caller of `cli` cells (ADR-0795) ---
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "argv"),
+    [
+        (
+            "investigations.list",
+            {"request": {"project": "p", "limit": 5}},
+            ["investigations", "list", "--project", "p", "--limit", "5"],
+        ),
+        ("jobs.wait", {"job_id": "j", "timeout_s": 0}, ["jobs", "wait", "j", "--timeout-s", "0"]),
+        (
+            "investigations.link",
+            {"investigation_id": "i", "ref": {"k": 1}},
+            ["investigations", "link", "--investigation-id", "i", "--ref-json", '{"k": 1}'],
+        ),
+        (
+            "tools.search",
+            {"names": ["a", "b"]},
+            ["tools", "search", "--names", "a", "--names", "b"],
+        ),
+        (
+            "tools.invoke",
+            {"name": "x", "arguments": {}},
+            ["tools", "invoke", "--name", "x", "--arguments-json", "{}", "--yes"],
+        ),
+        (
+            "accounting.usage",
+            {"target": {"kind": "project", "project": "p"}},
+            ["accounting", "usage", "--project", "p"],
+        ),
+        (
+            "accounting.report",
+            {"request": {"scope": "granted-set", "projects": ["a", "b"], "window": ["s", None]}},
+            ["accounting", "report", "--scope", "granted-set", "--projects", "a,b", "--since", "s"],
+        ),
+        (
+            "resources.availability",
+            {"request": {"include_devices": "maybe"}},
+            ["resources", "availability", "--include-devices", "maybe"],
+        ),
+        (
+            "investigations.close",
+            {"investigation_id": "i", "summary": "s", "force": False},
+            ["investigations", "close", "--investigation-id", "i", "--summary", "s"],
+        ),
+    ],
+)
+def test_cli_argv_follows_the_descriptor(
+    tool: str, args: Mapping[str, object], argv: list[str]
+) -> None:
+    assert tool_cells.cli_argv(tool, args) == [*argv, "--json"]
+
+
+def test_cli_argv_names_a_field_the_verb_cannot_carry() -> None:
+    with pytest.raises(tool_cells.CliTranslationGap, match="'resource_id'"):
+        tool_cells.cli_argv("inventory.list", {"request": {"resource_id": "r"}})
+
+
+def test_cli_argv_carries_list_paging_options() -> None:
+    argv = tool_cells.cli_argv("allocations.list", {"request": {"project": "p", "limit": 5}})
+    assert argv == ["allocations", "list", "--project", "p", "--limit", "5", "--json"]
+
+
+def test_cli_exactness_compares_the_parsed_payload() -> None:
+    args = {"request": {"project": "p", "limit": 5}}
+    tool_cells._check_exact(
+        "investigations.list", tool_cells.cli_argv("investigations.list", args), args
+    )
+    with pytest.raises(tool_cells.CliTranslationGap, match=r"\['request'\]"):
+        tool_cells._check_exact(
+            "investigations.list", ["investigations", "list", "--project", "q", "--json"], args
+        )
+    # A command line the parser refuses is left to the subprocess's usage error.
+    tool_cells._check_exact("investigations.list", ["investigations", "list", "--bogus"], args)
+
+
+_CLI_ISSUER = OidcIssuer("https://issuer.test")
+
+
+@dataclass(frozen=True)
+class _Cli(tool_cells.CliCaller):
+    """A ``CliCaller`` minting stand-in tokens, so no issuer is reached."""
+
+    def token(self, grants: Grants) -> str:
+        return forge_source(grants)
+
+
+def _runner(
+    monkeypatch: pytest.MonkeyPatch, *runs: tool_cells.CliRun
+) -> list[tuple[list[str], str]]:
+    answers = iter(runs)
+    seen: list[tuple[list[str], str]] = []
+
+    async def run(argv: list[str], *, token: str, base_url: str) -> tool_cells.CliRun:
+        seen.append((argv, token))
+        return next(answers)
+
+    monkeypatch.setattr(tool_cells, "run_kdivectl", run)
+    return seen
+
+
+def _cli_call(tool: str = "session.whoami", args: Mapping[str, object] | None = None) -> object:
+    caller = _Cli("cli", "http://stack.test", _CLI_ISSUER)
+    return asyncio.run(caller.call(tool, args or {}, "tok"))
+
+
+def _printed(envelope: ToolResponse | dict[str, object]) -> str:
+    body = envelope.model_dump() if isinstance(envelope, ToolResponse) else envelope
+    return json.dumps(body, default=str)
+
+
+def test_cli_call_returns_the_printed_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _runner(
+        monkeypatch,
+        tool_cells.CliRun(0, _printed(_OK), ""),
+        tool_cells.CliRun(0, _printed({"result": [_OK.model_dump()]}), ""),
+    )
+    assert _cli_call() == _OK
+    assert _cli_call() == [_OK]
+    assert seen[0] == (["session", "whoami", "--json"], "tok")
+
+
+def test_cli_call_requires_the_category_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    denied = ToolResponse.failure("x", ErrorCategory.AUTHORIZATION_DENIED, detail="no")
+    _runner(
+        monkeypatch,
+        tool_cells.CliRun(1, _printed(denied), ""),
+        tool_cells.CliRun(3, _printed(denied), ""),
+    )
+    with pytest.raises(AssertionError, match="exited 1 for 'authorization_denied', not 3"):
+        _cli_call()
+    assert _cli_call() == denied
+
+
+@pytest.mark.parametrize(
+    ("run", "error", "message"),
+    [
+        (
+            tool_cells.CliRun(
+                2, "", "usage: kdivectl\nkdivectl: error: unrecognized arguments: --kind x\n"
+            ),
+            tool_cells.CliUsageError,
+            "refused the command line (unrecognized): --kind",
+        ),
+        (
+            tool_cells.CliRun(1, "", "error: boom\n"),
+            LiveStackToolError,
+            "boom",
+        ),
+    ],
+)
+def test_cli_call_types_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, run: tool_cells.CliRun, error: type[Exception], message: str
+) -> None:
+    _runner(monkeypatch, run)
+    with pytest.raises(error) as raised:
+        _cli_call()
+    assert message in cast(LiveStackToolError, raised.value).message
+
+
+def test_cli_call_without_an_envelope_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    _runner(monkeypatch, tool_cells.CliRun(3, "destructive call needs confirmation\n", ""))
+    with pytest.raises(AssertionError, match="exited 3 with no envelope"):
+        _cli_call()
+
+
+_TIER = tool_cells.CliRun(
+    3, "'session.whoami' is not positively classified; it is unreachable\n", ""
+)
+
+
+def _catalog(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    async def catalog(base_url: str, token: str) -> set[str]:
+        return set(names)
+
+    monkeypatch.setattr(tool_cells, "_catalog", catalog)
+
+
+def test_cli_tier_refusal_needs_the_tool_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    _runner(monkeypatch, _TIER, _TIER)
+    _catalog(monkeypatch, "tools.search")
+    with pytest.raises(tool_cells.CliTierRefusal):
+        _cli_call()
+    _catalog(monkeypatch, "session.whoami")
+    with pytest.raises(AssertionError, match="refused listed session.whoami"):
+        _cli_call()
+
+
+def _cli_cell_run(tmp_path: Path, operation: str, boundary: str) -> CellRun:
+    cell = next(
+        c
+        for c in build_contract().cells
+        if c.operation == operation and c.scenario_id.endswith("/" + boundary)
+    )
+    return CellRun(replace(cell, exposure="cli"), EvidenceWriter(tmp_path))
+
+
+def test_cli_tier_refusal_is_an_authorization_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _runner(monkeypatch, _TIER)
+    _catalog(monkeypatch)
+    run = _cli_cell_run(tmp_path, "investigations.get", "authorization")
+    caller = _Cli("cli", "http://stack.test", _CLI_ISSUER)
+    rejection = Rejection({"investigation_id": "i"}, _GRANTS)
+    asyncio.run(prove_rejection(run, caller, "authorization", rejection, _snapshot(1, 1)))
+    assert set(run.assertions) == {"authorization", "unchanged-state", "cleanup"}
+    proof = json.loads(
+        (run.writer.root / "artifacts" / run.assertions["authorization"]).read_bytes()
+    )
+    assert proof["rejected"] == {"catalog_hidden": True, "error_category": "authorization_denied"}
+
+
+def test_cli_validation_accepts_a_usage_refusal_only_on_cli() -> None:
+    usage = tool_cells.CliUsageError("t", "invalid-value", "--limit")
+    assert rejected_by_validation("cli", usage)
+    assert not rejected_by_validation("direct", usage)
+    assert not rejected_by_validation("gateway", usage)
+    assert rejected_by_validation("cli", _invoke_error(None))
+    assert rejected_by_validation("cli", LiveStackToolError("t", "1 validation error for call"))
+    assert tool_cells._shape(usage) == {"usage_error": "invalid-value", "refused": "--limit"}
+
+
+_AUTH = tool_cells.CliRun(1, "", "error: authentication failed; verify KDIVE_TOKEN\n")
+
+
+def test_cli_authentication_needs_the_fixed_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    caller = _Cli("cli", "http://stack.test", _CLI_ISSUER)
+    rejection = Rejection({}, _GRANTS)
+    seen = _runner(monkeypatch, _AUTH, tool_cells.CliRun(0, _printed(_OK), ""))
+    run = _run(tmp_path, "authentication")
+    asyncio.run(prove_rejection(run, caller, "authentication", rejection, _snapshot(1, 1)))
+    assert set(run.assertions) == {"authentication", "unchanged-state", "cleanup"}
+    assert seen[0][1] != seen[1][1]  # the forged token, then the issued one
+    _runner(monkeypatch, _AUTH, _AUTH)
+    with pytest.raises(AssertionError, match="also failed"):
+        asyncio.run(
+            prove_rejection(
+                _run(tmp_path, "authentication"), caller, "authentication", rejection, _snapshot(1)
+            )
+        )
+    _runner(
+        monkeypatch,
+        tool_cells.CliRun(2, "", "kdivectl: error: the following arguments are required: --name\n"),
+    )
+    with pytest.raises(tool_cells.CliTranslationGap, match="--name"):
+        asyncio.run(
+            prove_rejection(
+                _run(tmp_path, "authentication"), caller, "authentication", rejection, _snapshot(1)
+            )
+        )
+
+
+def test_caller_for_selects_the_exposure(monkeypatch: pytest.MonkeyPatch) -> None:
+    minted: list[object] = []
+    monkeypatch.setattr(tool_cells, "mint_token", lambda *_, **kw: minted.append(kw) or "t")
+    monkeypatch.setattr(tool_cells.config, "require", lambda _key: "kdivectl-id")
+    cli = tool_cells.caller_for("cli", "http://stack.test", _CLI_ISSUER)
+    assert isinstance(cli, tool_cells.CliCaller)
+    cli.token(_GRANTS)
+    tool_cells.caller_for("gateway", "http://stack.test", _CLI_ISSUER).token(_GRANTS)
+    assert [cast(dict[str, object], kw)["client_id"] for kw in minted] == ["kdivectl-id", None]
+    direct = tool_cells.http_caller(cli)
+    assert type(direct) is HttpCaller and direct.exposure == "direct"
+    gateway = tool_cells.caller_for("gateway", "http://stack.test", _CLI_ISSUER)
+    assert tool_cells.http_caller(gateway) is gateway
+    with pytest.raises(AssertionError, match="CliCaller"):
+        HttpCaller("cli", "http://stack.test", _CLI_ISSUER)
+
+
+def test_run_kdivectl_drives_the_entry_point() -> None:
+    done = asyncio.run(
+        tool_cells.run_kdivectl(
+            ["session", "whoami", "--json"], token="t", base_url="http://127.0.0.1:9"
+        )
+    )
+    assert done.code == 1
+    assert "error: connection failed" in done.stderr
+
+
+@pytest.mark.parametrize(
+    ("stderr", "kind"),
+    [
+        ("kdivectl resources availability: error: unrecognized arguments: maybe\n", "unrecognized"),
+        (
+            "kdivectl images describe: error: the following arguments are required: image_id\n",
+            "required",
+        ),
+        (
+            "kdivectl jobs wait: error: argument --timeout-s: must be a finite number, not 'inf'\n",
+            "invalid-value",
+        ),
+        ("error: give exactly one of --project or --investigation-id\n", "handler"),
+    ],
+)
+def test_cli_usage_refusal_records_its_class(stderr: str, kind: str) -> None:
+    assert tool_cells._refusal_kind(tool_cells.CliRun(2, "", stderr)) == kind

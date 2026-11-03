@@ -10,11 +10,14 @@ from kdive.providers.ports.debug import (
     GdbBreakpointRef,
     GdbDisassembly,
     GdbFrame,
+    GdbFrameDetail,
+    GdbHalt,
     GdbInstruction,
     GdbMiAttachment,
     GdbModule,
     GdbModuleList,
     GdbStopRecord,
+    GdbVariable,
     GdbWatchpointRef,
 )
 
@@ -110,8 +113,12 @@ class FaultInjectDebugEngine:
     def finish(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
         return GdbStopRecord(reason="function-finished", stopped_thread="1")
 
-    def interrupt(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
-        return GdbStopRecord(reason="signal-received", stopped_thread="1")
+    def continue_background(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
+        # The fake never leaves a guest running, so it reports the run's stop at once (#3244).
+        return GdbStopRecord(reason="breakpoint-hit", stopped_thread="1")
+
+    def interrupt(self, attachment: GdbMiAttachment) -> GdbHalt:
+        return GdbHalt(halted_by="already_halted")
 
     def backtrace(self, attachment: GdbMiAttachment, *, max_frames: int = 64) -> GdbBacktrace:
         del attachment, max_frames
@@ -129,10 +136,15 @@ class FaultInjectDebugEngine:
             truncated=False,
         )
 
-    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
+    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrameDetail:
         del attachment
-        return GdbFrame(
-            level=level, func="panic", addr="0xffffffff81000000", file="kernel/panic.c", line=1
+        return GdbFrameDetail(
+            level=level,
+            func="panic",
+            addr="0xffffffff81000000",
+            file="kernel/panic.c",
+            line=1,
+            args=[GdbVariable(name="fmt", type="const char *", value="0xffffffff82000000")],
         )
 
     def set_watchpoint(

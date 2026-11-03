@@ -50,6 +50,14 @@ live_stack_backends_up() {
   # The Postgres initdb bind source resolves to each checkout's absolute path. A second worktree
   # changes Compose's hash and would recreate a healthy database; apply backend config/image
   # changes explicitly with stack-down.sh before bringing it up again.
+  # oidc is stateless and publishes ${KDIVE_OIDC_PORT} only at container creation, so reusing a
+  # container left by a failed attempt under another port serves nothing on the new one. Recreate
+  # it alone (--no-deps) here; the wait below then covers it and `--no-recreate` still protects
+  # postgres and seaweedfs.
+  docker compose up --detach --force-recreate --no-deps oidc || {
+    docker compose ps >&2
+    return 1
+  }
   docker compose up --no-recreate --wait --wait-timeout 120 "${KDIVE_BACKEND_LONG_RUNNING[@]}" || {
     docker compose ps >&2
     return 1
@@ -298,11 +306,11 @@ restart_host_processes() {
   revision="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?')"
   echo "starting kdive host processes (${worker_count} lifecycle worker(s)) @ ${revision} ..."
   KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
-    env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+    env -u KDIVE_HARNESS_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
     -u KDIVE_RECONCILER_DATABASE_URL \
     setsid nohup "$py" -m kdive server >"${log_dir}/server.log" 2>&1 </dev/null &
   KDIVE_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL}" \
-    env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+    env -u KDIVE_HARNESS_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
     -u KDIVE_WORKER_DATABASE_URL \
     setsid nohup "$py" -m kdive reconciler >"${log_dir}/reconciler.log" 2>&1 </dev/null &
   "${repo_root}/scripts/live-stack/worker-lifecycle.sh" start "$worker_count"
@@ -403,10 +411,12 @@ nodedev_ok() {
 
 # Operator-owned dedicated session libvirt daemon (#2032). The live_vm_host role provisions a
 # dedicated session daemon for the runner account (config /etc/kdive/libvirtd-live.conf, runtime
-# root /run/kdive/live-libvirt) and keeps it boot-persistent with a systemd --user unit. stack-services.sh's
+# root /run/kdive/live-libvirt) and keeps it boot-persistent with a system unit running as that
+# operator with fresh provider groups. stack-services.sh's
 # recovery path starts this same daemon directly as the invoking user — the runner service account
 # has no sudo and the Debian-family runner ships no virtqemud, so a system-daemon fallback can
-# never work there.
+# never work there. A direct start remains unmanaged even if the system unit is installed;
+# provisioning requires a drain and targeted stop before taking ownership (ADR-0737).
 #
 # Idempotently ensure the dedicated session daemon is running. A pid file pointing at a live
 # process short-circuits; otherwise start it exactly as the provisioning role does (same binary,

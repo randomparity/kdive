@@ -45,3 +45,16 @@ still cannot update the obligation table directly.
   server authority.
 - **Carry only a nonce in process memory.** Rejected because a nonce not bound to the durable job
   payload is caller-selectable and cannot prove ownership after restart.
+
+## Amendment (2026-10-27): an ACTIVATE job's terminal evidence binds through durable records
+
+An ACTIVATE boot job is admitted before its module attempt is opened, so its payload never carries
+`remote_module_attempt_v1`, and the receipt check above refused every remote Run boot's terminal
+evidence (#3373). Migration 0180 replaces the function with the same signature and grant. A payload
+that carries the receipt must still match it exactly, and `discharge-reap` and `record-restored`
+are unchanged. For `record-terminal` only, a payload without the receipt is accepted when the job
+is the running, unexpired boot job already checked, its `external_boot_authority_v1` marker is an
+`activate` marker whose activation, System and Run match the call, that activation is still
+`preparing`, and `external_boot_authority_audit` names this job and attempt as the activation's
+latest `takeover_allocated` row. The marker check is a private `SECURITY DEFINER` helper that
+`kdive_worker` cannot call. No table changes.

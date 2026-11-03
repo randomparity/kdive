@@ -414,3 +414,22 @@ def test_factory_build_failure_is_error_verdict_and_audited(
     asyncio.run(_run())
     assert "malformed KDIVE_* secret value" in caplog.text
     assert any(record.exc_info is not None for record in caplog.records)
+
+
+@pytest.mark.parametrize("target", ["unknown", ""])
+def test_real_factory_invalid_target_is_audited_error(migrated_url: str, target: str) -> None:
+    from kdive.diagnostics.service import default_service_factory
+
+    async def run() -> None:
+        async with _pool(migrated_url) as pool:
+            response = await diagnostics.run_diagnostics(
+                pool, default_service_factory, _OPERATOR, provider=target
+            )
+        assert response.status == "ok"
+        assert response.data["has_error"] is True
+        assert response.data["has_failure"] is False
+        assert [item.data["check"] for item in response.items] == ["diagnostics"]
+        assert response.items[0].data["status"] == "error"
+        assert len(await _platform_audit_rows(migrated_url)) == 1
+
+    asyncio.run(run())

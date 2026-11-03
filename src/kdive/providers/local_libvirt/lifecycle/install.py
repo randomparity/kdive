@@ -66,6 +66,7 @@ from kdive.providers.local_libvirt.lifecycle.power import clean_shutdown_bound_s
 from kdive.providers.local_libvirt.lifecycle.storage import (
     _prepare_console_log,
     console_log_path,
+    ensure_shared_artifact_directory,
     overlay_path,
 )
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
@@ -359,7 +360,13 @@ class LocalLibvirtInstaller:
         """
         run_dir = root / str(request.system_id) / str(request.run_id)
         try:
-            run_dir.mkdir(parents=True, exist_ok=True)
+            if setting is INSTALL_STAGING:
+                run_dir.parent.mkdir(parents=True, exist_ok=True)
+                ensure_shared_artifact_directory(run_dir.parent)
+                run_dir.mkdir(exist_ok=True)
+                ensure_shared_artifact_directory(run_dir)
+            else:
+                run_dir.mkdir(parents=True, exist_ok=True)
         except PermissionError as exc:
             raise self._unwritable_run_dir_error(root, run_dir, setting) from exc
         except OSError as exc:

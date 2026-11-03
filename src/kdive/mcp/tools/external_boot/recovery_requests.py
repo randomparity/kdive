@@ -42,7 +42,7 @@ from kdive.mcp.tools.external_boot.recovery_idempotency import (
     recovery_request,
     recovery_response,
 )
-from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (
     AuthorizationError,
@@ -63,6 +63,7 @@ from kdive.services.external_boot import (
     check_external_boot_admission,
 )
 from kdive.services.external_boot.local_timing import local_external_boot_timing
+from kdive.services.external_boot.routing import server_authority_instance
 
 RELEASE_TOOL = "runs.release_external_boot"
 RESOLVE_CONFLICT_TOOL = "systems.resolve_external_boot_conflict"
@@ -171,6 +172,24 @@ def _provider_unconfigured(object_id: str, tool: str) -> ToolResponse:
         suggested_next_actions=["systems.get"],
         data={"reason": "recovery_provider_not_configured"},
     )
+
+
+def _recovery_provider_configured(
+    binding: ProviderBinding, rows: Sequence[Mapping[str, object]]
+) -> bool:
+    """Whether this server can dispatch disposition of the rows' exact objects.
+
+    A runtime that composes a recovery-object port can. A provider whose authority host owns the
+    provider I/O (local and remote libvirt, ADR-0615) composes none on the server, so its rows are
+    dispatchable when the server's fixed authority route is the instance that published them, as
+    release and conflict admission decide it (``admission.py``).
+    """
+    if any(row["provider_kind"] != binding.kind.value for row in rows):
+        return False
+    if binding.runtime.external_boot_recovery_objects is not None:
+        return True
+    route = server_authority_instance(binding)
+    return route is not None and all(row["authority_instance"] == route for row in rows)
 
 
 def _config_error(object_id: str, *, reason: str, detail: str, next_action: str) -> ToolResponse:
@@ -805,10 +824,7 @@ async def resolve_recovery_orphan(
                     next_actions=["systems.get"],
                 )
             binding = await resolver.binding_for_system(conn, uid)
-            if (
-                any(row["provider_kind"] != binding.kind.value for row in rows)
-                or binding.runtime.external_boot_recovery_objects is None
-            ):
+            if not _recovery_provider_configured(binding, rows):
                 return _provider_unconfigured(system_id, ORPHAN_TOOL)
             binding_digest = _quarantine_binding_digest(rows)
             binding_snapshot = _quarantine_binding_snapshot(rows)

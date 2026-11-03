@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -226,6 +226,41 @@ async def resolve_current_preparation_authority_binding(
             ),
         )
         return _binding(await cursor.fetchone())
+
+
+type PrestopHolders = Literal["clear", "session_active", "job_active"]
+
+
+async def external_boot_prestop_system_holders(
+    conn: AsyncConnection,
+    *,
+    peer_incarnation_id: str,
+    authority_id: UUID,
+    generation: int,
+    acknowledgement_sequence: int,
+    acknowledgement_digest: str,
+) -> PrestopHolders | None:
+    """Ask whether a session or another job holds the System, bound to the PREPARE authority.
+
+    ``None`` means the authority no longer resolves, exactly as for the preparation resolver.
+    """
+    row = await (
+        await conn.execute(
+            "SELECT external_boot_prestop_system_holders(%s, %s, %s, %s, %s)",
+            (
+                peer_incarnation_id,
+                authority_id,
+                generation,
+                acknowledgement_sequence,
+                acknowledgement_digest,
+            ),
+        )
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    if row[0] not in {"clear", "session_active", "job_active"}:
+        raise ValueError(f"unexpected pre-stop System-holder answer {row[0]!r}")
+    return cast(PrestopHolders, row[0])
 
 
 async def resolve_current_release_phase_authority_binding(

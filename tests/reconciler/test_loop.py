@@ -110,6 +110,7 @@ def test_reconcile_report_fields_are_catalog_backed() -> None:
         not in {
             "failures",
             "repair_counts",
+            "repair_failures",
             "captures_budget_unattempted",
             "dump_volumes_budget_unattempted",
         }
@@ -400,6 +401,8 @@ def test_terminal_authority_system_receipt_repair_uses_the_fixed_batch_limit() -
                 if "list_authority_system" in query
                 else "finalize"
                 if "finalize_authority_system" in query
+                else "discharge"
+                if "discharge_exhausted_authority_system" in query
                 else "provision"
             )
 
@@ -425,12 +428,13 @@ def test_terminal_authority_system_receipt_repair_uses_the_fixed_batch_limit() -
             monkeypatch.setattr(job_repairs, "reclaim_system_core_after_provider_teardown", reclaim)
             assert (
                 await repair_terminal_authority_system_attempts(cast(Any, conn), cast(Any, store))
-                == 3
+                == 5
             )
-        assert events == ["provision", "list", "cleanup", "finalize"]
+        assert events == ["provision", "list", "cleanup", "finalize", "discharge"]
         assert conn.statements[0][1] == (100,)
         assert conn.statements[1][1] == (100,)
         assert conn.statements[2][1] == candidate
+        assert conn.statements[3][1] == (100,)
 
     asyncio.run(_run())
 
@@ -1962,12 +1966,13 @@ def test_the_delete_is_addressed_to_the_identity_the_sweep_sampled(migrated_url:
     asyncio.run(_run())
 
 
-def test_all_repair_kinds_matches_a_fully_populated_plan() -> None:
+def test_all_repair_kinds_matches_a_fully_populated_plan(monkeypatch: pytest.MonkeyPatch) -> None:
     """ALL_REPAIR_KINDS must equal the names a plan with every optional port emits.
 
     The repairs counter labels ``repair_kind`` with the ``_RepairSpec.name`` strings, so the
     declared bound must stay in lock-step with the plan or the cardinality guard drifts.
     """
+    monkeypatch.setenv("KDIVE_VMCORE_RETENTION_DAYS", "30")
     config = make_reconcile_config(
         upload_store=cast(loop.ReconcileUploadStore, object()),
         image_store=cast(loop.ImageSweepStore, object()),
@@ -2022,3 +2027,16 @@ def test_build_artifact_repairs_are_in_all_repair_kinds() -> None:
     """The two build-artifact GC sweeps emit their own repair kinds (#768)."""
     assert "investigation_artifacts_gc_count" in loop.ALL_REPAIR_KINDS
     assert "expired_build_artifacts_gc_count" in loop.ALL_REPAIR_KINDS
+
+
+def test_vmcore_retention_is_disabled_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_VMCORE_RETENTION_DAYS", raising=False)
+    names = [
+        spec.name
+        for spec in loop._repair_plan(
+            reaper=NullReaper(),
+            config=make_reconcile_config(),
+            image_publish_grace=timedelta(seconds=1),
+        )
+    ]
+    assert "vmcore_executions_retired_count" not in names

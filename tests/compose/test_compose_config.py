@@ -205,6 +205,8 @@ def test_clean_local_database_bootstraps_distinct_exact_login_members() -> None:
     for member, capability in _LOCAL_LOGIN_MEMBERS.values():
         assert member in script
         assert capability in script
+    assert 'CREATE ROLE "kdive-harness" LOGIN' in script
+    assert 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO "kdive-harness"' in script
 
 
 def test_every_runtime_waits_for_exact_local_role_bootstrap() -> None:
@@ -430,6 +432,52 @@ def test_fixed_credential_backend_addr_port_override_works(
     assert container_port in targets
 
 
+@pytest.mark.parametrize(
+    ("override", "host_ip", "published"),
+    [
+        (None, "127.0.0.1", None),
+        ("", "127.0.0.1", None),
+        ("17779", None, "17779"),
+        ("127.0.0.1:17779", "127.0.0.1", "17779"),
+        ("0.0.0.0:17779", "0.0.0.0", "17779"),
+    ],
+    ids=["unset", "empty", "bare-port", "loopback", "wildcard"],
+)
+def test_sourced_live_environment_preserves_backend_bindings(
+    override: str | None, host_ip: str | None, published: str | None
+) -> None:
+    backends = {
+        "postgres": ("KDIVE_POSTGRES_PORT", "5432", 5432),
+        "seaweedfs": ("KDIVE_SEAWEEDFS_PORT", "8333", 8333),
+        "oidc": ("KDIVE_OIDC_PORT", "8090", 8080),
+    }
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("KDIVE_", "AWS_"))}
+    env["KDIVE_LIBVIRT_URI"] = "qemu:///system"
+    if override is not None:
+        env.update({variable: override for variable, _, _ in backends.values()})
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1/scripts/live-stack/env.sh" || exit $?\n'
+            'docker compose -f "$1/docker-compose.yml" config --format json',
+            "bash",
+            str(_COMPOSE_FILE.parent),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    services = json.loads(result.stdout)["services"]
+    for service, (_, default_port, target) in backends.items():
+        assert _host_ips(services[service]) == {host_ip}
+        assert _published_ports(services[service]) == {published or default_port}
+        assert {port["target"] for port in services[service]["ports"]} == {target}
+
+
 # Per-process aux health/metrics ports (ADR-0090 §5): the loopback default ports the
 # bind decision keeps, but bound to 0.0.0.0 inside each container so the compose
 # healthcheck (and an in-network scrape) can reach a side port that is never published.
@@ -595,3 +643,97 @@ def test_prometheus_tsdb_is_tmpfs_rather_than_a_named_volume() -> None:
     # unreferenced volumes from the rendered model, so that check cannot fail.
     prometheus = _services_with_obs_profile()["prometheus"]
     assert prometheus["tmpfs"] == ["/prometheus:mode=0700,uid=65534,gid=65534,size=256m"]
+
+
+def test_vmcore_store_signer_is_delivered_to_backend_and_health_is_public() -> None:
+    services = _config(
+        # Synthetic configuration values, never a deployed identity.
+        # pragma: allowlist nextline secret
+        {"COMPOSE_S3_ACCESS_KEY": "fixture-key", "COMPOSE_S3_SECRET_KEY": "fixture-value"}
+    )["services"]
+    environment = services["seaweedfs"]["environment"]
+    assert environment["AWS_ACCESS_KEY_ID"] == "fixture-key"
+    # Same synthetic configuration value checked above.
+    # pragma: allowlist nextline secret
+    assert environment["AWS_SECRET_ACCESS_KEY"] == "fixture-value"
+    assert "S3_ACCESS_KEY" not in environment
+    assert "S3_SECRET_KEY" not in environment
+    assert services["seaweedfs"]["healthcheck"]["test"][-1] == "http://localhost:8333/healthz"
+
+
+def test_vmcore_retention_setting_reaches_every_app_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_VMCORE_RETENTION_DAYS", raising=False)
+    disabled = _config()["services"]
+    enabled = _config({"KDIVE_VMCORE_RETENTION_DAYS": "30"})["services"]
+    for name in _APP_SERVICES:
+        assert disabled[name]["environment"].get("KDIVE_VMCORE_RETENTION_DAYS") is None
+        assert enabled[name]["environment"]["KDIVE_VMCORE_RETENTION_DAYS"] == "30"
+
+
+@pytest.mark.parametrize(
+    ("access", "secret", "valid"),
+    [
+        (None, None, True),
+        ("fixture-key", "fixture-value", True),
+        ("", "", False),
+        ("fixture-key", None, False),
+        (None, "fixture-value", False),
+        ("", None, False),
+        (None, "", False),
+        ("fixture-key", "", False),
+        ("", "fixture-value", False),
+    ],
+)
+def test_store_credentials_require_absent_or_complete_nonempty_pair(
+    access: str | None, secret: str | None, valid: bool, tmp_path: Path
+) -> None:
+    env = os.environ.copy()
+    for key, value in (("COMPOSE_S3_ACCESS_KEY", access), ("COMPOSE_S3_SECRET_KEY", secret)):
+        env.pop(key, None)
+        if value is not None:
+            env[key] = value
+    rendered = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            "/dev/null",
+            "-f",
+            str(_COMPOSE_FILE),
+            "--profile",
+            "managed-worker",
+            "config",
+            "--format",
+            "json",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    # Every input renders: Compose v2 cannot express the pair rule, so the store enforces it.
+    assert rendered.returncode == 0, rendered.stderr
+    services = json.loads(rendered.stdout)["services"]
+    store = services["seaweedfs"]
+    fake_weed = tmp_path / "weed"
+    fake_weed.write_text('#!/bin/sh\necho "weed $*"\n')
+    fake_weed.chmod(0o755)
+    # Rendered config keeps `$$` escaped; the container runtime receives a single `$`.
+    entrypoint = [part.replace("$$", "$") for part in store["entrypoint"]]
+    started = subprocess.run(
+        [*entrypoint, *store["command"]],
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin", **store["environment"]},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert (started.returncode == 0) is valid
+    if not valid:
+        assert "Set both COMPOSE_S3 credentials to nonempty values" in started.stderr
+        assert started.stdout == ""
+        return
+    assert started.stdout == "weed mini -dir=/data\n"
+    expected = (access or "kdive", secret or "kdive-demo-secret")
+    for name in (*_APP_SERVICES, "seaweedfs"):
+        credentials = services[name]["environment"]
+        assert (credentials["AWS_ACCESS_KEY_ID"], credentials["AWS_SECRET_ACCESS_KEY"]) == expected

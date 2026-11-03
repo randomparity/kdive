@@ -2,6 +2,9 @@
 - name: Validate authority firewall ownership
   ansible.builtin.import_tasks: authority_validate.yml
 
+- name: Prepare the firewall backend before any protected-port rule
+  ansible.builtin.import_tasks: prerequisites.yml
+
 - name: Retract every retained authority tuple except the selected target
   ansible.builtin.include_tasks: authority_rules.yml
   vars:

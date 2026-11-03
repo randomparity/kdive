@@ -14,6 +14,10 @@ from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityResponseV1,
     decode_device_identity_response,
 )
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    ModuleVolumeSweepRequestV1,
+    ModuleVolumeSweepResponseV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
     AuthorityConflictResolutionRequestV1,
@@ -54,8 +58,17 @@ _PEER_REASONS = frozenset(
         "provider-failure",
         "remote-module-failed",
         "remote-module-refused",
+        "system-held",
         "configuration-error",
     }
+)
+
+
+# Rejections raised before the authority dispatches the request to the provider host (service.py
+# ``_reject`` and the ``superseded`` checks ahead of ``host.execute_*``; ``provider-not-configured``
+# and ``invalid-request`` at the transport). They say nothing about an earlier attempt's dispatch.
+_NOT_ADMITTED_REASONS = frozenset(
+    {"unauthenticated", "superseded", "provider-not-configured", "invalid-request"}
 )
 
 
@@ -67,21 +80,30 @@ def _failure(reason: str) -> CategorizedError:
     category = {
         "remote-module-failed": ErrorCategory.CONFLICT,
         "remote-module-refused": ErrorCategory.CONFIGURATION_ERROR,
+        "system-held": ErrorCategory.TRANSPORT_CONFLICT,
         "configuration-error": ErrorCategory.CONFIGURATION_ERROR,
     }.get(reason, ErrorCategory.INFRASTRUCTURE_FAILURE)
     details: dict[str, object] | None = None
     if reason == "remote-module-failed":
         details = {"completion": "failed-after-mutation"}
-    elif reason == "remote-module-refused":
+    elif reason in {"remote-module-refused", "system-held"}:
         details = {"completion": "refused-before-mutation"}
     elif reason == "provider-conflict":
         # ADR-0714: the bound failure carries this mark so a repeat can end the job.
         details = {"authority_reason": reason}
+    elif reason in _NOT_ADMITTED_REASONS:
+        # ADR-0808: the authority answered before it admitted the request, so this request
+        # cannot have mutated. The category stays retryable; the mark ends a lifecycle wait. Only
+        # provider-conflict carries ``authority_reason`` (ADR-0714).
+        details = {"admission": "refused"}
+    elif reason == "journal-conflict":
+        # The wire carries no reason for a journal conflict, and some of them follow a mutation.
+        details = {"admission": "unknown"}
     return CategorizedError(
         f"authority: {reason}",
         category=category,
         details=details,
-        terminal=reason == "configuration-error",
+        terminal=reason in {"configuration-error", "system-held"},
     )
 
 
@@ -180,6 +202,14 @@ class AuthorityRequestSender:
         raise CategorizedError(
             "remote device identity is invalid", category=ErrorCategory.CONFLICT
         ) from None
+
+    async def sweep_module_volumes(
+        self, request: ModuleVolumeSweepRequestV1, *, deadline: float
+    ) -> ModuleVolumeSweepResponseV1:
+        response = await self._transport_factory()._request_frame(
+            self._encode("sweep-module-volumes", request), deadline=deadline
+        )
+        return _decode_response(response, ModuleVolumeSweepResponseV1)
 
     async def acknowledge_takeover(
         self, request: AuthorityTakeoverRequestV1, *, deadline: float

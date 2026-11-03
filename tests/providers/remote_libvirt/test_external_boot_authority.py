@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import fcntl
 import inspect
 import os
+import re
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, NoReturn, cast, get_args
 from uuid import UUID, uuid4
 
 import libvirt
@@ -21,6 +26,7 @@ from pydantic import SecretStr, ValidationError
 
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
+    ModuleAttemptRestoredEvidence,
     ModuleAttemptWorkerWriteContext,
     RemoteModuleAttemptObligationRepository,
 )
@@ -29,9 +35,13 @@ from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
 )
+from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.orphan import _Selection
+from kdive.providers.external_boot_authority.proof_barrier import ProofBarrierShutdown
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
@@ -40,20 +50,27 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalPhase,
     JournalRecordV1,
 )
+from kdive.providers.external_boot_authority.service import (
+    AuthenticatedPeer,
+    AuthorityServiceError,
+    ExternalBootAuthorityService,
+    ProofBarrierAbort,
+)
 from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownReservationV1,
+    ProviderRecoveryRefusal,
+    ProviderRecoveryRefusalReason,
     SystemTeardownSupersededError,
 )
 from kdive.providers.ports.external_boot import (
-    AbsentComponentState,
     ExternalBootActivationBinding,
     ExternalBootPlan,
     ExternalBootPreparationObservation,
     ExternalBootPreparationRequest,
     OpaqueProviderRef,
     PresentComponentState,
-    ProviderStateIdentity,
     RecoveryObjectBinding,
+    RecoveryObjectObservation,
     RecoveryPoint,
     RunningKernelObservation,
 )
@@ -69,10 +86,13 @@ from kdive.providers.remote_libvirt.authority_client import module_operation as 
 from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
     DurableRemoteModuleVolumePreparationHost,
+    RemoteCleanupQuarantineV1,
     RemoteExternalBootAuthorityAdapter,
     RemoteExternalBootCoordinator,
     RemoteExternalBootOperations,
     RemoteExternalBootRecoveryRecord,
+    RemoteFinalizedBootArtifactV1,
+    RemoteFinalizedTeardownRefsV1,
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
@@ -81,7 +101,9 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationResponseV1,
     RemoteModuleVolumePreparationStore,
     RemoteSystemTeardownInspection,
+    RemoteSystemTeardownIntentV1,
     RemoteSystemTeardownState,
+    authority_reference,
 )
 from kdive.providers.remote_libvirt.external_boot_materialization import (
     ConcreteRemoteExternalBootMaterializer,
@@ -89,7 +111,9 @@ from kdive.providers.remote_libvirt.external_boot_materialization import (
 from kdive.providers.remote_libvirt.external_boot_operations import (
     ConcreteRemoteExternalBootOperations,
 )
-from kdive.providers.remote_libvirt.lifecycle.external_boot import prepare_target_definition
+from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
+    parse_boot_artifact_name,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes import (
     MaterializedBootArtifacts,
     artifact_volume_name,
@@ -122,14 +146,32 @@ from kdive.services.remote_module_authority_preparation import (
     prepare_remote_module_on_authority_host,
 )
 from tests.db.external_boot_authority_support import _RoleDsns
+from tests.providers.external_boot_authority.service_support import _Adapter as _ServiceAdapter
+from tests.providers.external_boot_authority.service_support import _mutation as _support_mutation
+from tests.providers.external_boot_authority.service_support import (
+    _Repository as _SupportRepository,
+)
+from tests.providers.external_boot_authority.service_support import (
+    _takeover as _support_takeover,
+)
 from tests.providers.remote_libvirt.authority_module_support import (
+    InactiveSystemHost,
     _prepared_volumes,
     _remote_preparation_request,
     _terminal_response,
 )
+from tests.providers.remote_libvirt.external_boot_authority_support import (
+    _native_adapter,
+    _native_context,
+    _native_request,
+    _NativeOperations,
+    _plan_for_record,
+    _publish_terminal,
+    _record,
+    _restored_response,
+)
 from tests.providers.remote_libvirt.lifecycle.external_boot_support import (
     _FakeAgentExec,
-    _materialization,
     _plan,
     _replies,
     _source_xml,
@@ -200,10 +242,58 @@ def test_concrete_remote_materializer_binds_and_publishes_private_volume_names(
     )
 
     assert result.artifacts.kernel.ref == "volumes/exact-private-kernel"
+    modules_ref = result.artifacts.modules.ref
+    assert re.fullmatch(r"bundle/[0-9a-f]{64}", modules_ref)
+    assert modules_ref == f"bundle/{plan.bundle.sha256.removeprefix('sha256:')}"
+    assert parse_boot_artifact_name(modules_ref) is None
     assert result.plan_identity == plan.identity
     assert result.ownership.system_id == binding.system_id
     assert result.ownership.run_id == binding.run_id
     assert calls == [(UUID(binding.system_id), UUID(binding.run_id), "boot-pool")]
+
+
+@pytest.mark.parametrize("shortfall", [0, 1])
+@pytest.mark.parametrize("optional_sources", [False, True])
+def test_concrete_remote_materializer_capacity_boundary(
+    shortfall: int,
+    optional_sources: bool,
+) -> None:
+    from kdive.providers.shared.external_boot_bounds import materialization_reservation_bytes
+
+    data = _plan(with_initrd=False).model_dump(by_alias=True)
+    if optional_sources:
+        for field in ("initrd", "debuginfo"):
+            data[field] = {
+                "key": field,
+                "version": "v1",
+                "sha256": "sha256:" + "0" * 64,
+                "size_bytes": 123,
+            }
+    plan = ExternalBootPlan.model_validate(data)
+
+    class Stager:
+        def materialize_artifacts(self, actual: ExternalBootPlan, descriptor: int) -> None:
+            assert actual == plan
+            raise RuntimeError("staging reached")
+
+    materializer = ConcreteRemoteExternalBootMaterializer(
+        object_store=cast(Any, object()),
+        connection=cast(Any, object()),
+        pool_name="boot-pool",
+        capacity_bytes=materialization_reservation_bytes(plan) + 2 * 1_048_576 - shortfall,
+        monotonic=lambda: 1.0,
+        artifact_stager=cast(Any, Stager()),
+    )
+    binding = ExternalBootActivationBinding(
+        system_id=plan.ownership.system_id,
+        run_id=plan.ownership.run_id,
+        activation_id=str(uuid4()),
+    )
+    error, message = (
+        (ValueError, "configured capacity") if shortfall else (RuntimeError, "staging reached")
+    )
+    with pytest.raises(error, match=message):
+        materializer.materialize(plan, binding, OpaqueProviderRef(ref="authority/current"), 2.0)
 
 
 def test_concrete_remote_materializer_rejects_capacity_and_foreign_binding() -> None:
@@ -449,10 +539,24 @@ def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -
     assert domain.creates == 1
     assert observation.identity == recovery.materialization.kernel_observation
     assert observation.cmdline == recovery.definition.expected_cmdline.encode()
+    activated = operations.observe_state(recovery, 2.0)
+    assert (activated.definition, activated.active, activated.recovery_objects_absent) == (
+        "target",
+        True,
+        False,
+    )
     operations.recover(recovery, authority, 2.0)
     operations.recover(recovery, authority, 2.0)
     assert domain.xml == recovery.definition.source_xml
     assert not domain.active
+    recovered = operations.observe_state(recovery, 2.0)
+    assert (recovered.definition, recovered.active, recovered.recovery_objects_absent) == (
+        "source",
+        False,
+        False,
+    )
+    assert recovered.preserved == recovery.definition.source_definition
+    assert recovered.boot == recovery.definition.source_boot
 
     incomplete = recovery.model_copy(
         update={
@@ -463,7 +567,7 @@ def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -
             )
         }
     )
-    with pytest.raises(ValueError, match="omitted an owned private artifact"):
+    with pytest.raises(ProviderRecoveryRefusal, match="omitted an owned private artifact"):
         operations.activate(incomplete, authority, 2.0)
     assert domain.creates == 1
 
@@ -486,10 +590,15 @@ def test_concrete_remote_activate_replays_target_and_observes_running_kernel() -
             )
         }
     )
+    with pytest.raises(ProviderRecoveryRefusal, match="remains before authorized cleanup"):
+        operations.cleanup(recovery, authority, 2.0)
+    assert not deleted
     modules_absent = True
     assert recovery.materialization.artifacts.initrd is not None
     operations.cleanup(recovery, authority, 2.0)
     operations.cleanup(recovery, authority, 2.0)
+    cleaned = operations.observe_state(recovery, 2.0)
+    assert (cleaned.definition, cleaned.recovery_objects_absent) == ("source", True)
     assert deleted == {
         recovery.materialization.artifacts.kernel.ref,
         recovery.materialization.artifacts.initrd.ref,
@@ -529,16 +638,9 @@ async def test_remote_adapter_replays_materialize_and_prepare_without_repeating_
                 }
             )
 
-    class Delegate:
-        async def observe(self, request: object) -> object:
-            raise AssertionError(request)
-
-        async def commit(self, request: object, context: object) -> object:
-            raise AssertionError((request, context))
-
     coordinator = RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 9.0)
     executor = RemoteModulePreparationExecutor()
-    adapter = RemoteExternalBootAuthorityAdapter(cast(Any, Delegate()), coordinator, executor)
+    adapter = RemoteExternalBootAuthorityAdapter(coordinator, executor)
     prepare_request = terminal.request.authority
     materialize_request = prepare_request.model_copy(
         update={
@@ -564,6 +666,107 @@ async def test_remote_adapter_replays_materialize_and_prepare_without_repeating_
     assert calls == ["materialize", "prepare"]
     assert await adapter.preparation_receipt(prepare_request) is not None
     executor.shutdown()
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_remote_adapter_adopts_a_new_generations_materialize(tmp_path: Path) -> None:
+    """A retry generation re-materializes by adopting the first generation's receipt (#3348)."""
+    record = _record()
+    plan = _plan_for_record(record)
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    _publish_terminal(store, record)
+    terminal = store.reopen_terminal(record.binding, plan.identity)
+    calls: list[str] = []
+
+    class Operations:
+        def materialize(self, *args: object) -> object:
+            calls.append("materialize")
+            return record.materialization.model_copy(
+                update={"plan_identity": terminal.request.authority.plan_identity}
+            )
+
+    coordinator = RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 9.0)
+    executor = RemoteModulePreparationExecutor()
+    adapter = RemoteExternalBootAuthorityAdapter(coordinator, executor)
+    base = terminal.request.authority
+    first = base.model_copy(
+        update={
+            "operation": AuthorityOperation.MATERIALIZE,
+            "operation_identity": "materialize-gen-1",
+            "attempt_id": uuid4(),
+        }
+    )
+    retry = first.model_copy(
+        update={
+            "generation": first.generation + 1,
+            "operation_identity": "materialize-gen-2",
+            "attempt_id": uuid4(),
+        }
+    )
+
+    def context(request: AuthorityPreparationMutationRequestV1) -> AuthorityCommitContextV1:
+        return AuthorityCommitContextV1(
+            commit_point=request.operation,
+            operation_identity=request.operation_identity,
+            attempt_id=request.attempt_id,
+            journal_sequence=1,
+            journal_digest="sha256:" + "a" * 64,
+        )
+
+    original = await adapter.commit(first, context(first))
+    adopted = await adapter.adopt_preparation(
+        retry, first, original.composite_state, context(retry)
+    )
+
+    assert calls == ["materialize"]
+    assert adopted.composite_state != original.composite_state
+    assert (await adapter.preparation_receipt(retry)).operation_identity == "materialize-gen-2"
+    with pytest.raises(ValueError, match="predecessor cannot be adopted"):
+        await adapter.adopt_preparation(retry, first, "sha256:" + "0" * 64, context(retry))
+    with pytest.raises(ValueError, match="differs from request"):
+        await adapter.adopt_preparation(retry, first, original.composite_state, context(first))
+    executor.shutdown()
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("recorded", "live", "expected"),
+    [
+        ("running", "inactive", "running"),
+        (None, "running", "running"),
+        (None, "inactive", "inactive"),
+    ],
+)
+def test_prepare_records_the_power_written_ahead_of_the_stop(
+    tmp_path: Path, recorded: str | None, live: str, expected: str
+) -> None:
+    record = _record()
+    plan = _plan_for_record(record)
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    _publish_terminal(store, record)
+    terminal = store.reopen_terminal(record.binding, plan.identity)
+    authority = terminal.request.authority
+    if recorded is not None:
+        store.record_prior_power(authority, cast(Any, recorded))
+    materialization = record.materialization.model_copy(update={"plan_identity": plan.identity})
+    prepared = record.model_copy(
+        update={
+            "plan_identity": plan.identity,
+            "materialization": materialization,
+            "prior_power": live,
+        }
+    )
+
+    class Operations:
+        def prepare(self, *args: object) -> RemoteExternalBootRecoveryRecord:
+            return prepared
+
+    coordinator = RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 9.0)
+    store.publish_materialization(plan, materialization)
+    point = coordinator.prepare(materialization, record.binding, OpaqueProviderRef(ref="a"))
+
+    assert store.reopen_recovery(point).prior_power == expected
     store.close()
 
 
@@ -594,16 +797,9 @@ async def test_remote_cleanup_changed_nonce_fails_before_provider_mutation() -> 
             del point, authority
             calls.append("recover")
 
-        def cleanup(self, point: object, authority: object) -> None:
-            del point, authority
+        def cleanup(self, point: object) -> None:
+            del point
             calls.append("cleanup")
-
-    class Delegate:
-        async def observe(self, request: object) -> object:
-            raise AssertionError(request)
-
-        async def commit(self, request: object, context: object) -> object:
-            raise AssertionError((request, context))
 
     request = AuthorityMutationRequestV1(
         authority_id=uuid4(),
@@ -638,14 +834,328 @@ async def test_remote_cleanup_changed_nonce_fails_before_provider_mutation() -> 
         recovery_reference_json=record.module_recovery.model_dump_json(),
     )
     executor = RemoteModulePreparationExecutor()
-    adapter = RemoteExternalBootAuthorityAdapter(
-        cast(Any, Delegate()), cast(Any, Coordinator()), executor
-    )
+    adapter = RemoteExternalBootAuthorityAdapter(cast(Any, Coordinator()), executor)
 
-    with pytest.raises(ValueError, match="changed before provider deletion"):
+    with pytest.raises(ProviderRecoveryRefusal, match="changed before provider deletion"):
         await adapter.commit_cleanup(request, context, evidence)
     assert calls == ["point", "record"]
     executor.shutdown()
+
+
+@pytest.mark.anyio
+async def test_remote_activate_commits_through_the_remote_coordinator(tmp_path: Path) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path)
+    request = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    )
+
+    observed = await adapter.commit(request, _native_context(request))
+
+    assert operations.calls == ["activate"]
+    assert observed.category == "target"
+    assert await adapter.observe(request) == observed
+    adapter.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("purpose", ["release", "recover"])
+async def test_remote_recover_restores_without_deleting(tmp_path: Path, purpose: str) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path, restored=True)
+    operations.state = replace(operations.state, definition="source", active=False)
+    request = _native_request(record, point, purpose=purpose, operation=AuthorityOperation.RECOVER)
+
+    observed = await adapter.commit(request, _native_context(request))
+
+    assert operations.calls == ["recover"]
+    assert observed.category == "source"
+    adapter.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("purpose", "operation"),
+    [
+        ("release", AuthorityOperation.CLEANUP),
+        ("teardown", AuthorityOperation.TEARDOWN),
+        ("recover", AuthorityOperation.RECOVERY_ATTEMPT),
+    ],
+)
+async def test_remote_commit_refuses_points_outside_its_mutations(
+    tmp_path: Path, purpose: str, operation: AuthorityOperation
+) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path)
+    request = _native_request(record, point, purpose=purpose, operation=operation, named=True)
+
+    with pytest.raises(ValueError, match="is not admitted"):
+        await adapter.commit(request, _native_context(request))
+    assert operations.calls == []
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_commit_refuses_changed_identity_before_provider(tmp_path: Path) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path)
+    request = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    ).model_copy(update={"expected_source_identity": "sha256:" + "9" * 64})
+
+    with pytest.raises(ValueError, match="identities differ"):
+        await adapter.commit(request, _native_context(request))
+    assert operations.calls == []
+    adapter.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("definition", "objects_absent", "restored", "category"),
+    [
+        # Prepared, not yet activated: modules are installed in the shared overlay.
+        ("source", False, False, "source"),
+        ("source", False, True, "source"),
+        ("source", True, True, "absent"),
+        ("target", False, False, "target"),
+        ("target", False, True, "mixed"),
+        ("target", True, True, "conflict"),
+        ("other", False, False, "conflict"),
+    ],
+)
+async def test_remote_observation_categorizes_live_definition_and_durable_modules(
+    tmp_path: Path, definition: str, objects_absent: bool, restored: bool, category: str
+) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path, restored=restored)
+    operations.state = replace(
+        operations.state, definition=definition, recovery_objects_absent=objects_absent
+    )
+    request = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    )
+
+    observed = await adapter.observe(request)
+
+    assert observed.category == category
+    assert operations.calls == []
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_observation_composite_names_exactly_what_was_seen(tmp_path: Path) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path)
+    request = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    )
+
+    first = await adapter.observe(request)
+    assert await adapter.observe(request) == first
+    operations.state = replace(operations.state, active=False)
+    changed = await adapter.observe(request)
+
+    assert changed.category == first.category == "target"
+    assert changed.composite_state != first.composite_state
+    assert changed.observation_id != first.observation_id
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_observation_is_unreadable_or_conflict_without_raising(
+    tmp_path: Path,
+) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path)
+    request = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    )
+    operations.fail_read = True
+    assert (await adapter.observe(request)).category == "unreadable"
+    absent_plan = request.model_copy(update={"plan_identity": "sha256:" + "8" * 64})
+    assert (await adapter.observe(absent_plan)).category == "unreadable"
+    operations.fail_read = False
+    foreign = request.model_copy(update={"intended_target_identity": "sha256:" + "7" * 64})
+    assert (await adapter.observe(foreign)).category == "conflict"
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_release_cleanup_deletes_under_its_preparation_authority(
+    tmp_path: Path,
+) -> None:
+    adapter, operations, record, point, preparation_authority = _native_adapter(
+        tmp_path, restored=True
+    )
+    request = _native_request(
+        record, point, purpose="release", operation=AuthorityOperation.CLEANUP, named=True
+    )
+    assert f"authority/{request.authority_id}/" not in preparation_authority.ref
+    evidence = AuthorityCleanupEvidenceContextV1(
+        operation_identity=request.operation_identity,
+        attempt_id=request.attempt_id,
+        operation_nonce=record.module_recovery.operation_nonce,
+        cleanup_state="discharged",
+        recovery_reference_json=record.module_recovery.model_dump_json(),
+    )
+    operations.state = replace(
+        operations.state, definition="source", active=False, recovery_objects_absent=True
+    )
+
+    assert await adapter.cleanup_subject(request) == record.module_recovery.operation_nonce
+    observed = await adapter.commit_cleanup(request, _native_context(request), evidence)
+
+    assert operations.calls == ["recover", "cleanup"]
+    assert operations.cleanup_owners == [preparation_authority]
+    assert observed.category == "absent"
+    adapter.close()
+
+
+def _mkdir(path: Path) -> Path:
+    path.mkdir()
+    return path
+
+
+async def _resolve_after_observing(
+    tmp_path: Path, *, definition: str, change_after_ack: bool = False
+) -> tuple[_NativeOperations, RemoteExternalBootAuthorityAdapter, Any]:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path, restored=True)
+    operations.state = replace(
+        operations.state, definition=definition, active=False, recovery_objects_absent=False
+    )
+    observing = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    )
+    acknowledged = (await adapter.observe(observing)).composite_state
+    if change_after_ack:
+        operations.state = replace(operations.state, boot="sha256:" + "9" * 64)
+    request = AuthorityConflictResolutionRequestV1.model_validate(
+        {
+            **_native_request(
+                record,
+                point,
+                purpose="resolve-conflict",
+                operation=AuthorityOperation.RESOLVE_CONFLICT,
+            ).model_dump(mode="python", by_alias=True),
+            "expected_observed_composite": acknowledged,
+        }
+    )
+    return operations, adapter, (request, _native_context(request))
+
+
+@pytest.mark.anyio
+async def test_remote_resolve_restores_the_acknowledged_third_definition(tmp_path: Path) -> None:
+    operations, adapter, args = await _resolve_after_observing(tmp_path, definition="other")
+
+    await adapter.commit(*args)
+
+    assert operations.calls == ["recover-acknowledged"]
+    assert operations.acknowledged == [
+        (operations.state.preserved, operations.state.boot),
+    ]
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_resolve_retains_the_recovery_objects_and_observes_the_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3414: a resolve recovers and leaves the objects for the release CLEANUP, as RECOVER does."""
+    operations, adapter, args = await _resolve_after_observing(tmp_path, definition="other")
+    recover = operations.recover_acknowledged
+
+    def recover_to_source(*values: Any) -> None:
+        recover(*values)
+        operations.state = replace(operations.state, definition="source", active=False)
+
+    monkeypatch.setattr(operations, "recover_acknowledged", recover_to_source)
+
+    observed = await adapter.commit(*args)
+
+    assert "cleanup" not in operations.calls
+    assert observed.category == "source"
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_resolve_from_a_recorded_side_uses_ordinary_recovery(tmp_path: Path) -> None:
+    operations, adapter, args = await _resolve_after_observing(tmp_path, definition="target")
+
+    await adapter.commit(*args)
+
+    assert operations.calls == ["recover"]
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_resolve_refuses_a_definition_changed_since_the_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    operations, adapter, args = await _resolve_after_observing(
+        tmp_path, definition="other", change_after_ack=True
+    )
+
+    with pytest.raises(ValueError, match="changed before restore"):
+        await adapter.commit(*args)
+
+    assert operations.calls == []
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_observation_composite_ignores_module_restore_evidence(
+    tmp_path: Path,
+) -> None:
+    """Resolution writes restore evidence before the authority rechecks the acknowledgement."""
+    adapter, operations, record, point, _ = _native_adapter(_mkdir(tmp_path / "a"), restored=False)
+    request = _native_request(
+        record, point, purpose="activate", operation=AuthorityOperation.ACTIVATE
+    )
+    unrestored = (await adapter.observe(request)).composite_state
+    adapter.close()
+    adapter, operations, record, point, _ = _native_adapter(_mkdir(tmp_path / "b"), restored=True)
+    restored = (await adapter.observe(request)).composite_state
+    adapter.close()
+
+    assert unrestored == restored
+
+
+@pytest.mark.anyio
+async def test_remote_release_cleanup_must_name_the_object_it_deletes(tmp_path: Path) -> None:
+    adapter, operations, record, point, _ = _native_adapter(tmp_path, restored=True)
+    request = _native_request(
+        record, point, purpose="release", operation=AuthorityOperation.CLEANUP
+    )
+    evidence = AuthorityCleanupEvidenceContextV1(
+        operation_identity=request.operation_identity,
+        attempt_id=request.attempt_id,
+        operation_nonce=record.module_recovery.operation_nonce,
+        cleanup_state="discharged",
+        recovery_reference_json=record.module_recovery.model_dump_json(),
+    )
+
+    with pytest.raises(ValueError, match="recovery objects are not this activation's"):
+        await adapter.commit_cleanup(request, _native_context(request), evidence)
+    assert operations.calls == []
+    adapter.close()
+
+
+def test_coordinator_cleanup_refuses_a_record_from_another_preparation(tmp_path: Path) -> None:
+    record = _record()
+    operations = _NativeOperations()
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    _publish_terminal(store, record)
+    foreign = record.model_copy(
+        update={
+            "module_recovery": record.module_recovery.model_copy(
+                update={
+                    "authority_identity": RemoteModuleRecoveryRefV2.identity_for_authority(
+                        OpaqueProviderRef(ref="authority/other-preparation")
+                    )
+                }
+            )
+        }
+    )
+    store.publish_recovery(foreign)
+    coordinator = RemoteExternalBootCoordinator(cast(Any, operations), store, lambda: 300.0)
+
+    with pytest.raises(ValueError, match="recovery authority does not match reference"):
+        coordinator.cleanup(store.recovery_point(foreign.binding, foreign.plan_identity))
+    assert operations.calls == []
+    store.close()
 
 
 def _module_lifecycle_request(
@@ -672,36 +1182,6 @@ def _module_lifecycle_request(
         authority=mutation,
         action=action,
         budget_seconds=30,
-    )
-
-
-def _restored_response(
-    request: RemoteModuleVolumePreparationRequestV1,
-) -> RemoteModuleLifecycleResponseV1:
-    terminal = _terminal_response(request)
-    capture = request.operation
-    operation = RemoteModuleOperationV1(
-        operation="restore",
-        system_id=capture.system_id,
-        run_id=capture.run_id,
-        plan_identity=capture.plan_identity,
-        operation_nonce=capture.operation_nonce,
-        release=capture.release,
-        root_volume=capture.root_volume,
-        source_manifest=capture.source_manifest,
-        capture_absent=True,
-        installed_manifest=capture.source_manifest,
-        appliance_image_digest=capture.appliance_image_digest,
-    )
-    result = terminal.result.model_copy(
-        update={"phase": "restored", "entry_count": None, "content_bytes": None}
-    )
-    return RemoteModuleLifecycleResponseV1(
-        action="restore",
-        recovery=terminal.recovery,
-        operation=operation,
-        result=result,
-        volumes_absent=False,
     )
 
 
@@ -974,128 +1454,6 @@ def test_asyncio_run_shutdown_waits_for_late_prep_completion(
     assert calls == 3
 
 
-def _record() -> RemoteExternalBootRecoveryRecord:
-    system_id = "00000000-0000-4000-8000-000000000001"
-    run_id = "00000000-0000-4000-8000-000000000002"
-    base_plan = _plan()
-    plan = base_plan.model_copy(
-        update={
-            "ownership": base_plan.ownership.model_copy(
-                update={"system_id": system_id, "run_id": run_id}
-            )
-        }
-    )
-    materialization = _materialization(plan=plan)
-    materialization = materialization.model_copy(
-        update={
-            "ownership": materialization.ownership.model_copy(
-                update={"system_id": system_id, "run_id": run_id}
-            )
-        }
-    )
-    binding = ExternalBootActivationBinding(
-        system_id=plan.ownership.system_id,
-        run_id=plan.ownership.run_id,
-        activation_id="00000000-0000-4000-8000-000000000003",
-    )
-    definition = prepare_target_definition(
-        _source_xml(system_id=UUID(system_id)),
-        plan=plan,
-        materialization=materialization,
-        binding=binding,
-        pool="kdive",
-        overlay_path="/pool/overlay.qcow2",
-        kernel_path="/artifacts/kernel",
-        initrd_path="/artifacts/initrd",
-    )
-    digest = "sha256:" + "a" * 64
-    module = RemoteModuleRecoveryRefV2.model_validate(
-        {
-            "system_id": binding.system_id,
-            "run_id": binding.run_id,
-            "plan_identity": plan.identity,
-            "operation_nonce": "b" * 32,
-            "pool": {"ref": "pool/modules"},
-            "root_volume": {"ref": "volumes/root"},
-            "source_volume": {"ref": "volumes/source"},
-            "scratch_volume": {"ref": "volumes/scratch"},
-            "operation_identity": digest,
-            "result_identity": digest,
-            "installed_entry_count": 1,
-            "installed_content_bytes": 3,
-            "appliance_image_digest": digest,
-            "authority_identity": digest,
-            "source_capacity_bytes": 4096,
-        }
-    )
-    return RemoteExternalBootRecoveryRecord(
-        binding=binding,
-        plan_identity=plan.identity,
-        materialization=materialization,
-        definition=definition,
-        module_recovery=module,
-        source_state=ProviderStateIdentity(
-            definition=definition.source_definition, modules=AbsentComponentState()
-        ),
-        target_state=ProviderStateIdentity(
-            definition=definition.target_definition,
-            modules=PresentComponentState(manifest=materialization.installed_module_tree),
-        ),
-        prior_power="inactive",
-        recovery_objects=tuple(
-            sorted(
-                (
-                    OpaqueProviderRef(ref="volumes/source"),
-                    OpaqueProviderRef(ref="volumes/scratch"),
-                ),
-                key=lambda value: value.to_canonical_json(),
-            )
-        ),
-    )
-
-
-def _plan_for_record(record: RemoteExternalBootRecoveryRecord) -> ExternalBootPlan:
-    base = _plan()
-    return base.model_copy(
-        update={
-            "ownership": base.ownership.model_copy(
-                update={
-                    "system_id": record.binding.system_id,
-                    "run_id": record.binding.run_id,
-                }
-            )
-        }
-    )
-
-
-def _publish_terminal(
-    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
-) -> None:
-    plan = _plan_for_record(record)
-    base = _remote_preparation_request()
-    authority = base.authority.model_copy(
-        update={
-            "system_id": UUID(record.binding.system_id),
-            "activation_id": UUID(record.binding.activation_id),
-            "run_id": UUID(record.binding.run_id),
-            "plan_identity": plan.identity,
-            "plan": plan,
-        }
-    )
-    operation = base.operation.model_copy(
-        update={
-            "system_id": record.binding.system_id,
-            "run_id": record.binding.run_id,
-            "plan_identity": plan.identity,
-            "release": plan.module_obligation.release,
-            "source_manifest": plan.module_obligation.source_manifest,
-        }
-    )
-    request = RemoteModuleVolumePreparationRequestV1(authority=authority, operation=operation)
-    store.stage(request, 999.0)
-    store.publish_result(request, _terminal_response(request))
-
-
 def _preparation_request(
     record: RemoteExternalBootRecoveryRecord,
     phase: Literal["materialize", "prepare"],
@@ -1283,7 +1641,7 @@ async def test_durable_remote_preparation_reopens_before_and_after_mutation(tmp_
     request = _remote_preparation_request()
     calls = 0
 
-    class Host:
+    class Host(InactiveSystemHost):
         async def execute(
             self, admitted: AdmittedRemoteModulePreparation
         ) -> RemoteModuleTerminalPreparationResponseV1:
@@ -1299,7 +1657,9 @@ async def test_durable_remote_preparation_reopens_before_and_after_mutation(tmp_
 
     second = RemoteModuleVolumePreparationStore(tmp_path)
     durable = DurableRemoteModuleVolumePreparationHost(second, cast(Any, Host()))
+    assert not durable.execution_started(request)
     expected = await durable.execute(request)
+    assert durable.execution_started(request)
     second.close()
 
     third = RemoteModuleVolumePreparationStore(tmp_path)
@@ -1320,7 +1680,7 @@ async def test_durable_remote_lifecycle_waits_through_lost_reply_and_reopens_ter
     release = asyncio.Event()
     calls = 0
 
-    class Host:
+    class Host(InactiveSystemHost):
         async def execute_lifecycle(
             self, request: object, terminal: object, restored: object, deadline: float
         ) -> RemoteModuleLifecycleResponseV1:
@@ -1413,7 +1773,7 @@ async def test_remote_reap_requires_restored_cleanup_or_installed_teardown(
     )
     calls = 0
 
-    class Host:
+    class Host(InactiveSystemHost):
         async def execute_lifecycle(
             self,
             request: RemoteModuleLifecycleRequestV1,
@@ -1552,6 +1912,121 @@ async def test_worker_reap_requires_retained_terminal_evidence_before_dispatch(
             action="reap",
             deadline=asyncio.get_running_loop().time() + 10,
         )
+
+
+async def _worker_cleanup_retry(
+    *,
+    discharged: bool,
+    open_: bool = False,
+    purpose: str = "release",
+    operation: str = "cleanup",
+    reap_response: Callable[[RemoteModuleLifecycleResponseV1], RemoteModuleLifecycleResponseV1]
+    | None = None,
+) -> tuple[ModuleCompletion, list[str]]:
+    """Run a worker reap whose obligation is open or already discharged by a first pass."""
+    preparation_request = _remote_preparation_request()
+    preparation = ModuleAttemptPreparationRequestV1(
+        module_attempt_obligation=ModuleAttemptObligationReceiptV1(
+            system_id=preparation_request.authority.system_id,
+            run_id=preparation_request.authority.run_id,
+            operation_nonce=preparation_request.operation.operation_nonce,
+        )
+    )
+    restored = _restored_response(preparation_request)
+    reaped = restored.model_copy(update={"action": "reap", "volumes_absent": True})
+    if reap_response is not None:
+        reaped = reap_response(reaped)
+    retained = module_completion(restored.operation, restored)
+    evidence = ModuleAttemptRestoredEvidence(
+        restored_operation=retained.operation.evidence.document,
+        restored_operation_identity=retained.operation.evidence.identity,
+        restored_result=retained.result.document,
+        restored_result_identity=retained.result.identity,
+    )
+    calls: list[str] = []
+
+    class Repository:
+        async def reap_obligation_is_open(self, *_args: object) -> bool:
+            return open_
+
+        async def reap_obligation_is_discharged(self, *_args: object) -> bool:
+            return discharged
+
+        async def read_restored_evidence(self, *_args: object) -> ModuleAttemptRestoredEvidence:
+            return evidence
+
+        async def read_terminal_evidence(self, *_args: object) -> None:
+            return None
+
+        async def worker_discharge_reap_obligation(self, *_args: object) -> bool:
+            calls.append("discharge")
+            return True
+
+    class Sender:
+        async def execute_remote_module_lifecycle(self, *_args: object, **_kwargs: object) -> Any:
+            calls.append("dispatch")
+            return module_completion(reaped.operation, reaped)
+
+    response = await execute_remote_module_lifecycle_on_authority_host(
+        connection=cast(Any, object()),
+        repository=cast(Any, Repository()),
+        sender=cast(Any, Sender()),
+        authority=_module_lifecycle_request(
+            preparation_request, purpose=purpose, operation=operation, action="reap"
+        ).authority,
+        preparation=preparation,
+        worker_context=ModuleAttemptWorkerWriteContext(
+            job_id=uuid4(),
+            job_attempt=1,
+            incarnation_credential=SecretStr("worker-credential"),
+            preparation=preparation,
+        ),
+        action="reap",
+        deadline=asyncio.get_running_loop().time() + 10,
+    )
+    return response, calls
+
+
+@pytest.mark.anyio
+async def test_cleanup_retry_after_the_reap_discharged_the_obligation_succeeds() -> None:
+    response, calls = await _worker_cleanup_retry(discharged=True)
+
+    assert response.volumes_absent
+    assert calls == ["dispatch", "discharge"]
+
+
+@pytest.mark.anyio
+async def test_cleanup_retry_needs_the_host_to_report_the_volumes_absent() -> None:
+    with pytest.raises(CategorizedError, match="volumes reaped") as refused:
+        await _worker_cleanup_retry(
+            discharged=True,
+            reap_response=lambda response: response.model_copy(update={"volumes_absent": False}),
+        )
+
+    assert refused.value.category is ErrorCategory.CONFLICT
+
+
+@pytest.mark.anyio
+async def test_cleanup_retry_needs_the_host_response_to_match_the_restored_evidence() -> None:
+    with pytest.raises(CategorizedError, match="differs from restored evidence"):
+        await _worker_cleanup_retry(
+            discharged=True,
+            reap_response=lambda response: response.model_copy(
+                update={"result": response.result.model_copy(update={"entry_count": 7})}
+            ),
+        )
+
+
+@pytest.mark.anyio
+async def test_cleanup_without_an_open_or_discharged_obligation_is_refused() -> None:
+    with pytest.raises(CategorizedError, match="reap obligation is not retained"):
+        await _worker_cleanup_retry(discharged=False)
+
+
+@pytest.mark.anyio
+async def test_teardown_reap_of_a_discharged_obligation_is_still_refused() -> None:
+    with pytest.raises(CategorizedError, match="reap obligation is not retained"):
+        await _worker_cleanup_retry(discharged=True, purpose="teardown", operation="teardown")
 
 
 @pytest.mark.anyio
@@ -1790,10 +2265,13 @@ def test_durable_remote_preparation_preserves_first_authority_clock_deadline(
 async def test_durable_remote_preparation_failure_is_terminal_for_recovery(tmp_path: Path) -> None:
     request = _remote_preparation_request()
 
-    class FailingHost:
+    class FailingHost(InactiveSystemHost):
         async def execute(self, request: object) -> object:
             del request
             raise RuntimeError("provider returned after mutation")
+
+        async def restore_system_power(self, admitted: object, prior: object) -> None:
+            raise RuntimeError("System power could not be restored")
 
     store = RemoteModuleVolumePreparationStore(tmp_path)
     store.stage(request, 999.0)
@@ -1810,6 +2288,207 @@ async def test_durable_remote_preparation_failure_is_terminal_for_recovery(tmp_p
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("raised", "completion"),
+    [
+        (RuntimeError("provider returned after mutation"), "failed-after-mutation"),
+        (
+            CategorizedError(
+                "inspection refused",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"completion": "refused-before-mutation"},
+            ),
+            "refused-before-mutation",
+        ),
+    ],
+)
+async def test_durable_remote_preparation_failure_restores_power_and_does_not_latch(
+    tmp_path: Path, raised: Exception, completion: str
+) -> None:
+    request = _remote_preparation_request()
+    restored: list[object] = []
+
+    class FailingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            del request
+            raise raised
+
+        async def restore_system_power(self, admitted: object, prior: object) -> None:
+            restored.append(prior)
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    for _ in range(2):
+        with pytest.raises(CategorizedError) as failed:
+            await durable.execute(request)
+        assert failed.value.details["completion"] == completion
+        assert failed.value.details["abandoned"] is True
+        assert failed.value.__cause__ is raised
+    assert restored == ["inactive", "inactive"]
+    assert store.reopen_completion(request) is None
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_failure_before_the_stop_is_reported_as_refused_before_mutation(
+    tmp_path: Path,
+) -> None:
+    request = _remote_preparation_request()
+
+    class UnreadableHost(InactiveSystemHost):
+        async def observe_system_power(self, admitted: object) -> NoReturn:
+            raise ValueError("power could not be read")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, UnreadableHost()))
+    with pytest.raises(CategorizedError) as failed:
+        await durable.execute(request)
+
+    assert failed.value.details == {"completion": "refused-before-mutation", "abandoned": True}
+    assert store.reopen_completion(request) is None
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_unclearable_prior_power_record_does_not_latch_a_restored_system(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _remote_preparation_request()
+
+    class FailingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            raise RuntimeError("provider returned after mutation")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+
+    def refuse(*_args: object) -> None:
+        raise OSError("read-only store")
+
+    monkeypatch.setattr(store, "clear_prior_power", refuse)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    with pytest.raises(CategorizedError) as failed:
+        await durable.execute(request)
+
+    assert failed.value.details["abandoned"] is True
+    assert store.reopen_completion(request) is None
+    store.close()
+
+
+def _binding_for(request: RemoteModuleVolumePreparationRequestV1) -> ExternalBootActivationBinding:
+    authority = request.authority
+    return ExternalBootActivationBinding(
+        system_id=str(authority.system_id),
+        run_id=str(authority.run_id),
+        activation_id=str(authority.activation_id),
+    )
+
+
+@pytest.mark.anyio
+async def test_a_recorded_stop_counts_as_an_execution_that_started(tmp_path: Path) -> None:
+    """A crash after the stop leaves the System stopped, so a resume must not be refused."""
+    request = _remote_preparation_request()
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, InactiveSystemHost()))
+    assert durable.execution_started(request) is False
+
+    store.record_prior_power(request.authority, "running")
+    assert durable.execution_started(request) is True
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_a_record_another_request_wrote_is_not_a_started_execution(tmp_path: Path) -> None:
+    """The record outlives a successful PREPARE, so a later PREPARE must still be rechecked."""
+    first = _remote_preparation_request()
+    later = first.model_copy(
+        update={
+            "authority": first.authority.model_copy(update={"operation_identity": "prepare-later"})
+        }
+    )
+    expected = _terminal_response(first)
+
+    class SucceedingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            return expected
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(first, 999.0)
+    store.stage(later, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, SucceedingHost()))
+    await durable.execute(first)
+
+    assert store.prior_power(_binding_for(first), first.authority.plan_identity) == "inactive"
+    assert durable.execution_started(first) is True
+    assert durable.execution_started(later) is False
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_an_orphan_owner_does_not_wedge_a_later_request(tmp_path: Path) -> None:
+    """A crash between the owner and the power record must not refuse every later PREPARE."""
+    first = _remote_preparation_request()
+    later = first.model_copy(
+        update={
+            "authority": first.authority.model_copy(update={"operation_identity": "prepare-later"})
+        }
+    )
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.record_prior_power(first.authority, "running")
+    (power,) = tmp_path.glob("*.prior-power")
+    power.unlink()
+
+    assert store.record_prior_power(later.authority, "inactive") == "inactive"
+    assert store.prior_power_started_by(later.authority) is True
+    assert store.prior_power_started_by(first.authority) is False
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_a_restored_abandon_is_not_an_execution_that_started(tmp_path: Path) -> None:
+    request = _remote_preparation_request()
+
+    class FailingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            raise RuntimeError("provider returned after mutation")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    with pytest.raises(CategorizedError):
+        await durable.execute(request)
+
+    assert durable.execution_started(request) is False
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_cancelled_abandon_keeps_the_failure_latched(tmp_path: Path) -> None:
+    request = _remote_preparation_request()
+
+    class FailingHost(InactiveSystemHost):
+        async def execute(self, request: object) -> object:
+            del request
+            raise RuntimeError("provider returned after mutation")
+
+        async def restore_system_power(self, admitted: object, prior: object) -> None:
+            raise asyncio.CancelledError
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(request, 999.0)
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    with pytest.raises(asyncio.CancelledError):
+        await durable.execute(request)
+
+    completion = store.reopen_completion(request)
+    assert completion is not None and completion.state == "failed-after-mutation"
+    store.close()
+
+
+@pytest.mark.anyio
 async def test_durable_remote_preparation_cancellation_waits_and_records_terminal(
     tmp_path: Path,
 ) -> None:
@@ -1818,7 +2497,7 @@ async def test_durable_remote_preparation_cancellation_waits_and_records_termina
     release = asyncio.Event()
     expected = _terminal_response(request)
 
-    class BlockingHost:
+    class BlockingHost(InactiveSystemHost):
         async def execute(self, request: object) -> object:
             del request
             started.set()
@@ -1857,7 +2536,7 @@ async def test_durable_remote_preparation_cancel_persists_exceptional_completion
     started = asyncio.Event()
     release = asyncio.Event()
 
-    class FailingHost:
+    class FailingHost(InactiveSystemHost):
         async def execute(self, request: object) -> object:
             del request
             started.set()
@@ -1895,7 +2574,7 @@ async def test_durable_remote_lifecycle_cancel_persists_exceptional_completion(
     started = asyncio.Event()
     release = asyncio.Event()
 
-    class FailingHost:
+    class FailingHost(InactiveSystemHost):
         async def execute_lifecycle(self, *_args: object) -> object:
             started.set()
             await release.wait()
@@ -1926,6 +2605,35 @@ async def test_durable_remote_lifecycle_cancel_persists_exceptional_completion(
 
 
 @pytest.mark.anyio
+async def test_failed_remote_reap_completion_still_requires_recovery(tmp_path: Path) -> None:
+    """Only a restore is re-driven (#3469); a reap whose host call failed stays latched."""
+    preparation = _remote_preparation_request()
+    teardown = _module_lifecycle_request(
+        preparation, purpose="teardown", operation="teardown", action="reap"
+    )
+    calls = 0
+
+    class FailingHost(InactiveSystemHost):
+        async def execute_lifecycle(self, *_args: object) -> object:
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("provider failed after mutation")
+
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store.stage(preparation, 999.0)
+    store.publish_result(preparation, _terminal_response(preparation))
+    durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
+    with pytest.raises(RuntimeError, match="after mutation"):
+        await durable.execute_lifecycle(teardown)
+    with pytest.raises(CategorizedError, match="requires recovery"):
+        await durable.observe_lifecycle(teardown)
+    with pytest.raises(CategorizedError, match="requires recovery"):
+        await durable.execute_lifecycle(teardown)
+    assert calls == 1
+    store.close()
+
+
+@pytest.mark.anyio
 async def test_durable_remote_preparation_retries_unrecorded_provider_return(
     tmp_path: Path,
 ) -> None:
@@ -1944,7 +2652,7 @@ async def test_durable_remote_preparation_retries_unrecorded_provider_return(
     executor.shutdown()
     store.close()
 
-    class Host:
+    class Host(InactiveSystemHost):
         async def execute(
             self, admitted: AdmittedRemoteModulePreparation
         ) -> RemoteModuleTerminalPreparationResponseV1:
@@ -2227,7 +2935,7 @@ def test_materialization_index_rejects_path_before_descriptor_relative_open(
     monkeypatch.setattr(
         "kdive.providers.remote_libvirt.external_boot_authority.os.open", guarded_open
     )
-    with pytest.raises(ValueError, match="index is malformed"):
+    with pytest.raises(ProviderRecoveryRefusal, match="index is malformed"):
         store.reopen_materialization_for_plan(plan)
     assert escaped == []
     store.close()
@@ -2327,7 +3035,9 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
             calls.append(("recover", deadline))
 
         def cleanup(self, recovery: object, owner: object, deadline: float) -> None:
-            assert recovery == record and owner == authority
+            # Cleanup is fenced by the PREPARE authority the module reference was minted
+            # under, not by the caller's later attempt.
+            assert recovery == record and owner == preparation_authority
             calls.append(("cleanup", deadline))
 
     store = RemoteModuleVolumePreparationStore(tmp_path)
@@ -2340,6 +3050,11 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
     )
     _publish_terminal(store, record)
     point = coordinator.prepare(record.materialization, record.binding, authority)
+    prepared = store.reopen_terminal(record.binding, record.plan_identity).request.authority
+    preparation_authority = OpaqueProviderRef(
+        ref=f"authority/{prepared.authority_id}/{prepared.generation}/{prepared.attempt_id}"
+    )
+    assert preparation_authority != authority
     store.close()
 
     restarted_store = RemoteModuleVolumePreparationStore(tmp_path)
@@ -2351,7 +3066,7 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
     restarted.activate(point, authority)
     assert restarted.observe(point, authority).identity == record.materialization.kernel_observation
     restarted.recover(point, authority)
-    restarted.cleanup(point, authority)
+    restarted.cleanup(point)
     assert calls == [
         ("materialize", 123.0),
         ("prepare", 123.0),
@@ -2388,7 +3103,7 @@ def test_coordinator_rejects_changed_recovery_before_provider_contact(tmp_path: 
             "plan_identity": "sha256:" + "f" * 64,
         }
     )
-    with pytest.raises(ValueError, match="differs from durable record"):
+    with pytest.raises(ProviderRecoveryRefusal, match="differs from durable record"):
         coordinator.activate(changed, OpaqueProviderRef(ref="authority/remote-a"))
     store.close()
 
@@ -2430,19 +3145,12 @@ def test_running_observation_reopens_exact_recovery_after_restart(tmp_path: Path
             calls.append((recovery, authority))
             return observed
 
-    class Delegate:
-        async def observe(self, request: object) -> AuthorityObservationV1:
-            raise AssertionError("ordinary observation used")
-
-        async def commit(self, request: object, context: object) -> AuthorityObservationV1:
-            raise AssertionError("mutation used")
-
     restarted = RemoteModuleVolumePreparationStore(tmp_path)
     coordinator = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()), restarted, lambda: 123.0
     )
     executor = RemoteModulePreparationExecutor()
-    adapter = RemoteExternalBootAuthorityAdapter(Delegate(), coordinator, executor)  # type: ignore[arg-type]
+    adapter = RemoteExternalBootAuthorityAdapter(coordinator, executor)
     assert asyncio.run(adapter.observe_running(request)) == observed
     assert calls == [
         (
@@ -2462,13 +3170,6 @@ def test_running_observation_rejects_changed_request_before_provider(tmp_path: P
     class Operations:
         def observe(self, *args: object) -> RunningKernelObservation:
             raise AssertionError("provider touched")
-
-    class Delegate:
-        async def observe(self, request: object) -> AuthorityObservationV1:
-            raise AssertionError
-
-        async def commit(self, request: object, context: object) -> AuthorityObservationV1:
-            raise AssertionError
 
     request = AuthorityMutationRequestV1(
         authority_id=uuid4(),
@@ -2490,12 +3191,11 @@ def test_running_observation_rejects_changed_request_before_provider(tmp_path: P
     )
     executor = RemoteModulePreparationExecutor()
     adapter = RemoteExternalBootAuthorityAdapter(
-        Delegate(),
         RemoteExternalBootCoordinator(
             cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
         ),
         executor,
-    )  # type: ignore[arg-type]
+    )
     with pytest.raises(ValueError, match="identities differ"):
         asyncio.run(adapter.observe_running(request))
     executor.shutdown()
@@ -2687,7 +3387,6 @@ async def test_remote_system_teardown_restarts_after_lost_storage_response(
     def adapter(store: RemoteModuleVolumePreparationStore) -> RemoteExternalBootAuthorityAdapter:
         executor = RemoteModulePreparationExecutor()
         return RemoteExternalBootAuthorityAdapter(
-            cast(Any, object()),
             RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
             executor,
             teardown_clock=lambda: datetime(2026, 9, 6, tzinfo=UTC),
@@ -2715,7 +3414,7 @@ async def test_remote_system_teardown_restarts_after_lost_storage_response(
         request.model_copy(update={"plan_identity": "sha256:" + "8" * 64}),
         request.model_copy(update={"activation_id": uuid4()}),
     ):
-        with pytest.raises(ValueError, match="conflicts with retained intent"):
+        with pytest.raises(ProviderRecoveryRefusal, match="conflicts with retained intent"):
             await restarted.execute_system_teardown(
                 changed, _remote_teardown_context(changed), reservation
             )
@@ -2760,7 +3459,6 @@ def _completing_teardown_adapter(
     store: RemoteModuleVolumePreparationStore, operations: _CompletingTeardownOperations
 ) -> RemoteExternalBootAuthorityAdapter:
     return RemoteExternalBootAuthorityAdapter(
-        cast(Any, object()),
         RemoteExternalBootCoordinator(cast(Any, operations), store, lambda: 300.0),
         RemoteModulePreparationExecutor(),
         teardown_clock=lambda: datetime(2026, 9, 6, tzinfo=UTC),
@@ -2842,7 +3540,7 @@ async def test_remote_system_teardown_observation_refuses_another_subject_at_any
         at_generation.model_copy(update={"activation_id": uuid4()}),
         retained.model_copy(update={"operation_digest": "sha256:" + "7" * 64}),
     ):
-        with pytest.raises(ValueError, match="conflicts with retained intent"):
+        with pytest.raises(ProviderRecoveryRefusal, match="conflicts with retained intent"):
             await adapter.observe_system_teardown(changed, _remote_teardown_context(changed))
 
     assert {path: path.read_bytes() for path in teardown_files} == before
@@ -2899,7 +3597,7 @@ async def test_remote_system_teardown_reaps_full_private_recovery_before_undefin
                 recovery_absent=not flags["recovery"] and not flags["artifacts"],
             )
 
-    class ModuleHost:
+    class ModuleHost(InactiveSystemHost):
         async def execute_system_teardown(self, exact: object) -> object:
             assert isinstance(exact, external_boot_authority.RemoteModuleSystemTeardownRequestV1)
             assert exact.authority == request
@@ -2914,7 +3612,6 @@ async def test_remote_system_teardown_reaps_full_private_recovery_before_undefin
 
     executor = RemoteModulePreparationExecutor()
     adapter = RemoteExternalBootAuthorityAdapter(
-        cast(Any, object()),
         RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
         executor,
         remote_module_host=cast(Any, ModuleHost()),
@@ -2959,7 +3656,6 @@ async def test_remote_system_teardown_cancellation_retains_underlying_checkpoint
     store = RemoteModuleVolumePreparationStore(tmp_path)
     executor = RemoteModulePreparationExecutor()
     adapter = RemoteExternalBootAuthorityAdapter(
-        cast(Any, object()),
         RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
         executor,
     )
@@ -3043,7 +3739,6 @@ async def test_remote_system_teardown_retains_unfinished_preparation_before_unde
 
     executor = RemoteModulePreparationExecutor()
     adapter = RemoteExternalBootAuthorityAdapter(
-        cast(Any, object()),
         RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
         executor,
     )
@@ -3201,3 +3896,1941 @@ def test_concrete_remote_system_teardown_preserves_siblings_and_rejects_aliases(
     with pytest.raises(CategorizedError, match="another domain references"):
         operations.validate_system_teardown(state)
     assert deleted == set()
+
+
+async def _cleaned_release(
+    tmp_path: Path,
+) -> tuple[
+    RemoteExternalBootAuthorityAdapter,
+    RemoteExternalBootRecoveryRecord,
+    AuthorityMutationRequestV1,
+    AuthorityCommitContextV1,
+]:
+    """A remote release CLEANUP committed, with finalization not yet run (#3326)."""
+    adapter, operations, record, point, _ = _native_adapter(tmp_path, restored=True)
+    request = _native_request(
+        record, point, purpose="release", operation=AuthorityOperation.CLEANUP, named=True
+    )
+    context = _native_context(request)
+    evidence = AuthorityCleanupEvidenceContextV1(
+        operation_identity=request.operation_identity,
+        attempt_id=request.attempt_id,
+        operation_nonce=record.module_recovery.operation_nonce,
+        cleanup_state="discharged",
+        recovery_reference_json=record.module_recovery.model_dump_json(),
+    )
+    operations.state = replace(
+        operations.state, definition="source", active=False, recovery_objects_absent=True
+    )
+    await adapter.commit_cleanup(request, context, evidence)
+    return adapter, record, request, context
+
+
+@pytest.mark.anyio
+async def test_remote_cleanup_inventory_is_the_exact_unmanaged_recovery_record(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+
+    (observation,) = await adapter.cleanup_quarantine_inventory(request, context)
+
+    assert observation.present
+    assert not observation.managed
+    bound = observation.binding
+    assert bound.kind == "recovery-record"
+    assert bound.binding == record.binding
+    assert bound.operation_identity == request.operation_identity
+    assert bound.attempt_id == str(request.attempt_id)
+    assert bound.mutation_journal_sequence == context.journal_sequence
+    assert bound.mutation_journal_digest == context.journal_digest
+    with pytest.raises(AuthorityServiceError):
+        await adapter.cleanup_quarantine_inventory(
+            request, context.model_copy(update={"attempt_id": uuid4()})
+        )
+    activate = request.model_copy(update={"operation": AuthorityOperation.ACTIVATE})
+    assert await adapter.cleanup_quarantine_inventory(activate, context) == ()
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_cleanup_inventory_follows_the_adopted_proof_on_a_retry(
+    tmp_path: Path,
+) -> None:
+    """A retry that adopted the cleanup inventories the receipt the cleanup left (#3434)."""
+    adapter, _record, request, context = await _cleaned_release(tmp_path)
+    retry = request.model_copy(
+        update={
+            "generation": request.generation + 1,
+            "attempt_id": uuid4(),
+            "operation_identity": "release-cleanup-retry",
+        }
+    )
+
+    (observed,) = await adapter.cleanup_quarantine_inventory(retry, context)
+
+    assert observed.binding.operation_identity == request.operation_identity
+    assert observed.binding.attempt_id == str(request.attempt_id)
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await adapter.cleanup_quarantine_inventory(retry, _native_context(retry))
+    deleted = await adapter.delete_recovery_object(
+        observed.binding, authority_reference(retry), observed.observed_digest
+    )
+    assert not deleted.present
+    adapter.close()
+
+
+def _absent_observation() -> AuthorityObservationV1:
+    return AuthorityObservationV1(
+        observation_id=uuid4(), category="absent", composite_state="sha256:" + "a" * 64
+    )
+
+
+class _AbsentChainAdapter(_ServiceAdapter):
+    """A service adapter whose release cleanup proof lives in a real remote store (#3434)."""
+
+    def __init__(
+        self,
+        remote: RemoteExternalBootAuthorityAdapter,
+        record: RemoteExternalBootRecoveryRecord,
+        point: RecoveryPoint,
+    ) -> None:
+        super().__init__()
+        self.remote = remote
+        self.record = record
+        self.point = point
+
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        await super().observe(request)
+        return _absent_observation()
+
+    async def commit(
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
+    ) -> AuthorityObservationV1:
+        await super().commit(request, context)
+        native = _native_request(
+            self.record,
+            self.point,
+            purpose="release",
+            operation=AuthorityOperation.CLEANUP,
+            named=True,
+        ).model_copy(
+            update={
+                "operation_identity": context.operation_identity,
+                "attempt_id": context.attempt_id,
+            }
+        )
+        evidence = AuthorityCleanupEvidenceContextV1(
+            operation_identity=context.operation_identity,
+            attempt_id=context.attempt_id,
+            operation_nonce=self.record.module_recovery.operation_nonce,
+            cleanup_state="discharged",
+            recovery_reference_json=self.record.module_recovery.model_dump_json(),
+        )
+        await self.remote.commit_cleanup(native, context, evidence)
+        return _absent_observation()
+
+    async def finalize(
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
+    ) -> None:
+        self.calls.append("finalize")
+        await self.remote.finalize(request, context)
+
+    async def cleanup_quarantine_inventory(
+        self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
+    ) -> tuple[RecoveryObjectObservation, ...]:
+        return await self.remote.cleanup_quarantine_inventory(request, context)
+
+
+class _QueuedFinalizeFault:
+    def __init__(self) -> None:
+        self.fault: Exception | None = None
+
+    async def checkpoint(
+        self,
+        system_id: UUID,
+        run_id: UUID,
+        operation: AuthorityOperation,
+        checkpoint: Literal["before-provider", "after-provider", "before-finalize"],
+    ) -> None:
+        if checkpoint == "before-finalize" and self.fault is not None:
+            fault, self.fault = self.fault, None
+            raise fault
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("first_interruption", ["abort", "shutdown"])
+async def test_service_publishes_the_adopted_receipt_and_the_resolver_disposes_it(
+    tmp_path: Path, first_interruption: str
+) -> None:
+    """A release interrupted twice before finalize publishes the receipt it ran with (#3434)."""
+    (tmp_path / "remote").mkdir()
+    remote, operations, record, point, _ = _native_adapter(tmp_path / "remote", restored=True)
+    operations.state = replace(
+        operations.state, definition="source", active=False, recovery_objects_absent=True
+    )
+    peer = AuthenticatedPeer(uuid4())
+    root = _support_takeover().model_copy(
+        update={
+            "purpose": "release",
+            "operation": AuthorityOperation.RELEASE,
+            "system_id": UUID(record.binding.system_id),
+            "activation_id": UUID(record.binding.activation_id),
+            "run_id": UUID(record.binding.run_id),
+            "plan_identity": record.plan_identity,
+            "provider_kind": "remote-libvirt",
+            "authority_instance": "remote-a",
+        }
+    )
+    repository = _SupportRepository(peer, root)
+    adapter = _AbsentChainAdapter(remote, record, point)
+    fault = _QueuedFinalizeFault()
+    journal_root = tmp_path / "journal"
+    journal_root.mkdir()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(
+            journal_root, f"{system_id}.journal"
+        ),
+        adapter=adapter,
+        proof_checkpoint=fault,
+    )
+    await service.acknowledge_takeover(peer, root)
+    repository.current = True
+    first = _support_mutation(root).model_copy(
+        update={
+            "operation": AuthorityOperation.CLEANUP,
+            "operation_identity": "release-cleanup-1",
+            "expected_source_identity": record.source_state.definition,
+            "intended_target_identity": record.target_state.definition,
+        }
+    )
+    fault.fault = (
+        ProofBarrierAbort("aborted")
+        if first_interruption == "abort"
+        else ProofBarrierShutdown("shutdown")
+    )
+    with pytest.raises((AuthorityServiceError, ProofBarrierShutdown)):
+        await service.execute_mutation(peer, first)
+    (ran,) = adapter.commit_contexts
+
+    successor = root.model_copy(
+        update={"authority_id": uuid4(), "generation": 2, "operation_identity": "takeover-2"}
+    )
+    repository.allocating_request = successor
+    repository.current = False
+    await service.acknowledge_takeover(peer, successor)
+    repository.request = successor
+    repository.current = True
+    retry = first.model_copy(
+        update={
+            "authority_id": successor.authority_id,
+            "generation": 2,
+            "attempt_id": uuid4(),
+            "operation_identity": "release-cleanup-2",
+        }
+    )
+    fault.fault = ProofBarrierAbort("aborted")
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, retry)
+
+    assert adapter.calls.count("commit:cleanup") == 1
+    published = [
+        cast(tuple[RecoveryObjectObservation, ...], args[-1])
+        for args in repository.published_cleanup_quarantines
+    ]
+    assert len(published) == (2 if first_interruption == "abort" else 1)
+    (observed,) = published[-1]
+    assert all(observations == (observed,) for observations in published)
+    assert observed.binding.operation_identity == ran.operation_identity
+    assert observed.binding.attempt_id == str(ran.attempt_id)
+    bound = observed.binding
+    selection = _Selection(
+        object_id=UUID(bound.record_id),
+        system_id=UUID(bound.binding.system_id),
+        activation_id=UUID(bound.binding.activation_id),
+        run_id=UUID(bound.binding.run_id),
+        disposition="delete",
+        authority_instance="remote-a",
+        kind=bound.kind,
+        reference=bound.reference.ref,
+        ownership_digest=bound.ownership_digest,
+        observed_digest=observed.observed_digest,
+        operation_identity=bound.operation_identity,
+        attempt_id=UUID(bound.attempt_id),
+        journal_sequence=bound.mutation_journal_sequence,
+        journal_digest=bound.mutation_journal_digest,
+        reserved_bytes=bound.reserved_bytes,
+        deadline=datetime.now(UTC),
+    )
+    assert selection.binding() == bound
+    deleted = await remote.delete_recovery_object(
+        selection.binding(), OpaqueProviderRef(ref="remote-a"), selection.observed_digest
+    )
+    assert not deleted.present
+    remote.close()
+
+
+@pytest.mark.anyio
+async def test_remote_cleanup_inventory_is_empty_before_cleanup(tmp_path: Path) -> None:
+    adapter, _operations, record, point, _ = _native_adapter(tmp_path, restored=True)
+    request = _native_request(
+        record, point, purpose="release", operation=AuthorityOperation.CLEANUP, named=True
+    )
+
+    assert await adapter.cleanup_quarantine_inventory(request, _native_context(request)) == ()
+    await adapter.finalize(request, _native_context(request))
+    assert adapter._coordinator.recovery_point(record.binding, record.plan_identity) == point
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_removes_the_receipt_and_recovery_record_idempotently(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+
+    await adapter.finalize(request, context)
+
+    assert await adapter.cleanup_quarantine_inventory(request, _native_context(request)) == ()
+    with pytest.raises(FileNotFoundError):
+        adapter._coordinator.recovery_point(record.binding, record.plan_identity)
+    assert (
+        adapter._coordinator._store.teardown_recovery(record.binding, record.plan_identity) is None
+    )
+    await adapter.finalize(request, context)
+    adapter.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("field", ["journal_digest", "journal_sequence", "attempt_id"])
+async def test_remote_finalize_refuses_a_proof_that_differs_from_the_receipt(
+    tmp_path: Path, field: str
+) -> None:
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+    changed = {
+        "journal_digest": "sha256:" + "b" * 64,
+        "journal_sequence": context.journal_sequence + 1,
+        "attempt_id": uuid4(),
+    }[field]
+
+    with pytest.raises(ProviderRecoveryRefusal, match="differs from the quarantine receipt"):
+        await adapter.finalize(request, context.model_copy(update={field: changed}))
+
+    assert len(await adapter.cleanup_quarantine_inventory(request, _native_context(request))) == 1
+    assert adapter._coordinator.recovery_point(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_recovery_record_delete_and_adopt_are_digest_fenced(tmp_path: Path) -> None:
+    adapter, _record, request, _context = await _cleaned_release(tmp_path)
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+    authority = authority_reference(request)
+    stale = "sha256:" + "0" * 64
+
+    with pytest.raises(ProviderRecoveryRefusal, match="changed before delete"):
+        await adapter.delete_recovery_object(observed.binding, authority, stale)
+    with pytest.raises(ProviderRecoveryRefusal, match="changed before adopt"):
+        await adapter.adopt_recovery_object(observed.binding, authority, stale)
+    assert await adapter.observe_recovery_object(observed.binding, authority) == observed
+
+    adopted = await adapter.adopt_recovery_object(
+        observed.binding, authority, observed.observed_digest
+    )
+    assert adopted.managed
+    assert await adapter.cleanup_quarantine_inventory(request, _native_context(request)) == ()
+    with pytest.raises(ProviderRecoveryRefusal, match="changed before delete"):
+        await adapter.delete_recovery_object(observed.binding, authority, adopted.observed_digest)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_re_recording_never_un_adopts_a_receipt(tmp_path: Path) -> None:
+    adapter, record, request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+    await adapter.adopt_recovery_object(
+        observed.binding, authority_reference(request), observed.observed_digest
+    )
+    adopted = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert adopted is not None and adopted.managed
+
+    store.record_cleanup_quarantine(adopted.model_copy(update={"managed": False}))
+
+    assert store.read_cleanup_quarantine(record.binding, record.plan_identity) == adopted
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_leaves_an_adopted_receipt_in_place(tmp_path: Path) -> None:
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+    authority = authority_reference(request)
+    adopted = await adapter.adopt_recovery_object(
+        observed.binding, authority, observed.observed_digest
+    )
+
+    await adapter.finalize(request, context)
+
+    assert await adapter.observe_recovery_object(observed.binding, authority) == adopted
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None and receipt.managed
+    assert adapter._coordinator.recovery_point(record.binding, record.plan_identity)
+    assert store._read(store._finalized_name(record.binding, record.plan_identity)) is None
+    adapter.close()
+
+
+class _ReapingModuleHost:
+    async def execute_system_teardown(self, _exact: object) -> object:
+        return object()
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_keeps_an_adopted_receipt(tmp_path: Path) -> None:
+    """#3467: teardown leaves an adopted receipt in place, as release finalize does (#3435)."""
+    adapter, record, request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+    authority = authority_reference(request)
+    adopted = await adapter.adopt_recovery_object(
+        observed.binding, authority, observed.observed_digest
+    )
+    teardown_adapter = RemoteExternalBootAuthorityAdapter(
+        RemoteExternalBootCoordinator(
+            cast(Any, _CompletingTeardownOperations()), store, lambda: 300.0
+        ),
+        RemoteModulePreparationExecutor(),
+        remote_module_host=cast(Any, _ReapingModuleHost()),
+        teardown_clock=lambda: datetime(2026, 9, 6, tzinfo=UTC),
+    )
+    teardown = _remote_teardown_request()
+
+    result = await teardown_adapter.execute_system_teardown(
+        teardown, _remote_teardown_context(teardown), _REMOTE_TEARDOWN_RESERVATION
+    )
+
+    assert result.complete
+    assert await adapter.observe_recovery_object(observed.binding, authority) == adopted
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None and receipt.managed
+    identity = external_boot_authority._recovery_identity(receipt.recovery_ref)
+    index = f"{store._recovery_key(record.binding, record.plan_identity)}.recovery-index"
+    assert _store_names(store) == {
+        _teardown_name(store),
+        f"{identity}.recovery",
+        f"{identity}.cleanup-quarantine",
+        index,
+    }
+    adapter.close()
+
+
+class _CollectingTeardownOperations(_CompletingTeardownOperations):
+    """Completing teardown host that also proves a finalized activation's preparation absent."""
+
+    def unfinished_preparation_absent(self, _state: object) -> bool:
+        return True
+
+
+def _collecting_teardown_adapter(
+    store: RemoteModuleVolumePreparationStore, operations: _CompletingTeardownOperations
+) -> RemoteExternalBootAuthorityAdapter:
+    return RemoteExternalBootAuthorityAdapter(
+        RemoteExternalBootCoordinator(cast(Any, operations), store, lambda: 300.0),
+        RemoteModulePreparationExecutor(),
+        remote_module_host=cast(Any, _ReapingModuleHost()),
+        teardown_clock=lambda: datetime(2026, 9, 6, tzinfo=UTC),
+    )
+
+
+async def _system_teardown(
+    store: RemoteModuleVolumePreparationStore,
+    operations: _CompletingTeardownOperations | None = None,
+) -> bool:
+    adapter = _collecting_teardown_adapter(store, operations or _CollectingTeardownOperations())
+    request = _remote_teardown_request()
+    try:
+        result = await adapter.execute_system_teardown(
+            request, _remote_teardown_context(request), _REMOTE_TEARDOWN_RESERVATION
+        )
+    finally:
+        adapter.close()
+    return result.complete
+
+
+async def _observe_teardown(
+    store: RemoteModuleVolumePreparationStore, operations: _CompletingTeardownOperations
+) -> bool:
+    adapter = _collecting_teardown_adapter(store, operations)
+    request = _remote_teardown_request()
+    try:
+        result = await adapter.observe_system_teardown(request, _remote_teardown_context(request))
+    finally:
+        adapter.close()
+    return result.complete
+
+
+def _teardown_name(store: RemoteModuleVolumePreparationStore) -> str:
+    return f"{store._system_teardown_key(_record().binding.system_id)}.teardown"
+
+
+def _sibling(
+    record: RemoteExternalBootRecoveryRecord, activation_id: str
+) -> RemoteExternalBootRecoveryRecord:
+    """A valid record of another activation of the same Run and plan (#3486)."""
+    binding = record.binding.model_copy(update={"activation_id": activation_id})
+    definition = record.definition.model_copy(update={"binding": binding})
+    return RemoteExternalBootRecoveryRecord.model_validate(
+        record.model_copy(update={"binding": binding, "definition": definition}).model_dump(
+            mode="python", by_alias=True
+        )
+    )
+
+
+class _ProvingTeardownOperations(_CollectingTeardownOperations):
+    """Collecting teardown host whose pool still holds the volumes of ``keep`` (#3486).
+
+    Every fixture activation renders the same module volume names, so presence is keyed by
+    activation id; the concrete name-based proof has its own test.
+    """
+
+    def __init__(self, *, keep: frozenset[str] = frozenset()) -> None:
+        super().__init__()
+        self.keep = keep
+        self.proved: list[str] = []
+
+    def activation_volumes_absent(self, binding: Any, refs: Any) -> bool:
+        del refs
+        self.proved.append(binding.activation_id)
+        return binding.activation_id not in self.keep
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_collects_a_never_finalized_activation(
+    tmp_path: Path,
+) -> None:
+    """#3472: teardown removes every file of an activation finalize never ran for."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    other = record.model_copy(
+        update={
+            "binding": record.binding.model_copy(
+                update={"activation_id": "00000000-0000-4000-8000-0000000000aa"}
+            )
+        }
+    )
+    _publish_terminal(store, other)
+    _seed_activation_residue(store, other)
+    before = _store_names(store)
+
+    assert await _system_teardown(store, _ProvingTeardownOperations())
+
+    after = _store_names(store)
+    assert after == {_teardown_name(store)}
+    assert {name.rsplit(".", 1)[1] for name in before - after} == {
+        "terminal",
+        "restored",
+        "request",
+        "result",
+        "completion",
+        "lifecycle-request",
+        "lifecycle-completion",
+        "materialization",
+        "materialization-index",
+        "preparation",
+        "prior-power",
+        "prior-power-owner",
+        "recovery",
+        "recovery-index",
+        "object-index",
+        "cleanup-quarantine",
+    }
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_collects_a_finalized_activation(tmp_path: Path) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    await adapter.finalize(request, context)
+    assert store._finalized_name(record.binding, record.plan_identity) in _store_names(store)
+
+    assert await _system_teardown(store)
+
+    assert _store_names(store) == {_teardown_name(store)}
+    await adapter.finalize(request, context)
+    assert _store_names(store) == {_teardown_name(store)}
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_stage_after_system_teardown_is_refused(tmp_path: Path) -> None:
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    terminal = store.reopen_terminal(record.binding, record.plan_identity)
+    lifecycle = _module_lifecycle_request(terminal.request, action="restore")
+    assert await _system_teardown(store)
+    names = _store_names(store)
+    finalized_error = external_boot_authority.RemoteCleanupFinalizedError
+
+    with pytest.raises(finalized_error, match="System teardown"):
+        store.stage(terminal.request, 1.0)
+    with pytest.raises(finalized_error):
+        store.stage_lifecycle(lifecycle, 1.0)
+    assert _store_names(store) == names
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_stage_of_a_sibling_after_system_teardown_is_refused(
+    tmp_path: Path,
+) -> None:
+    """#3486: the refusal covers every activation of the torn-down System."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    sibling = _sibling(record, "00000000-0000-4000-8000-0000000000aa")
+    _publish_terminal(store, sibling)
+    staged = store.reopen_terminal(sibling.binding, sibling.plan_identity).request
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    sibling_receipt = receipt.model_copy(
+        update={"binding": sibling.binding, "operation_identity": "cleanup-sibling"}
+    )
+    assert await _system_teardown(store, _ProvingTeardownOperations())
+    names = _store_names(store)
+
+    with pytest.raises(external_boot_authority.RemoteCleanupFinalizedError):
+        store.stage(staged, 1.0)
+    assert store.cleanup_finalized(sibling.binding, sibling.plan_identity)
+    store.finalize_cleanup_quarantine(sibling_receipt)
+    assert _store_names(store) == names
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_system_activations_find_every_activation_by_content(
+    tmp_path: Path,
+) -> None:
+    """#3486: discovery reads each anchor's content and skips another System's files."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    sibling = _sibling(record, "00000000-0000-4000-8000-0000000000aa")
+    _publish_terminal(store, sibling)
+    foreign = record.binding.model_copy(
+        update={"system_id": "00000000-0000-4000-8000-0000000000bb"}
+    )
+    store.record_cleanup_quarantine(
+        RemoteCleanupQuarantineV1(
+            binding=foreign,
+            plan_identity=record.plan_identity,
+            recovery_ref=OpaqueProviderRef(ref="remote-external-boot/" + "c" * 64),
+            operation_identity="cleanup-foreign",
+            attempt_id=uuid4(),
+            journal_sequence=3,
+            journal_digest="sha256:" + "d" * 64,
+        )
+    )
+
+    found = store.system_activations(record.binding.system_id)
+
+    assert found == sorted(
+        [(record.binding, record.plan_identity), (sibling.binding, sibling.plan_identity)],
+        key=lambda item: (item[0].run_id, item[0].activation_id, item[1]),
+    )
+    assert store.system_activations(foreign.system_id) == [(foreign, record.plan_identity)]
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_activation_claims_name_every_volume_and_none_once_finalized(
+    tmp_path: Path,
+) -> None:
+    """#3486: claims carry the module volumes, nonce and boot artifacts the records name."""
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    claims = store.activation_claims(record.binding, record.plan_identity)
+    module = store.reopen_terminal(record.binding, record.plan_identity).response.recovery
+    recovery = record.module_recovery
+
+    assert claims is not None
+    assert set(claims.module_volumes) == {
+        (module.pool.ref, module.source_volume.ref),
+        (module.pool.ref, module.scratch_volume.ref),
+        (recovery.pool.ref, recovery.source_volume.ref),
+        (recovery.pool.ref, recovery.scratch_volume.ref),
+    }
+    assert claims.operation_nonce is not None
+    assert record.materialization.artifacts.kernel.ref in {
+        item.ref for item in claims.boot_artifacts
+    }
+    await adapter.finalize(request, context)
+    assert store.activation_claims(record.binding, record.plan_identity) is None
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_proven_activation_is_kept_when_its_claims_grew(tmp_path: Path) -> None:
+    """#3486: a record written after the proof keeps every file of that activation."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    sibling = _sibling(record, "00000000-0000-4000-8000-0000000000aa")
+    proven = RemoteFinalizedTeardownRefsV1(
+        module_volumes=(), operation_nonce=None, boot_artifacts=()
+    )
+    _publish_terminal(store, sibling)
+    before = _store_names(store)
+
+    assert not store.collect_proven_activation(
+        sibling.binding, sibling.plan_identity, proven, keep_plan=False
+    )
+    assert _store_names(store) == before
+    claims = store.activation_claims(sibling.binding, sibling.plan_identity)
+    assert store.collect_proven_activation(
+        sibling.binding, sibling.plan_identity, claims, keep_plan=True
+    )
+    assert store.system_activations(record.binding.system_id) == [
+        (record.binding, record.plan_identity)
+    ]
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_collection_with_keep_plan_keeps_the_materialization(
+    tmp_path: Path,
+) -> None:
+    """#3486: a kept activation of the same Run still needs the plan's materialization."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    stem = record.plan_identity.removeprefix("sha256:")
+    identity = record.materialization.identity.removeprefix("sha256:")
+    pair = {f"{stem}.materialization-index", f"{identity}.materialization"}
+    assert pair <= _store_names(store)
+
+    store.collect_torn_down_activation(record.binding, record.plan_identity, keep_plan=True)
+
+    assert pair <= _store_names(store)
+    store.collect_torn_down_activation(record.binding, record.plan_identity)
+    assert not pair & _store_names(store)
+    adapter.close()
+
+
+def test_remote_activation_volumes_absent_reads_every_named_volume() -> None:
+    """#3486: module, nonce-rendered and boot names are each read; nothing is deleted."""
+    binding = _record().binding
+    nonce = _remote_preparation_request().operation.operation_nonce
+    rendered = {
+        render_module_volume_name(binding.system_id, binding.run_id, nonce, kind)
+        for kind in ("source.ext4", "scratch.ext4")
+    }
+    refs = RemoteFinalizedTeardownRefsV1(
+        module_volumes=(("modules", "kept-source"),),
+        operation_nonce=nonce,
+        boot_artifacts=(RemoteFinalizedBootArtifactV1(ref="kernel-a", kind="kernel", sha256=None),),
+    )
+    looked: list[tuple[str, str]] = []
+    present: set[str] = set()
+
+    class Pool:
+        def __init__(self, name: str) -> None:
+            self.pool = name
+
+        def storageVolLookupByName(self, name: str) -> object:  # noqa: N802
+            looked.append((self.pool, name))
+            if name in present:
+                return object()
+            error = libvirt.libvirtError("absent")
+            error.err = (libvirt.VIR_ERR_NO_STORAGE_VOL,) + (0,) * 8
+            raise error
+
+    class Connection:
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def storagePoolLookupByName(self, name: str) -> Pool:  # noqa: N802
+            return Pool(name)
+
+    operations = ConcreteRemoteExternalBootOperations(
+        cast(Any, object()), cast(Any, Connection), "boot", lambda: 1.0, cast(Any, object())
+    )
+
+    assert operations.activation_volumes_absent(binding, refs)
+    assert set(looked) == {("modules", "kept-source"), ("boot", "kernel-a")} | {
+        ("boot", name) for name in rendered
+    }
+    present.add("kernel-a")
+    assert not operations.activation_volumes_absent(binding, refs)
+
+
+def _seed_recovered_sibling(
+    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+) -> RemoteExternalBootRecoveryRecord:
+    """Another activation with every per-activation file, a recovery record and its receipt."""
+    objects = sorted(
+        (OpaqueProviderRef(ref=f"volumes/sibling-{kind}") for kind in ("source", "scratch")),
+        key=OpaqueProviderRef.to_canonical_json,
+    )
+    sibling = RemoteExternalBootRecoveryRecord.model_validate(
+        _sibling(record, "00000000-0000-4000-8000-0000000000aa")
+        .model_copy(update={"recovery_objects": tuple(objects)})
+        .model_dump(mode="python", by_alias=True)
+    )
+    _publish_terminal(store, sibling)
+    _seed_activation_residue(store, sibling)
+    store.record_cleanup_quarantine(
+        RemoteCleanupQuarantineV1(
+            binding=sibling.binding,
+            plan_identity=sibling.plan_identity,
+            recovery_ref=store.publish_recovery(sibling),
+            operation_identity="cleanup-sibling",
+            attempt_id=uuid4(),
+            journal_sequence=6,
+            journal_digest="sha256:" + "a" * 64,
+        )
+    )
+    return sibling
+
+
+def _activation_names(
+    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+) -> set[str]:
+    """An activation's own files on disk plus the plan's shared materialization pair."""
+    derived, anchors = store._activation_file_groups(
+        record.binding, record.plan_identity, keep_plan=False
+    )
+    return {name for name in derived + anchors if store._read(name) is not None}
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_collects_every_provable_activation(
+    tmp_path: Path,
+) -> None:
+    """#3486: finalized and proven siblings go; an unproven one and an adopted trio stay."""
+    adapter, record, request, _context, store = await _finalized_release_store(tmp_path)
+    finalized = _sibling(record, "00000000-0000-4000-8000-0000000000a1")
+    absent = _sibling(record, "00000000-0000-4000-8000-0000000000a2")
+    kept = _sibling(record, "00000000-0000-4000-8000-0000000000a3")
+    for sibling in (finalized, absent, kept):
+        _publish_terminal(store, sibling)
+    store._publish(
+        store._finalized_name(finalized.binding, finalized.plan_identity),
+        RemoteCleanupQuarantineV1(
+            binding=finalized.binding,
+            plan_identity=finalized.plan_identity,
+            recovery_ref=OpaqueProviderRef(ref="remote-external-boot/" + "e" * 64),
+            operation_identity="cleanup-finalized",
+            attempt_id=uuid4(),
+            journal_sequence=5,
+            journal_digest="sha256:" + "f" * 64,
+        ).to_canonical_json(),
+    )
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+    await adapter.adopt_recovery_object(
+        observed.binding, authority_reference(request), observed.observed_digest
+    )
+    kept_names = _activation_names(store, kept)
+    absent_request = store.reopen_terminal(absent.binding, absent.plan_identity).request
+    operations = _ProvingTeardownOperations(keep=frozenset({kept.binding.activation_id}))
+
+    assert await _system_teardown(store, operations)
+
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None and receipt.managed
+    identity = external_boot_authority._recovery_identity(receipt.recovery_ref)
+    index = f"{store._recovery_key(record.binding, record.plan_identity)}.recovery-index"
+    assert _store_names(store) == {
+        _teardown_name(store),
+        f"{identity}.recovery",
+        f"{identity}.cleanup-quarantine",
+        index,
+        *kept_names,
+    }
+    assert sorted(operations.proved) == [absent.binding.activation_id, kept.binding.activation_id]
+    with pytest.raises(external_boot_authority.RemoteCleanupFinalizedError):
+        store.stage(absent_request, 1.0)
+    cleanup = request.model_copy(update={"activation_id": UUID(absent.binding.activation_id)})
+    assert adapter._observe(cleanup).category == "absent"
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_after_teardown_collection_writes_nothing(tmp_path: Path) -> None:
+    """#3472: an orphan delete that read the receipt before collection publishes no marker."""
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    assert await _system_teardown(store)
+
+    store.finalize_cleanup_quarantine(receipt)
+
+    assert _store_names(store) == {_teardown_name(store)}
+    adapter.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("finalized", [False, True])
+async def test_remote_teardown_collection_resumes_after_a_crash_at_any_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finalized: bool
+) -> None:
+    """#3472: the service's recovery observation finishes an interrupted collection."""
+    real_unlink = os.unlink
+    crashes = 0
+    for crash_at in range(1, 100):
+        root = tmp_path / f"crash-{crash_at}"
+        root.mkdir()
+        adapter, record, request, context, store = await _finalized_release_store(root)
+        staged = store.reopen_terminal(record.binding, record.plan_identity).request
+        if finalized:
+            await adapter.finalize(request, context)
+        _seed_recovered_sibling(store, record)
+        operations = _ProvingTeardownOperations()
+        seen = 0
+
+        def failing(path: str, *args: Any, _at: int = crash_at, **kwargs: Any) -> None:
+            nonlocal seen
+            if not path.startswith("."):
+                seen += 1
+                if seen == _at:
+                    raise OSError("injected crash")
+            real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(external_boot_authority.os, "unlink", failing)
+        try:
+            assert await _system_teardown(store, operations)
+        finally:
+            monkeypatch.setattr(external_boot_authority.os, "unlink", real_unlink)
+        crashed = seen >= crash_at
+        if crashed:
+            crashes += 1
+            with pytest.raises(external_boot_authority.RemoteCleanupFinalizedError):
+                store.stage(staged, 1.0)
+            assert await _observe_teardown(store, operations)
+        assert _store_names(store) == {_teardown_name(store)}
+        adapter.close()
+        if not crashed:
+            break
+    assert crashes >= (25 if finalized else 30)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["adopt", "collect"])
+async def test_remote_receipt_decisions_wait_for_the_store_lock(
+    tmp_path: Path, operation: str
+) -> None:
+    """#3472: adoption and collection serialize on one lock over the store directory."""
+    adapter, record, _request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    name = store._quarantine_name(receipt.recovery_ref)
+    before = store._read(name)
+
+    def run() -> None:
+        if operation == "adopt":
+            store.adopt_cleanup_quarantine(receipt)
+        else:
+            store.collect_torn_down_activation(record.binding, record.plan_identity)
+
+    held = os.open(".", os.O_RDONLY | os.O_DIRECTORY, dir_fd=store._root_fd)
+    try:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(timeout=0.5)
+        assert worker.is_alive()
+        assert store._read(name) == before
+    finally:
+        os.close(held)
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_adoption_during_teardown_collection_fails_as_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3472: an adoption arriving after collection read the receipt cannot lose it."""
+    adapter, record, _request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    outcome: list[BaseException | None] = []
+
+    def adopt() -> None:
+        try:
+            store.adopt_cleanup_quarantine(receipt)
+        except BaseException as error:  # noqa: BLE001 - the outcome is the assertion
+            outcome.append(error)
+        else:
+            outcome.append(None)
+
+    worker = threading.Thread(target=adopt)
+    real_receipt = store._receipt
+
+    def receipt_then_adopt(reference: OpaqueProviderRef) -> object:
+        read = real_receipt(reference)
+        if not worker.is_alive() and not outcome:
+            worker.start()
+            worker.join(timeout=0.5)
+        return read
+
+    monkeypatch.setattr(store, "_receipt", receipt_then_adopt)
+    store.collect_torn_down_activation(record.binding, record.plan_identity)
+    worker.join(timeout=10)
+
+    (error,) = outcome
+    assert isinstance(error, ProviderRecoveryRefusal)
+    assert store._read(store._quarantine_name(receipt.recovery_ref)) is None
+    adapter.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("named", [b"../" + b"a" * 61, b"z" * 64])
+async def test_remote_collection_refuses_a_malformed_recovery_index_before_unlinking(
+    tmp_path: Path, named: bytes
+) -> None:
+    """#3472: an index whose content is not a recovery identity names no file to remove."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    index = f"{store._recovery_key(record.binding, record.plan_identity)}.recovery-index"
+    os.unlink(index, dir_fd=store._root_fd)
+    store._publish(index, named)
+    before = _store_names(store)
+
+    # A traversal-shaped value fails the opaque-reference check, a non-hex one the identity check.
+    with pytest.raises(ValueError, match="opaque|malformed"):
+        store.collect_torn_down_activation(record.binding, record.plan_identity)
+
+    assert _store_names(store) == before
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_adoption_after_teardown_collection_fails_as_changed(tmp_path: Path) -> None:
+    adapter, record, _request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    assert await _system_teardown(store)
+
+    with pytest.raises(ProviderRecoveryRefusal, match="changed"):
+        store.adopt_cleanup_quarantine(receipt)
+    assert _store_names(store) == {_teardown_name(store)}
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_recovery_record_delete_finalizes_the_exact_record(tmp_path: Path) -> None:
+    adapter, record, request, _context = await _cleaned_release(tmp_path)
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+    authority = authority_reference(request)
+
+    deleted = await adapter.delete_recovery_object(
+        observed.binding, authority, observed.observed_digest
+    )
+
+    assert not deleted.present
+    assert await adapter.cleanup_quarantine_inventory(request, _native_context(request)) == ()
+    with pytest.raises(FileNotFoundError):
+        adapter._coordinator.recovery_point(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_recovery_object_port_serves_only_the_recovery_record(
+    tmp_path: Path,
+) -> None:
+    adapter, _record, request, _context = await _cleaned_release(tmp_path)
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+
+    with pytest.raises(ProviderRecoveryRefusal, match="only the recovery record"):
+        await adapter.observe_recovery_object(
+            observed.binding.model_copy(update={"kind": "kernel"}), authority_reference(request)
+        )
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_cleanup_after_finalize_observes_absent_not_unreadable(
+    tmp_path: Path,
+) -> None:
+    adapter, _record, request, context = await _cleaned_release(tmp_path)
+    await adapter.finalize(request, context)
+
+    observed = await adapter.observe(request)
+
+    assert observed.category == "absent"
+    activate = request.model_copy(update={"operation": AuthorityOperation.ACTIVATE})
+    assert (await adapter.observe(activate)).category == "unreadable"
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_cleanup_refuses_another_operations_unfinalized_receipt(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, _context = await _cleaned_release(tmp_path)
+    operations = cast(_NativeOperations, adapter._coordinator._operations)
+    calls = list(operations.calls)
+    other = request.model_copy(update={"operation_identity": "release-cleanup-other"})
+    evidence = AuthorityCleanupEvidenceContextV1(
+        operation_identity=other.operation_identity,
+        attempt_id=other.attempt_id,
+        operation_nonce=record.module_recovery.operation_nonce,
+        cleanup_state="discharged",
+        recovery_reference_json=record.module_recovery.model_dump_json(),
+    )
+
+    with pytest.raises(ProviderRecoveryRefusal, match="belongs to another operation"):
+        await adapter.commit_cleanup(other, _native_context(other), evidence)
+
+    assert operations.calls == calls
+    assert len(await adapter.cleanup_quarantine_inventory(request, _native_context(request))) == 1
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_marker_without_removal_still_reports_the_receipt_present(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    # The crash window: the marker landed, no removal did.
+    store._publish(
+        store._finalized_name(record.binding, record.plan_identity), receipt.to_canonical_json()
+    )
+
+    assert await adapter.cleanup_quarantine_inventory(request, _native_context(request)) == (
+        observed,
+    )
+    present = await adapter.observe_recovery_object(observed.binding, authority_reference(request))
+    assert present == observed
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_interrupted_finalize_keeps_the_receipt_visible_and_repeats(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    name = store._quarantine_name(receipt.recovery_ref)
+    # The crash window: the marker and record removal landed, the receipt unlink did not.
+    store.finalize_cleanup_quarantine(receipt)
+    store._publish(name, receipt.to_canonical_json())
+
+    assert await adapter.cleanup_quarantine_inventory(request, _native_context(request)) == (
+        observed,
+    )
+    leftover = await adapter.observe_recovery_object(observed.binding, authority_reference(request))
+    assert leftover.present
+
+    await adapter.finalize(request, context)
+    assert store._read(name) is None
+    assert await adapter.cleanup_quarantine_inventory(request, _native_context(request)) == ()
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_delete_rechecks_the_receipt_it_finalizes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter, record, request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    real = adapter._quarantine_receipt
+    calls = 0
+
+    async def adopted_between_reads(binding: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            store.adopt_cleanup_quarantine(receipt)
+        return await real(binding)
+
+    monkeypatch.setattr(adapter, "_quarantine_receipt", adopted_between_reads)
+    with pytest.raises(ProviderRecoveryRefusal, match="changed before delete"):
+        await adapter.delete_recovery_object(
+            observed.binding, authority_reference(request), observed.observed_digest
+        )
+    assert store.read_cleanup_quarantine(record.binding, record.plan_identity) is not None
+    adapter.close()
+
+
+def _seed_activation_residue(
+    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+) -> None:
+    """Every per-activation file a release leaves besides the recovery record (#3333)."""
+    terminal = store.reopen_terminal(record.binding, record.plan_identity)
+    lifecycle = _module_lifecycle_request(terminal.request, action="restore")
+    store.stage_lifecycle(lifecycle, 999.0)
+    store.publish_lifecycle_completion(lifecycle, _restored_response(terminal.request))
+    store.publish_materialization(_plan_for_record(record), record.materialization)
+    store.record_prior_power(terminal.request.authority, "inactive")
+    request = _preparation_request(record, "materialize")
+    store.publish_preparation(
+        request,
+        ExternalBootPreparationObservation(
+            state="materialized",
+            binding=request.binding,
+            plan_identity=request.plan.identity,
+            authority=request.authority,
+            operation_identity=request.operation_identity,
+            materialization=record.materialization,
+        ),
+    )
+
+
+def _seed_system_teardown_intent(store: RemoteModuleVolumePreparationStore) -> str:
+    """A real in-progress teardown record, so the torn-down check can parse it."""
+    request = _remote_teardown_request()
+    anchor = RemoteExternalBootAuthorityAdapter._teardown_anchor(
+        request, _remote_teardown_context(request)
+    )
+    store.begin_system_teardown(
+        RemoteSystemTeardownIntentV1.model_validate(
+            anchor.model_dump(exclude={"schema_"}) | {"reservation": _REMOTE_TEARDOWN_RESERVATION}
+        )
+    )
+    return _teardown_name(store)
+
+
+def _store_names(store: RemoteModuleVolumePreparationStore) -> set[str]:
+    return set(os.listdir(store._root_fd))
+
+
+async def _finalized_release_store(
+    tmp_path: Path,
+) -> tuple[
+    RemoteExternalBootAuthorityAdapter,
+    RemoteExternalBootRecoveryRecord,
+    AuthorityMutationRequestV1,
+    AuthorityCommitContextV1,
+    RemoteModuleVolumePreparationStore,
+]:
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    _seed_activation_residue(store, record)
+    return adapter, record, request, context, store
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_deletes_the_activations_files_and_keeps_the_marker_and_teardown(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    teardown = _seed_system_teardown_intent(store)
+    other = record.model_copy(
+        update={
+            "binding": record.binding.model_copy(
+                update={"activation_id": "00000000-0000-4000-8000-0000000000aa"}
+            )
+        }
+    )
+    _publish_terminal(store, other)
+    _seed_activation_residue(store, other)
+    before = _store_names(store)
+    await adapter.finalize(request, context)
+    after = _store_names(store)
+
+    marker = store._finalized_name(record.binding, record.plan_identity)
+    assert after - before == {marker}
+    assert {name.rsplit(".", 1)[1] for name in before - after} == {
+        "terminal",
+        "restored",
+        "request",
+        "result",
+        "completion",
+        "lifecycle-request",
+        "lifecycle-completion",
+        "materialization",
+        "materialization-index",
+        "preparation",
+        "prior-power",
+        "prior-power-owner",
+        "recovery",
+        "recovery-index",
+        "object-index",
+        "cleanup-quarantine",
+    }
+    assert teardown in after
+    other_key = store._terminal_key(
+        other.binding.system_id,
+        other.binding.activation_id,
+        other.binding.run_id,
+        other.plan_identity,
+    )
+    assert f"{other_key}.terminal" in after
+    assert sum(name.endswith((".request", ".result", ".completion")) for name in after) == 3
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_resumes_after_a_crash_at_any_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    adapter, _record, request, context, store = await _finalized_release_store(clean)
+    await adapter.finalize(request, context)
+    expected = _store_names(store)
+    adapter.close()
+    real_unlink = os.unlink
+    crashes = 0
+    for crash_at in range(1, 100):
+        root = tmp_path / f"crash-{crash_at}"
+        root.mkdir()
+        adapter, record, request, context, store = await _finalized_release_store(root)
+        refs = store._teardown_refs(record.binding, record.plan_identity)
+        seen = 0
+
+        def failing(path: str, *args: Any, _at: int = crash_at, **kwargs: Any) -> None:
+            nonlocal seen
+            seen += 1
+            if seen == _at:
+                raise OSError("injected crash")
+            real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(external_boot_authority.os, "unlink", failing)
+        try:
+            await adapter.finalize(request, context)
+            crashed = False
+        except OSError:
+            crashed = True
+        finally:
+            monkeypatch.setattr(external_boot_authority.os, "unlink", real_unlink)
+        if crashed:
+            crashes += 1
+            await adapter.finalize(request, context)
+        assert _store_names(store) == expected
+        assert store.finalized_teardown_refs(record.binding, record.plan_identity) == refs
+        adapter.close()
+        if not crashed:
+            break
+    assert crashes >= 10
+
+
+@pytest.mark.anyio
+async def test_remote_reads_of_a_finalized_activation_say_finalized_not_unknown(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    teardown = _seed_system_teardown_intent(store)
+    await adapter.finalize(request, context)
+    finalized_error = external_boot_authority.RemoteCleanupFinalizedError
+
+    with pytest.raises(finalized_error):
+        store.reopen_terminal(record.binding, record.plan_identity)
+    with pytest.raises(finalized_error):
+        store.reopen_restored(record.binding, record.plan_identity)
+    assert issubclass(finalized_error, FileNotFoundError)
+    unknown = record.binding.model_copy(
+        update={"activation_id": "00000000-0000-4000-8000-0000000000bb"}
+    )
+    with pytest.raises(FileNotFoundError) as absent:
+        store.reopen_terminal(unknown, record.plan_identity)
+    assert not isinstance(absent.value, finalized_error)
+    assert store.reopen_restored(unknown, record.plan_identity) is None
+
+    assert (await adapter.observe(request)).category == "absent"
+    state = adapter._coordinator.system_teardown_state(record.binding, record.plan_identity)
+    assert state.terminal is None
+    assert state.preparation is None
+    assert state.materialization is None
+    assert state.recovery is None
+    assert teardown in _store_names(store)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_replays_after_finalize_are_refused_not_recreated(tmp_path: Path) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    terminal = store.reopen_terminal(record.binding, record.plan_identity)
+    lifecycle = _module_lifecycle_request(terminal.request, action="restore")
+    prepare = _preparation_request(record, "materialize", operation_identity="replayed")
+    await adapter.finalize(request, context)
+    names = _store_names(store)
+    finalized_error = external_boot_authority.RemoteCleanupFinalizedError
+
+    with pytest.raises(finalized_error):
+        store.stage(terminal.request, 1.0)
+    with pytest.raises(finalized_error):
+        store.stage_lifecycle(lifecycle, 1.0)
+    with pytest.raises(finalized_error):
+        adapter._coordinator.execute_preparation(prepare)
+
+    assert _store_names(store) == names
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_leaves_an_unparseable_foreign_file_and_still_finalizes(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    foreign = "f" * 64 + ".lifecycle-request"
+    store._publish(foreign, b"not json")
+
+    await adapter.finalize(request, context)
+
+    assert foreign in _store_names(store)
+    assert store.cleanup_finalized(record.binding, record.plan_identity)
+    with pytest.raises(FileNotFoundError):
+        store.recovery_point(record.binding, record.plan_identity)
+    adapter.close()
+
+
+def _teardown_operations() -> ConcreteRemoteExternalBootOperations:
+    return ConcreteRemoteExternalBootOperations(
+        cast(Any, object()),
+        cast(Any, object()),
+        "modules",
+        lambda: 1.0,
+        cast(Any, object()),
+        cast(Any, object()),
+    )
+
+
+@pytest.mark.anyio
+async def test_remote_teardown_after_finalize_protects_the_same_volumes_as_before(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    coordinator = adapter._coordinator
+    operations = _teardown_operations()
+    before = coordinator.system_teardown_state(record.binding, record.plan_identity)
+    assert before.finalized is None and before.terminal is not None
+    protected = operations._protected_teardown_volumes(before)
+    assert ("modules", "kernel/abc") in protected
+    assert len(protected) == 6
+
+    await adapter.finalize(request, context)
+
+    after = coordinator.system_teardown_state(record.binding, record.plan_identity)
+    assert after.terminal is None and after.finalized is not None
+    assert operations._protected_teardown_volumes(after) == protected
+    with pytest.raises(ProviderRecoveryRefusal, match="boot artifact identity differs"):
+        operations._teardown_boot_volumes(before)
+    with pytest.raises(ProviderRecoveryRefusal, match="boot artifact identity differs"):
+        operations._teardown_boot_volumes(after)
+    adapter.close()
+
+
+def test_remote_finalized_refs_without_a_terminal_protect_the_nonce_volumes() -> None:
+    binding = _record().binding
+    refs = external_boot_authority.RemoteFinalizedTeardownRefsV1(
+        module_volumes=(), operation_nonce="c" * 32, boot_artifacts=()
+    )
+    state = RemoteSystemTeardownState(
+        binding=binding,
+        plan_identity=_record().plan_identity,
+        preparation=None,
+        terminal=None,
+        materialization=None,
+        recovery=None,
+        finalized=refs,
+    )
+    operations = _teardown_operations()
+
+    protected = operations._protected_teardown_volumes(state)
+
+    assert {name for _pool, name in protected if name.endswith(("source.ext4", "scratch.ext4"))}
+    assert len(protected) == 4
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("damage", ["garbage", "not-canonical", "unknown-field"])
+async def test_remote_malformed_finalized_marker_fails_closed(tmp_path: Path, damage: str) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    await adapter.finalize(request, context)
+    name = store._finalized_name(record.binding, record.plan_identity)
+    good = cast(bytes, store._read(name))
+    bad = {
+        "garbage": b"{",
+        "not-canonical": b" " + good,
+        "unknown-field": good.replace(b'{"receipt"', b'{"extra":1,"receipt"', 1),
+    }[damage]
+    os.unlink(name, dir_fd=store._root_fd)
+    store._publish(name, bad)
+
+    with pytest.raises(ProviderRecoveryRefusal, match="malformed"):
+        store.finalized_teardown_refs(record.binding, record.plan_identity)
+    with pytest.raises(ValueError, match="malformed"):
+        adapter._coordinator.system_teardown_state(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_legacy_finalized_marker_serves_teardown_only_while_files_remain(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    store._publish(
+        store._finalized_name(record.binding, record.plan_identity),
+        receipt.model_copy(update={"managed": False}).to_canonical_json(),
+    )
+
+    assert store.finalized_teardown_refs(record.binding, record.plan_identity) is None
+    key = store._terminal_key(
+        record.binding.system_id,
+        record.binding.activation_id,
+        record.binding.run_id,
+        record.plan_identity,
+    )
+    os.unlink(f"{key}.terminal", dir_fd=store._root_fd)
+    with pytest.raises(
+        ValueError,
+        match=f"no teardown refs.*System {record.binding.system_id} run {record.binding.run_id}"
+        ".*remove .*and retry teardown",
+    ):
+        store.finalized_teardown_refs(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_upgrades_a_legacy_marker_with_the_refs(tmp_path: Path) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    expected = store._teardown_refs(record.binding, record.plan_identity)
+    store._publish(
+        store._finalized_name(record.binding, record.plan_identity),
+        receipt.model_copy(update={"managed": False}).to_canonical_json(),
+    )
+
+    await adapter.finalize(request, context)
+
+    assert store.finalized_teardown_refs(record.binding, record.plan_identity) == expected
+    assert expected.module_volumes
+    adapter.close()
+
+
+def _record_with_boot_names() -> RemoteExternalBootRecoveryRecord:
+    record = _record()
+    materialization = record.materialization
+    system, run = UUID(record.binding.system_id), UUID(record.binding.run_id)
+    artifacts = materialization.artifacts.model_copy(
+        update={
+            "kernel": OpaqueProviderRef(
+                ref=artifact_volume_name(
+                    "kernel", system, run, materialization.extracted_vmlinuz_sha256
+                )
+            ),
+            "initrd": OpaqueProviderRef(
+                ref=artifact_volume_name(
+                    "initrd", system, run, cast(str, materialization.verified_initrd_sha256)
+                )
+            ),
+        }
+    )
+    return record.model_copy(
+        update={"materialization": materialization.model_copy(update={"artifacts": artifacts})}
+    )
+
+
+def test_remote_finalized_teardown_proves_valid_boot_artifacts_like_the_live_records(
+    tmp_path: Path,
+) -> None:
+    record = _record_with_boot_names()
+    assert record.materialization.verified_initrd_sha256 is not None
+    store = RemoteModuleVolumePreparationStore(tmp_path)
+    _publish_terminal(store, record)
+    store.publish_materialization(_plan_for_record(record), record.materialization)
+    coordinator = RemoteExternalBootCoordinator(cast(Any, object()), store, lambda: 1.0)
+    operations = _teardown_operations()
+    live = coordinator.system_teardown_state(record.binding, record.plan_identity)
+    boot = operations._teardown_boot_volumes(live)
+    assert len(boot) == 2
+
+    store._write_finalized_marker(
+        external_boot_authority.RemoteCleanupQuarantineV1(
+            binding=record.binding,
+            plan_identity=record.plan_identity,
+            recovery_ref=OpaqueProviderRef(ref="remote-external-boot/" + "a" * 64),
+            operation_identity="release-cleanup",
+            attempt_id=uuid4(),
+            journal_sequence=1,
+            journal_digest="sha256:" + "c" * 64,
+        )
+    )
+    finalized = coordinator.system_teardown_state(record.binding, record.plan_identity)
+
+    assert finalized.finalized is not None and finalized.materialization is None
+    assert operations._teardown_boot_volumes(finalized) == boot
+    assert operations._protected_teardown_volumes(finalized) == (
+        operations._protected_teardown_volumes(live)
+    )
+    store.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_refuses_a_corrupt_request_before_the_marker(tmp_path: Path) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    store._publish("e" * 64 + ".request", b"not json")
+    names = _store_names(store)
+
+    with pytest.raises(
+        ValueError, match="cannot parse e{64}.request.*any activation.*no module volume.*remove it"
+    ):
+        await adapter.finalize(request, context)
+
+    assert _store_names(store) == names
+    assert not store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_refuses_conflicting_preparation_nonces_before_the_marker(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    terminal = store.reopen_terminal(record.binding, record.plan_identity)
+    operation = terminal.request.operation.model_copy(update={"operation_nonce": "d" * 32})
+    authority = terminal.request.authority.model_copy(update={"attempt_id": uuid4()})
+    store.stage(
+        terminal.request.model_copy(update={"operation": operation, "authority": authority}), 999.0
+    )
+
+    with pytest.raises(ProviderRecoveryRefusal, match="conflicting preparation requests"):
+        await adapter.finalize(request, context)
+
+    assert not store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_teardown_state_ignores_a_half_removed_materialization_once_finalized(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    await adapter.finalize(request, context)
+    identity = record.materialization.identity.removeprefix("sha256:")
+    plan = record.plan_identity.removeprefix("sha256:")
+    store._publish(f"{plan}.materialization-index", identity.encode("ascii"))
+
+    state = adapter._coordinator.system_teardown_state(record.binding, record.plan_identity)
+
+    assert state.finalized is not None
+    assert state.materialization is None
+    adapter.close()
+
+
+class _FinalizedTeardownOperations(_CompletingTeardownOperations):
+    def __init__(self) -> None:
+        super().__init__()
+        self.finalized_nonce: object = "unset"
+
+    def unfinished_preparation_absent(self, state: Any) -> bool:
+        self.calls.append("unfinished-preparation")
+        self.finalized_nonce = state.finalized.operation_nonce
+        return False
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_of_a_finalized_activation_checks_unfinished_preparation(
+    tmp_path: Path,
+) -> None:
+    finalized, record, request, context, store = await _finalized_release_store(tmp_path)
+    await finalized.finalize(request, context)
+    operations = _FinalizedTeardownOperations()
+    adapter = _completing_teardown_adapter(store, operations)
+    teardown = _remote_teardown_request()
+
+    result = await adapter.execute_system_teardown(
+        teardown, _remote_teardown_context(teardown), _REMOTE_TEARDOWN_RESERVATION
+    )
+
+    assert "unfinished-preparation" in operations.calls
+    assert isinstance(operations.finalized_nonce, str)
+    assert not result.complete
+    finalized.close()
+
+
+def _recovery_names(
+    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+) -> tuple[str, str]:
+    """The recovery index and the recovery record it names (#3419)."""
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    identity = receipt.recovery_ref.ref.removeprefix("remote-external-boot/")
+    index = f"{store._recovery_key(record.binding, record.plan_identity)}.recovery-index"
+    return index, f"{identity}.recovery"
+
+
+async def _finalized_names(tmp_path: Path) -> set[str]:
+    root = tmp_path / "clean"
+    root.mkdir()
+    adapter, _record, request, context, store = await _finalized_release_store(root)
+    await adapter.finalize(request, context)
+    names = _store_names(store)
+    adapter.close()
+    return names
+
+
+async def _finalize_crashing_at(
+    adapter: RemoteExternalBootAuthorityAdapter,
+    request: AuthorityMutationRequestV1,
+    context: AuthorityCommitContextV1,
+    target: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_unlink = os.unlink
+
+    def failing(path: str, *args: Any, **kwargs: Any) -> None:
+        if path == target:
+            raise OSError("injected crash")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(external_boot_authority.os, "unlink", failing)
+    try:
+        with pytest.raises(OSError, match="injected crash"):
+            await adapter.finalize(request, context)
+    finally:
+        monkeypatch.setattr(external_boot_authority.os, "unlink", real_unlink)
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_retries_when_the_index_is_gone_and_the_record_remains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = await _finalized_names(tmp_path)
+    (crash := tmp_path / "crash").mkdir()
+    adapter, record, request, context, store = await _finalized_release_store(crash)
+    index, recovery = _recovery_names(store, record)
+
+    await _finalize_crashing_at(adapter, request, context, recovery, monkeypatch)
+
+    names = _store_names(store)
+    assert index not in names
+    assert recovery in names
+    assert store.read_cleanup_quarantine(record.binding, record.plan_identity) is not None
+    await adapter.finalize(request, context)
+    assert _store_names(store) == expected
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_retries_when_the_record_is_gone_and_the_index_remains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = await _finalized_names(tmp_path)
+    (crash := tmp_path / "crash").mkdir()
+    adapter, record, request, context, store = await _finalized_release_store(crash)
+    index, recovery = _recovery_names(store, record)
+    await _finalize_crashing_at(adapter, request, context, index, monkeypatch)
+    os.unlink(recovery, dir_fd=store._root_fd)
+
+    names = _store_names(store)
+    assert index in names
+    assert recovery not in names
+    assert store.read_cleanup_quarantine(record.binding, record.plan_identity) is not None
+    await adapter.finalize(request, context)
+    assert _store_names(store) == expected
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_leaves_a_recovery_index_naming_another_record(
+    tmp_path: Path,
+) -> None:
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    index, recovery = _recovery_names(store, record)
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    os.unlink(index, dir_fd=store._root_fd)
+    store._publish(index, b"0" * 64)
+
+    store.finalize_cleanup_quarantine(receipt)
+
+    names = _store_names(store)
+    assert recovery not in names
+    assert store._read(index) == b"0" * 64
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_refuses_requests_with_one_nonce_and_different_operations(
+    tmp_path: Path,
+) -> None:
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    terminal = store.reopen_terminal(record.binding, record.plan_identity)
+    operation = terminal.request.operation.model_copy(
+        update={"appliance_image_digest": "sha256:" + "b" * 64}
+    )
+    assert operation != terminal.request.operation
+    assert operation.operation_nonce == terminal.request.operation.operation_nonce
+    authority = terminal.request.authority.model_copy(update={"attempt_id": uuid4()})
+    store.stage(
+        terminal.request.model_copy(update={"operation": operation, "authority": authority}), 999.0
+    )
+
+    with pytest.raises(ProviderRecoveryRefusal, match="conflicting preparation requests"):
+        await adapter.finalize(request, context)
+
+    assert not store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_and_teardown_scans_ignore_accumulated_finalized_markers(
+    tmp_path: Path,
+) -> None:
+    """Markers are never counted, so neither finalize nor teardown refuses on them (#3475)."""
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    for count in range(4097):
+        store._publish(f"{count:064x}.cleanup-finalized", b"{}")
+
+    assert store.teardown_preparation(record.binding, record.plan_identity) is not None
+    await adapter.finalize(request, context)
+
+    assert store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()
+
+
+_REMEDY = (
+    "remote preparation store holds more than 4096 request, lifecycle-request and preparation "
+    "records, so finalize is refused; tear down Systems on this host so teardown collects their "
+    "records, or, once every System on this host is torn down, follow the runbook procedure "
+    "Clear store files of torn-down Systems, then retry"
+)
+_PADDING_ACTIVATION = UUID("00000000-0000-4000-8000-0000000000c1")
+
+
+def _counted_names(store: RemoteModuleVolumePreparationStore) -> int:
+    return sum(
+        1
+        for name in _store_names(store)
+        for suffix in (".request", ".lifecycle-request", ".preparation")
+        if len(name) == 64 + len(suffix) and name.endswith(suffix)
+    )
+
+
+def _pad_requests(
+    store: RemoteModuleVolumePreparationStore,
+    record: RemoteExternalBootRecoveryRecord,
+    activation_id: UUID,
+    total: int,
+) -> None:
+    """Stage same-operation ``.request`` copies for ``activation_id`` until ``total`` count."""
+    terminal = store.reopen_terminal(record.binding, record.plan_identity)
+    for _ in range(total - _counted_names(store)):
+        authority = terminal.request.authority.model_copy(
+            update={"activation_id": activation_id, "attempt_id": uuid4()}
+        )
+        store.stage(terminal.request.model_copy(update={"authority": authority}), 999.0)
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_refuses_past_the_scan_bound_and_names_the_remedy(
+    tmp_path: Path,
+) -> None:
+    """#3475: release finalize refuses past 4096 counted names and writes nothing."""
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    _pad_requests(store, record, _PADDING_ACTIVATION, 4097)
+    before = _store_names(store)
+
+    with pytest.raises(ProviderRecoveryRefusal) as refused:
+        await adapter.finalize(request, context)
+
+    assert str(refused.value) == _REMEDY
+    assert len(_REMEDY) <= 512
+    assert _store_names(store) == before
+    assert not store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("collect", [False, True])
+async def test_remote_finalize_at_the_scan_bound_and_after_collection_frees_names(
+    tmp_path: Path, collect: bool
+) -> None:
+    """#3475: 4096 counted names finalize; past it, collection frees names for the retry.
+
+    The padding shares the released activation's System, so this proves only that unlinked
+    files lower the count; teardown over the bound has its own test.
+    """
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    _pad_requests(store, record, _PADDING_ACTIVATION, 4097 if collect else 4096)
+    if collect:
+        with pytest.raises(ProviderRecoveryRefusal):
+            await adapter.finalize(request, context)
+        padding = record.binding.model_copy(update={"activation_id": str(_PADDING_ACTIVATION)})
+        store.collect_torn_down_activation(padding, record.plan_identity, keep_plan=True)
+        assert _counted_names(store) == 3
+
+    await adapter.finalize(request, context)
+
+    assert store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_collects_over_the_scan_bound(tmp_path: Path) -> None:
+    """#3475: teardown is the remedy, so store size never refuses it.
+
+    4100 counted names hold 4098 ``.request`` names, past the bound teardown used to apply.
+    """
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    _pad_requests(store, record, UUID(record.binding.activation_id), 4100)
+
+    assert await _system_teardown(store, _ProvingTeardownOperations())
+
+    assert _store_names(store) == {_teardown_name(store)}
+    adapter.close()
+
+
+def _plain_literal_value_errors(path: Path) -> list[tuple[int, str, bool]]:
+    """Each ``raise ValueError("<literal>")``: line, text, and whether a validator owns it."""
+    found: list[tuple[int, str, bool]] = []
+
+    def visit(node: ast.AST, in_validator: bool) -> None:
+        for child in ast.iter_child_nodes(node):
+            inside = in_validator
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                inside = any(
+                    isinstance(decorator, ast.Call)
+                    and isinstance(decorator.func, ast.Name)
+                    and decorator.func.id in {"model_validator", "field_validator"}
+                    for decorator in child.decorator_list
+                )
+            if (
+                isinstance(child, ast.Raise)
+                and isinstance(child.exc, ast.Call)
+                and isinstance(child.exc.func, ast.Name)
+                and child.exc.func.id == "ValueError"
+                and child.exc.args
+                and isinstance(literal := child.exc.args[0], ast.Constant)
+            ):
+                found.append((child.lineno, str(literal.value), inside))
+            visit(child, inside)
+
+    visit(ast.parse(path.read_text()), False)
+    return found
+
+
+def test_remote_refusal_reasons_are_never_raised_as_plain_value_errors() -> None:
+    """#3436/#3474: a fixed refusal raised as ``ValueError`` would log only its class.
+
+    The adapter's fixed-literal refusals are all ``ProviderRecoveryRefusal``; a pydantic
+    validator's ``ValueError`` is rewrapped as ``ValidationError``, so it stays plain.
+    """
+    reasons = set(get_args(ProviderRecoveryRefusalReason.__value__))
+    package = Path(external_boot_authority.__file__).parent
+    adapter_modules = (
+        "external_boot_authority.py",
+        "external_boot_operations.py",
+        "recovery_objects.py",
+    )
+    plain = [
+        f"{name}:{line}: {text}"
+        for name in (*adapter_modules, "remote_module_authority_host.py")
+        for line, text, in_validator in _plain_literal_value_errors(package / name)
+        if text in reasons or (name in adapter_modules and not in_validator)
+    ]
+    assert plain == []
