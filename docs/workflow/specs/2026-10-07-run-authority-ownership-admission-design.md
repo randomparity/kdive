@@ -40,7 +40,7 @@ module, and the import-closure test forbids `providers.local_libvirt.config` the
 Call sites: `install_run` and `boot_run` before `keyed_mutation`, and
 `_restage_and_enqueue_install` / `_enqueue_external_boot` again under the System lock. Errors
 render through `ToolResponse.failure_from_error`; the detail names the cause and the fix and
-does not suggest editing database rows. Wrapper docstrings and the generated tool reference
+does not suggest editing database rows, and says an already fixed-worker-provisioned System is ended and re-provisioned on a routed Resource rather than fixed by inventory edits. Wrapper docstrings and the generated tool reference
 state the refusal.
 
 **Lane and docs.** The fixture-mode inventory copy (runbook "Fixture-mode inventory") replaces
@@ -83,7 +83,7 @@ designs no recovery contract.
 
 - Actors and deployments: authenticated project contributors on local/remote libvirt
   deployments; operators configure routes and Resource `authority_instance`.
-- Invariants: a Run reaches an authority only when the System's Resource names it; refusals
+- Invariants: a Run reaches an authority only when the operator's inventory routes or declares the System's Resource for it, or a recorded binding names it (a declaration is Resource-wide trust, not per-System proof); refusals
   create no durable state; RBAC and replay remain.
 - Accepted failure classes: an operator changing configuration between requests makes a
   replayed key refuse until the route is restored.

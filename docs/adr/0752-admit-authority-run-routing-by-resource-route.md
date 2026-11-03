@@ -48,13 +48,20 @@ ordinary path.
 
 The check runs before keyed replay (a stored key cannot bypass a now-invalid route) and
 again under the System lock before any job, run-step deletion, activation or reservation is
-written. A refusal names the cause and the fix: declare `authority_instance` or
-`relocated_authority_instance` on the Resource, or provision the System on the intended
-Resource. The check lives in a server-side module outside the worker handlers' import
+written. A refusal names the cause and the fix: the Resource does not route to this authority; declare
+`relocated_authority_instance` only if every System on it is relocated to that authority's daemon
+(the fixture lane), otherwise end this System and provision a new one on a Resource that routes
+to the authority. A System the fixed worker already provisioned is not made safe by editing
+the inventory. The check lives in a server-side module outside the worker handlers' import
 closure. No schema, migration, ownership record, deployment setting or provider operation
 changes; the declaration is inventory configuration only.
 
 ## Consequences
+
+The relocation declaration is Resource-wide operator trust: it carries no per-System
+evidence, so an operator who declares it on a Resource whose Systems are not relocated
+re-creates the defect for those Systems. The decision narrows the defect to that explicit
+operator act; it does not prove physical location.
 
 Invalid calls create no job, activation, reservation or keyed result. Restoring a valid
 configuration restores idempotent replay. Fixture-mode Systems relocated onto a routed
