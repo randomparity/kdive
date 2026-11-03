@@ -89,6 +89,7 @@ async def seed_public_external_boot(
 ) -> tuple[str, str]:
     with_initrd = initrd_state == "present"
     system_id = await runs_support.seed_system(pool)
+    await runs_support.mark_authority_owned(pool, system_id, AUTHORITY_INSTANCE)
     investigation_id = await runs_support.seed_investigation(pool)
     run_id = str(uuid4())
     generation = uuid4()

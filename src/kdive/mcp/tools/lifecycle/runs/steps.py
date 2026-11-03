@@ -67,6 +67,7 @@ from kdive.services.runs.steps import (
     system_arch,
     system_required_cmdline,
 )
+from kdive.services.systems.authority_owned import require_authority_system_binding
 from kdive.services.systems.root_provenance import read_root_spec
 
 
@@ -138,6 +139,9 @@ async def install_run(
             try:
                 binding = await resolver.binding_for_system(conn, run.system_id)
                 authority_instance = server_authority_instance(binding)
+                # Before keyed replay, so a stored key cannot bypass a now-invalid route.
+                if authority_instance is not None:
+                    await require_authority_system_binding(conn, run.system_id, authority_instance)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(run_id, exc)
             # The method gate is on the crashkernel path only: an install without a reservation is
@@ -271,6 +275,11 @@ async def _restage_and_enqueue_install(
             or locked_run.system_id != system_id
         ):
             return _config_error(str(run.id))
+        if authority_instance is not None:
+            try:
+                await require_authority_system_binding(conn, system_id, authority_instance)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(str(run.id), exc)
         requested_cmdline = (
             cmdline.strip()
             if cmdline is not None
@@ -432,8 +441,15 @@ async def boot_run(
             if not await _has_succeeded_step(conn, uid, "install"):
                 return _install_first(run_id)
             if resolver is not None:
-                binding = await resolver.binding_for_system(conn, run.system_id)
-                authority_instance = server_authority_instance(binding)
+                try:
+                    binding = await resolver.binding_for_system(conn, run.system_id)
+                    authority_instance = server_authority_instance(binding)
+                    if authority_instance is not None:
+                        await require_authority_system_binding(
+                            conn, run.system_id, authority_instance
+                        )
+                except CategorizedError as exc:
+                    return ToolResponse.failure_from_error(run_id, exc)
                 if authority_instance is not None:
                     return await keyed_mutation(
                         conn,
@@ -485,6 +501,10 @@ async def _enqueue_external_boot(
         binding = await resolver.binding_for_system(conn, system_id)
         if server_authority_instance(binding) != authority_instance:
             return _config_error(str(run.id), data={"reason": "authority_route_changed"})
+        try:
+            await require_authority_system_binding(conn, system_id, authority_instance)
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(str(run.id), exc)
         policy = (
             queue.JobRecyclePolicy.TERMINAL if force else await _step_recycle(conn, run.id, "boot")
         )

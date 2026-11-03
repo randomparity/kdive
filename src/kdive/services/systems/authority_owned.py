@@ -98,6 +98,25 @@ async def authority_system_binding(
     return None if row is None else _binding(dict(row))
 
 
+async def require_authority_system_binding(
+    conn: AsyncConnection, system_id: UUID, authority_instance: str
+) -> None:
+    """Refuse an authority-routed Run step unless that authority owns the System (ADR-0752)."""
+    binding = await authority_system_binding(conn, system_id)
+    if binding is not None and binding.authority_instance == authority_instance:
+        return
+    raise CategorizedError(
+        "configured external-boot authority does not own this System; restore the route to "
+        "its existing owner or provision a new System through the intended authority",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "reason": "authority_system_binding_missing"
+            if binding is None
+            else "authority_system_binding_mismatch"
+        },
+    )
+
+
 async def ordinary_mutation_is_fenced(conn: AsyncConnection, system_id: UUID) -> bool:
     """Whether a pre-first-activation authority System refuses ordinary mutation."""
     binding = await authority_system_binding(conn, system_id)

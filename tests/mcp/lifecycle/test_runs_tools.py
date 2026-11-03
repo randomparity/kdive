@@ -3687,6 +3687,12 @@ async def _insert_root_provenance(
     return system_id
 
 
+async def _mark_authority_owned(pool: AsyncConnectionPool, run_id: str) -> None:
+    await runs_support.mark_authority_owned(
+        pool, await _system_id_of(pool, run_id), _AUTHORITY_INSTANCE
+    )
+
+
 async def _install_job(pool: AsyncConnectionPool, response: ToolResponse) -> Job:
     async with pool.connection() as conn:
         job = await JOBS.get(conn, UUID(response.object_id))
@@ -4756,6 +4762,7 @@ def test_authority_install_enqueues_exact_server_root_snapshot(
         _configure_install_authority()
         async with runs_support.pool(migrated_url) as admin:
             run_id = await _seed_succeeded_run(admin)
+            await _mark_authority_owned(admin, run_id)
             await _insert_root_provenance(admin, run_id)
             async with runs_support.pool(authority_role_dsns("kdive_server")) as server:
                 response = await install_run(
@@ -4829,6 +4836,7 @@ def test_authority_install_refuses_missing_or_malformed_root_before_enqueue(
         _configure_install_authority()
         async with runs_support.pool(migrated_url) as admin:
             run_id = await _seed_succeeded_run(admin)
+            await _mark_authority_owned(admin, run_id)
             if root_spec is not None:
                 await _insert_root_provenance(admin, run_id, root_spec)
             async with runs_support.pool(authority_role_dsns("kdive_server")) as server:
@@ -4947,6 +4955,7 @@ def test_authority_staging_worker_uses_payload_without_root_table_access(
         _configure_install_authority()
         async with runs_support.pool(migrated_url) as admin:
             run_id = await _seed_succeeded_run(admin)
+            await _mark_authority_owned(admin, run_id)
             await _insert_root_provenance(admin, run_id)
             async with runs_support.pool(authority_role_dsns("kdive_server")) as server:
                 response = await install_run(
