@@ -3,6 +3,9 @@ Description=KDIVE external-boot provider authority
 Documentation=https://github.com/randomparity/kdive
 After=network-online.target systemd-tmpfiles-setup.service
 Wants=network-online.target systemd-tmpfiles-setup.service
+# Five failed starts in ten minutes leave the unit failed instead of restarting forever.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=notify

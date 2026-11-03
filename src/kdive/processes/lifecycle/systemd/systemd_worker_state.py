@@ -473,7 +473,6 @@ class SlotStore:
             "KDIVE_DATABASE_URL": settings.worker_database_url.get_secret_value(),
             "KDIVE_FIXTURE_CATALOG_PATH": settings.fixture_catalog_path,
             "KDIVE_INSTALL_STAGING": settings.install_staging,
-            "KDIVE_KERNEL_SRC": settings.source_root,
             "KDIVE_LIBVIRT_URI": settings.libvirt_uri,
             "KDIVE_LOG_LEVEL": settings.log_level,
             "KDIVE_ROOTFS_DIR": settings.rootfs_dir,
@@ -484,7 +483,6 @@ class SlotStore:
             "KDIVE_WORKER_INCARNATION_ID": state.incarnation,
             "KDIVE_WORKER_INCARNATION_KIND": "local",
             "KDIVE_WORKER_PYTHON": settings.python,
-            "KDIVE_WORKER_SOURCE_ROOT": settings.source_root,
         }
         if health_bind := settings.health_binds.get(self.slot):
             values["KDIVE_HEALTH_BIND_ADDR"] = health_bind

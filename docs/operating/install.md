@@ -26,6 +26,12 @@ version with `aws s3api get-object --version-id "$version_id" --bucket "$bucket"
 "$probe_key" /tmp/kdive-version-probe`. Delete that exact version after the bytes compare equal.
 Do not start KDIVE until this exact-version read succeeds with the runtime identity.
 
+KDIVE presigns object-store URLs with SigV4, which signs the `Host` header. Set
+`KDIVE_S3_ENDPOINT_URL` to the one address every consumer reaches: the server, workers, MCP
+clients, and remote guests. A proxy in front of the store that rewrites `Host` breaks every
+presigned URL with `403 SignatureDoesNotMatch`. SigV4 also caps a presigned URL at 7 days, so
+`KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS` outside 1 to 604800 fails startup validation.
+
 ## Release compatibility
 
 Capture publication protocol 4 requires a new empty Postgres database and a new versioned
@@ -111,9 +117,16 @@ The recipe installs the complete developer toolchain before syncing the locked e
 building the capture-bootstrap manifest, installing Ansible collections, and installing and
 running the commit hooks. Native libraries and tools come from distribution packages (root
 or sudo required); pinned user tools go into `uv tool dir --bin`. These include `prek`,
-ShellCheck, shfmt, actionlint, Helm, gitleaks, and promtool. Docker and Compose are required
+ShellCheck, actionlint, Helm, gitleaks, and promtool. Docker and Compose are required
 for developer setup, as are the compiler and native headers exercised by the tests.
 Go tools build natively, and POWER builds ShellCheck with Cabal when no release binary exists.
+
+KDIVE installs its pinned shfmt 3.13.1 into `build/dev-tools/bin` within each checkout.
+`just lint-shell` and developer preflight prefer that formatter; when it is absent, they accept
+only ambient shfmt 3.13.1. An invalid private formatter fails with a setup remedy. The isolated
+commit hook retains its separate pin. Setup does not change host PATH or remove an existing
+shared-user formatter; reconcile pre-existing host-tool drift through its owner before testing
+retained-toolchain preservation. See [ADR-0732](../adr/0732-checkout-scoped-developer-shfmt.md).
 
 An installation failure or inaccessible Docker daemon fails setup before dependency sync.
 Setup preserves an existing Docker installation and does not change group membership or
@@ -293,6 +306,14 @@ re-applies those modes to a kernel a later upgrade installs, so no re-run is nee
 (ADR-0668). Start a new login session after it completes so group
 membership takes effect, then run `just check-local-libvirt`. Do not use `examples/local-libvirt/install-host.sh` as a
 second installer; it only calls this recipe for compatibility with the example walkthrough.
+
+On the supported Ubuntu AppArmor session deployment, the daemon's enforcing profile
+is not per-domain guest confinement: libvirt reports security model `none` and QEMU
+runs `unconfined`. [ADR-0741](../adr/0741-apparmor-session-confinement-posture.md)
+accepts that documented posture without granting privileged libvirt access or
+changing daemon ownership. Do not treat it as a confined multi-user deployment.
+The host-install confinement assertion remains failing for unconfined guests;
+this decision does not qualify the Debian host-install cell or release 0.5.0.
 
 The play's external-boot recovery capacity gate reserves
 `live_vm_host_external_boot_concurrent_activations` (3 by default here, 96 GiB at 32 GiB each)

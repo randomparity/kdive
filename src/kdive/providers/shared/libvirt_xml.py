@@ -36,6 +36,48 @@ def register_qemu_namespace() -> None:
     _qemu_namespace_registered = True
 
 
+def append_qcow2_backing_store(disk: ET.Element, base_path: str, *, relabel: bool) -> None:
+    """Append a disk's explicit, terminated qcow2 ``<backingStore>`` on ``base_path``.
+
+    ``relabel=False`` is the authority-owned staged-base contract (ADR-0623): the base carries a
+    staged ``virt_content_t`` label, and the ``selinux`` model seclabel stops libvirt's sVirt
+    driver relabelling it at every start. That relabel changes the base's ctime even when the
+    label is unchanged. Without SELinux, libvirt ignores a ``relabel='no'`` seclabel for a model
+    it has not loaded, so the element is inert on AppArmor and unconfined hosts.
+    """
+    backing = ET.SubElement(disk, "backingStore", type="file")
+    ET.SubElement(backing, "format", type="qcow2")
+    source = ET.SubElement(backing, "source", file=base_path)
+    if not relabel:
+        ET.SubElement(source, "seclabel", model="selinux", relabel="no")
+    ET.SubElement(backing, "backingStore")
+
+
+def backing_store_projection(disk: ET.Element) -> tuple[object, ...] | None:
+    """Project a disk's first typed ``<backingStore>``: source file, format, and seclabels.
+
+    libvirt keeps a ``relabel='no'`` seclabel in both inactive and live XML but omits an
+    unlabelled ``relabel='yes'`` one from inactive XML, so either drift changes the projection.
+    The live-only ``index`` attribute is not projected.
+    """
+    backing = disk.find("./backingStore[@type]")
+    if backing is None:
+        return None
+    source = backing.find("./source")
+    format_element = backing.find("./format")
+    return (
+        backing.get("type"),
+        None if format_element is None else format_element.get("type"),
+        None if source is None else source.get("file"),
+        ()
+        if source is None
+        else tuple(
+            (label.get("model"), label.get("relabel"), label.findtext("./label"))
+            for label in source.findall("./seclabel")
+        ),
+    )
+
+
 def parse_capabilities_arch(caps_xml: str) -> str:
     """Read ``<host><cpu><arch>`` from libvirt capabilities XML; ``unknown`` if malformed."""
     try:

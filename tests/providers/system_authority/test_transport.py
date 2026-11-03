@@ -15,6 +15,7 @@ from kdive.providers.external_boot_authority import transport
 from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemAcknowledgementV1,
+    AuthoritySystemExecutionV1,
     AuthoritySystemMutationRequestV1,
     AuthoritySystemOperation,
     AuthoritySystemResponseV1,
@@ -184,3 +185,35 @@ async def test_sender_rejects_acknowledgement_for_another_attempt_before_transpo
     wrong = _acknowledgement(request).model_copy(update={"attempt_id": uuid4()})
     with pytest.raises(CategorizedError, match="authority: invalid-request"):
         await sender.execute_system_operation(_mutation(request), wrong, deadline=12.0)
+
+
+@pytest.mark.anyio
+async def test_unexpected_system_failure_is_logged_without_reaching_the_peer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request = _takeover()
+
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker-a")
+
+    class Service:
+        async def execute(self, *_args: object) -> AuthoritySystemResponseV1:
+            raise RuntimeError("provider detail")
+
+    envelope = transport.encode_request_envelope(
+        "execute-system-operation",
+        AuthoritySystemExecutionV1(
+            request=_mutation(request), acknowledgement=_acknowledgement(request)
+        ).model_dump(mode="json", by_alias=True),
+        "credential",
+    )
+    with caplog.at_level("ERROR", logger=transport.__name__):
+        response = await transport._dispatch(
+            envelope, authenticate, None, system_service=cast(Any, Service())
+        )
+
+    assert response == b'{"category":"provider-conflict","status":"error"}'
+    [record] = [record for record in caplog.records if record.name == transport.__name__]
+    assert "execute-system-operation" in record.getMessage()
+    assert record.exc_info is not None
+    assert record.exc_info[0] is RuntimeError

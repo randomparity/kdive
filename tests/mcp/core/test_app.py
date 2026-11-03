@@ -35,7 +35,7 @@ from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
-from kdive.worker_lifecycle.worker_incarnation import KubernetesWorkerDeathVerifier
+from kdive.worker_lifecycle.contracts import WorkerDeathVerifier
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 
 _WORKER_CREDENTIAL = SecretStr("worker-test-incarnation-credential")
@@ -46,9 +46,8 @@ def _verifier() -> JWTVerifier:
     return JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
 
 
-class _CatalogDeathVerifier:
-    def verify_dead(self, worker_incarnation: str) -> str | None:
-        raise RuntimeError("catalog verifier must not execute")
+class _CatalogDeathVerifier(WorkerDeathVerifier):
+    """Registration-only test marker."""
 
 
 def test_build_app_registers_jobs_tools() -> None:
@@ -161,12 +160,13 @@ def test_build_use_recovery_is_not_advertised_for_legacy_local_verifier(monkeypa
     assert "ops.recover_build_use" not in names
 
 
-def test_build_use_recovery_is_advertised_in_durable_witness_mode(monkeypatch) -> None:
-    monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "kubernetes")
+@pytest.mark.parametrize("kind", ["docker", "kubernetes"])
+def test_build_use_recovery_is_advertised_in_durable_witness_mode(monkeypatch, kind: str) -> None:
+    monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", kind)
     stores = ObjectStoreAssembly(cast(Any, object()))
     monkeypatch.setattr(process_assembly_module, "build_object_store_assembly", lambda: stores)
     process = process_assembly_module.build_process_assembly(SecretRegistry())
-    assert isinstance(process.worker_death_verifier, KubernetesWorkerDeathVerifier)
+    assert isinstance(process.worker_death_verifier, WorkerDeathVerifier)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app_from_assembly(
         pool,
@@ -355,6 +355,7 @@ def test_debug_tools_registrar_wires_enabled_telemetry(
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = FastMCP("probe")
     expected_resolver = object()
+    expected_runtime = object()
     expected_secret_registry = SecretRegistry()
     expected_telemetry = DebugSessionTelemetry(meter=metrics.get_meter("test.mcp"))
     captured: dict[str, object] = {}
@@ -364,25 +365,31 @@ def test_debug_tools_registrar_wires_enabled_telemetry(
         registered_pool: AsyncConnectionPool,
         *,
         resolver: object,
+        runtime: object,
         secret_registry: object,
         telemetry: object | None = None,
     ) -> None:
         captured["app"] = registered_app
         captured["pool"] = registered_pool
         captured["resolver"] = resolver
+        captured["runtime"] = runtime
         captured["secret_registry"] = secret_registry
         captured["telemetry"] = telemetry
 
     monkeypatch.setattr(tool_module.debug_tools, "register", _register)
 
     registrar = tool_module._debug_tools_registrar(
-        cast(Any, expected_resolver), expected_secret_registry, expected_telemetry
+        cast(Any, expected_resolver),
+        cast(Any, expected_runtime),
+        expected_secret_registry,
+        expected_telemetry,
     )
     registrar(app, pool)
 
     assert captured["app"] is app
     assert captured["pool"] is pool
     assert captured["resolver"] is expected_resolver
+    assert captured["runtime"] is expected_runtime
     assert captured["secret_registry"] is expected_secret_registry
     telemetry = captured["telemetry"]
     assert telemetry is expected_telemetry

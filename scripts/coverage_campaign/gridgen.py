@@ -15,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.assembly import ProcessAssembly
 from kdive.mcp.assembly.app import build_app_from_assembly
+from kdive.mcp.assembly.schema_catalog import CatalogWorkerDeathVerifier
 from kdive.mcp.dev_harness import AUDIENCE, ISSUER, make_keypair
 from kdive.mcp.exposure import required_scopes
 from kdive.mcp.schema.schema_advertising import registered_tools
@@ -46,11 +47,6 @@ def _annotation(tool: FunctionTool) -> str:
     return "mutating"
 
 
-class _OfflineVerifier:
-    def verify_dead(self, worker_incarnation: str) -> str | None:
-        raise RuntimeError("the census must not invoke worker operations")
-
-
 def _build_tools(*, recovery: bool = False) -> list[FunctionTool]:
     kp = make_keypair()
     verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
@@ -65,7 +61,7 @@ def _build_tools(*, recovery: bool = False) -> list[FunctionTool]:
         pool,
         verifier=verifier,
         process_assembly=process,
-        worker_death_verifier=_OfflineVerifier() if recovery else None,
+        worker_death_verifier=CatalogWorkerDeathVerifier() if recovery else None,
     )
     return cast(list[FunctionTool], list(registered_tools(app)))
 

@@ -1,13 +1,16 @@
 ---
-# The daemon that owns the qemu+tls listener differs by distro: Fedora/RHEL use the
-# modular virtproxyd (virtproxyd.conf + virtproxyd-tls.socket); Ubuntu/Debian use the
-# monolithic libvirtd (libvirtd.conf + libvirtd-tls.socket), since the modular daemons
-# are not packaged there. The TLS settings themselves are identical.
+# The daemon that owns the qemu+tls listener differs by distro: Fedora/RHEL and SUSE use the
+# modular virtproxyd (virtproxyd.conf + virtproxyd-tls.socket; openSUSE Leap 16 ships no
+# libvirtd at all); Ubuntu/Debian use the monolithic libvirtd (libvirtd.conf +
+# libvirtd-tls.socket), since the modular daemons are not packaged there. The TLS settings
+# themselves are identical.
 - name: Resolve the per-distro TLS daemon, socket, and config file
+  vars:
+    libvirt_tls_modular: "{{ ansible_os_family in ['RedHat', 'Suse'] }}"
   ansible.builtin.set_fact:
-    libvirt_tls_daemon: "{{ 'virtproxyd.service' if ansible_os_family == 'RedHat' else 'libvirtd.service' }}"
-    libvirt_tls_socket: "{{ 'virtproxyd-tls.socket' if ansible_os_family == 'RedHat' else 'libvirtd-tls.socket' }}"
-    libvirt_tls_conf_file: "{{ '/etc/libvirt/virtproxyd.conf' if ansible_os_family == 'RedHat' else '/etc/libvirt/libvirtd.conf' }}"
+    libvirt_tls_daemon: "{{ 'virtproxyd.service' if libvirt_tls_modular else 'libvirtd.service' }}"
+    libvirt_tls_socket: "{{ 'virtproxyd-tls.socket' if libvirt_tls_modular else 'libvirtd-tls.socket' }}"
+    libvirt_tls_conf_file: "{{ '/etc/libvirt/virtproxyd.conf' if libvirt_tls_modular else '/etc/libvirt/libvirtd.conf' }}"
 
 - name: Create the PKI directories
   ansible.builtin.file:

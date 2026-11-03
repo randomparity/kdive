@@ -16,6 +16,7 @@ from kdive.config.core_settings import (
     S3_ENDPOINT_URL,
     S3_REGION,
     SETTINGS,
+    VMCORE_RETENTION_DAYS,
     _always,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -154,3 +155,14 @@ def test_always_required_settings_reject_blank(setting: Setting[str], blank: str
     """
     with pytest.raises(ValueError):
         setting.parse(blank)
+
+
+@pytest.mark.parametrize("value", [None, "1", "30", "", "0", "-1", "1.5"])
+def test_vmcore_retention_optional_positive_days(value: str | None) -> None:
+    registry = Registry([VMCORE_RETENTION_DAYS])
+    registry.load({} if value is None else {VMCORE_RETENTION_DAYS.name: value})
+    if value in {"", "0", "-1", "1.5"}:
+        with pytest.raises(CategorizedError):
+            registry.get(VMCORE_RETENTION_DAYS)
+    else:
+        assert registry.get(VMCORE_RETENTION_DAYS) == (None if value is None else int(value))

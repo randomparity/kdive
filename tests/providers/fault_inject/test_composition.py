@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
-from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.artifacts.storage import (
+    ArtifactWriteRequest,
+    ConditionalArtifactWriteRequest,
+    StoredArtifact,
+)
 from kdive.components.references import ROOTFS_COMPONENT
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -174,16 +178,22 @@ class _RecordingStore:
     """A StorePort double that records each write and returns a key-bearing result."""
 
     def __init__(self) -> None:
-        self.requests: list[ArtifactWriteRequest] = []
+        self.requests: list[ConditionalArtifactWriteRequest] = []
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
-        self.requests.append(request)
         return StoredArtifact(
             key=request.key(),
             etag="etag",
             sensitivity=request.sensitivity,
             retention_class=request.retention_class,
             version_id="test-version",
+        )
+
+    def create_if_absent(self, request: ConditionalArtifactWriteRequest) -> StoredArtifact:
+        self.requests.append(request)
+        assert request.metadata == {"vmcore-execution": str(UUID(int=1)), "vmcore-kind": "capture"}
+        return StoredArtifact(
+            request.key, "etag", request.sensitivity, request.retention_class, "test-version"
         )
 
 
@@ -295,24 +305,21 @@ def test_capture_writes_sensitive_and_redacted_vmcore_artifacts() -> None:
     system_id = uuid4()
 
     run_id = uuid4()
-    output = retrieve.capture(system_id, run_id, CaptureMethod.HOST_DUMP)
+    output = retrieve.capture(system_id, run_id, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1))
 
     raw_req, redacted_req = store.requests
-    assert raw_req.name == "vmcore-host_dump"
+    assert raw_req.key == f"{TENANT}/runs/{run_id}/vmcore-host_dump-{UUID(int=1)}"
     assert raw_req.sensitivity is Sensitivity.SENSITIVE
-    assert redacted_req.name == "vmcore-host_dump-redacted"
+    assert redacted_req.key == raw_req.key + "-redacted"
     assert redacted_req.sensitivity is Sensitivity.REDACTED
 
     for req in store.requests:
-        assert req.tenant == TENANT
-        assert req.owner_kind == "runs"
-        assert req.owner_id == str(run_id)
         assert req.data == b"fault-inject-vmcore"
         assert req.retention_class == "vmcore"
 
-    assert output.raw.key == raw_req.key()
+    assert output.raw.key == raw_req.key
     assert output.raw.sensitivity is Sensitivity.SENSITIVE
-    assert output.redacted.key == redacted_req.key()
+    assert output.redacted.key == redacted_req.key
     assert output.redacted.sensitivity is Sensitivity.REDACTED
     assert output.vmcore_build_id == SYNTHETIC_BUILD_ID
     assert output.raw_size_bytes == len(b"fault-inject-vmcore")

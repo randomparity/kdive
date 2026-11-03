@@ -113,6 +113,81 @@ unprivileged. Under SELinux the output file also needs the `virt_image_t` label 
 can read it under `qemu:///system` (a host-side file label, independent of the guest-internal
 SELinux the plane disables).
 
+For worker-driven local publication, host preparation creates `/var/lib/kdive/build/images`
+with the existing operator/shared-provider-group ownership and mode `2770`, and labels that
+exact subtree `svirt_image_t` on enforcing SELinux hosts. The build handoff grants group
+traversal on owned directories, group read on regular files, and group write only on the staged
+customization disk. It preserves existing bits, owners/groups and the system-daemon access
+path. The published qcow2 retains the disk's group-write bit after atomic rename; provider-group
+members are cooperating principals, not isolated tenants ([ADR-0764](../../adr/0764-local-image-build-workspace-access.md)).
+
+A custom workspace needs the same shared-group ancestry and confinement prerequisites supplied
+by its operator. The runtime neither repairs ancestors nor changes service umasks or SELinux
+enforcement. Symlinks, multiply linked regular files, foreign-owned nodes and other nonregular
+nodes fail before customization boot; investigate the reported path rather than applying a
+recursive permission rewrite.
+
+Host preparation also owns `/var/lib/kdive/rootfs-cache` with the configured operator,
+provider group and mode `2770`, using the same `svirt_image_t` policy
+([ADR-0765](../../adr/0765-local-published-rootfs-cache-access.md)). This cache is persistent:
+System overlays can reference its files after publication, so do not remove it as build cleanup.
+Provider-group peers can replace entries; this policy does not provide hostile-peer isolation.
+
+Before preparing a populated legacy cache, quiesce dependent Systems and inspect the exact root
+and entries. Reconcile unexpected or symlinked roots first. The role converges only the root's
+owner/group/mode; its existing label task preserves customizable security categories. An owner
+or administrator may repair an individually inspected entry's necessary group/read access while
+quiesced, preserving other bits, ownership and contents. Do not recursively chmod/chown the tree
+or delete backing files. File modes, worker umask and cache-hit validation remain unchanged.
+
+## Refresh a pruned cloud-image source
+
+Versioned URLs can disappear from rolling vendor storage. A download failure does not justify
+switching a row to an unchecked `latest` URL or disabling its SHA-256 check. Refresh the
+selected row in `fixtures/local-libvirt/rootfs_catalog.toml`:
+
+1. Find a versioned replacement for the same distribution, release and architecture in the
+   vendor index: [CentOS Stream 9](https://cloud.centos.org/centos/9-stream/x86_64/images/),
+   [CentOS Stream 10](https://cloud.centos.org/centos/10-stream/x86_64/images/), or
+   [Tumbleweed appliances](https://download.opensuse.org/tumbleweed/appliances/).
+   Tumbleweed's snapshot also determines the row's `version`; CentOS keeps its major release.
+2. Download that exact image and its vendor checksum metadata into an owned build workspace.
+   CentOS publishes a `.SHA256SUM` sidecar with `SHA256 (filename) = digest`; Tumbleweed
+   publishes `.sha256` with `digest  filename`. Match the checksum entry to the exact basename.
+   Compute `sha256sum IMAGE` and compare the full digest before changing the catalog. Stop on
+   a missing checksum, download failure or mismatch; rediscover the candidate if it was pruned
+   during verification. Preserve the vendor URL, checksum record and downloaded byte digest.
+3. Update the selected row's exact URL and SHA-256, and its snapshot version where applicable.
+   Keep unrelated rows unchanged, including other architectures: an x86_64 download does not
+   verify a ppc64le source. Build with the catalog's default package set; do not copy the
+   Fedora example's `--package` overrides into another distribution. For example:
+
+   ```bash
+   python -m kdive build-fs \
+     --image centos-stream-kdive-ready-9 \
+     --workspace ~/.local/share/kdive/build/images \
+     --dest ~/.local/share/kdive/build/images/centos-stream-kdive-ready-9.qcow2
+   ```
+
+   For another row, change both the image name and destination basename. The acquisition path
+   independently verifies the catalog checksum again.
+4. After a successful build, inspect the emitted provenance sidecar and the guest's installed
+   package inventory. Check the recorded `makedumpfile_version` and `drgn_version` against the
+   executable version markers produced by customization. Update the row's package annotations
+   and corresponding curated expectations in `tests/images/test_rootfs_catalog.py` from those
+   observations. Missing packages or incomplete version evidence require investigation.
+5. Run the built-image verification below and the affected image-smoke parameters in the
+   [live-testing guide](live-testing.md). Record candidate/deployed revisions, source and output
+   digests, guest OS/architecture, accelerator, results and owned cleanup. A successful build
+   or direct boot does not replace the MCP image-smoke cell. Keep a blocked or skipped cell
+   explicit and rerun it once its prerequisite is available.
+6. Run the catalog tests and repository guardrails before submitting the refresh. Retain the
+   evidence with the change so the selected bytes and package observations are reviewable.
+
+Repeat this procedure when a vendor prunes the replacement. The checksum binds the downloaded
+bytes; it does not promise that the vendor will retain them indefinitely. No automatic updater
+or archival mirror is configured by this procedure.
+
 ## Verify the built image
 
 Follow [live-stack setup](live-stack.md) to configure and start the runtime, then the
@@ -152,11 +227,30 @@ the job already in flight. The build worker runs the same plane this runbook dro
 validates the guest contract (libguestfs inspection — a build missing agent/kdump/drgn/helpers is
 rejected, never published), and publishes row-first.
 
+`publish` builds local-libvirt images only. An authorized `--provider remote-libvirt` request is
+refused at once with `not_implemented`: it enqueues no job, writes no catalog row and returns no
+job reference ([ADR-0759](../../adr/0759-remote-image-publication-admission.md)). Build and stage a
+remote base volume with `deploy/ansible/playbooks/image.yml` instead, as the
+[remote host setup](remote-libvirt-host-setup.md#2-prepare-guest-images) describes. An unauthorized
+caller is still denied before the provider is considered.
+
 ## Catalog inputs and runtime capability
 
 [`fixtures/local-libvirt/rootfs_catalog.toml`](../../../fixtures/local-libvirt/rootfs_catalog.toml)
 owns local build inputs, pinned base sources, and curated guest-tool versions. Family customizers
 own package installation; avoid copying their package/version tables into another guide.
+
+Optional `retained_kernel` names the exact bare version or `vmlinuz-<version>` filename
+for Fedora x86_64 builds (ADR-0761). It selects the customization boot and retains that release
+in the finished image. After ordinary customization, RPM checks then removes only other-release
+`kernel`, `kernel-core`, `kernel-modules-core`, `kernel-modules`, and `kernel-modules-extra`
+packages using normal dependency checks and scriptlets. Selected-release and unrelated packages
+remain. Publication requires exactly one non-rescue kernel matching the selection with its initramfs.
+Omission preserves existing behavior. The retired `customization_kernel` key is rejected;
+replace it only after accepting the package-removal effects. Missing/stale selections, unsupported
+families or architectures, RPM dependency failures and invalid final inventories fail the build.
+Inspect the template/package inventory and explicitly refresh the value or template, then rebuild
+and rerun the unchanged unhinted image-smoke cell. This supplies no provisioning hint.
 
 Runtime capture capability depends on the target kernel and available evidence. Use
 `images.describe` and the [images guide](../../guide/toolsets/images.md) to distinguish supported,
@@ -242,6 +336,22 @@ agent-supplied (untrusted) kernel can send outbound traffic through the NIC. The
 longer the boundary — **your network zone's firewall is**. Enable this only for resources that live
 in a lab micro-zone whose network firewall already restricts egress. When the flag is absent or
 false, behavior is exactly as before (`restrict=on`, no egress).
+
+**Security — host loopback is reachable too.** With `restrict=off`, QEMU user-mode networking
+maps the guest's gateway address, `10.0.2.2`, to the host's loopback interface. An egress-enabled
+guest can open TCP connections to any service that listens only on host loopback, as the account
+libvirt runs QEMU as: the libvirt QEMU user under `qemu:///system`, the invoking account under
+`qemu:///session`. For an authority System with `guest_egress` in its manifest, remote authority
+Systems included, it is the authority account that owns the private session daemon. Your
+network-zone firewall does not see these connections, because they terminate on the host. That
+includes kdive's own per-System listeners: other guests' loopback SSH forward ports and, on Systems
+provisioned with `debug.gdbstub`, the unauthenticated QEMU gdbstub, which gives the reaching guest
+control of that other guest. The image-build customization boot has its own ungated `restrict=off`
+NIC with the same mapping, so it reaches host-loopback services whether or not `guest_egress` is
+set. Before enabling `guest_egress`, treat every loopback-only service on that host as reachable by
+the guest's kernel and userspace, or do not enable it on that host. Whether kdive will mitigate this
+is tracked in #3496; until then the exposure is part of what you accept (ADR-0313, amendment of
+2026-11-03).
 
 **Note:** `restrict=off` opens the *route*; the guest still needs to DHCP the NIC and populate
 `/etc/resolv.conf` (SLIRP hands out `10.0.2.15` with DNS at `10.0.2.3`). The `kdive-ready` images do

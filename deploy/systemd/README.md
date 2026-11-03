@@ -28,6 +28,15 @@ printf '%s\n' "$witness_dsn" | sudo env "PATH=$PATH" \
 unset witness_dsn
 ```
 
+Provisioning passes `--uv /usr/local/bin/uv` (or the inventory's existing
+`live_vm_host_uv_bin`) so sudo's restricted PATH need not contain the installation.
+An explicit selection must be an absolute executable regular file; its canonical file
+and every ancestor must be root-owned and not group/other-writable. The installer checks
+these permissions before executing `uv --version`, and rejects an unsuitable selection
+before reading the DSN or changing the host. Supply the existing trusted installation;
+do not change sudo policy or install a second copy. Omitting `--uv` preserves the
+PATH-based direct invocation above, with the same early executable/version check.
+
 The installer is idempotent for one checkout on a fresh disposable host. It selects the host
 distro's supported session daemon: Debian-family hosts use monolithic `libvirtd` and
 `libvirt-sock`; Red Hat-family hosts use modular `virtqemud` and `virtqemud-sock`. An unsupported

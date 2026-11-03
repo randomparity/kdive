@@ -806,7 +806,7 @@ async def _load_module_symbols_when_configured(
 
 
 def _module_resolver(fixture: _ModuleFixture | None) -> Any:
-    def resolve(_run_id: str, module: str) -> ModuleDebuginfo:
+    def resolve(_attachment: GdbMiAttachment, module: str) -> ModuleDebuginfo:
         if fixture is None or module != fixture.name:
             raise AssertionError(f"unexpected module-symbol fixture request: {module}")
         return ModuleDebuginfo(path=fixture.path, srcversion=None, build_id=None)

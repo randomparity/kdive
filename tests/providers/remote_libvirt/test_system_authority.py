@@ -37,6 +37,7 @@ from kdive.providers.remote_libvirt.system_authority import (
     RemoteAuthoritySystemManifestEntry,
     RemoteAuthoritySystemProvider,
 )
+from kdive.providers.shared.libvirt_xml import QEMU_NS
 from kdive.providers.system_authority import (
     AuthoritySystemCommitContextV1,
     AuthoritySystemMutationRequestV1,
@@ -152,14 +153,15 @@ def _snapshot(*, architecture: Architecture = "x86_64") -> AuthoritySystemProvis
     )
 
 
-def _manifest(*, architecture: Architecture = "x86_64") -> RemoteAuthoritySystemManifestEntry:
+def _manifest(
+    *, architecture: Architecture = "x86_64", guest_egress: bool = False
+) -> RemoteAuthoritySystemManifestEntry:
     return RemoteAuthoritySystemManifestEntry(
         resource_name="remote-a",
         authority_instance="authority-a",
         root_identity=ROOT_IDENTITY,
         architecture=architecture,
         base_volume=BASE_VOLUME,
-        network="authority-net",
         machine="pc-i440fx-9.2" if architecture == "x86_64" else "pseries-9.2",
         gdb_addr="127.0.0.1",
         gdb_port_min=47000,
@@ -167,6 +169,7 @@ def _manifest(*, architecture: Architecture = "x86_64") -> RemoteAuthoritySystem
         ssh_addr="127.0.0.1",
         ssh_port_min=47100,
         ssh_port_max=47103,
+        guest_egress=guest_egress,
     )
 
 
@@ -239,10 +242,33 @@ class _Domain:
         )
         for tag in ("emulator", "controller", "input", "audio", "watchdog", "memballoon"):
             ET.SubElement(devices, tag)
+        _fill_libvirt_defaults(root, live=flags == 0 and self.active)
         transform = self.connection.xml_transforms.get(flags)
         if transform is not None:
             transform(root)
         return ET.tostring(root, encoding="unicode")
+
+
+def _fill_libvirt_defaults(root: ET.Element[str], *, live: bool) -> None:
+    """Apply the readback changes libvirt 12.0.0 makes to the rendered intent (#3296)."""
+    os_type = root.find("./os/type")
+    assert os_type is not None
+    serial_type, serial_model = {
+        "x86_64": ("isa-serial", "isa-serial"),
+        "ppc64le": ("spapr-vio-serial", "spapr-vty"),
+    }[os_type.get("arch", "")]
+    serial_target = root.find("./devices/serial/target")
+    assert serial_target is not None
+    if serial_target.get("type") is None:
+        serial_target.set("type", serial_type)
+        ET.SubElement(serial_target, "model", name=serial_model)
+    if not live:
+        return
+    cpu = root.find("./cpu")
+    assert cpu is not None
+    if cpu.get("mode") == "host-model":
+        cpu.attrib.update({"mode": "custom", "match": "exact", "check": "full"})
+        ET.SubElement(cpu, "model", fallback="forbid").text = "SapphireRapids"
 
 
 class _Pool(FakeStoragePool):
@@ -360,6 +386,7 @@ def _provider(
     clock: _Clock | None = None,
     sleep: Callable[[float], None] | None = None,
     architecture: Architecture = "x86_64",
+    guest_egress: bool = False,
     validate_private_base: Callable[[str, str], None] = lambda _name, _path: None,
 ) -> tuple[RemoteAuthoritySystemProvider, _Bootstrap, RemoteModulePreparationExecutor, Path]:
     state = tmp_path / "state"
@@ -376,7 +403,7 @@ def _provider(
     provider = RemoteAuthoritySystemProvider(
         connection=open_connection,
         pool_name=POOL_NAME,
-        manifest=(_manifest(architecture=architecture),),
+        manifest=(_manifest(architecture=architecture, guest_egress=guest_egress),),
         private_base_paths={BASE_VOLUME: Path("/authority/pool") / BASE_VOLUME},
         validate_private_base=validate_private_base,
         state_dir=state,
@@ -421,6 +448,77 @@ async def test_provider_implements_fixed_port_and_persists_intent_before_mutatio
     assert overlay_volume_name(SYSTEM_ID) in connection.pool.listVolumes()
     assert connection.domains[DOMAIN_NAME].active
     assert (state / f"{SYSTEM_ID}.provision.json").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("guest_egress", (False, True), ids=("egress-off", "egress-on"))
+async def test_domain_has_only_the_forward_nic_with_operator_egress(
+    tmp_path: Path, guest_egress: bool
+) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, state = _provider(
+        tmp_path, connection, guest_egress=guest_egress
+    )
+    try:
+        facts = await provider.execute_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert facts.complete
+    root = ET.fromstring(connection.domains[DOMAIN_NAME].xml)
+    assert root.findall("./devices/interface") == []
+    (netdev,) = _forward_netdevs(root)
+    restrict = "off" if guest_egress else "on"
+    assert netdev.get("value") == (
+        f"user,id=kdivessh,restrict={restrict},hostfwd=tcp:127.0.0.1:47100-:22"
+    )
+    assert [argument.get("value") for argument in root.iter(f"{{{QEMU_NS}}}arg")][:2] == [
+        "-gdb",
+        "tcp:127.0.0.1:47001",
+    ]
+    intent = json.loads((state / f"{SYSTEM_ID}.provision.json").read_bytes())
+    assert intent["guest_egress"] is guest_egress
+    assert "network" not in intent
+
+
+@pytest.mark.anyio
+async def test_guest_egress_flip_changes_identity_and_refuses_the_existing_intent(
+    tmp_path: Path,
+) -> None:
+    identities: dict[bool, str] = {}
+    states: dict[bool, Path] = {}
+    connections: dict[bool, _Connection] = {}
+    for guest_egress in (False, True):
+        root = tmp_path / str(guest_egress)
+        root.mkdir()
+        connections[guest_egress] = _Connection()
+        provider, _bootstrap, executor, states[guest_egress] = _provider(
+            root, connections[guest_egress], guest_egress=guest_egress
+        )
+        try:
+            await provider.execute_system_provision(_request(), _context(), _snapshot())
+        finally:
+            executor.shutdown()
+        intent = json.loads((states[guest_egress] / f"{SYSTEM_ID}.provision.json").read_bytes())
+        identities[guest_egress] = intent["intent_identity"]
+    assert identities[False] != identities[True]
+
+    intent_name = f"{SYSTEM_ID}.provision.json"
+    before = list(connections[False].mutations)
+    (tmp_path / "flipped").mkdir()
+    flipped, _bootstrap, executor, flipped_state = _provider(
+        tmp_path / "flipped", connections[False], guest_egress=True
+    )
+    (flipped_state / intent_name).write_bytes((states[False] / intent_name).read_bytes())
+    (flipped_state / intent_name).chmod(0o600)
+    try:
+        with pytest.raises(CategorizedError, match="another binding") as caught:
+            await flipped.execute_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert connections[False].mutations == before
 
 
 @pytest.mark.anyio
@@ -740,12 +838,7 @@ async def test_live_and_inactive_domain_mismatch_fail_closed(
         await provider.execute_system_provision(_request(), _context(), _snapshot())
         before = list(connection.mutations)
 
-        def change_network(root: ET.Element[str]) -> None:
-            source = root.find("./devices/interface/source")
-            assert source is not None
-            source.set("network", "foreign-net")
-
-        connection.xml_transforms[xml_flags] = change_network
+        connection.xml_transforms[xml_flags] = _enable_forward_egress
         with pytest.raises(CategorizedError) as caught:
             await provider.observe_system_provision(_request(), _context(), _snapshot())
     finally:
@@ -753,6 +846,156 @@ async def test_live_and_inactive_domain_mismatch_fail_closed(
 
     assert caught.value.category is ErrorCategory.CONFLICT
     assert connection.mutations == before
+
+
+def _forward_netdevs(root: ET.Element[str]) -> list[ET.Element[str]]:
+    return [
+        argument
+        for argument in root.iter(f"{{{QEMU_NS}}}arg")
+        if argument.get("value", "").startswith("user,id=kdivessh,")
+    ]
+
+
+def _enable_forward_egress(root: ET.Element[str]) -> None:
+    (netdev,) = _forward_netdevs(root)
+    netdev.set("value", netdev.get("value", "").replace("restrict=on", "restrict=off"))
+
+
+def _set_attribute(path: str, name: str, value: str) -> Callable[[ET.Element[str]], None]:
+    def change(root: ET.Element[str]) -> None:
+        element = root.find(path)
+        assert element is not None
+        element.set(name, value)
+
+    return change
+
+
+_LIVE = 0
+_INACTIVE = libvirt.VIR_DOMAIN_XML_INACTIVE
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("xml_flags", "tamper"),
+    (
+        *(
+            (flags, tamper)
+            for flags in (_LIVE, _INACTIVE)
+            for tamper in (
+                _set_attribute("./devices/serial/target", "type", "pci-serial"),
+                _set_attribute("./devices/serial/target", "type", "spapr-vio-serial"),
+                _set_attribute("./devices/serial/target", "port", "1"),
+            )
+        ),
+    ),
+    ids=(
+        *(
+            f"{document}-{case}"
+            for document in ("live", "inactive")
+            for case in ("serial-type", "serial-foreign-arch-type", "serial-port")
+        ),
+    ),
+)
+async def test_libvirt_defaults_do_not_mask_device_tampering(
+    tmp_path: Path, xml_flags: int, tamper: Callable[[ET.Element[str]], None]
+) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        before = list(connection.mutations)
+        connection.xml_transforms[xml_flags] = tamper
+        with pytest.raises(CategorizedError, match="differs from private intent") as caught:
+            await provider.observe_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert connection.mutations == before
+
+
+@pytest.mark.anyio
+async def test_domain_keeps_libvirt_from_relabelling_only_the_base(tmp_path: Path) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    try:
+        facts = await provider.execute_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert facts.complete
+    disk = ET.fromstring(connection.domains[DOMAIN_NAME].xml).find("./devices/disk")
+    assert disk is not None
+    assert disk.findall("./source/seclabel") == []
+    assert [label.attrib for label in disk.findall("./backingStore/source/seclabel")] == [
+        {"model": "selinux", "relabel": "no"}
+    ]
+
+
+def _drop_base_seclabel(root: ET.Element[str]) -> None:
+    source = root.find("./devices/disk/backingStore/source")
+    assert source is not None
+    for label in source.findall("./seclabel"):
+        source.remove(label)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        _drop_base_seclabel,
+        _set_attribute("./devices/disk/backingStore/source/seclabel", "relabel", "yes"),
+    ),
+    ids=("seclabel-missing", "relabel-yes"),
+)
+@pytest.mark.parametrize(
+    "xml_flags", (0, libvirt.VIR_DOMAIN_XML_INACTIVE), ids=("live", "inactive")
+)
+async def test_base_relabel_drift_fails_closed(
+    tmp_path: Path, xml_flags: int, tamper: Callable[[ET.Element[str]], None]
+) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        before = list(connection.mutations)
+        connection.xml_transforms[xml_flags] = tamper
+        with pytest.raises(CategorizedError, match="differs from private intent") as caught:
+            await provider.observe_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert connection.mutations == before
+
+
+@pytest.mark.anyio
+async def test_live_custom_cpu_without_host_model_expansion_fails_closed(tmp_path: Path) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        connection.xml_transforms[_LIVE] = _set_attribute("./cpu", "check", "partial")
+        with pytest.raises(CategorizedError, match="differs from private intent"):
+            await provider.observe_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ("custom", "host-passthrough"))
+async def test_inactive_cpu_mode_change_fails_closed(tmp_path: Path, mode: str) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        connection.xml_transforms[libvirt.VIR_DOMAIN_XML_INACTIVE] = _set_attribute(
+            "./cpu", "mode", mode
+        )
+        with pytest.raises(CategorizedError, match="differs from private intent"):
+            await provider.observe_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
 
 
 @pytest.mark.anyio
@@ -1212,3 +1455,72 @@ async def test_wrong_private_record_mode_fails_before_provider_access(tmp_path: 
         executor.shutdown()
     assert connection.opens == 0
     assert connection.mutations == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("xml_flags", (_LIVE, _INACTIVE), ids=("live", "inactive"))
+@pytest.mark.parametrize("interface_type", ("network", "user"))
+async def test_added_libvirt_interface_fails_closed(
+    tmp_path: Path, xml_flags: int, interface_type: str
+) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection)
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        before = list(connection.mutations)
+
+        def add_interface(root: ET.Element[str]) -> None:
+            devices = root.find("./devices")
+            assert devices is not None
+            interface = ET.SubElement(devices, "interface", type=interface_type)
+            if interface_type == "network":
+                ET.SubElement(interface, "source", network="default")
+            ET.SubElement(interface, "model", type="virtio")
+
+        connection.xml_transforms[xml_flags] = add_interface
+        with pytest.raises(CategorizedError, match="differs from private intent") as caught:
+            await provider.observe_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert connection.mutations == before
+
+
+@pytest.mark.anyio
+async def test_guest_egress_is_bound_into_the_stored_intent_identity(tmp_path: Path) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, state = _provider(tmp_path, connection, guest_egress=True)
+    intent_path = state / f"{SYSTEM_ID}.provision.json"
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        intent = json.loads(intent_path.read_bytes())
+        intent["guest_egress"] = False
+        intent_path.write_text(json.dumps(intent, sort_keys=True, separators=(",", ":")) + "\n")
+        before = list(connection.mutations)
+        with pytest.raises(ValueError, match="intent identity changed"):
+            await provider.observe_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert connection.mutations == before
+
+
+@pytest.mark.anyio
+async def test_stored_intent_of_the_network_shape_fails_closed(tmp_path: Path) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, state = _provider(tmp_path, connection)
+    intent_path = state / f"{SYSTEM_ID}.provision.json"
+    try:
+        await provider.execute_system_provision(_request(), _context(), _snapshot())
+        intent = json.loads(intent_path.read_bytes())
+        del intent["guest_egress"]
+        intent["network"] = "default"
+        intent_path.write_text(json.dumps(intent, sort_keys=True, separators=(",", ":")) + "\n")
+        before = list(connection.mutations)
+        with pytest.raises(ValueError, match="guest_egress"):
+            await provider.observe_system_provision(_request(), _context(), _snapshot())
+    finally:
+        executor.shutdown()
+
+    assert connection.mutations == before

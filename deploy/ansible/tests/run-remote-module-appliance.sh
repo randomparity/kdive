@@ -43,9 +43,12 @@ PY
 export ANSIBLE_CONFIG=deploy/ansible/ansible.cfg
 export ANSIBLE_ROLES_PATH=deploy/ansible/roles
 playbook=deploy/ansible/tests/remote-module-appliance.yml
-ansible-playbook "$playbook" -i localhost, -e "@$test_root/vars.json"
+# This unprivileged run cannot write SELinux policy, so an enforcing developer host would fail the
+# fcontext rule; the extra var overrides the role's registered getenforce result (#3346).
+selinux_off='{"remote_libvirt_module_appliance_selinux_mode": {"stdout": "Disabled"}}'
+ansible-playbook "$playbook" -i localhost, -e "@$test_root/vars.json" -e "$selinux_off"
 second_log="$test_root/second.log"
-if ! ansible-playbook "$playbook" -i localhost, -e "@$test_root/vars.json" >"$second_log" 2>&1; then
+if ! ansible-playbook "$playbook" -i localhost, -e "@$test_root/vars.json" -e "$selinux_off" >"$second_log" 2>&1; then
   cat "$second_log"
   exit 1
 fi
@@ -67,7 +70,7 @@ variables["remote_libvirt_module_appliance_images"]["x86_64"]["sha256"] = "0" * 
 path.write_text(json.dumps(variables), encoding="utf-8")
 PY
 rm "$install_dir/appliance-v1-x86_64.tar"
-if ansible-playbook "$playbook" -i localhost, -e "@$test_root/vars.json"; then
+if ansible-playbook "$playbook" -i localhost, -e "@$test_root/vars.json" -e "$selinux_off"; then
   echo "bad module-appliance digest unexpectedly passed" >&2
   exit 1
 fi

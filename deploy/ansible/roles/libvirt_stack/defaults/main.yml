@@ -40,6 +40,8 @@ libvirt_stack_packages_redhat:
   - libseccomp
   - python3-libvirt
   - python3-lxml
+  # semanage + the seobject bindings sefcontext needs for the pcap pool label (#3316).
+  - policycoreutils-python-utils
   # `combined_kernel_tar` (tests/integration/live_stack/spine.py) shells out to `make`
   # and a GNU `tar` supporting --transform when it cuts a combined kernel bundle. Both
   # were a pre-existing undeclared dependency of the live-stack spine; the #2318
@@ -57,9 +59,15 @@ libvirt_stack_packages_redhat:
   - elfutils-libelf-devel
   - openssl-devel
   - dwarves
+# Already-present SUSE packages that must share the QEMU module build (with the emulators).
+libvirt_stack_suse_qemu_build_packages:
+  - qemu-img
 libvirt_stack_packages_suse:
   - libvirt-daemon-qemu
   - libvirt-daemon-proxy
+  # The modular SUSE daemons do not define the `default` network that libvirt_pool_net
+  # activates; this subpackage ships its definition (zypper skips recommends).
+  - libvirt-daemon-config-network
   - libvirt-client
   - qemu-tools
   - guestfs-tools
@@ -70,6 +78,8 @@ libvirt_stack_packages_suse:
   # Zypper capabilities select bindings for the distro's default Python ABI.
   - python3-libvirt-python
   - python3-lxml
+  # semanage + the seobject bindings sefcontext needs for the pcap pool label (#3316).
+  - policycoreutils-python-utils
   # `combined_kernel_tar` (tests/integration/live_stack/spine.py) shells out to `make`
   # and a GNU `tar` supporting --transform when it cuts a combined kernel bundle. Both
   # were a pre-existing undeclared dependency of the live-stack spine; the #2318

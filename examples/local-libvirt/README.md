@@ -8,7 +8,7 @@ The server and reconciler run as you, the workers run in fixed slot accounts und
 root-owned lifecycle witness (ADR-0574; every worker incarnation is registered and credentialed
 by it), and all of them share one operator-owned **session libvirt daemon** the contract
 publishes. The stack onboards a project named **`demo`**, and an MCP client opened in your
-kernel tree (`~/src/linux` by default) drives that very checkout.
+demo workspace (`KDIVE_DEMO_WORKSPACE`, your kernel tree by default when you have one) drives it.
 
 This is the supported first-run path for a local-libvirt install. The scripts wrap the
 maintained [live-stack lifecycle](../../docs/operating/runbooks/live-stack.md), adding host
@@ -36,10 +36,10 @@ demo walkthrough below. Otherwise:
   `systems.toml` so an agent can provision it by catalog name. `build-image.sh` builds and
   registers one from the rootfs catalog (Fedora 44 is the kdump-capable default); it needs the
   backends up, so run it after `demo-up.sh`.
-- A kernel source tree at `KDIVE_KERNEL_SRC` (default `~/src/linux`).
-- A workspace to install the MCP client config into, at `KDIVE_DEMO_WORKSPACE` (default
-  `KDIVE_KERNEL_SRC`). Set it separately from `KDIVE_KERNEL_SRC` if that tree is also a live
-  proof's kernel fixture, so `demo-up.sh` does not write `.mcp.json` into it.
+- A directory to open your MCP client in, at `KDIVE_DEMO_WORKSPACE` (default `KDIVE_KERNEL_SRC`
+  when set; required otherwise). The stack itself needs no kernel tree. Set it separately from
+  `KDIVE_KERNEL_SRC` if that tree is also a live proof's kernel fixture, so `demo-up.sh` does not
+  write `.mcp.json` into it.
 - The installed lifecycle worker environment, `/opt/kdive-live-worker-lifecycle/.venv`, needs
   the libguestfs binding to provision, build images, and capture kdump locally, and drgn for
   local kdump capture. The lifecycle installer/host role owns that environment, and the
@@ -73,6 +73,9 @@ on it.
 
 ```bash
 KDIVE_CHECKOUT="$PWD"    # run this block from the KDIVE checkout
+# demo-up.sh installs .mcp.json into your kernel tree (KDIVE_KERNEL_SRC, ~/src/linux when it
+# exists). With no kernel tree, name any directory instead:
+#   export KDIVE_DEMO_WORKSPACE=~/kdive-demo; mkdir -p "$KDIVE_DEMO_WORKSPACE"
 
 # 0. Prepare the host using the installation guide, then log out and back in for the groups.
 examples/local-libvirt/install-host.sh
@@ -90,8 +93,8 @@ examples/local-libvirt/build-image.sh fedora-kdive-ready-44
 # 3. In the shell you launch your MCP client from, export a fresh token:
 export KDIVE_TOKEN=$(examples/local-libvirt/mint-token.sh)
 
-# 4. Open your MCP client in the kernel tree — it reads the installed .mcp.json:
-cd ~/src/linux            # the .mcp.json demo-up.sh installed lives here
+# 4. Open your MCP client in the demo workspace — it reads the installed .mcp.json:
+cd "${KDIVE_DEMO_WORKSPACE:-$HOME/src/linux}"   # the .mcp.json demo-up.sh installed lives here
 # ...launch your MCP client (it connects to http://127.0.0.1:8000/mcp as Bearer $KDIVE_TOKEN)
 
 # 5. When finished, return to KDIVE and stop the stack (data is kept):
@@ -153,7 +156,7 @@ Everything is overridable from the environment before running the scripts:
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `KDIVE_PROJECT` | `demo` | Project the stack seeds and the token grants `admin` on. |
-| `KDIVE_KERNEL_SRC` | `~/src/linux` | Kernel tree under test. |
+| `KDIVE_KERNEL_SRC` | `~/src/linux` when it exists | Your kernel tree, if any: the default workspace and the live proofs' kernel fixture. The workers never read it. |
 | `KDIVE_DEMO_WORKSPACE` | same as `KDIVE_KERNEL_SRC` | Directory `.mcp.json` is installed into. Defaults to the kernel tree, but set it separately when `KDIVE_KERNEL_SRC` doubles as a live proof's kernel fixture (#2760) — a demo bring-up must not add files to a tree a proof run also uses. |
 | `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-44.qcow2` (`…/fedora-kdive-ready-44-ppc64le.qcow2` on a ppc64le host) | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
 | `KDIVE_LIBVIRT_URI` | the endpoint in `/etc/kdive/live-worker-libvirt.env` | libvirt connection every consumer drives — the operator-owned session daemon the lifecycle installer published. `qemu:///system` until the contract is installed, which `demo-up.sh` refuses. |
@@ -172,7 +175,7 @@ The daemon logs live under the XDG state dir (`$XDG_STATE_HOME`, default
 the repo. Set `XDG_STATE_HOME` or `KDIVE_STACK_LOG_DIR` to relocate them.
 
 If you change `KDIVE_HTTP_HOST`/`KDIVE_HTTP_PORT` from `127.0.0.1:8000`, edit the `url` in
-the installed `~/src/linux/.mcp.json` to match.
+the installed `$KDIVE_DEMO_WORKSPACE/.mcp.json` to match.
 
 ## Optional inventory (`systems.toml`)
 

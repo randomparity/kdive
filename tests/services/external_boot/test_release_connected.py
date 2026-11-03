@@ -13,9 +13,12 @@ from uuid import uuid4
 import psycopg
 import pytest
 from psycopg import AsyncConnection
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
+from kdive.domain.external_boot_activation import ExternalBootReservationRelease
 from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, Job, JobKind
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
@@ -24,6 +27,7 @@ from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.handlers.external_boot.router import route_marked
 from kdive.jobs.models import HandlerRegistry
+from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY
 from kdive.jobs.worker import Worker
 from kdive.mcp.tools.external_boot.recovery_requests import request_release
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
@@ -31,19 +35,25 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityTeardownMutationRequestV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
 from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
     ExternalBootAuthorityService,
 )
+from kdive.providers.external_boot_authority.teardown import AuthorityTeardownSnapshot
 from kdive.providers.external_boot_authority.transport import _dispatch
 from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for
-from tests.jobs.handlers.external_boot.seeding import seed_case
+from tests.jobs.handlers.external_boot.seeding import (
+    AUTHORITY_INSTANCE,
+    PROVIDER_KIND,
+    seed_case,
+)
 from tests.jobs.handlers.external_boot.vehicle import Vehicle, build_vehicle
 from tests.mcp.lifecycle import runs_support
 from tests.mcp.systems_support import provider_resolver
@@ -131,6 +141,107 @@ async def _retire_seed_authority(conn: AsyncConnection, case: Any) -> None:
         "INSERT INTO external_boot_authority_counters (system_id, last_generation) VALUES (%s, 1) "
         "ON CONFLICT (system_id) DO UPDATE SET last_generation = 1",
         (case.vehicle.system_id,),
+    )
+
+
+async def _resolve_released_teardown(
+    seed: AsyncConnection, case: Any, dsns: Callable[[str], str]
+) -> AuthorityTeardownSnapshot | None:
+    """Resolve the authority teardown snapshot over the release row the real worker persisted.
+
+    The allocation runs as the worker role and the resolution as the provider-authority role, so
+    the released snapshot is assembled by the production SQL and repository (#3321). Only the
+    acknowledgement, which a live authority takeover writes, is seeded directly.
+    """
+    job_id = uuid4()
+    operation_identity = f"teardown-{uuid4()}"
+    await seed.execute(
+        "INSERT INTO jobs (id, kind, payload, state, attempt, max_attempts, worker_id, "
+        "lease_expires_at, heartbeat_at, authorizing, dedup_key) VALUES "
+        "(%s, 'teardown', %s, 'running', 1, 3, %s, now() + interval '5 minutes', now(), %s, %s)",
+        (
+            job_id,
+            Jsonb(
+                {
+                    "system_id": str(case.vehicle.system_id),
+                    EXTERNAL_BOOT_AUTHORITY_MARKER_KEY: case.marker
+                    | {
+                        "purpose": "teardown",
+                        "operation": "teardown",
+                        "operation_identity": operation_identity,
+                    },
+                }
+            ),
+            case.worker_incarnation,
+            Jsonb({"principal": "p", "agent_session": None, "project": "proj"}),
+            f"teardown-{job_id}",
+        ),
+    )
+    async with await psycopg.AsyncConnection.connect(
+        dsns("kdive_worker"), autocommit=True
+    ) as worker:
+        cursor = await worker.execute(
+            "SELECT status, authority_id, generation, operation_digest "
+            "FROM allocate_external_boot_authority(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                hashlib.sha256(case.credential.encode()).digest(),
+                job_id,
+                1,
+                case.vehicle.activation_id,
+                case.vehicle.run_id,
+                case.vehicle.system_id,
+                case.vehicle.plan_identity,
+                "teardown",
+                PROVIDER_KIND,
+                AUTHORITY_INSTANCE,
+                operation_identity,
+            ),
+        )
+        allocated = await cursor.fetchone()
+    assert allocated is not None and allocated[0] == "allocated"
+    _, authority_id, generation, operation_digest = allocated
+    acknowledgement_digest = "sha256:" + "b" * 64
+    await seed.execute(
+        "UPDATE external_boot_authorities SET state = 'current', acknowledged_at = now() "
+        "WHERE id = %s",
+        (authority_id,),
+    )
+    await seed.execute(
+        "INSERT INTO external_boot_authority_acknowledgements "
+        "(authority_id, system_id, generation, authority_instance, operation_identity, "
+        "operation_digest, journal_sequence, journal_digest, positive_quiescence_digest) "
+        "VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s)",
+        (
+            authority_id,
+            case.vehicle.system_id,
+            generation,
+            AUTHORITY_INSTANCE,
+            operation_identity,
+            operation_digest,
+            acknowledgement_digest,
+            "sha256:" + "c" * 64,
+        ),
+    )
+    request = AuthorityTeardownMutationRequestV1(
+        authority_id=authority_id,
+        generation=generation,
+        system_id=case.vehicle.system_id,
+        activation_id=case.vehicle.activation_id,
+        run_id=case.vehicle.run_id,
+        plan_identity=case.vehicle.plan_identity,
+        purpose="teardown",
+        operation="teardown",
+        provider_kind=PROVIDER_KIND,
+        authority_instance=AUTHORITY_INSTANCE,
+        operation_identity=operation_identity,
+        operation_digest=operation_digest,
+        attempt_id=uuid4(),
+    )
+    repository = DatabaseAuthorityRepository(
+        lambda: _authority_connection(dsns("kdive_provider_authority"))
+    )
+    return await repository.resolve_current_teardown(
+        AuthenticatedPeer(case.worker_incarnation), request, 1, acknowledgement_digest
     )
 
 
@@ -479,12 +590,20 @@ def test_public_active_release_claims_and_completes_through_worker(
                     else [(False, False), (True, True)]
                 )
                 assert await cur.fetchall() == expected_receipts
+            async with seed.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    "SELECT count(*) FROM external_boot_reservation_releases "
-                    "WHERE activation_id = %s",
+                    "SELECT * FROM external_boot_reservation_releases WHERE activation_id = %s",
                     (vehicle.activation_id,),
                 )
-                assert await cur.fetchone() == (1,)
+                releases = await cur.fetchall()
+            # Teardown and cleanup re-derive the identity from the stored evidence (#3321).
+            assert len(releases) == 1
+            ExternalBootReservationRelease.model_validate(releases[0])
+            if interrupt_after is None:
+                snapshot = await _resolve_released_teardown(seed, case, authority_role_dsns)
+                assert snapshot is not None
+                assert snapshot.reservation.disposition == "released"
+                assert snapshot.release_identity == releases[0]["release_identity"]
         assert adapter.mutations == ["recover", "cleanup"]
         assert vehicle.port.calls == ["recover", "cleanup"]
         if interrupt_after is None:

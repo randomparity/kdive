@@ -6,6 +6,7 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import socket
 import ssl
@@ -23,6 +24,11 @@ from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityRequestV1,
     DeviceIdentityResponseV1,
     decode_device_identity_request,
+)
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    ModuleVolumeSweepRequestV1,
+    ModuleVolumeSweepResponseV1,
+    decode_module_volume_sweep_request,
 )
 from kdive.providers.external_boot_authority.protocol import (
     MAX_ENVELOPE_BYTES,
@@ -73,6 +79,7 @@ SOCKET_MODE = 0o660
 SOCKET_DIRECTORY_MODE = 0o2750
 _TLS_TIMEOUT_SECONDS = 5.0
 _MAX_JSON_NESTING = 64
+_log = logging.getLogger(__name__)
 _POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_default"})
 
 type Operation = Literal[
@@ -88,6 +95,7 @@ type Operation = Literal[
     "execute-remote-module-lifecycle",
     "health",
     "resolve-device-identity",
+    "sweep-module-volumes",
     "resolve-recovery-orphan",
     "acknowledge-system-takeover",
     "execute-system-operation",
@@ -168,6 +176,15 @@ class DeviceIdentityService(Protocol):
     async def resolve(self, request: DeviceIdentityRequestV1) -> DeviceIdentityResponseV1: ...
 
 
+@runtime_checkable
+class ModuleVolumeSweeper(Protocol):
+    """Sweep unretained module volumes from the authority's own pool (#3386)."""
+
+    async def sweep_module_volumes(
+        self, peer: AuthenticatedPeer, request: ModuleVolumeSweepRequestV1
+    ) -> ModuleVolumeSweepResponseV1: ...
+
+
 class AuthoritySystemTransportService(Protocol):
     async def begin(
         self, peer_incarnation: str, request: AuthoritySystemTakeoverRequestV1
@@ -205,6 +222,8 @@ def _decode_operation_request(operation: Operation, payload: bytes) -> object:
         return AuthoritySystemExecutionV1.model_validate_json(payload)
     if operation == "resolve-device-identity":
         return decode_device_identity_request(payload)
+    if operation == "sweep-module-volumes":
+        return decode_module_volume_sweep_request(payload)
     if operation == "execute-remote-module-lifecycle":
         return RemoteModuleLifecycleRequestV1.from_canonical_json(payload)
     if operation == "execute-remote-module-preparation":
@@ -260,6 +279,8 @@ def encode_request_envelope(
     if operation == "health" and not isinstance(decoded, AuthorityHealthRequestV1):
         raise ValueError("invalid-request")
     if operation == "resolve-device-identity" and not isinstance(decoded, DeviceIdentityRequestV1):
+        raise ValueError("invalid-request")
+    if operation == "sweep-module-volumes" and not isinstance(decoded, ModuleVolumeSweepRequestV1):
         raise ValueError("invalid-request")
     if operation == "acknowledge-system-takeover" and not isinstance(
         decoded, AuthoritySystemTakeoverRequestV1
@@ -326,6 +347,7 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             "execute-remote-module-lifecycle",
             "health",
             "resolve-device-identity",
+            "sweep-module-volumes",
             "resolve-recovery-orphan",
             "acknowledge-system-takeover",
             "execute-system-operation",
@@ -382,6 +404,10 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             request, DeviceIdentityRequestV1
         ):
             raise ValueError
+        if operation == "sweep-module-volumes" and not isinstance(
+            request, ModuleVolumeSweepRequestV1
+        ):
+            raise ValueError
         if operation == "acknowledge-system-takeover" and not isinstance(
             request, AuthoritySystemTakeoverRequestV1
         ):
@@ -403,6 +429,7 @@ def _success(
     | AuthorityRunningObservationV1
     | AuthorityHealthAcknowledgementV1
     | DeviceIdentityResponseV1
+    | ModuleVolumeSweepResponseV1
     | RemoteModulePreparationBeginResponseV1
     | RemoteModuleLifecycleResponseV1
     | RemoteModuleTerminalPreparationResponseV1
@@ -417,10 +444,26 @@ def _error(category: str) -> bytes:
     return _canonical_json({"category": category, "status": "error"})
 
 
+def _log_module_completion(operation: str, exc: CategorizedError) -> None:
+    """Leave the cause on the authority journal; only the category crosses the wire.
+
+    Logs the type and kdive's own message, not the traceback: its cause chain can hold
+    provider output (ADR-0707).
+    """
+    _log.error(
+        "authority transport %s ended %s: %s: %s",
+        operation,
+        exc.details.get("completion"),
+        type(exc).__qualname__,
+        exc,
+    )
+
+
 def _service_category(category: str) -> str:
     return {
         "journal_conflict": "journal-conflict",
         "provider_conflict": "provider-conflict",
+        "system_held": "system-held",
         "configuration_error": "configuration-error",
     }.get(category, category)
 
@@ -437,6 +480,7 @@ async def _dispatch(
     try:
         peer = await authenticate_peer(credential)
     except Exception:  # noqa: BLE001 -- authentication details never cross the boundary
+        _log.exception("authority transport %s peer authentication failed", operation)
         return _error("unauthenticated")
     if operation == "health":
         return _success(AuthorityHealthAcknowledgementV1())
@@ -448,6 +492,17 @@ async def _dispatch(
         try:
             return _success(await identity_service.resolve(request))
         except Exception:  # noqa: BLE001 -- filesystem details never cross the boundary
+            _log.exception("authority transport %s failed unexpectedly", operation)
+            return _error("provider-failure")
+    if operation == "sweep-module-volumes":
+        if not isinstance(remote_module_service, ModuleVolumeSweeper):
+            return _error("provider-not-configured")
+        if not isinstance(request, ModuleVolumeSweepRequestV1):
+            raise _TransportError("invalid-request")
+        try:
+            return _success(await remote_module_service.sweep_module_volumes(peer, request))
+        except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
+            _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-failure")
     if operation in {"acknowledge-system-takeover", "execute-system-operation"}:
         if system_service is None:
@@ -468,6 +523,7 @@ async def _dispatch(
         except AuthoritySystemServiceError as exc:
             return _error(_service_category(exc.category))
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
+            _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-conflict")
     if operation == "execute-remote-module-lifecycle":
         if remote_module_service is None:
@@ -480,12 +536,14 @@ async def _dispatch(
         except AuthorityServiceError as exc:
             return _error(_service_category(exc.category))
         except CategorizedError as exc:
+            _log_module_completion(operation, exc)
             if exc.details.get("completion") == "failed-after-mutation":
                 return _error("remote-module-failed")
             if exc.details.get("completion") == "refused-before-mutation":
                 return _error("remote-module-refused")
             return _error("provider-conflict")
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
+            _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-conflict")
     if operation == "execute-remote-module-preparation":
         if remote_module_service is None:
@@ -498,10 +556,14 @@ async def _dispatch(
         except AuthorityServiceError as exc:
             return _error(_service_category(exc.category))
         except CategorizedError as exc:
+            _log_module_completion(operation, exc)
             if exc.details.get("completion") == "failed-after-mutation":
                 return _error("remote-module-failed")
+            if exc.details.get("completion") == "refused-before-mutation":
+                return _error("remote-module-refused")
             return _error("provider-conflict")
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
+            _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-conflict")
     if operation == "begin-remote-module-preparation":
         if remote_module_service is None:
@@ -513,6 +575,7 @@ async def _dispatch(
         except AuthorityServiceError as exc:
             return _error(_service_category(exc.category))
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
+            _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-conflict")
     if service is None:
         return _error("provider-not-configured")
@@ -559,6 +622,7 @@ async def _dispatch(
     except AuthorityServiceError as exc:
         return _error(_service_category(exc.category))
     except Exception:  # noqa: BLE001 -- provider/service details never cross the boundary
+        _log.exception("authority transport %s failed unexpectedly", operation)
         return _error("provider-conflict")
 
 

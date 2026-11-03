@@ -63,7 +63,6 @@ def _remote_document() -> dict[str, Any]:
                 "root_identity": _DIGEST,
                 "architecture": "x86_64",
                 "base_volume": "base-a.qcow2",
-                "network": "provider-net",
                 "machine": "pc-q35-9.2",
                 "gdb_addr": "127.0.0.1",
                 "gdb_port_min": 31000,
@@ -99,6 +98,36 @@ def test_loads_and_validates_remote_provider_entry(tmp_path: Path) -> None:
 
     assert isinstance(result, RemoteAuthoritySystemManifestV1)
     assert result.provider_entries()[0].base_volume == "base-a.qcow2"
+    assert result.provider_entries()[0].guest_egress is False
+
+
+def test_remote_entry_carries_operator_guest_egress(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    document = _remote_document()
+    document["entries"][0]["guest_egress"] = True
+    _write_manifest(path, document)
+
+    result = load_authority_system_manifest(path, owner_uid=os.getuid(), owner_gid=os.getgid())
+
+    assert isinstance(result, RemoteAuthoritySystemManifestV1)
+    assert result.provider_entries()[0].guest_egress is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("network", "default"), ("guest_egress", "true")),
+    ids=("network", "egress"),
+)
+def test_remote_entry_rejects_network_and_non_boolean_egress(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    path = tmp_path / "manifest.json"
+    document = _remote_document()
+    document["entries"][0][field] = value
+    _write_manifest(path, document)
+
+    with pytest.raises(ValidationError):
+        load_authority_system_manifest(path, owner_uid=os.getuid(), owner_gid=os.getgid())
 
 
 @pytest.mark.parametrize("mode", (0o600, 0o440))
@@ -401,11 +430,14 @@ def test_local_provider_rechecks_the_pinned_base_before_provisioning(
         **kwargs: Any,
     ) -> str:
         expected_guest_arch.append(kwargs.get("expected_guest_arch"))
+        unrelabeled_bases.append(_provisioner._authority_base)
         return "test-domain"
 
+    unrelabeled_bases: list[bool] = []
     monkeypatch.setattr(LocalLibvirtProvisioning, "provision", record_expected_guest_arch)
     provider._provisioner.provision(uuid4(), profile)
     assert expected_guest_arch == [(accel, manifest.emulator)]
+    assert unrelabeled_bases == [True]
     system_id, allocation_id, resource_id = uuid4(), uuid4(), uuid4()
     bootstrap_public_key = "ssh-ed25519 YWFhYQ== kdive-system"
     snapshot = AuthoritySystemProvisionSnapshot(

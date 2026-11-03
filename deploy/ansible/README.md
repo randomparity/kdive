@@ -2,7 +2,7 @@
 
 Owns host provisioning and guest-image builds for a
 KDIVE **remote-libvirt** provider host (Ubuntu 26.04 / Fedora 44 / RHEL-Rocky 10,
-x86_64 or ppc64le). Design: `docs/archive/superpowers/specs/2026-06-18-ansible-remote-libvirt-host-setup-design.md`.
+x86_64 or ppc64le; openSUSE Leap 16, x86_64 only). Design: `docs/archive/superpowers/specs/2026-06-18-ansible-remote-libvirt-host-setup-design.md`.
 
 ## What it produces
 
@@ -13,7 +13,10 @@ x86_64 or ppc64le). Design: `docs/archive/superpowers/specs/2026-06-18-ansible-r
 - A `dir` storage pool + the `default` network.
 - A firewalld/ufw ACL restricting `:16514` and the gdbstub range to `worker_cidr`,
   **enforced** on both distros (the gdbstub tier is raw TCP — the ACL is its only auth).
-  Fedora/RHEL use firewalld; on Ubuntu the role allows SSH, sets
+  Fedora/RHEL install firewalld and its Python binding, preserve the configured management
+  port before starting an inactive firewall, then enable/start it before protected rules.
+  Already-running firewalls keep their existing management policy. Debian/Ubuntu install
+  ufw; on Ubuntu the role allows SSH, sets
   `DEFAULT_FORWARD_POLICY=ACCEPT` (so enabling ufw doesn't break libvirt guest NAT
   egress), enables ufw (`gdbstub_acl_ufw_enable`, default true), and asserts it is
   active — failing closed rather than leaving the debug ports open. Set the var false
@@ -190,7 +193,15 @@ with a clear message if it is not set in `host_vars/`.
   stages, boots, and connects its guest agent (provision / `host_dump` path), but
   `runs.install` (the `kdive-install-kernel` `grubby` path) needs a Debian helper variant
   — **unvalidated / tracked separately**.
-- The **scratch/bare** path is implemented but **unvalidated** (no scratch-capable test
+- Ubuntu remote images use their native netplan/networkd dispatcher for DHCP and the
+  lease-identified SSH return route. Rebuild existing staged images with
+  `force_image_rebuild=true`; unrelated netplan YAML is refused rather than overwritten.
+  The policy removes only the identified slirp DHCP default, preserving other routes and DNS.
+  Ubuntu SSH generates missing host keys at service startup, separately for each clone,
+  and preserves them on reboot. Unknown SSH prechecks or foreign service drop-ins
+  also require a clean supported image; shared-image host keys are not generated.
+- The **scratch/bare** image has no remote SSH parity: it installs neither sshd nor a
+  guest network policy. Its build path is implemented but **unvalidated** (no scratch-capable test
   host): it builds the rootfs from the host OS family but the bootloader install + boot
   must be confirmed on hardware, like the ppc64le note below. It is admitted only on
   Fedora/Debian-family hosts (`host_distros`, above), so that confirmation has to happen
@@ -201,3 +212,29 @@ with a clear message if it is not set in `host_vars/`.
 - `root_device` on a catalog entry is metadata only for remote-libvirt — the in-guest GRUB
   owns the real root (ADR-0183); the platform injects no `root=` for remote.
 - Molecule-in-Docker is intentionally not used: it cannot exercise KVM or `virt-builder`.
+
+### Pinned SUSE remote image
+
+For this exact pinned row, fresh preparation completes the native JeOS marker
+only after validating vendor firstboot units and all native systemd load roots.
+Foreign overrides or unsafe/nonempty markers refuse staging; rebuild cleanly.
+The stock SSH key-generation units, cloud-init and vendor boot configuration remain.
+
+`opensuse-leap-15.6-kdive-remote-base` is the x86_64 Leap representative. Its
+`cloud_image_checksum` is passed to the existing downloader; omitted checksums
+preserve other rows' behavior. A source pin does not freeze installed package versions.
+Use `playbooks/image.yml` to rebuild and stage its native helpers and Wicked policy;
+the admitted image must already provide busctl for atomic native policy creation.
+Startup refuses selected foreign policy state rather than transparently updating it;
+existing guests are not migrated. Competing network configuration is refused.
+The native helper/network contract and failure diagnostics are in the
+[guest-helper guide](../remote-libvirt-guest-helpers/README.md#suse-leap-installation-and-networking).
+
+The pinned Leap15.6 cloud image is prepared in a fresh build work directory:
+its checksum-verified `.source` file remains read-only, while native `virt-resize`
+expands the third XFS partition into a new10 GiB qcow2 before package installation.
+The role requires12 GiB host free space and native XFS expansion support, checks
+partition starts, boot content and root identities, and promotes only verified output.
+A partial `.growing` or existing customization file is retained and refused on retry;
+select a fresh `guest_base_image_build_workdir`, preserving the failed artifacts.
+Other cloud image rows retain their existing preparation. See ADR-0767.

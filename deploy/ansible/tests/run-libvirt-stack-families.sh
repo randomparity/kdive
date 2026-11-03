@@ -18,6 +18,7 @@ defaults = yaml.safe_load((role / "defaults/main.yml").read_text())
 tasks = yaml.safe_load((role / "tasks/main.yml").read_text())
 jinja = NativeEnvironment(undefined=StrictUndefined)
 jinja.filters["extract"] = lambda value, mapping: mapping[value]
+jinja.tests["changed"] = lambda result: bool(result.get("changed"))
 
 
 def require(condition, message):
@@ -69,14 +70,15 @@ expected = {
     "RedHat": [
         "libvirt", "libvirt-client", "qemu-img", "libguestfs-tools-c", "e2fsprogs",
         "virt-install", "gnutls-utils", "libseccomp", "python3-libvirt", "python3-lxml",
-        "make", "tar",
+        "policycoreutils-python-utils", "make", "tar",
         "gcc", "binutils", "bison", "flex", "bc", "perl",
         "elfutils-libelf-devel", "openssl-devel", "dwarves",
     ],
     "Suse": [
-        "libvirt-daemon-qemu", "libvirt-daemon-proxy", "libvirt-client", "qemu-tools",
+        "libvirt-daemon-qemu", "libvirt-daemon-proxy", "libvirt-daemon-config-network",
+        "libvirt-client", "qemu-tools",
         "guestfs-tools", "e2fsprogs", "virt-install", "gnutls", "libseccomp2",
-        "python3-libvirt-python", "python3-lxml", "make", "tar",
+        "python3-libvirt-python", "python3-lxml", "policycoreutils-python-utils", "make", "tar",
         "gcc", "binutils", "bison", "flex", "bc", "perl",
         "libelf-devel", "libopenssl-devel", "dwarves",
     ],
@@ -225,5 +227,58 @@ require(
     group["ansible.builtin.user"]["append"] is True,
     "operator group membership is not additive",
 )
-print("libvirt_stack families: six package routes, daemon models, guard, and operator passed")
+require(
+    install["Suse"].get("register") == "libvirt_stack_suse_install",
+    "Suse package install result is not registered for the network daemon reload",
+)
+reload = module_task(
+    "ansible.builtin.command", "Reload network definitions in a running virtnetworkd (Suse)"
+)
+require(
+    reload["ansible.builtin.command"]["argv"]
+    == ["systemctl", "try-restart", "virtnetworkd.service"],
+    "network daemon reload must try-restart virtnetworkd so a stopped daemon stays stopped",
+)
+require(
+    tasks.index(reload) == tasks.index(install["Suse"]) + 1,
+    "network daemon reload must directly follow the Suse package install",
+)
+for family, changed, expected_reload in (
+    ("Suse", True, True), ("Suse", False, False), ("RedHat", True, False), ("Debian", True, False),
+):
+    facts = {"ansible_os_family": family, "libvirt_stack_suse_install": {"changed": changed}}
+    require(
+        all(evaluate(condition, **facts) for condition in reload["when"]) == expected_reload,
+        f"network daemon reload route differs for {family} changed={changed}",
+    )
+build_task = module_task(
+    "community.general.zypper", "Keep the QEMU emulator and qemu-img at the module build (Suse)"
+)
+require(build_task.get("when") == "ansible_os_family == 'Suse'", "QEMU alignment is Suse-only")
+build = build_task["community.general.zypper"]
+require(build["state"] == "latest", "the SUSE QEMU build alignment must upgrade, not just install")
+require(install["Suse"]["community.general.zypper"]["state"] == "present", "only QEMU is upgraded")
+selected = ["qemu-x86"]
+aligned = render(build["name"], libvirt_stack_qemu_packages=selected)
+require(
+    list(aligned) == ["qemu-x86", "qemu-img"],
+    f"the SUSE QEMU build alignment covers {aligned}, not the emulator and qemu-img",
+)
+print("libvirt_stack families: packages, daemon models, network reload, guard, operator passed")
+
+# libvirt_tls must name the daemon each family actually ships (Leap 16 has no libvirtd).
+tls = yaml.safe_load((role.parent / "libvirt_tls/tasks/main.yml").read_text())[0]
+facts = tls["ansible.builtin.set_fact"]
+for family, daemon, socket, conf in (
+    ("RedHat", "virtproxyd.service", "virtproxyd-tls.socket", "/etc/libvirt/virtproxyd.conf"),
+    ("Suse", "virtproxyd.service", "virtproxyd-tls.socket", "/etc/libvirt/virtproxyd.conf"),
+    ("Debian", "libvirtd.service", "libvirtd-tls.socket", "/etc/libvirt/libvirtd.conf"),
+):
+    modular = render(tls["vars"]["libvirt_tls_modular"], ansible_os_family=family)
+    resolved = [
+        render(facts[key], libvirt_tls_modular=modular in (True, "True"))
+        for key in ("libvirt_tls_daemon", "libvirt_tls_socket", "libvirt_tls_conf_file")
+    ]
+    require(resolved == [daemon, socket, conf], f"libvirt_tls picks {resolved} for {family}")
+print("libvirt_tls families: TLS daemon, socket and config per family passed")
 PY

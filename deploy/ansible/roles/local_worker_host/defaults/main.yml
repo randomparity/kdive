@@ -33,11 +33,9 @@ live_vm_host_packages:  # noqa: var-naming[no-role-prefix]
   - libssl-dev         # grpcio source build on ppc64le (no wheel, no BoringSSL target, #2666)
   - zlib1g-dev         # grpcio source build on ppc64le (paired with libssl-dev above, #2666)
 
-# pip installs the uv console script to /usr/local/bin, which root's sudo secure_path lists
-# (#2506, #2665) unlike a user-local ~/.local/bin install. Reference uv by absolute path in a
-# venv-build command so it is found under become regardless of sudo's PATH handling; override if
-# pip is configured to install console scripts elsewhere. Shared with live_vm_host, which installs
-# and consumes this identically (tasks/uv.yml).
+# pip normally installs uv to /usr/local/bin; sudo secure_path may omit it. Both venv
+# callers use this absolute selection. Override when pip installs elsewhere; lifecycle
+# installation requires a root-owned canonical path without group/other write access.
 live_vm_host_uv_bin: /usr/local/bin/uv  # noqa: var-naming[no-role-prefix]
 
 # Fixed host-worker authority contract (ADR-0574). Keep the slot count literal: unit names,
@@ -61,7 +59,11 @@ live_vm_host_worker_shared_directories:  # noqa: var-naming[no-role-prefix]
   - /var/lib/kdive/console
   - /var/lib/kdive/pcap
   - /var/lib/kdive/build
+  - /var/lib/kdive/build/images
+  - /var/lib/kdive/rootfs-cache
   - /var/lib/kdive/install
+  # Uploaded-rootfs staging root (UPLOADS_DIR): a worker stages per-investigation bases here.
+  - /var/lib/kdive/rootfs-uploads
 # Local external-boot recovery roots (ADR-0586, #2210) use one owner-only child per worker.
 # The traverse-only root remains root-owned so a worker cannot replace sibling roots.
 live_vm_host_worker_recovery_root: /var/lib/kdive/live-workers/external-boot-recovery  # noqa: var-naming[no-role-prefix]
@@ -112,13 +114,20 @@ local_worker_host_guestfs_packages_el10:
   - rpm-build
   - cpio
 
-# The two parent image directories this role labels svirt_image_t on an SELinux-enforcing RedHat
+# Image roots and the build/images subtree labeled svirt_image_t on an SELinux-enforcing RedHat
 # host (ADR-0640, #2779). The nested /var/lib/kdive/rootfs/local rule belongs to build-image.sh
 # and must not be added here: local fcontext rules match last-wins in file_contexts.local, so a
 # second writer would change which rule wins.
 local_worker_host_svirt_image_directories:
+  - /var/lib/kdive/host-dump
   - /var/lib/kdive/rootfs
   - /var/lib/kdive/install
+  - /var/lib/kdive/build/images
+  - /var/lib/kdive/rootfs-cache
+  # An uploaded rootfs's staged base backs the overlay in place, so qemu reads it here.
+  - /var/lib/kdive/rootfs-uploads
+  # The confined domain creates its traffic-capture pcap here via filter-dump (ADR-0385, #3270).
+  - /var/lib/kdive/pcap
 
 # Container runtime for the on-box compose stack (scripts/live-stack/stack-services.sh) and the
 # testcontainers gate, split into engine and compose halves because they carry different gates.
@@ -196,3 +205,8 @@ local_worker_host_engine_unit_path: /usr/lib/systemd/system/docker.service
 # The socket unit's SocketGroup on all three: its socket is root:docker 0660, so a non-root
 # operator outside this group cannot reach the daemon and stack-services.sh fails (#2557).
 local_worker_host_engine_socket_group: docker
+
+# Optional operator-supplied controller files (ADR-0762); all three are required together.
+local_worker_host_remote_libvirt_client_certificate_source: ""
+local_worker_host_remote_libvirt_client_key_source: ""
+local_worker_host_remote_libvirt_ca_certificate_source: ""

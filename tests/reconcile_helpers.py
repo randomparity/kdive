@@ -12,7 +12,12 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any, cast
 
-from kdive.artifacts.storage import VersionBatch, VersionPage
+from kdive.artifacts.storage import (
+    ConditionalArtifactWriteRequest,
+    ConditionalCreateResult,
+    VersionBatch,
+    VersionPage,
+)
 from kdive.reconciler.loop import ReconcileConfig, ReconcileUploadStore
 from kdive.services.images.retention import ImageSweepStore
 
@@ -29,13 +34,16 @@ class _NullImageStore:
 
 
 class _NullUploadStore:
+    def create_if_absent(self, request: ConditionalArtifactWriteRequest) -> ConditionalCreateResult:
+        raise AssertionError("store-agnostic fixture must not retire vmcore data")
+
     def list_prefix(self, prefix: str) -> list[str]:
         return []
 
     def iter_prefix_pages_with_mtime(self, prefix: str) -> Iterator[list[Any]]:
         yield []  # one empty page, as list_objects_v2 replies for a prefix matching nothing
 
-    def head(self, key: str) -> Any:
+    def head(self, key: str, *, version_id: str | None = None) -> Any:
         return None
 
     def list_version_page(
@@ -53,6 +61,9 @@ class _NullUploadStore:
 
     def capture_exact_versions(self, key: str, limit: int) -> VersionBatch:
         return VersionBatch(key, (), True)
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        raise AssertionError("store-agnostic fixture must not delete vmcore versions")
 
     def delete_batch(self, batch: VersionBatch) -> bool:
         return True

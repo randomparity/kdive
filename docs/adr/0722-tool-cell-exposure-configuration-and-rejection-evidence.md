@@ -75,6 +75,101 @@ their binding failures before `tools.invoke` sees them, without `data.field_erro
 `gateway` validation cell for one of them fails under this rule until a later decision names
 its evidence.
 
+### Amendment (2026-10-12): three filtering list boundaries prove denied visibility (#3108)
+
+This is an amendment because a later decision supersedes part of decision 3 for three
+named cells only. [ADR-0756](0756-filtered-list-boundary-evidence.md) replaces the
+failure-envelope requirement for `investigations.list` `authorization`, `investigations.list`
+`project-isolation` and `artifacts.list` `project-isolation`. These tools filter the caller's
+view instead of failing. Their cells prove denial with a positive control. First, a viewer
+sees an independently known protected item. Then the denied caller gets the tool's canonical
+empty page in the same exposure. Protected-state equality and cleanup still apply. Every other
+`authorization` and `project-isolation` cell keeps the failure-envelope rule. The outcome
+`rejection` is unchanged.
+
+### Amendment (2026-10-13): a capability cell follows the provider's support verdict (#2815)
+
+This amends the boundary list in the Context and decision 3, by operator decision R2
+(2026-10-13). The contract added a `capability` rejection cell to every capability-gated tool
+whatever the provider's verdict. Both libvirt providers support every gated capability, so
+those cells demanded a refusal no run can produce. A capability-gated tool's cells now follow
+their final verdict: the `ProviderSupport` verdict `_capability_variants` derives, after
+`_tool_cells` applies the `ArchTraits` fadump override:
+
+- **Supported.** The functional cell is the proof. No `capability` cell is generated.
+- **Unsupported.** The `unsupported` cell keeps its reviewed rule, and a `capability`
+  rejection cell proves the refusal. A real-issuer token with the cell's grants must receive
+  ADR-0209's refusal: a `configuration_error` envelope whose `data.reason` is
+  `capability_unsupported`. `configuration_error` alone also answers schema and name failures,
+  so it is not capability evidence. Protected state and cleanup follow decision 4, and the
+  outcome is `rejection`. The refusal comes from the tool's own admission, so the cell first
+  meets that tool's other preconditions: `vmcore.fetch` checks the CRASHED state before the
+  capture method, so its x86_64 `fadump` cell needs a crashed, Run-bound System (#2814).
+
+Cell identities and the other boundaries are unchanged. A provider that gains or loses a
+capability changes the cell set, which moves the contract digest, so a qualification against
+the old set fails `matrix-mismatch` rather than passing stale evidence.
+
+### Amendment (2026-10-14): ten more filtering list boundaries prove denied visibility (#2813)
+
+This amends the 2026-10-12 amendment above, which names three cells and keeps the
+failure-envelope rule for every other `authorization` and `project-isolation` cell. By
+operator decision R3 (2026-10-13), [ADR-0756](0756-filtered-list-boundary-evidence.md)'s
+2026-10-14 amendment adds the `authorization` and `project-isolation` pairs of `runs.list`,
+`systems.list`, `jobs.list`, `allocations.list` and `debug.list_sessions`. Their cells prove
+denial with ADR-0756's positive control and canonical empty page. The contract's
+`FILTERED_LIST_BOUNDARIES` owns the named set; every pair outside it keeps the
+failure-envelope rule.
+
+### Amendment (2026-10-14): recovery evidence is the witness's termination row (#3111)
+
+This corrects decision 2 and the first Consequence. Decision 2 says a recovery-tool call on the
+host-process lane "cannot prove a worker dead". The Consequence says a carrier of the recovery
+tools needs a lane whose death verifier can reach its authority. Both assume that
+`ops.recover_build_use` asks the configured verifier. It does not:
+
+- `KDIVE_WORKER_DEATH_VERIFIER` only decides whether the two tools are registered. No caller
+  invokes `verify_dead`.
+- `recover_investigation_build_use` (`src/kdive/db/schema/0108_worker_fence_runtime_paths.sql`)
+  accepts only one fact as death evidence: a durable `worker_incarnations` row in state
+  `terminated` for the exact holder on the pin.
+- The systemd lifecycle witness writes that row on the demo-up lane when a worker unit's
+  invocation dies (`worker-lifecycle.sh status`).
+
+The functional cells of both recovery tools therefore run on the demo-up `recovery` lane
+(`KDIVE_WORKER_DEATH_VERIFIER=docker`). They strand a real pin under a frozen worker unit,
+observe the tool while that holder lives, kill the unit, and let the witness publish the
+termination. The worker there has a `local` incarnation, and the recovery row records
+`authority_kind = 'local'`. Docker and Kubernetes incarnations write the same row through their
+own witnesses, so the same evidence rule covers them. The configuration proof and the other
+decisions are unchanged.
+
+### Amendment (2026-10-20): a variant the tool's handler refuses is unsupported (#3114)
+
+This amends the 2026-10-13 amendment's verdict. `_capability_variants` turns every advertised
+capture method into a `vmcore.fetch` variant. `remote-libvirt` advertises `console` and `gdbstub`,
+but the handler admits only its core-producing set (`VMCORE_METHODS`). It answers any other method
+with `configuration_error`, `data.reason` "method does not produce a vmcore", and no job. That
+refusal does not depend on the provider or the architecture. A `vmcore.fetch` variant outside that
+set is therefore `unsupported`, with the handler as its `unsupported_reason`, on every lane. This
+covers the x86_64 and ppc64le `remote-libvirt` `console` and `gdbstub` cells.
+
+The refusal is not ADR-0209's `capability_unsupported`, so the verdict generates no `capability`
+rejection cell. The `unsupported` cell proves the refusal itself. It first meets the handler's
+preconditions: a crashed, Run-bound System. Then a real-issuer `contributor` token in the cell's
+exposure must receive exactly that envelope. The System must stay `crashed`, and the jobs naming
+the System or Run must be unchanged. Cell identities, owners and the other boundaries are
+unchanged. A change to `VMCORE_METHODS` moves the cell set and the contract digest.
+
+### Amendment (2026-10-20): a `cli` exposure for the core service tools (#3099)
+
+This amends the two exposures of the Context and decision 1, by operator decision at the #3099
+design gate (2026-10-20). [ADR-0795](0795-cli-translation-exposure.md) adds a third exposure,
+`cli`, to the tools of the core service groups: every `direct` cell of them gains a `cli` twin on
+the same scenario and node, whose caller drives the tool's generated `kdivectl` verb. Decision 3
+holds for `cli` with the rejection readings ADR-0795 states. Every other tool keeps `direct` and
+`gateway` only.
+
 ## Consequences
 
 - Recovery-configuration evidence exists only from a run whose catalog proved it. A carrier of

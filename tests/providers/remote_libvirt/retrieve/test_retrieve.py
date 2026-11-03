@@ -11,8 +11,8 @@ from uuid import UUID
 import pytest
 
 from kdive.artifacts.storage import (
-    ArtifactStreamRequest,
     ArtifactWriteRequest,
+    ConditionalArtifactWriteRequest,
     HeadResult,
     PresignedUpload,
     PresignPutRequest,
@@ -102,7 +102,13 @@ class FakeStore:
 
     def presign_put(self, request: PresignPutRequest) -> PresignedUpload:
         self.presigned.append(request)
-        return PresignedUpload(url="https://s3/put?sig=SECRET", required_headers={"h": "v"})
+        return PresignedUpload(
+            url="https://s3/put?sig=SECRET",
+            required_headers={
+                "if-none-match": "*",
+                "x-amz-meta-vmcore-execution": request.metadata["vmcore-execution"],
+            },
+        )
 
     def head(self, key: str) -> HeadResult | None:
         return self._head
@@ -117,9 +123,12 @@ class FakeStore:
             version_id="test-version",
         )
 
-    def put_stream(self, request: ArtifactStreamRequest) -> StoredArtifact:
-        # The kdump path never streams; present only to satisfy the store protocol.
-        raise AssertionError("kdump capture must not call put_stream")
+    def create_if_absent(self, request: ConditionalArtifactWriteRequest) -> StoredArtifact:
+        assert request.metadata == {"vmcore-execution": str(UUID(int=1)), "vmcore-kind": "capture"}
+        assert isinstance(request.data, bytes)
+        return StoredArtifact(
+            request.key, "etag-red", request.sensitivity, request.retention_class, "test-version"
+        )
 
 
 def _retrieve(
@@ -166,17 +175,24 @@ def test_capture_two_phase_happy_path(tmp_path: Path) -> None:
             version_id="test-version",
         )
     )
-    out = _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
+    out = _retrieve(agent, store, tmp_path).capture(
+        _SID, _RID, CaptureMethod.KDUMP, execution_id=UUID(int=1)
+    )
 
     assert out.vmcore_build_id == "deadbeef"
     assert out.raw.etag == "etag-raw"
     assert out.raw.sensitivity is Sensitivity.SENSITIVE
-    assert out.raw.key.endswith("/vmcore-kdump")
-    assert out.redacted.key.endswith("/vmcore-kdump-redacted")
+    assert out.raw.key.endswith("/vmcore-kdump-00000000-0000-0000-0000-000000000001")
+    assert out.redacted.key.endswith("/vmcore-kdump-00000000-0000-0000-0000-000000000001-redacted")
     assert out.redacted.sensitivity is Sensitivity.REDACTED
     # presign signed the inspected digest + deterministic key.
     assert store.presigned[0].sha256 == _SHA
-    assert store.presigned[0].key.endswith("/vmcore-kdump")
+    assert store.presigned[0].key.endswith("/vmcore-kdump-00000000-0000-0000-0000-000000000001")
+    assert store.presigned[0].if_absent is True
+    assert store.presigned[0].metadata["vmcore-execution"] == str(UUID(int=1))
+    upload_argv = next(a for a in agent.argvs if a[1] == "upload")
+    assert "if-none-match:*" in upload_argv
+    assert f"x-amz-meta-vmcore-execution:{UUID(int=1)}" in upload_argv
     # the upload argv ran after inspect, carrying the bearer URL.
     assert agent.argvs[0][1] == "inspect"
     assert any(a[1] == "upload" for a in agent.argvs)
@@ -199,7 +215,9 @@ def test_capture_loopback_endpoint_fails_before_touching_the_guest(
         )
     )
     with pytest.raises(CategorizedError) as excinfo:
-        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
+        _retrieve(agent, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.KDUMP, execution_id=UUID(int=1)
+        )
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert excinfo.value.details["env_var"] == "KDIVE_S3_ENDPOINT_URL"
     assert agent.argvs == []  # never reached the guest
@@ -217,7 +235,9 @@ def test_capture_waits_out_a_rebooting_agent(tmp_path: Path) -> None:
             version_id="test-version",
         )
     )
-    out = _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
+    out = _retrieve(agent, store, tmp_path).capture(
+        _SID, _RID, CaptureMethod.KDUMP, execution_id=UUID(int=1)
+    )
     assert out.vmcore_build_id == "deadbeef"
 
 
@@ -226,7 +246,7 @@ def test_capture_readiness_window_exhausted_is_readiness_failure(tmp_path: Path)
     store = FakeStore(head=None)
     rt = _retrieve(agent, store, tmp_path, readiness_timeout_s=0.0)
     with pytest.raises(CategorizedError) as exc:
-        rt.capture(_SID, _RID, CaptureMethod.KDUMP)
+        rt.capture(_SID, _RID, CaptureMethod.KDUMP, execution_id=UUID(int=1))
     assert exc.value.category is ErrorCategory.READINESS_FAILURE
     assert exc.value.details["kernel_config_hint"] == EMPTY_CAPTURE_CONFIG_HINT
 
@@ -235,7 +255,9 @@ def test_capture_no_core_present_is_readiness_failure(tmp_path: Path) -> None:
     agent = FakeAgentExec(inspect=_inspect_json(present=False))
     store = FakeStore(head=None)
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
+        _retrieve(agent, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.KDUMP, execution_id=UUID(int=1)
+        )
     assert exc.value.category is ErrorCategory.READINESS_FAILURE
     assert exc.value.details["kernel_config_hint"] == EMPTY_CAPTURE_CONFIG_HINT
 
@@ -244,7 +266,9 @@ def test_capture_oversized_core_is_configuration_error(tmp_path: Path) -> None:
     agent = FakeAgentExec(inspect=_inspect_json(size=6 * 1024**3))
     store = FakeStore(head=None)
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
+        _retrieve(agent, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.KDUMP, execution_id=UUID(int=1)
+        )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -252,7 +276,9 @@ def test_capture_upload_failure_is_infrastructure_failure(tmp_path: Path) -> Non
     agent = FakeAgentExec(inspect=_inspect_json(), upload_exit=22)
     store = FakeStore(head=None)
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
+        _retrieve(agent, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.KDUMP, execution_id=UUID(int=1)
+        )
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
@@ -260,7 +286,9 @@ def test_capture_missing_object_after_upload_is_infrastructure_failure(tmp_path:
     agent = FakeAgentExec(inspect=_inspect_json())
     store = FakeStore(head=None)  # head returns None despite an exit-0 upload
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
+        _retrieve(agent, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.KDUMP, execution_id=UUID(int=1)
+        )
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
@@ -270,7 +298,9 @@ def test_capture_rejects_a_non_vmcore_method(tmp_path: Path) -> None:
     agent = FakeAgentExec(inspect=_inspect_json())
     store = FakeStore(head=None)
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.CONSOLE)
+        _retrieve(agent, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.CONSOLE, execution_id=UUID(int=1)
+        )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -293,7 +323,9 @@ def test_capture_non_rebooting_inspect_error_propagates_immediately(tmp_path: Pa
     agent = _RaisingInspectAgent(ErrorCategory.INFRASTRUCTURE_FAILURE)
     store = FakeStore(head=None)
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
+        _retrieve(agent, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.KDUMP, execution_id=UUID(int=1)
+        )
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert agent.calls == 1  # no readiness spin on a non-rebooting error
 
@@ -307,5 +339,7 @@ def test_capture_nonzero_inspect_exit_is_infrastructure_failure(tmp_path: Path) 
 
     store = FakeStore(head=None)
     with pytest.raises(CategorizedError) as exc:
-        _retrieve(_NonZeroInspect(), store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
+        _retrieve(_NonZeroInspect(), store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.KDUMP, execution_id=UUID(int=1)
+        )
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE

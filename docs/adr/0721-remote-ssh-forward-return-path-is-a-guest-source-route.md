@@ -46,6 +46,16 @@ rule.
 Images without NetworkManager (Ubuntu 24.04 and the bare image) do not get the script. Their return
 path is #3091.
 
+### Amendment (2026-10-21): remote authority Systems have no libvirt NIC (#3310)
+
+This is an amendment because [ADR-0804](0804-remote-authority-systems-have-only-the-forward-nic.md)
+replaces one claim here for authority-owned remote Systems only. The Decision keeps the guest's
+default route on the libvirt-network NIC and leaves the domain XML unchanged. An authority System
+runs on the authority's unprivileged session daemon, which has no network to attach that NIC to.
+Its domain therefore carries no libvirt `<interface>`, and the forward NIC is its only NIC. The
+operator's `guest_egress` setting renders that NIC `restrict=off`; it is `restrict=on` by default.
+Ordinary remote Systems are unchanged.
+
 ## Consequences
 
 - Remote SSH parity needs the image contract. An image staged before this change must be rebuilt

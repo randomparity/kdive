@@ -93,7 +93,6 @@ class RemoteAuthoritySystemEntryV1(_ClosedManifest):
     root_identity: Digest
     architecture: Architecture
     base_volume: str
-    network: str
     machine: str
     gdb_addr: str
     gdb_port_min: int
@@ -101,6 +100,7 @@ class RemoteAuthoritySystemEntryV1(_ClosedManifest):
     ssh_addr: str
     ssh_port_min: int
     ssh_port_max: int
+    guest_egress: bool = False
 
 
 class RemoteAuthoritySystemManifestV1(_ClosedManifest):

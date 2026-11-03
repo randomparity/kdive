@@ -41,6 +41,16 @@
     - role: provider_authority_host
       tags: [provider_authority_host]
 
+- name: Check the selected guest network after firewall convergence
+  hosts: remote_libvirt_hosts
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Check for the known Docker forwarding conflict
+      ansible.builtin.import_role:
+        name: libvirt_pool_net
+        tasks_from: egress_preflight
+
 - name: Emit remote-libvirt facts (controller-side)
   hosts: remote_libvirt_hosts
   gather_facts: true

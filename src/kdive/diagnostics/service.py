@@ -322,9 +322,12 @@ class _EnabledDiagnosticContribution:
 
 def _enabled_provider_contributions(
     provider_contributions: Sequence[DiagnosticProviderContribution],
+    provider: str | None,
 ) -> list[_EnabledDiagnosticContribution]:
     enabled: list[_EnabledDiagnosticContribution] = []
     for contribution in provider_contributions:
+        if provider is not None and contribution.provider != provider:
+            continue
         if contribution.enabled():
             enabled.append(
                 _EnabledDiagnosticContribution(
@@ -332,6 +335,11 @@ def _enabled_provider_contributions(
                     unavailable_worker_checks=tuple(contribution.unavailable_worker_checks()),
                 )
             )
+    if provider is not None and not enabled:
+        raise CategorizedError(
+            "diagnostics target is not an enabled registered provider",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
     return enabled
 
 
@@ -394,6 +402,10 @@ def default_service_factory(
 ) -> DiagnosticsService:
     """Build the production read-only diagnostics service for ``provider``.
 
+    An exact named target selects only its enabled contributions; ``None`` selects all enabled
+    contributions. Unknown or disabled names fail before check construction. The independent
+    ``secret_ref`` check remains present for every valid target.
+
     Assembles the server-vantage ``secret_ref`` check over the configured secret refs, resolved
     against the file-ref backend under ``KDIVE_SECRETS_ROOT``. When a ``[[remote_libvirt]]``
     instance is declared, the provider diagnostic contribution also assembles the server-vantage
@@ -413,10 +425,10 @@ def default_service_factory(
     otherwise the opt-in fails fast instead of silently dropping the requested check.
 
     Raises:
-        CategorizedError: ``with_egress`` is requested but no enabled provider contribution
-            supplies an egress check in this deployment (``CONFIGURATION_ERROR``).
+        CategorizedError: A named target has no enabled contribution, or ``with_egress`` has no
+            selected contribution supplying an egress check (``CONFIGURATION_ERROR``).
     """
-    enabled_contributions = _enabled_provider_contributions(provider_contributions)
+    enabled_contributions = _enabled_provider_contributions(provider_contributions, provider)
     egress_checks = _provider_egress_checks(enabled_contributions) if with_egress else []
     if with_egress and not egress_checks:
         raise CategorizedError(

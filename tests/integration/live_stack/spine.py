@@ -23,16 +23,21 @@ import base64
 import hashlib
 import json
 import os
+import platform
+import re
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager, nullcontext
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Never
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -241,6 +246,148 @@ def console_part_ids(listing: ToolResponse) -> list[str]:
     ]
 
 
+@dataclass
+class ConsoleObservation:
+    """Bounded redacted evidence for one opt-in force-crash console observation."""
+
+    records: list[dict[str, object]] = field(default_factory=list)
+    incomplete: str | None = None
+    baseline: dict[tuple[int, int], ToolResponse] = field(default_factory=dict)
+    used_bytes: int = 0
+    inspected: set[str] = field(default_factory=set)
+    expires_at: float = 0.0
+
+    def fail(self, reason: str) -> Never:
+        self.incomplete = reason
+        raise SpinePhaseError("console-parts", f"incomplete console evidence: {reason}")
+
+    async def call(self, client: LiveStackClient, name: str, **args: object) -> ToolResponse:
+        remaining = self.expires_at - time.monotonic()
+        if remaining <= 0:
+            self.fail("deadline")
+        try:
+            async with asyncio.timeout(remaining):
+                env = await scalar(client, name, **args)
+        except TimeoutError:
+            self.fail("deadline")
+        record: dict[str, object] = {
+            "tool": name,
+            "id": env.object_id,
+            "status": env.status,
+            "object": env.refs.get("object"),
+            "data": env.data,
+            "error_category": env.error_category,
+            "request": args.get("request", {"cursor": args.get("cursor")}),
+            "items": [{"id": i.object_id, "object": i.refs.get("object")} for i in env.items],
+        }
+        content = env.data.get("content")
+        if isinstance(content, str):
+            record["content_sha256"] = hashlib.sha256(content.encode()).hexdigest()
+        size = len(json.dumps(record, sort_keys=True, separators=(",", ":")).encode())
+        if self.used_bytes + size > 16 * 1024 * 1024:
+            self.fail("diagnostic_byte_bound")
+        self.records.append(record)
+        self.used_bytes += size
+        if time.monotonic() >= self.expires_at:
+            self.fail("deadline")
+        if env.status in {"error", "failed"}:
+            self.incomplete = "acquisition_failure"
+        return ok(env, "console-parts")
+
+    async def parts(
+        self, client: LiveStackClient, system_id: str
+    ) -> dict[tuple[int, int], ToolResponse]:
+        result: dict[tuple[int, int], ToolResponse] = {}
+        ids: set[str] = set()
+        cursors: set[str] = set()
+        cursor: str | None = None
+        while True:
+            args: dict[str, object] = {"system_id": system_id}
+            if cursor is not None:
+                args["cursor"] = cursor
+            page = await self.call(client, "artifacts.list", **args)
+            for item in page.items:
+                key = item.refs.get("object", "")
+                if "console-part-" not in key:
+                    continue
+                # Parts are keyed under the System's provider: local- or remote-libvirt.
+                match = re.fullmatch(
+                    rf"(?:local|remote-libvirt)/systems/{re.escape(system_id)}"
+                    r"/console-part-(\d+)-(\d+)",
+                    key,
+                )
+                if match is None:
+                    self.fail("invalid_part_key")
+                position = (int(match[1]), int(match[2]))
+                if position in result or item.object_id in ids:
+                    self.fail("duplicate_part")
+                result[position] = item
+                ids.add(item.object_id)
+            if not page.data.get("truncated", False):
+                return result
+            following = page.data.get("next_cursor")
+            if not isinstance(following, str) or not following or following in cursors:
+                self.fail("invalid_list_continuation")
+            cursors.add(following)
+            cursor = following
+
+    async def snapshot(self, client: LiveStackClient, system_id: str) -> set[str]:
+        self.expires_at = time.monotonic() + 600.0
+        self.baseline = await self.parts(client, system_id)
+        if not self.baseline:
+            self.fail("empty_baseline")
+        return {item.object_id for item in self.baseline.values()}
+
+    async def text(self, client: LiveStackClient, item: ToolResponse) -> str:
+        if len(self.inspected) >= 128:
+            self.fail("part_bound")
+        self.inspected.add(item.object_id)
+        chunks: list[str] = []
+        offset = 0
+        expected_size: int | None = None
+        while True:
+            env = await self.call(
+                client,
+                "artifacts.get",
+                request={
+                    "artifact_id": item.object_id,
+                    "byte_offset": offset,
+                },
+            )
+            if env.refs.get("object", item.refs.get("object")) != item.refs.get("object"):
+                self.fail("changed_part_ref")
+            content = env.data.get("content")
+            if (
+                not isinstance(content, str)
+                or env.data.get("content_unavailable")
+                or env.data.get("content_omitted")
+            ):
+                self.fail("unavailable_content")
+            size = env.data.get("size_bytes")
+            if (
+                type(size) is not int
+                or size < 0
+                or "\ufffd" in content
+                or (expected_size is not None and size != expected_size)
+            ):
+                self.fail("unverifiable_content_size")
+            expected_size = size
+            end = offset + len(content.encode("utf-8"))
+            if end > size:
+                self.fail("invalid_content_size")
+            truncated = env.data.get("content_truncated", False)
+            following = env.data.get("next_offset")
+            if truncated:
+                if type(following) is not int or following != end or not offset < end < size:
+                    self.fail("invalid_content_continuation")
+            elif end != size:
+                self.fail("incomplete_terminal_content")
+            chunks.append(content)
+            if not truncated:
+                return "".join(chunks)
+            offset = end
+
+
 async def poll_for_new_console_part(
     client: LiveStackClient,
     system_id: str,
@@ -249,35 +396,70 @@ async def poll_for_new_console_part(
     *,
     deadline_s: float,
     interval_s: float,
+    predicate: Callable[[str], bool] | None = None,
+    observation: ConsoleObservation | None = None,
 ) -> tuple[str, str]:
-    """Return a new immutable console part containing ``marker`` and its full plaintext."""
-    deadline = time.monotonic() + deadline_s
-    inspected_ids: set[str] = set()
-    current_ids: list[str] = []
-    while True:
-        listing = ok(
-            await scalar(client, "artifacts.list", system_id=system_id),
-            "poll-parts",
-        )
-        current_ids = console_part_ids(listing)
-        candidates = [
-            artifact_id
-            for artifact_id in current_ids
-            if artifact_id not in initial_ids and artifact_id not in inspected_ids
-        ]
-        for artifact_id in candidates:
-            text = await full_artifact_text(client, artifact_id, "read-new-part")
-            inspected_ids.add(artifact_id)
-            if marker in text:
-                return artifact_id, text
-        if time.monotonic() >= deadline:
-            raise SpinePhaseError(
-                "console-parts",
-                f"no marker-bearing console-part artifacts within {deadline_s:g}s "
-                f"(initial={len(initial_ids)}, current={len(current_ids)}, "
-                f"inspected={len(inspected_ids)})",
+    """Read a marker part, or an opt-in complete predicate stream with bounded evidence."""
+    if observation is None and predicate is None:
+        deadline = time.monotonic() + deadline_s
+        inspected_ids: set[str] = set()
+        current_ids: list[str] = []
+        while True:
+            listing = ok(
+                await scalar(client, "artifacts.list", system_id=system_id),
+                "poll-parts",
             )
-        await asyncio.sleep(interval_s)
+            current_ids = console_part_ids(listing)
+            candidates = [
+                artifact_id
+                for artifact_id in current_ids
+                if artifact_id not in initial_ids and artifact_id not in inspected_ids
+            ]
+            for artifact_id in candidates:
+                text = await full_artifact_text(client, artifact_id, "read-new-part")
+                inspected_ids.add(artifact_id)
+                if marker in text:
+                    return artifact_id, text
+            if time.monotonic() >= deadline:
+                raise SpinePhaseError(
+                    "console-parts",
+                    f"no marker-bearing console-part artifacts within {deadline_s:g}s "
+                    f"(initial={len(initial_ids)}, current={len(current_ids)}, "
+                    f"inspected={len(inspected_ids)})",
+                )
+            await asyncio.sleep(interval_s)
+    observed = observation or ConsoleObservation()
+    observed.expires_at = time.monotonic() + deadline_s
+    strict = predicate is not None
+    if strict and not observed.baseline:
+        observed.fail("missing_baseline")
+    baseline = max(observed.baseline) if observed.baseline else None
+    stream = ""
+    previous = baseline
+    while True:
+        parts = await observed.parts(client, system_id)
+        if strict and baseline is not None and any(p[0] > baseline[0] for p in parts):
+            observed.fail("generation_change")
+        for position, item in sorted(parts.items()):
+            if item.object_id in initial_ids or item.object_id in observed.inspected:
+                continue
+            if strict and baseline is not None:
+                if position <= baseline:
+                    continue
+                if previous is not None and position != (previous[0], previous[1] + 1):
+                    observed.fail("part_gap")
+            text = await observed.text(client, item)
+            stream = stream + text if strict else text
+            previous = position
+            closed_stream = stream[: stream.rfind("\n") + 1] if strict else stream
+            if predicate(closed_stream) if predicate is not None else marker in closed_stream:
+                if time.monotonic() >= observed.expires_at:
+                    observed.fail("deadline")
+                return item.object_id, stream
+        remaining = observed.expires_at - time.monotonic()
+        if remaining <= 0:
+            observed.fail("deadline")
+        await asyncio.sleep(min(interval_s, max(0.0, remaining)))
 
 
 # --- async-drain helpers (ADR-0045 §2) ------------------------------------------------------
@@ -557,9 +739,13 @@ def check_spine_kernel_config(
     require_kdump: bool = False,
     require_network: bool = False,
     require_live_debug: bool = False,
+    require_initrd: bool = False,
     root_fs: str | None = None,
 ) -> bytes:
-    """Reject a built tree that lacks the selected live proof's kernel features."""
+    """Reject a built tree that lacks the selected live proof's kernel features.
+
+    ``require_initrd`` adds the support to unpack :func:`spine_initrd`'s gzip initramfs.
+    """
     if arch not in {"x86_64", "ppc64le"}:
         raise SpinePhaseError(phase_name, f"unsupported kernel arch {arch!r}")
     if root_fs not in {None, "ext4", "xfs"}:
@@ -585,6 +771,12 @@ def check_spine_kernel_config(
             missing.append("CONFIG_XFS_FS=y")
     elif not (config.is_builtin("EXT4_FS") or config.is_builtin("XFS_FS")):
         missing.append("CONFIG_EXT4_FS=y or CONFIG_XFS_FS=y")
+    if require_initrd:
+        missing.extend(
+            f"CONFIG_{symbol}=y"
+            for symbol in ("BLK_DEV_INITRD", "RD_GZIP")
+            if not config.is_builtin(symbol)
+        )
     if require_network and not config.is_enabled("VIRTIO_NET"):
         missing.append("CONFIG_VIRTIO_NET=y or =m")
     has_dwarf = config.is_builtin("DEBUG_INFO_DWARF4") or config.is_builtin("DEBUG_INFO_DWARF5")
@@ -599,6 +791,73 @@ def check_spine_kernel_config(
             f"KDIVE_KERNEL_SRC/.config lacks required spine settings: {', '.join(missing)}",
         )
     return config_bytes
+
+
+def _host_tool_env() -> dict[str, str]:
+    """The caller's environment minus anything a host build tool reads as configuration."""
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name in {"PATH", "HOME", "LANG", "LANGUAGE"} or name.startswith("LC_")
+    }
+
+
+# The remote root is ``root=UUID=<uuid> rootfstype=<fs>``; the kernel resolves a filesystem UUID
+# only from initramfs userspace. The spine already requires the virtio and root-filesystem
+# drivers built in, so the initrd carries userspace only (udev, blkid, systemd's switch-root).
+_INITRD_DRACUT_MODULES = "base rootfs-block udev-rules systemd systemd-initrd dracut-systemd fs-lib"
+
+
+def spine_initrd(kernel_src: Path, dest_dir: Path, phase_name: str) -> Path:
+    """Build the userspace-only gzip initrd a remote external boot needs (#3323).
+
+    dracut packs this host's userspace and runs unprivileged. It skips ``/etc/dracut.conf`` and
+    ``/etc/dracut.conf.d``, but always sources the distro's ``/usr/lib/dracut/dracut.conf.d``,
+    whose drop-ins can still add dracut modules or files. ``--no-kernel`` adds no kernel modules,
+    so the initrd pairs with any kernel whose boot drivers are built in. Without root, dracut logs
+    that ldconfig needs uid 0 and writes no ``ld.so.cache``; glibc's built-in search path still
+    covers the distro library directories.
+    """
+    if shutil.which("dracut") is None:
+        raise SpinePhaseError(phase_name, "dracut not on PATH; install the dracut package")
+    release_file = kernel_src / "include/config/kernel.release"
+    try:
+        release = release_file.read_text().strip()
+    except OSError as exc:
+        raise SpinePhaseError(
+            phase_name, f"could not read {release_file} ({type(exc).__name__})"
+        ) from exc
+    confdir = dest_dir / "dracut.conf.d"
+    confdir.mkdir()
+    initrd = dest_dir / "initrd"
+    try:
+        subprocess.run(
+            [
+                "dracut",
+                "--conf",
+                "/dev/null",
+                "--confdir",
+                str(confdir),
+                "--no-kernel",
+                "--no-hostonly",
+                "--no-hostonly-cmdline",
+                "--no-early-microcode",
+                "--kver",
+                release,
+                "--modules",
+                _INITRD_DRACUT_MODULES,
+                "--gzip",
+                "--force",
+                "--tmpdir",
+                str(dest_dir),
+                str(initrd),
+            ],
+            check=True,
+            env=_host_tool_env(),
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SpinePhaseError(phase_name, f"dracut exited {exc.returncode}") from exc
+    return initrd
 
 
 def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64") -> Path:
@@ -631,11 +890,6 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
         boot_root = dest_dir
         member = Path("vmlinuz")
     modstage = dest_dir / "modstage"
-    make_env = {
-        name: value
-        for name, value in os.environ.items()
-        if name in {"PATH", "HOME", "LANG", "LANGUAGE"} or name.startswith("LC_")
-    }
     make_arch = {"x86_64": "x86", "ppc64le": "powerpc"}[arch]
     subprocess.run(
         [
@@ -648,7 +902,7 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
             "INSTALL_MOD_STRIP=1",
         ],
         check=True,
-        env=make_env,
+        env=_host_tool_env(),
     )
     tar_path = dest_dir / "kernel.tar.gz"
     subprocess.run(
@@ -678,12 +932,14 @@ async def build_and_upload_kernel(
     phase_name: str = "upload-build",
     arch: str = "x86_64",
     with_vmlinux: bool = False,
+    with_initrd: bool = False,
     require_kdump: bool = False,
     require_network: bool = False,
     require_live_debug: bool = False,
     root_fs: str | None = None,
     kernel_tree: Path | None = None,
     evidence_dir: Path | None = None,
+    complete: bool = True,
 ) -> None:
     """Drive the external-build upload lane for ``run_id`` and complete the Run's build step.
 
@@ -698,8 +954,14 @@ async def build_and_upload_kernel(
     opt-in because the ELF is large (hundreds of MB) and a spine that never attaches pays the
     upload for nothing.
 
+    ``with_initrd`` additionally uploads :func:`spine_initrd`'s initrd. Remote external boot
+    refuses a build without one (``remote_external_boot_initrd_required``). dracut packs this
+    host's userspace, so the guest ``arch`` must be the host's.
+
     ``kernel_tree`` overrides the environment input. ``evidence_dir`` must be new;
     it retains the bundle, effective config and upload declarations/completion result.
+    ``complete=False`` uploads the artifacts and skips ``runs.complete_build``, so the Run stays
+    ``created``.
     """
     contract = json.loads(await client.read_text_resource(EXTERNAL_BUILD_CONTRACT_URI))
     accepted = accepted_run_upload_names(contract)
@@ -707,6 +969,12 @@ async def build_and_upload_kernel(
         raise SpinePhaseError(phase_name, f"upload contract no longer accepts 'kernel': {accepted}")
     if with_vmlinux and "vmlinux" not in accepted:
         raise SpinePhaseError(phase_name, f"upload contract accepts no 'vmlinux': {accepted}")
+    if with_initrd and "initrd" not in accepted:
+        raise SpinePhaseError(phase_name, f"upload contract accepts no 'initrd': {accepted}")
+    if with_initrd and arch != platform.machine():
+        raise SpinePhaseError(
+            phase_name, f"build the {arch} initrd on a {arch} host, not {platform.machine()}"
+        )
     if "effective_config" not in accepted:
         raise SpinePhaseError(
             phase_name, f"upload contract no longer accepts 'effective_config': {accepted}"
@@ -721,6 +989,7 @@ async def build_and_upload_kernel(
         require_kdump=require_kdump,
         require_network=require_network,
         require_live_debug=require_live_debug,
+        require_initrd=with_initrd,
         root_fs=root_fs,
     )
     if evidence_dir is not None:
@@ -758,6 +1027,15 @@ async def build_and_upload_kernel(
                     "size_bytes": vmlinux.stat().st_size,
                 }
             )
+        if with_initrd:
+            initrd = spine_initrd(Path(kernel_src), Path(scratch), phase_name)
+            decls.append(
+                {
+                    "name": "initrd",
+                    "sha256": sha256_b64(initrd),
+                    "size_bytes": initrd.stat().st_size,
+                }
+            )
         up = ok(
             await scalar(client, "artifacts.create_run_upload", run_id=run_id, artifacts=decls),
             phase_name,
@@ -774,17 +1052,25 @@ async def build_and_upload_kernel(
                 raise SpinePhaseError(phase_name, "create_run_upload returned no 'vmlinux' item")
             await put_presigned(by_name["vmlinux"], vmlinux)
             build_id = elf_build_id(vmlinux)
+        if with_initrd:
+            if "initrd" not in by_name:
+                raise SpinePhaseError(phase_name, "create_run_upload returned no 'initrd' item")
+            await put_presigned(by_name["initrd"], initrd)
     # complete_build requires build_id iff a vmlinux was uploaded; sending it otherwise (or
     # omitting it here) is a configuration_error.
     extra: dict[str, JsonValue] = {"build_id": build_id} if with_vmlinux else {}
-    result = ok(await scalar(client, "runs.complete_build", run_id=run_id, **extra), phase_name)
+    result = (
+        ok(await scalar(client, "runs.complete_build", run_id=run_id, **extra), phase_name)
+        if complete
+        else None
+    )
     if evidence_dir is not None:
         (evidence_dir / "upload.json").write_text(
             json.dumps(
                 {
                     "artifacts": decls,
                     "build_id": build_id if with_vmlinux else None,
-                    "result": result.model_dump(mode="json"),
+                    "result": result.model_dump(mode="json") if result is not None else None,
                 },
                 sort_keys=True,
                 indent=2,

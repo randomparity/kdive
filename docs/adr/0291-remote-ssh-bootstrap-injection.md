@@ -62,6 +62,16 @@ would exist — and `authorize_ssh_key` still rejects).
   `ssh_addr`). The worker loads the bootstrap **private** key and SSHes to the endpoint to
   append the agent's key — the genuine consumer that makes the injected key load-bearing.
 
+### Amendment (2026-10-21): remote authority Systems have no libvirt NIC (#3310)
+
+This is an amendment because [ADR-0804](0804-remote-authority-systems-have-only-the-forward-nic.md)
+replaces one claim here for authority-owned remote Systems only. The Decision renders the forward
+NIC with `restrict=on` beside the domain's libvirt-network NIC, which keeps the guest's default
+route. An authority System runs on the authority's unprivileged session daemon, which has no
+network to attach that NIC to. Its domain therefore carries no libvirt `<interface>`, and the
+forward NIC is its only NIC. The operator's `guest_egress` setting renders that NIC `restrict=off`;
+it is `restrict=on` by default. Ordinary remote Systems are unchanged.
+
 ## Consequences
 
 - Remote reaches SSH parity with local: bootstrap key present in-guest, `ssh_info`

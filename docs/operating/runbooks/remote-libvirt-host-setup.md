@@ -18,6 +18,11 @@ The resulting host needs:
   or modular `virtproxyd` according to the host distribution.
 - A **directory (`dir`) storage pool** and guest network. The remote module-restoration volume
   naming contract assumes a dir pool ([ADR-0588](../../adr/0588-remote-module-volume-ownership-lives-in-the-volume-name.md)).
+- A `kdive-pcap` dir pool at `/var/lib/libvirt/kdive-pcap` for traffic captures: `root:root 0711`,
+  labelled `svirt_image_t` on an SELinux-enforcing host, and allowed by a write-only
+  `libvirt-qemu.d` drop-in on an AppArmor host. The provider pre-creates each capture file for the
+  domain's QEMU user
+  ([ADR-0432](../../adr/0432-remote-libvirt-traffic-capturer.md) amendment).
 - Firewall rules admitting the worker to TLS and the gdbstub range. The gdbstub uses raw TCP;
   the libvirt TLS connection does not protect it. Verify both an allowed worker connection and
   refusal from outside the configured worker network.
@@ -39,8 +44,17 @@ For remote SSH parity (`ssh_addr`/`ssh_range`), the image must carry the SSH-for
 from [ADR-0721](../../adr/0721-remote-ssh-forward-return-path-is-a-guest-source-route.md). The
 image playbook installs it into images that ship NetworkManager (the Fedora and Rocky entries).
 An image staged before that change does not have it: rebuild it with `force_image_rebuild=true`,
-or its SSH forward accepts connections and never answers. The Ubuntu 24.04 and bare images do
-not carry it yet (#3091).
+or its SSH forward accepts connections and never answers. Ubuntu 24.04 uses native
+netplan/networkd lease events with the same source-route helper
+([ADR-0763](../../adr/0763-ubuntu-remote-guest-network-policy.md)). Rebuild older Ubuntu
+images to install that policy. It removes only the main-table DHCP default through the
+identified restricted slirp interface and gateway, preserving ordinary primary-interface
+egress, static routes and DNS. Native startup replay restores policy after dispatcher restart;
+foreign netplan YAML is a build error requiring a clean supported image.
+Ubuntu SSH generates missing host keys at service startup, separately for each clone,
+and preserves them on reboot. Unknown SSH prechecks or foreign service drop-ins
+also require a clean supported image; shared-image host keys are not generated.
+Bare has no sshd or network policy and explicitly has no remote SSH parity; its bootability remains unvalidated.
 
 The baked `kdive-install-kernel` keeps `crashkernel=` in the `kdive` slot only when the requested
 cmdline carries one (the [ADR-0082](../../adr/0082-remote-install-in-guest-kernel.md) amendment
@@ -91,9 +105,9 @@ Adjust the namespace and Secret name to your deployment. If the emitted refs use
 `remote-clientcert.pem`, use those names on the left side of `--from-file` too. Mount the client
 bundle and CA certificate; keep the CA signing key on the PKI controller.
 
-The storage pool, network, and machine settings remain runtime configuration
+The storage pool, network, machine, and pcap pool settings remain runtime configuration
 (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, `KDIVE_REMOTE_LIBVIRT_NETWORK`,
-`KDIVE_REMOTE_LIBVIRT_MACHINE`); see the [configuration reference](../../guide/reference/config.md).
+`KDIVE_REMOTE_LIBVIRT_MACHINE`, `KDIVE_REMOTE_LIBVIRT_PCAP_POOL`); see the [configuration reference](../../guide/reference/config.md).
 Onboard the tenant's budget and quota using [project onboarding](../project-onboarding.md).
 
 ### Object-store reachability
@@ -106,6 +120,38 @@ Loopback names such as `localhost` point to the guest itself. A cluster-only ser
 also be unreachable from a remote guest. The worker rejects loopback endpoints before remote
 install/kdump transfer; it cannot establish that every other address has a working guest route.
 Verify routing and firewall rules for the actual guest-to-store path.
+
+### Docker forwarding
+
+Docker's iptables backend can set the IPv4 `FORWARD` policy to `DROP`. Libvirt's
+native nftables acceptance does not override a drop in that separate chain.
+Host-to-store success and guest SSH over the user-mode forward do not exercise
+the guest bridge's forwarding path.
+
+After firewall convergence, `site.yml` refuses the known-risk layout consisting
+of `FORWARD DROP`, only the unconditional `DOCKER-USER` then `DOCKER-FORWARD`
+jumps, and an empty `DOCKER-USER` chain (including a terminal `RETURN`). This is
+an actionable preflight, not automatic firewall repair. Even this signature can
+coexist with a custom downstream Docker allowance; the check does not interpret
+those chains. Other layouts and IPv6 are unverified, and later firewall changes
+can invalidate an earlier result. Setup success is not guest-egress evidence.
+
+Inspect the selected network with `virsh net-dumpxml NETWORK` and the rules with
+`iptables -S FORWARD` and `iptables -S DOCKER-USER`. The firewall administrator
+must configure an exception bounded to the selected guest bridge/subnet, the
+intended object-store address and TCP port, plus established return traffic.
+Preserve unrelated forwarding, management access, and the source restrictions on
+TLS and gdbstub ports. Do not globally accept forwarding or disable Docker's
+firewall management. Docker documents the
+[`DOCKER-USER` forwarding seam](https://docs.docker.com/engine/network/firewall-iptables/#allow-forwarding-between-host-interfaces).
+
+Persistence across Docker restarts and firewall reloads belongs to that
+administrator's configuration; KDIVE does not install or persist the exception.
+Rerun `site.yml`, then verify the actual guest-to-store path with a remote kernel
+install using the configured presigned endpoint. Follow the
+[remote live-stack procedure](remote-live-stack.md); retain the install result
+and owned-resource cleanup. A static check, a host request, or a missing probe
+cannot substitute for that live result.
 
 ### Optional: offer the base image's kernel config
 
@@ -171,3 +217,37 @@ This proves only TLS connectivity and volume visibility from that worker. Separa
 paths from step 1. Neither the TLS probe nor a catalog row proves the guest boots or captures a
 core. The [remote live-stack runbook](remote-live-stack.md) defines the disposable host-process
 lifecycle tests and their completion evidence.
+
+## Clear store files of torn-down Systems
+
+The external-boot authority keeps provider-host records under
+`/var/lib/kdive/provider-authority/remote-module-preparations/evidence`. A completed System
+teardown removes the records of every activation of that System it can prove safe
+([ADR-0787](../../adr/0787-abortable-finalize-proof-checkpoint.md), #3486). Systems torn down
+before #3472, and activations whose volumes were still present at teardown, keep their files; the
+authority logs `remote store keeps System … activation …` for the second case.
+
+Release and orphan delete refuse with `remote preparation store holds more than 4096 …` once the
+store holds more than 4096 `.request`, `.lifecycle-request` and `.preparation` files
+([ADR-0787](../../adr/0787-abortable-finalize-proof-checkpoint.md), #3475). A completed teardown
+collects its provable activations' files, so tearing down Systems lowers the count. It does not
+remove the files of activations kept at teardown, of Systems torn down before #3472, or files that
+do not parse (the authority logs `unreadable and left in place`). When those hold the store over
+the limit, tearing down live Systems does not help: drain the host and use this procedure.
+
+Use this procedure only when every System ever placed on this host is `torn_down`. With a System
+in any other state, including `failed`, its records may be the only pointer to its volumes; leave
+the store alone.
+
+1. Stop the authority: `sudo systemctl stop kdive-external-boot-authority.service`.
+2. List the storage pool (`virsh vol-list <pool>`) and confirm that it holds no `kdive-module-…`
+   or `kdive-boot-v1-…` volume. If one remains, resolve it first: the store records are its only
+   pointer.
+3. Copy the directory aside with its modes and owner kept (`sudo cp -a` into a new directory only
+   root can read), list its files, then remove the listed files by exact name, except:
+   - each `<key>.teardown` record, which refuses a late stage of that System;
+   - each `<identity>.cleanup-quarantine` whose JSON has `"managed":true`, its
+     `<identity>.recovery`, and the `.recovery-index` file whose content is `<identity>`.
+4. Start the authority again: `sudo systemctl start kdive-external-boot-authority.service`.
+
+The operator who later removes an adopted receipt removes all three of its files together.

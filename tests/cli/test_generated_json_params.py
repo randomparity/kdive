@@ -1,20 +1,24 @@
 """The ``--<param>-json`` escape for non-scalar generated-verb parameters (#1449).
 
-Non-scalar tool parameters (nested objects, object arrays) cannot derive to a typed scalar
-flag, so the generator records them in ``GeneratedVerb.json_params`` (#1447) and defers the CLI
-surface here: each marked param gets a ``--<param>-json`` flag whose value is validated to a
-JSON container (object or array) at parse time, so a malformed or scalar value fails as a clean
-usage error (exit 2) before the verb dispatches. The flag-value-to-payload assembly is #1450;
+Non-scalar tool parameters (nested objects, object arrays, scalar unions) cannot derive to a
+typed scalar flag, so the generator records them in ``GeneratedVerb.json_params`` (#1447) and
+defers the CLI surface here: each marked param gets a ``--<param>-json`` flag whose value is
+validated at parse time (a container, or a scalar of a type in ``GeneratedVerb.json_scalars``,
+#3299), so a malformed or wrong-shaped value fails as a clean usage error (exit 2) before the
+verb dispatches. The flag-value-to-payload assembly is #1450;
 here the value only lands on the namespace under the ``genarg_<param>_json`` dest.
 """
 
 from __future__ import annotations
+
+import argparse
 
 import pytest
 
 from kdive.cli.__main__ import build_parser
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
 from kdive.cli.commands.generated_args import GENERATED_ARG_PREFIX
+from kdive.cli.commands.registry import _json_value_arg
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 
 # Every descriptor that carries at least one non-scalar parameter exposes its JSON-flag surface,
@@ -123,8 +127,8 @@ def test_malformed_json_is_a_usage_error() -> None:
     assert excinfo.value.code == 2
 
 
-def test_scalar_json_is_a_usage_error() -> None:
-    # A bare scalar is valid JSON but not a structured param value; reject before dispatch.
+def test_container_param_refuses_a_scalar() -> None:
+    # A bare scalar is valid JSON but this container-only param has no scalar member.
     with pytest.raises(SystemExit) as excinfo:
         build_parser().parse_args(
             ["investigations", "link", "--investigation-id", "inv-1", "--ref-json", "5"]
@@ -138,3 +142,71 @@ def test_empty_string_json_is_a_usage_error() -> None:
             ["systems", "reprovision", "--system-id", "sys-1", "--profile-json", ""]
         )
     assert excinfo.value.code == 2
+
+
+# (argv past the required flags, escape flag) for the verbs whose schema is ``Decimal``
+# (``number | string``) and, for ``allocations request``, a sibling object-only escape (#3299).
+_DECIMAL_ESCAPES = [
+    (["accounting", "set-budget", "--project", "p"], "--limit-kcu-json"),
+    (["allocations", "renew", "--allocation-id", "al-1"], "--extend-json"),
+    (["allocations", "request", "--project", "p"], "--window-json"),
+    (["ops", "set-cost-class-coeff", "--cost-class", "c"], "--coeff-json"),
+]
+
+
+@pytest.mark.parametrize(("argv", "flag"), _DECIMAL_ESCAPES, ids=lambda v: str(v[-1]))
+@pytest.mark.parametrize("value", ["5", "1.5", '"1.5"'])
+def test_decimal_escape_accepts_schema_allowed_scalars(
+    argv: list[str], flag: str, value: str
+) -> None:
+    args = build_parser().parse_args([*argv, flag, value])
+    assert (
+        getattr(args, _json_dest(flag.removeprefix("--").removesuffix("-json").replace("-", "_")))
+        == value
+    )
+
+
+@pytest.mark.parametrize(("argv", "flag"), _DECIMAL_ESCAPES, ids=lambda v: str(v[-1]))
+@pytest.mark.parametrize("value", ["true", "null"])
+def test_decimal_escape_refuses_scalars_the_schema_forbids(
+    argv: list[str], flag: str, value: str
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args([*argv, flag, value])
+    assert excinfo.value.code == 2
+
+
+def test_container_only_escape_still_refuses_a_scalar() -> None:
+    # ``resource`` is an object union with no scalar member, so a bare number stays refused.
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args(
+            ["allocations", "request", "--project", "p", "--resource-json", "5"]
+        )
+    assert excinfo.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("scalars", "value", "accepted"),
+    [
+        (("integer",), "3", True),
+        (("integer",), "1.5", False),
+        (("integer",), '"3"', False),
+        (("boolean",), "true", True),
+        (("boolean",), "1", False),
+        (("number",), "3", True),
+        (("number",), "true", False),
+        (("string",), "3", False),
+        (("number", "string"), "NaN", False),
+        (("number", "string"), "Infinity", False),
+        (("number", "string"), "1e999", False),
+    ],
+)
+def test_json_value_arg_checks_scalar_kind(
+    scalars: tuple[str, ...], value: str, accepted: bool
+) -> None:
+    parse = _json_value_arg(scalars)
+    if accepted:
+        assert parse(value) == value
+    else:
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse(value)

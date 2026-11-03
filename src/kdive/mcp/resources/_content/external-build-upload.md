@@ -157,8 +157,11 @@ injection and coverage — each with what it finds and what it costs.
 you upload serves offline `introspect.from_vmcore` and host GDB, and it is also what drgn-live
 reads: no released drgn reads kernel BTF, so drgn finds symbols in the DWARF `vmlinux` staged at
 `/usr/lib/debug/lib/modules/<release>/vmlinux` in the guest. kdive stages the uploaded file there
-on the local-libvirt legacy install path; other install paths do not stage it yet, so a live
-session on them can still lack symbols. Upload the matching `vmlinux` as described below.
+on the local-libvirt legacy install path. The remote-libvirt external-boot authority stages it at
+`/lib/modules/<release>/vmlinux`, which drgn also searches; other install paths do not stage it
+yet, so a live session on them can still lack symbols. A Run whose build completed before the
+remote authority staged the file keeps no staged `vmlinux`; complete the build again in a new Run.
+Upload the matching `vmlinux` as described below.
 
 **DWARF has a cost — omit it when you do not need post-boot introspection.**
 `CONFIG_DEBUG_INFO_DWARF5=y` embeds DWARF tables in every `.ko`, which can grow the module tree

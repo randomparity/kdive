@@ -55,7 +55,9 @@ requires viewer. These operations return jobs; poll them rather than assuming im
 After login, use the guest package manager as root to install tools within guest disk and
 network limits. Local-libvirt has
 no outbound egress by default: the operator must enable `guest_egress = true` on the resource
-for direct mirror access. Remote networking is also operator configured. Use a prepared image
+for direct mirror access. Enabling it also lets the guest reach services that listen only on the
+host's loopback interface, which the network-zone firewall does not cover; the image lifecycle
+runbook has the detail. Remote networking is also operator configured. Use a prepared image
 when package mirrors are unavailable.
 
 ## Rebuild and finish

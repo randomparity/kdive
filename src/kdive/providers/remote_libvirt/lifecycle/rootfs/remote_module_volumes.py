@@ -29,6 +29,13 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,
 )
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_scratch import (
+    ScratchState,
+    StreamIo,
+    classify_head,
+    format_scratch_volume,
+    read_head,
+)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
     ModuleVolumeOwner,
     parse_module_volume_name,
@@ -46,6 +53,7 @@ from kdive.providers.shared.external_boot_bounds import (
 )
 
 SCRATCH_CAPACITY_BYTES = 10 * 1024**3
+_DEBUGINFO_TREE_NAME = "vmlinux"
 _MIN_SOURCE_CAPACITY_BYTES = 64 * 1024**2
 _SOURCE_BLOCK_BYTES = 4096
 _SOURCE_FIXED_OVERHEAD_BYTES = 16 * 1024**2
@@ -93,7 +101,9 @@ class FilesystemImageWriter(Protocol):
 
 
 class ArchiveFilesystemImageWriter(FilesystemImageWriter, Protocol):
-    def build_from_archive(self, operation: bytes, archive: Path) -> BuiltSourceImage: ...
+    def build_from_archive(
+        self, operation: bytes, archive: Path, debuginfo: Path | None = None
+    ) -> BuiltSourceImage: ...
 
 
 class Ext4SourceFilesystemWriter:
@@ -109,11 +119,16 @@ class Ext4SourceFilesystemWriter:
             lambda modules: _populate_module_entries(modules, entries),
         )
 
-    def build_from_archive(self, operation: bytes, archive: Path) -> BuiltSourceImage:
-        """Build from the canonical file-backed module tar without materializing its contents."""
+    def build_from_archive(
+        self, operation: bytes, archive: Path, debuginfo: Path | None = None
+    ) -> BuiltSourceImage:
+        """Build from the canonical file-backed module tar without materializing its contents.
+
+        ``debuginfo`` joins the tree as ``vmlinux`` (#3131).
+        """
         return self._build_source(
             operation,
-            lambda modules: _extract_canonical_module_archive(archive, modules),
+            lambda modules: _extract_canonical_module_archive(archive, modules, debuginfo),
         )
 
     def _build_source(
@@ -220,6 +235,7 @@ class VolumeRequest:
     # systemd host is a RAM-backed tmpfs sized at half of memory.
     work_dir: Path | None = None
     archive: Path | None = None
+    debuginfo: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,7 +351,9 @@ def _populate_module_entries(
     return len(entries), content_bytes
 
 
-def _extract_canonical_module_archive(archive_path: Path, modules: Path) -> tuple[int, int]:
+def _extract_canonical_module_archive(
+    archive_path: Path, modules: Path, debuginfo: Path | None = None
+) -> tuple[int, int]:
     count = 0
     content_bytes = 0
     prior_name: bytes | None = None
@@ -363,7 +381,21 @@ def _extract_canonical_module_archive(archive_path: Path, modules: Path) -> tupl
                 validate_module_tree_bounds(entry_count=count, content_bytes=content_bytes)
                 destination = modules.joinpath(*PurePosixPath(path).parts)
                 _extract_archive_member(archive, member, destination, kind)
-    return count, content_bytes
+    if debuginfo is None:
+        return count, content_bytes
+    size = _link_debuginfo(modules, debuginfo)
+    validate_module_tree_bounds(entry_count=count + 1, content_bytes=content_bytes + size)
+    return count + 1, content_bytes + size
+
+
+def _link_debuginfo(modules: Path, debuginfo: Path) -> int:
+    """Hard-link the staged vmlinux into the tree; the work directory is one filesystem."""
+    destination = modules / _DEBUGINFO_TREE_NAME
+    if os.path.lexists(destination):
+        raise ValueError(f"module tree already has {_DEBUGINFO_TREE_NAME}")
+    debuginfo.chmod(0o644)
+    os.link(debuginfo, destination, follow_symlinks=False)
+    return destination.lstat().st_size
 
 
 def _canonical_archive_path(value: str) -> str:
@@ -708,6 +740,68 @@ def _upload(
         ) from exc
 
 
+def _stream_io(
+    admission: Callable[[], None] | None,
+    call_stream: Callable[[Callable[[], object]], object] | None,
+) -> StreamIo:
+    def bounded[T](operation: Callable[[], T]) -> T:
+        if call_stream is None:
+            _admit(admission)
+        return _call_stream(call_stream, operation)
+
+    def abort(stream: UploadStream, primary: BaseException) -> None:
+        _abort_stream(admission, call_stream, stream, primary)
+
+    return StreamIo(bounded, abort)
+
+
+def _format_scratch(
+    conn: StorageConn,
+    volume: Volume,
+    request: VolumeRequest,
+    admission: Callable[[], None] | None,
+    call_stream: Callable[[Callable[[], object]], object] | None,
+) -> None:
+    format_scratch_volume(
+        conn, volume, SCRATCH_CAPACITY_BYTES, request.work_dir, _stream_io(admission, call_stream)
+    )
+
+
+def _ensure_scratch_formatted(
+    conn: StorageConn,
+    volume: Volume,
+    request: VolumeRequest,
+    name: str,
+    admission: Callable[[], None] | None,
+    call_stream: Callable[[Callable[[], object]], object] | None,
+) -> None:
+    """Leave a formatted scratch alone; finish the format of one a dead worker left blank.
+
+    The superblock block is uploaded last, so a zero first block proves no phase was ever
+    written. Reformatting also demands the detachment proof a delete does, so nothing writes
+    into a volume a live appliance still holds.
+    """
+    observed_name, capacity = _readback_facts(volume, name)
+    _require_owner(observed_name, _expected_owner(request, "scratch"), name)
+    if capacity != SCRATCH_CAPACITY_BYTES:
+        raise _conflict("remote module volume capacity mismatched", volume=name)
+    io = _stream_io(admission, call_stream)
+    state = classify_head(read_head(conn, volume, io))
+    if state is ScratchState.FORMATTED:
+        return
+    if state is ScratchState.FOREIGN:
+        raise _conflict("remote module scratch volume holds unrecognised content", volume=name)
+    _admit(admission)
+    if not request.inspect_attachments().proves_detached(request.pool, name):
+        raise _conflict("remote module scratch volume is unformatted but not detached", volume=name)
+    # Re-read after the proof, immediately before the first write, so a volume another worker
+    # formatted in between is left alone.
+    if classify_head(read_head(conn, volume, io)) is not ScratchState.BLANK:
+        raise _conflict("remote module scratch volume changed during its repair", volume=name)
+    _admit(admission)
+    _format_scratch(conn, volume, request, admission, call_stream)
+
+
 def _source_repair(
     conn: StorageConn,
     request: VolumeRequest,
@@ -824,15 +918,18 @@ def _prepared(
 
 def _build_request_image(request: VolumeRequest, operation: bytes) -> BuiltSourceImage:
     if request.archive is None:
+        if request.debuginfo is not None:
+            raise ValueError("a staged vmlinux needs an archive-backed module preparation")
         return request.writer.build(operation, request.entries)
     if request.entries:
         raise ValueError("archive-backed module preparation forbids in-memory entries")
     build = getattr(request.writer, "build_from_archive", None)
     if not callable(build):
         raise ValueError("archive-backed module preparation requires an archive writer")
-    return cast(ArchiveFilesystemImageWriter, request.writer).build_from_archive(
-        operation, request.archive
-    )
+    writer = cast(ArchiveFilesystemImageWriter, request.writer)
+    if request.debuginfo is None:
+        return writer.build_from_archive(operation, request.archive)
+    return writer.build_from_archive(operation, request.archive, request.debuginfo)
 
 
 def prepare_attempt_volumes(
@@ -896,6 +993,11 @@ def prepare_attempt_volumes(
                 scratch.name,
             )
             created.append(scratch)
+            _format_scratch(conn, existing_scratch, request, admit_mutation, call_stream)
+        else:
+            _ensure_scratch_formatted(
+                conn, existing_scratch, request, scratch.name, admit_mutation, call_stream
+            )
         # validate_attempt_volumes re-proves ownership, identity, capacity and
         # the source content, so this needs no separate readback of its own.
         return validate_attempt_volumes(
@@ -1100,9 +1202,16 @@ def delete_owned_attempt_volume(
     *,
     inspection: AttachmentInspection,
     admit_mutation: Callable[[], None] | None = None,
+    allow_active_system: bool = False,
 ) -> None:
-    """Delete only an exactly owned, detached volume and verify absence."""
-    if not inspection.proves_detached(volume.pool, volume.name):
+    """Delete only an exactly owned, detached volume and verify absence.
+
+    ``allow_active_system`` accepts proof that the volume is attached to no domain even while
+    the owning System runs: a release CLEANUP deletes attempt volumes after RECOVER restored the
+    System's power.
+    """
+    proof = inspection.proves_unattached if allow_active_system else inspection.proves_detached
+    if not proof(volume.pool, volume.name):
         raise _conflict("volume lacks exact detached attachment proof", volume=volume.name)
     pool = _lookup_pool(conn, volume.pool)
     found = _lookup(pool, volume.name)

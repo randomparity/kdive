@@ -23,10 +23,16 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes impor
     BootArtifactVolumeConn,
     materialize_boot_artifacts,
 )
-from kdive.providers.shared.external_boot_bounds import materialization_reservation_bytes
+from kdive.providers.shared.external_boot_bounds import (
+    MAX_MATERIALIZATION_RESERVATION_BYTES,
+    materialization_reservation_bytes,
+)
 from kdive.store.objectstore import ObjectStore
 
 _TEMPORARY_METADATA_BYTES = 2 * 1_048_576
+REMOTE_MATERIALIZATION_CAPACITY_BYTES = (
+    MAX_MATERIALIZATION_RESERVATION_BYTES + _TEMPORARY_METADATA_BYTES
+)
 
 
 class ConcreteRemoteExternalBootMaterializer:
@@ -107,6 +113,9 @@ class ConcreteRemoteExternalBootMaterializer:
             ),
             artifacts=MaterializedArtifacts(
                 kernel=artifacts.kernel,
+                # Unlike kernel and initrd, which are final storage-volume names, this
+                # names the verified bundle (``bundle/<sha256 hex>``). It is never a
+                # volume name: its ``/`` cannot occur in one, so a volume lookup fails.
                 modules=OpaqueProviderRef(
                     ref=f"bundle/{plan.bundle.sha256.removeprefix('sha256:')}"
                 ),

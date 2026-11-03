@@ -34,8 +34,8 @@
   changed_when: false
 
 # Part 2: the delta check-local-libvirt.sh does not cover. On the Ubuntu target there is no
-# static disk label to assert (AppArmor/virt-aa-helper permits each domain's disk paths
-# dynamically), so the gate verifies group membership and the short XDG_RUNTIME_DIR directly.
+# static disk label to assert; session guests lack per-domain AppArmor confinement
+# (ADR-0741). Group/runtime checks below do not prove guest confinement.
 - name: Assert the service account is in kvm and libvirt
   ansible.builtin.command: "id -nG {{ live_vm_host_operator_user }}"
   register: live_vm_host_groups
@@ -229,6 +229,34 @@
         (live_vm_host_worker_libvirt_env.content | b64decode)
         == 'KDIVE_LIBVIRT_URI=' + live_vm_host_worker_libvirt_uri + '\n'
 
+- name: Inspect the published fixed-worker authority route
+  ansible.builtin.stat:
+    path: /etc/kdive/live-worker-authority.env
+  register: live_vm_host_worker_authority_route_file
+
+- name: Assert the authority route is published only with the worker client
+  ansible.builtin.assert:
+    that: >-
+      live_vm_host_worker_authority_route_file.stat.exists
+      == (live_vm_host_worker_authority_enabled | bool)
+
+- name: Read the published fixed-worker authority route
+  ansible.builtin.slurp:
+    path: /etc/kdive/live-worker-authority.env
+  register: live_vm_host_worker_authority_route
+  when: live_vm_host_worker_authority_enabled | bool
+
+- name: Assert the authority route is public, root-owned and exact
+  ansible.builtin.assert:
+    that:
+      - live_vm_host_worker_authority_route_file.stat.pw_name == "root"
+      - live_vm_host_worker_authority_route_file.stat.gr_name == "root"
+      - live_vm_host_worker_authority_route_file.stat.mode == "0644"
+      - >-
+        (live_vm_host_worker_authority_route.content | b64decode)
+        == lookup('ansible.builtin.template', 'live-worker-authority.env.j2')
+  when: live_vm_host_worker_authority_enabled | bool
+
 - name: Inspect the installed lifecycle revision
   ansible.builtin.stat:
     path: /opt/kdive-live-worker-lifecycle/revision
@@ -382,6 +410,47 @@
       - live_vm_host_worker_libvirt_socket.stat.pw_name == live_vm_host_operator_user
       - live_vm_host_worker_libvirt_socket.stat.gr_name == live_vm_host_worker_libvirt_group
       - live_vm_host_worker_libvirt_socket.stat.mode == "0770"
+
+- name: Verify native KVM on the selected libvirt endpoints
+  ansible.builtin.command:
+    argv:
+      - "{{ live_vm_venv }}/.venv/bin/python"
+      - -c
+      - |
+        import sys
+        import libvirt
+        from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
+        from kdive.providers.shared.libvirt_xml import parse_capabilities_arch, parse_guest_arches
+
+        connection = libvirt.open(sys.argv[1])
+        if connection is None:
+            raise SystemExit(f"Cannot open {sys.argv[2]} endpoint; inspect its installed daemon")
+        try:
+            xml = connection.getCapabilities()
+        finally:
+            connection.close()
+        native = parse_capabilities_arch(xml)
+        guests = parse_guest_arches(xml, SUPPORTED_ARCHES)
+        if guests.get(native, {}).get("accel") != "kvm":
+            raise SystemExit(
+                f"{sys.argv[2]} endpoint does not advertise native KVM for {native}; "
+                "inspect its installed daemon groups and KVM access before minting a System"
+            )
+      - "{{ item.uri }}"
+      - "{{ item.label }}"
+  become: true
+  become_user: "{{ item.user }}"
+  loop:
+    - uri: "{{ live_vm_host_worker_libvirt_uri }}"
+      user: "{{ live_vm_host_operator_user }}"
+      label: operator
+      enabled: true
+    - uri: "{{ live_vm_host_authority_libvirt_uri }}"
+      user: "{{ live_vm_host_authority_account }}"
+      label: authority
+      enabled: "{{ live_vm_host_authority_enabled | bool and live_vm_host_authority_local_mutation_enabled | bool }}"
+  when: item.enabled | bool
+  changed_when: false
 
 - name: Inspect authority protected paths
   ansible.builtin.stat:
@@ -624,6 +693,32 @@
   failed_when: live_vm_host_authority_denied_virsh_results.rc == 0
   when: live_vm_host_authority_enabled | bool
 
+- name: Require installed authority certificates to outlive the expiry margin
+  ansible.builtin.include_tasks:
+    file: tls_expiry.yml
+  vars:
+    live_vm_host_tls_expiry_certificates:
+      - name: server-certificate
+        path: "{{ live_vm_host_authority_credentials_dir }}/server-certificate"
+      - name: server-ca
+        path: "{{ live_vm_host_authority_credentials_dir }}/server-ca"
+      - name: worker-client-ca
+        path: "{{ live_vm_host_authority_credentials_dir }}/worker-client-ca"
+      - name: health-client-certificate
+        path: "{{ live_vm_host_authority_credentials_dir }}/health-client-certificate"
+  when: live_vm_host_authority_enabled | bool
+
+- name: Require installed fixed-worker authority certificates to outlive the expiry margin
+  ansible.builtin.include_tasks:
+    file: tls_expiry.yml
+  vars:
+    live_vm_host_tls_expiry_certificates:
+      - name: server-ca
+        path: "{{ live_vm_host_worker_authority_secrets_root }}/server-ca"
+      - name: client-certificate
+        path: "{{ live_vm_host_worker_authority_secrets_root }}/client-certificate"
+  when: live_vm_host_worker_authority_enabled | bool
+
 - name: Assert the authority service is ready
   ansible.builtin.systemd_service:
     name: kdive-external-boot-authority.service
@@ -865,6 +960,11 @@
         path: "{{ live_vm_host_authority_credentials_dir }}/server-certificate.proof-backup"
         state: absent
 
+    - name: Clear the start limit the drift proof tripped
+      ansible.builtin.command:
+        argv: [systemctl, reset-failed, kdive-external-boot-authority.service]
+      changed_when: false
+
     - name: Restore authority readiness after drift proofs
       ansible.builtin.systemd_service:
         name: kdive-external-boot-authority.service
@@ -960,3 +1060,44 @@
     path: "/tmp/kdive-live-worker-{{ item }}-permission-probe"
     state: absent
   loop: "{{ live_vm_host_worker_accounts }}"
+
+- name: Verify final inventory boundary state
+  block:
+    - name: Inspect the final inventory socket unit
+      ansible.builtin.stat:
+        path: /etc/systemd/system/kdive-authority-inventory.socket
+      register: live_vm_host_inventory_unit
+
+    - name: Require disabled inventory absence
+      ansible.builtin.assert:
+        that: not live_vm_host_inventory_unit.stat.exists
+      when: not live_vm_host_authority_inventory_observer_enabled | bool
+
+    - name: Verify final collector identity runtime and revision
+      ansible.builtin.command:
+        argv: [/opt/kdive-authority-inventory/.venv/bin/python, -I, -c,
+               "{{ provider_authority_host_inventory_verifier }}", verify,
+               "{{ live_vm_venv }}", "{{ live_vm_host_checkout.after }}"]
+      changed_when: false
+      when: live_vm_host_authority_inventory_observer_enabled | bool
+
+    - name: Repeat final observer readiness
+      ansible.builtin.command:
+        argv: [/usr/bin/python3, -I, -S, /usr/libexec/kdive-authority-inventory-client.py]
+      become: true
+      become_user: kdive-authority-observer
+      changed_when: false
+      no_log: true
+      timeout: 120
+      when: live_vm_host_authority_inventory_observer_enabled | bool
+  rescue:
+    - name: Withdraw the collector after final verification failure
+      ansible.builtin.systemd_service:
+        name: kdive-authority-inventory.socket
+        state: stopped
+        enabled: false
+      when: live_vm_host_inventory_unit.stat.exists | default(false)
+
+    - name: Report final inventory boundary failure
+      ansible.builtin.fail:
+        msg: Final inventory boundary verification failed; repair prerequisites and reconverge.

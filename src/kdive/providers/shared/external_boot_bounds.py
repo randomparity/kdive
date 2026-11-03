@@ -14,6 +14,16 @@ from kdive.providers.ports.external_boot import (
 MAX_MODULE_ENTRIES = 200_000
 MAX_MODULE_REGULAR_BYTES = 8_589_934_592
 MAX_MODULE_ARCHIVE_BYTES = MAX_MODULE_REGULAR_BYTES + MAX_MODULE_ENTRIES * 4096
+# Maximum of the per-plan reservation below, before provider metadata (ADR-0747).
+MAX_MATERIALIZATION_RESERVATION_BYTES = (
+    build_validation._EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES  # noqa: SLF001
+    + build_validation._EXTERNAL_BOOT_INITRD_MAX_BYTES  # noqa: SLF001
+    + build_validation._EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES  # noqa: SLF001
+    + MAX_MODULE_REGULAR_BYTES
+    + MAX_MODULE_ENTRIES * 1024
+    + MAX_MODULE_ARCHIVE_BYTES * 2
+    + build_validation._EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES  # noqa: SLF001
+)
 
 
 def source_byte_limit(source: ArtifactSource) -> int:

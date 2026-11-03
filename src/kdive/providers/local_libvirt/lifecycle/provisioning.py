@@ -220,6 +220,7 @@ class LocalLibvirtProvisioning:
         guest_egress: bool = False,
         first_boot_readiness: Readiness | None = None,
         clock: Callable[[], float] = time.monotonic,
+        authority_base: bool = False,
     ) -> None:
         self._connect = connect
         self._files = files or ProvisioningFiles()
@@ -237,6 +238,8 @@ class LocalLibvirtProvisioning:
         # the authority lane, which proves boot_ready itself — means provision does not wait.
         self._first_boot_readiness = first_boot_readiness
         self._clock = clock
+        # Only the authority lane (ADR-0623) sets this: its staged base must not be relabelled.
+        self._authority_base = authority_base
 
     @classmethod
     def from_env(
@@ -372,6 +375,7 @@ class LocalLibvirtProvisioning:
                 guest_egress=self._guest_egress,
                 accel=accel,
                 emulator=emulator,
+                authority_base_path=base if self._authority_base else None,
             )
             if overlay.created:
                 for customize in overlay_customizers:

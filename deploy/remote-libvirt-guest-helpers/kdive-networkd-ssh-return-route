@@ -1,0 +1,43 @@
+#!/bin/sh
+# Native Ubuntu lease events adapt the existing return-route contract (ADR-0763).
+set -eu
+helper=/usr/local/libexec/kdive-ssh-return-route
+iface=${IFACE:?networkd dispatcher must supply IFACE}
+case ${STATE:-} in
+configured | routable) ;;
+off | no-carrier | failed | linger) exec "$helper" "$iface" down ;;
+*) exit 0 ;;
+esac
+
+lease=
+# Native IP_ADDRS is a whitespace-separated address list; do not expand file globs.
+set -f
+for address in ${IP_ADDRS:-}; do
+  case "$address" in
+  10.0.2.*)
+    octet=${address#10.0.2.}
+    case "$octet" in
+    '' | *[!0-9]* | ????*)
+      echo 'kdive: malformed slirp lease in networkd event' >&2
+      exit 1
+      ;;
+    esac
+    if [ "$octet" -gt 254 ] || [ "$octet" -lt 1 ] || [ -n "$lease" ]; then
+      echo 'kdive: invalid or ambiguous slirp lease in networkd event' >&2
+      exit 1
+    fi
+    lease=$address
+    ;;
+  esac
+done
+[ -n "$lease" ] || exec "$helper" "$iface" down
+
+# Filter at the kernel boundary, preserving static routes and every other interface/gateway.
+routes=$(ip -4 route show table main default proto dhcp via 10.0.2.2 dev "$iface")
+while IFS= read -r route; do
+  [ -z "$route" ] || ip -4 route del default proto dhcp via 10.0.2.2 dev "$iface" table main
+done <<EOF
+$routes
+EOF
+export DHCP4_IP_ADDRESS="$lease"
+exec "$helper" "$iface" up

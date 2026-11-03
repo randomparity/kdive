@@ -41,6 +41,20 @@
   when: live_vm_host_worker_authority_enabled | bool
   no_log: true
 
+- name: Require fixed-worker authority client certificates to outlive the expiry margin
+  ansible.builtin.include_tasks:
+    file: tls_expiry.yml
+    apply:
+      delegate_to: localhost
+      become: false
+  vars:
+    live_vm_host_tls_expiry_certificates:
+      - name: server-ca
+        path: "{{ live_vm_host_worker_authority_server_ca_source }}"
+      - name: client-certificate
+        path: "{{ live_vm_host_worker_authority_client_certificate_source }}"
+  when: live_vm_host_worker_authority_enabled | bool
+
 - name: Validate external-boot authority inputs before host mutation
   when: live_vm_host_authority_enabled | bool
   block:
@@ -256,6 +270,23 @@
         quiet: true
       loop: "{{ live_vm_host_authority_source_preflight.results }}"
       no_log: true
+
+    - name: Require external-boot authority certificates to outlive the expiry margin
+      ansible.builtin.include_tasks:
+        file: tls_expiry.yml
+        apply:
+          delegate_to: localhost
+          become: false
+      vars:
+        live_vm_host_tls_expiry_certificates:
+          - name: server-certificate
+            path: "{{ live_vm_host_authority_server_certificate_source }}"
+          - name: server-ca
+            path: "{{ live_vm_host_authority_server_ca_source }}"
+          - name: worker-client-ca
+            path: "{{ live_vm_host_authority_worker_client_ca_source }}"
+          - name: health-client-certificate
+            path: "{{ live_vm_host_authority_health_client_certificate_source }}"
 
     - name: Require complete transient proof inputs when proof is enabled
       ansible.builtin.assert:

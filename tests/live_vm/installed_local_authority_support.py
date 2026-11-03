@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, Protocol, TypedDict, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -953,8 +953,8 @@ def run_installed_local_authority_restart_recovery() -> None:
             try:
                 activation = await start_external_boot_activation(
                     client,
-                    config,
                     ledger,
+                    **_activation_target(config),
                     before_activate=lambda run_id: arm_fault_barrier(
                         config, run_id, "activate", "after-provider"
                     ),
@@ -1038,8 +1038,8 @@ def run_installed_local_authority_unresolved_call_takeover() -> None:
             try:
                 activation = await start_external_boot_activation(
                     client,
-                    config,
                     ledger,
+                    **_activation_target(config),
                     before_activate=lambda run_id: arm_fault_barrier(
                         config, run_id, "activate", "before-provider"
                     ),
@@ -1105,8 +1105,15 @@ def run_installed_local_authority_unresolved_call_takeover() -> None:
     asyncio.run(run())
 
 
+class Revisioned(Protocol):
+    """An operator config that names the installed candidate revision."""
+
+    @property
+    def installed_revision(self) -> str: ...
+
+
 def require_deployed_revision(
-    config: NativeAuthorityConfig,
+    config: Revisioned,
     base_url: str,
     running_workers: str,
     *,
@@ -1157,9 +1164,7 @@ def _active_worker_slots(running_workers: str) -> tuple[int, ...]:
     return slots
 
 
-def require_installed_authority_routes(
-    _config: NativeAuthorityConfig, running_workers: str
-) -> None:
+def require_installed_authority_routes(_config: Revisioned, running_workers: str) -> None:
     """Check the exact live server, authority, and active-worker route before mutation."""
     slots = _active_worker_slots(running_workers)
     result = _output(
@@ -1253,8 +1258,13 @@ def load_config(
     raw = env.get(env_name)
     if raw is None:
         return None
-    path = Path(raw)
-    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    data = read_protected_config(raw, "local authority proof config")
+    return NativeAuthorityConfig.model_validate_json(data)
+
+
+def read_protected_config(raw: str, label: str) -> bytes:
+    """The bytes of an owner-only mode-0400/0600 regular file of at most 16384 bytes."""
+    descriptor = os.open(Path(raw), os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         metadata = os.fstat(descriptor)
         if (
@@ -1263,13 +1273,13 @@ def load_config(
             or stat.S_IMODE(metadata.st_mode) not in (0o400, 0o600)
             or not 0 < metadata.st_size <= 16_384
         ):
-            raise ValueError("local authority proof config has unsafe metadata")
+            raise ValueError(f"{label} has unsafe metadata")
         data = os.read(descriptor, 16_385)
     finally:
         os.close(descriptor)
     if len(data) > 16_384:
-        raise ValueError("local authority proof config exceeds 16384 bytes")
-    return NativeAuthorityConfig.model_validate_json(data)
+        raise ValueError(f"{label} exceeds 16384 bytes")
+    return data
 
 
 class OwnedResource(BaseModel):
@@ -1769,8 +1779,8 @@ def run_installed_local_authority_journal_restore_recovery() -> None:
             try:
                 activation = await start_external_boot_activation(
                     client,
-                    config,
                     ledger,
+                    **_activation_target(config),
                     before_activate=lambda run_id: arm_fault_barrier(
                         config, run_id, "activate", "after-provider"
                     ),
@@ -1917,7 +1927,8 @@ async def assert_root_release_completion(db_url: str, operations: NormalOperatio
 
 
 # Every table the carriers read directly. Several are authority-private: the migrations revoke
-# them from PUBLIC and grant no read to kdive_server, so only the migration owner can read them.
+# them from PUBLIC and grant no read to kdive_server, so the carriers read them through the
+# development harness login, which the role bootstrap grants SELECT on every table (ADR-0769).
 _CARRIER_READ_TABLES = (
     "systems",
     "jobs",
@@ -1931,14 +1942,16 @@ _CARRIER_READ_TABLES = (
 )
 
 
-async def require_evidence_read_access(db_url: str) -> None:
+async def require_evidence_read_access(
+    db_url: str, tables: tuple[str, ...] = _CARRIER_READ_TABLES
+) -> None:
     """Fail before any mutation when the carrier DSN cannot read a table the carrier reads."""
     async with await psycopg.AsyncConnection.connect(db_url) as conn, conn.cursor() as cur:
         await cur.execute(
             "SELECT current_user, coalesce(array_agg(name ORDER BY position) FILTER "
             "(WHERE NOT has_table_privilege('public.' || name, 'SELECT')), '{}') "
             "FROM unnest(%s::text[]) WITH ORDINALITY AS t(name, position)",
-            (list(_CARRIER_READ_TABLES),),
+            (list(tables),),
         )
         row = await cur.fetchone()
     assert row is not None
@@ -1946,8 +1959,11 @@ async def require_evidence_read_access(db_url: str) -> None:
     if denied:
         raise PermissionError(
             f"KDIVE_DATABASE_URL role {role!r} cannot SELECT {', '.join(denied)}; the carrier "
-            "reads authority-private evidence tables, so set KDIVE_DATABASE_URL to the "
-            "migration-owner DSN (KDIVE_MIGRATION_DATABASE_URL), not the server DSN"
+            "reads authority-private evidence tables, so set "
+            'KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" (the least-privilege harness '
+            "login), not the server DSN; if it is already set, rerun the role bootstrap: "
+            "scripts/live-stack/stack-services.sh, or after `just stack-backends` "
+            "`env -u KDIVE_MIGRATION_DATABASE_URL docker compose run --rm --no-deps role-bootstrap`"
         )
 
 
@@ -2056,7 +2072,7 @@ def remove_authority_fixture(config: NativeAuthorityConfig, ledger: ResourceLedg
 _RELEASE_ADMISSION_ATTEMPTS = 3
 
 
-async def _release_external_boot(client: LiveStackClient, run_id: str) -> ToolResponse:
+async def release_external_boot(client: LiveStackClient, run_id: str) -> ToolResponse:
     """Admit the release, first draining any System job its conflict names.
 
     A job queued during the boot (a console rotation) can still hold the System when the boot
@@ -2088,9 +2104,11 @@ async def drive_normal_operations(
     ``guest_arch`` is forwarded to ``start_external_boot_activation``; pass ``"ppc64le"`` for
     the ppc64le carrier (#2152).
     """
-    activation = await start_external_boot_activation(client, config, ledger, guest_arch=guest_arch)
+    activation = await start_external_boot_activation(
+        client, ledger, **_activation_target(config), guest_arch=guest_arch
+    )
     await drain_job(client, "activate", activation.activate_job_id)
-    release = await _release_external_boot(client, activation.run_id)
+    release = await release_external_boot(client, activation.run_id)
     await drain_job(client, "release", release.object_id)
     return NormalOperationJobs(
         investigation_id=activation.investigation_id,
@@ -2100,26 +2118,54 @@ async def drive_normal_operations(
     )
 
 
+class ActivationTarget(TypedDict):
+    project: str
+    system_id: str
+    label: str
+    require_kdump: bool
+
+
+def _activation_target(config: NativeAuthorityConfig) -> ActivationTarget:
+    # The carrier System is minted with a crashkernel (scripts/live-vm/mint-system.sh).
+    return ActivationTarget(
+        project=config.project,
+        system_id=str(config.system_id),
+        label=config.ownership_prefix,
+        require_kdump=True,
+    )
+
+
 async def start_external_boot_activation(
     client: LiveStackClient,
-    config: NativeAuthorityConfig,
     ledger: ResourceLedger,
     *,
+    project: str,
+    system_id: str,
+    label: str,
+    require_kdump: bool,
     guest_arch: str = "x86_64",
+    with_initrd: bool = False,
     before_activate: Callable[[str], None] | None = None,
+    kernel_tree: Path | None = None,
+    evidence_dir: Path | None = None,
+    with_vmlinux: bool = False,
 ) -> ActivationJob:
     """Create, install, and publicly admit one activation without polling its job.
 
     ``guest_arch`` is the architecture recorded in the Run's build profile; it defaults to
     ``"x86_64"`` for the native x86_64 carrier and must be ``"ppc64le"`` for the ppc64le
-    carrier (#2152).
+    carrier (#2152). ``require_kdump`` arms install's crash-config gate, so it is true only for
+    a System minted with a crashkernel. ``kernel_tree`` and ``evidence_dir`` pass through to
+    :func:`build_and_upload_kernel`. ``with_initrd`` uploads an initrd with the kernel, which
+    remote external boot requires (#3323). ``with_vmlinux`` uploads the tree's unstripped
+    ``vmlinux`` too.
     """
     opened = ok(
         await scalar(
             client,
             "investigations.open",
-            project=config.project,
-            title=config.ownership_prefix,
+            project=project,
+            title=label,
         ),
         "open-investigation",
     )
@@ -2130,17 +2176,25 @@ async def start_external_boot_activation(
             client,
             "runs.create",
             investigation_id=investigation_id,
-            system_id=str(config.system_id),
+            system_id=system_id,
             build_profile={"schema_version": 1, "arch": guest_arch},
-            label=config.ownership_prefix,
+            label=label,
         ),
         "create-run",
     )
     run_id = created.object_id
     ledger.record(OwnedResource(kind="run", identity=run_id))
-    # The carrier System is minted with a crashkernel (scripts/live-vm/mint-system.sh), and the
-    # uploaded effective_config arms install's crash-config gate, so check it before staging.
-    await build_and_upload_kernel(client, run_id=run_id, arch=guest_arch, require_kdump=True)
+    # The uploaded effective_config arms install's crash-config gate, so check it before staging.
+    await build_and_upload_kernel(
+        client,
+        run_id=run_id,
+        arch=guest_arch,
+        require_kdump=require_kdump,
+        kernel_tree=kernel_tree,
+        evidence_dir=evidence_dir,
+        with_initrd=with_initrd,
+        with_vmlinux=with_vmlinux,
+    )
     install = ok(await scalar(client, "runs.install", run_id=run_id), "install")
     await drain_job(client, "install", install.object_id)
     if before_activate is not None:

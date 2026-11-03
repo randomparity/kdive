@@ -19,7 +19,7 @@ import json
 import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, LiteralString, cast
 from uuid import UUID, uuid4
 
@@ -31,18 +31,25 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr, TypeAdapter
 
 import kdive.jobs.handlers.external_boot.lifecycle as lifecycle_module  # noqa: F401
+from kdive.db.remote_module_attempt_obligations import (
+    ModuleAttempt,
+    RemoteModuleAttemptObligationRepository,
+)
 from kdive.domain.capacity.state import ExternalBootActivationState, SystemState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import (
     ExternalBootReleaseEvidenceV1,
     ExternalBootTeardownEvidenceV1,
 )
 from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.jobs import queue
 from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.models import (
+    ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthorityMarkerV1,
@@ -50,16 +57,19 @@ from kdive.jobs.models import (
     ExternalBootAuthoritySuccessV1,
     _ActivateResult,
     _FailureResult,
+    _RecoveryAttemptResult,
     _TeardownResult,
 )
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
     AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
+    AuthorityOperation,
     AuthorityTakeoverRequestV1,
     AuthorityTeardownMutationRequestV1,
     AuthorityTeardownProofV1,
@@ -67,6 +77,7 @@ from kdive.providers.external_boot_authority.protocol import (
     canonical_teardown_proof_bytes,
     teardown_proof_digest,
 )
+from kdive.providers.ports.authority import AuthorityCapability
 from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     RecoveryPoint,
@@ -74,10 +85,13 @@ from kdive.providers.ports.external_boot import (
 )
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.db.remote_module_attempt_obligations_support import _attempt as _module_attempt
+from tests.db.remote_module_attempt_obligations_support import _evidence as _module_evidence
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import (
     RecordingAcknowledger,
     SeededCase,
+    release_evidence,
     seed_case,
 )
 from tests.jobs.handlers.external_boot.support import CASES, build_job
@@ -427,6 +441,7 @@ def test_post_provider_interruption_replays_without_a_second_mutation(
             readiness_reads = ["observe", "observe"] if operation == "activate" else []
             assert case.vehicle.port.calls == [*spec["port_calls"], *readiness_reads]
 
+            assert isinstance(replayed, ExternalBootAuthoritySuccessV1)
             committed = await queue.complete_external_boot(
                 worker,
                 job,
@@ -468,6 +483,19 @@ async def _run_operation(
     *,
     registry: SecretRegistry | None = None,
 ) -> ExternalBootAuthoritySuccessV1:
+    result = await _run_to_terminal(dsns, seed, case, operation, registry=registry)
+    assert isinstance(result, ExternalBootAuthoritySuccessV1)
+    return result
+
+
+async def _run_to_terminal(
+    dsns: Callable[[str], str],
+    seed: AsyncConnection,
+    case: SeededCase,
+    operation: str,
+    *,
+    registry: SecretRegistry | None = None,
+) -> ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1:
     ports = _ports(case, case.vehicle, dsns)
     if operation == "teardown":
         ports = replace(ports, teardown_executor=_TeardownExecutor(seed))
@@ -485,6 +513,7 @@ async def _run_operation(
             worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker)
         )
         if result.result.operation == "recovery-attempt":
+            assert isinstance(result, ExternalBootAuthoritySuccessV1)
             committed = await queue.complete_external_boot(
                 worker,
                 _job(case),
@@ -492,7 +521,7 @@ async def _run_operation(
                 incarnation_credential=SecretStr(case.credential),
             )
             assert committed is not None
-            return await handler(
+            result = await handler(
                 worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker)
             )
         return result
@@ -628,6 +657,103 @@ def test_cleanup_marks_the_activation_cleanup_complete(
         assert (await _activation_row(seed, case.vehicle.activation_id))["cleanup_complete"] is True
 
     _drive(migrated_url, authority_role_dsns, "cleanup", body)
+
+
+def _teardown_evidence(system_id: UUID) -> dict[str, Any]:
+    return {
+        "schema": "external-boot-teardown-evidence-v1",
+        "system_id": str(system_id),
+        "system_state": "torn_down",
+        "observed_at": "2026-09-06T00:00:00Z",
+    }
+
+
+def _drive_system_teardown_cleanup(
+    migrated_url: str,
+    body: Callable[[AsyncConnection, SeededCase], Awaitable[None]],
+    *,
+    with_teardown_evidence: bool,
+) -> None:
+    """A failed recovery whose System teardown already recorded its release (#3321)."""
+
+    async def _main() -> None:
+        vehicle = build_vehicle()
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            case = await seed_case(
+                seed,
+                vehicle,
+                purpose="release",
+                operation="cleanup",
+                activation_state="recovery_failed",
+                attempt_state="failed",
+            )
+            release = release_evidence(vehicle)
+            await seed.execute(
+                "INSERT INTO external_boot_reservation_releases "
+                "(activation_id, store_identity, owner_key, reserved_bytes, release_identity, "
+                "release_evidence, teardown_evidence) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (
+                    vehicle.activation_id,
+                    release["store_identity"]["ref"],
+                    release["owner_key"]["ref"],
+                    release["reserved_bytes"],
+                    ExternalBootReleaseEvidenceV1.model_validate(release).identity,
+                    Jsonb(release),
+                    Jsonb(_teardown_evidence(vehicle.system_id))
+                    if with_teardown_evidence
+                    else None,
+                ),
+            )
+            if with_teardown_evidence:
+                await seed.execute(
+                    "UPDATE external_boot_activations SET teardown_evidence = %s WHERE id = %s",
+                    (Jsonb(_teardown_evidence(vehicle.system_id)), vehicle.activation_id),
+                )
+            await seed.execute(
+                "UPDATE systems SET state = 'torn_down' WHERE id = %s", (vehicle.system_id,)
+            )
+            await body(seed, case)
+
+    asyncio.run(_main())
+
+
+def test_system_teardown_cleanup_names_the_persisted_teardown_evidence(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    """The commit accepts only the recorded teardown evidence's canonical identity."""
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        result = await _run_operation(authority_role_dsns, seed, case, "cleanup")
+        evidence = cast(Any, result.result).evidence
+        assert evidence.mode == "system_teardown"
+        assert evidence.teardown_identity == (
+            ExternalBootTeardownEvidenceV1.model_validate(
+                _teardown_evidence(case.vehicle.system_id)
+            ).identity
+        )
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            await queue.complete_external_boot(
+                worker,
+                _job(case),
+                result,
+                incarnation_credential=SecretStr(case.credential),
+            )
+
+        assert (await _activation_row(seed, case.vehicle.activation_id))["cleanup_complete"] is True
+
+    _drive_system_teardown_cleanup(migrated_url, body, with_teardown_evidence=True)
+
+
+def test_system_teardown_cleanup_without_teardown_evidence_refuses_before_the_port(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        with pytest.raises(CategorizedError, match="requires recorded teardown evidence"):
+            await _run_operation(authority_role_dsns, seed, case, "cleanup")
+
+        assert case.vehicle.port.calls == []
+
+    _drive_system_teardown_cleanup(migrated_url, body, with_teardown_evidence=False)
 
 
 @pytest.mark.parametrize(
@@ -855,7 +981,7 @@ def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
     spec = CASES[operation]
 
     async def body(seed: AsyncConnection, case: SeededCase) -> None:
-        case.vehicle.port.__dict__["authority_category"] = "conflict"
+        case.vehicle.port.__dict__["authority_category"] = "unreadable"
 
         with pytest.raises(ExternalBootAuthorityFailure) as excinfo:
             await _run_operation(authority_role_dsns, seed, case, operation)
@@ -875,9 +1001,39 @@ def test_a_disagreeing_kernel_observation_refuses_to_emit_terminal_evidence(
         assert str(case.vehicle.activation_id) in warning
         assert "phase=commit" in warning
         assert "exception=CategorizedError" in warning
-        assert f"authority observed 'conflict' for {operation!r}" in warning
+        assert f"authority observed 'unreadable' for {operation!r}" in warning
         assert "authority observed" not in excinfo.value.result.model_dump_json(by_alias=True)
         # The mutation happened; what is refused is *recording* it as a good terminal state.
+        row = await _activation_row(seed, case.vehicle.activation_id)
+        expected_state = (
+            "recovering" if operation == "resolve-conflict" else spec["activation_state"]
+        )
+        assert row["state"] == expected_state
+
+    _drive(migrated_url, authority_role_dsns, operation, body)
+
+
+@pytest.mark.parametrize("category", ["conflict", "mixed"])
+@pytest.mark.parametrize("operation", ["activate", "recover", "resolve-conflict"])
+def test_a_conflict_observation_is_carried_to_the_conflict_commit(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    operation: str,
+    category: str,
+) -> None:
+    """ADR-0805: a conflict is carried as the authority observed it, never as terminal evidence."""
+    spec = CASES[operation]
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        case.vehicle.port.__dict__["authority_category"] = category
+
+        result = await _run_to_terminal(authority_role_dsns, seed, case, operation)
+
+        assert isinstance(result, ExternalBootAuthorityConflictV1)
+        evidence = result.result.model_dump(mode="json", by_alias=True)["evidence"]
+        assert evidence["composite_state"] == "sha256:" + "8" * 64
+        assert evidence["activation_id"] == str(case.vehicle.activation_id)
+        assert result.admitted_operation == operation
         row = await _activation_row(seed, case.vehicle.activation_id)
         expected_state = (
             "recovering" if operation == "resolve-conflict" else spec["activation_state"]
@@ -1357,3 +1513,311 @@ def test_teardown_transport_failure_is_a_bound_nonterminal_authority_failure(
         assert failure.failure_context.phase == "commit"
 
     _drive(migrated_url, authority_role_dsns, "teardown", body)
+
+
+_MODULE_ATTEMPTS = RemoteModuleAttemptObligationRepository()
+
+
+async def _seed_open_reap_obligation(
+    seed: AsyncConnection, case: SeededCase, nonce: str = "0" * 32
+) -> ModuleAttempt:
+    """A module attempt whose terminal evidence is stored and whose reap obligation is open."""
+    attempt = _module_attempt(case.vehicle.system_id, case.vehicle.run_id, nonce)
+    await _MODULE_ATTEMPTS.open_mutation_obligation(seed, attempt)
+    await _MODULE_ATTEMPTS.record_terminal_evidence(seed, attempt, _module_evidence(attempt))
+    await _MODULE_ATTEMPTS.open_reap_obligation(seed, attempt)
+    return attempt
+
+
+def _receipt(attempt: ModuleAttempt) -> dict[str, Any]:
+    return ModuleAttemptPreparationRequestV1.model_validate(
+        {
+            "module_attempt_obligation": {
+                "system_id": attempt.system_id,
+                "run_id": attempt.run_id,
+                "operation_nonce": attempt.operation_nonce,
+            }
+        }
+    ).model_dump(mode="json", by_alias=True)
+
+
+async def _carry_receipt_in_the_job_row(
+    seed: AsyncConnection, case: SeededCase, attempt: ModuleAttempt
+) -> None:
+    await seed.execute(
+        "UPDATE jobs SET payload = payload || "
+        "jsonb_build_object('remote_module_attempt_v1', %s::jsonb) WHERE id = %s",
+        (Jsonb(_receipt(attempt)), case.job_id),
+    )
+
+
+async def _run_teardown_with_receipt(
+    seed: AsyncConnection,
+    case: SeededCase,
+    dsns: Callable[[str], str],
+    receipt: dict[str, Any] | None,
+    *,
+    retained_quarantine: bool = False,
+) -> None:
+    job = _job(case)
+    if receipt is not None:
+        job = job.model_copy(
+            update={"payload": {**job.payload, "remote_module_attempt_v1": receipt}}
+        )
+    ports = replace(
+        _ports(case, case.vehicle, dsns),
+        teardown_executor=_TeardownExecutor(seed, retained_quarantine=retained_quarantine),
+    )
+    handler = build_operations(ports).get("teardown")
+    assert handler is not None
+    async with await role_connection(dsns("kdive_worker")) as worker:
+        await handler(worker, job, ExternalBootAuthorityMarkerV1.model_validate(case.marker))
+
+
+async def _reap_discharged(seed: AsyncConnection, attempt: ModuleAttempt) -> bool:
+    row = await _one(
+        seed,
+        "SELECT reap_discharged_at IS NOT NULL AS discharged "
+        "FROM remote_module_attempt_obligations WHERE system_id = %s AND run_id = %s",
+        (attempt.system_id, attempt.run_id),
+    )
+    return bool(row["discharged"])
+
+
+def test_system_teardown_discharges_the_module_reap_obligation(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        await _seed_core_owned_teardown_rows(seed, case)
+        attempt = await _seed_open_reap_obligation(seed, case)
+        await _carry_receipt_in_the_job_row(seed, case, attempt)
+
+        await _run_teardown_with_receipt(seed, case, authority_role_dsns, _receipt(attempt))
+
+        assert await _reap_discharged(seed, attempt)
+        assert await _system_state(seed, case.vehicle.system_id) == "torn_down"
+
+    _drive(migrated_url, authority_role_dsns, "teardown", body)
+
+
+def test_system_teardown_without_a_receipt_leaves_the_reap_obligation_open(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        await _seed_core_owned_teardown_rows(seed, case)
+        attempt = await _seed_open_reap_obligation(seed, case)
+
+        await _run_teardown_with_receipt(seed, case, authority_role_dsns, None)
+
+        assert not await _reap_discharged(seed, attempt)
+
+    _drive(migrated_url, authority_role_dsns, "teardown", body)
+
+
+def test_a_retained_quarantine_teardown_does_not_discharge_the_reap_obligation(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        await _seed_core_owned_teardown_rows(seed, case)
+        attempt = await _seed_open_reap_obligation(seed, case)
+        await _carry_receipt_in_the_job_row(seed, case, attempt)
+
+        await _run_teardown_with_receipt(
+            seed, case, authority_role_dsns, _receipt(attempt), retained_quarantine=True
+        )
+
+        assert not await _reap_discharged(seed, attempt)
+
+    _drive(migrated_url, authority_role_dsns, "teardown", body)
+
+
+def test_a_receipt_that_differs_from_the_job_row_is_refused_as_stale(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        await _seed_core_owned_teardown_rows(seed, case)
+        attempt = await _seed_open_reap_obligation(seed, case)
+        await _carry_receipt_in_the_job_row(seed, case, attempt)
+        foreign = _module_attempt(attempt.system_id, attempt.run_id, "1" * 32)
+
+        with pytest.raises(CategorizedError) as refused:
+            await _run_teardown_with_receipt(seed, case, authority_role_dsns, _receipt(foreign))
+
+        assert refused.value.category is ErrorCategory.STALE_HANDLE
+        assert not await _reap_discharged(seed, attempt)
+
+    _drive(migrated_url, authority_role_dsns, "teardown", body)
+
+
+def test_a_cleanup_job_parses_a_plain_json_receipt_for_the_module_lifecycle(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The job payload's receipt is a dict of string UUIDs, which the strict model must accept."""
+    seen: list[Any] = []
+
+    async def record(**values: Any) -> None:
+        seen.append(values["preparation"])
+
+    monkeypatch.setattr(
+        lifecycle_module, "execute_remote_module_lifecycle_on_authority_host", record
+    )
+
+    async def body(seed: AsyncConnection, case: SeededCase) -> None:
+        attempt = _module_attempt(case.vehicle.system_id, case.vehicle.run_id)
+        local = resolver_for(case.vehicle).resolve(ResourceKind.LOCAL_LIBVIRT)
+        modules = AuthorityCapability(
+            authority_instance=case.marker["authority_instance"], modules=cast(Any, object())
+        )
+        ports = replace(
+            _ports(case, case.vehicle, authority_role_dsns),
+            resolver=ProviderResolver(
+                {ResourceKind.LOCAL_LIBVIRT: replace(local, authority=modules)}
+            ),
+        )
+        job = _job(case)
+        job = job.model_copy(
+            update={"payload": {**job.payload, "remote_module_attempt_v1": _receipt(attempt)}}
+        )
+        handler = build_operations(ports).get("cleanup")
+        assert handler is not None
+        async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
+            await handler(worker, job, ExternalBootAuthorityMarkerV1.model_validate(case.marker))
+
+        assert [item.module_attempt_obligation.operation_nonce for item in seen] == [
+            attempt.operation_nonce
+        ]
+
+    _drive(migrated_url, authority_role_dsns, "cleanup", body)
+
+
+def test_teardown_without_a_module_receipt_discharges_nothing() -> None:
+    """#3406: a teardown admitted after a completed release has no reap obligation to discharge."""
+    from types import SimpleNamespace
+
+    context = SimpleNamespace(job=SimpleNamespace(payload={}))
+    asyncio.run(lifecycle_module._discharge_module_reap_after_teardown(cast(Any, context)))
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        (AuthorityOperation.RECOVER, ["restore"]),
+        (AuthorityOperation.RESOLVE_CONFLICT, ["restore"]),
+        (AuthorityOperation.CLEANUP, ["reap"]),
+    ],
+)
+def test_remote_module_lifecycle_steps_per_operation(
+    monkeypatch: pytest.MonkeyPatch, operation: AuthorityOperation, expected: list[str]
+) -> None:
+    """#3414: a resolve-conflict restores only; the later release CLEANUP reaps the volumes."""
+    from types import SimpleNamespace
+
+    actions: list[tuple[str, AuthorityOperation]] = []
+
+    async def record(**values: Any) -> None:
+        actions.append((values["action"], values["authority"].operation))
+
+    monkeypatch.setattr(
+        lifecycle_module, "execute_remote_module_lifecycle_on_authority_host", record
+    )
+    attempt = _module_attempt(uuid4(), uuid4())
+    context = SimpleNamespace(
+        binding=SimpleNamespace(
+            runtime=SimpleNamespace(authority=SimpleNamespace(modules=object()))
+        ),
+        job=SimpleNamespace(
+            id=uuid4(), attempt=1, payload={"remote_module_attempt_v1": _receipt(attempt)}
+        ),
+        connection=object(),
+        incarnation_credential=SecretStr("worker-credential"),
+    )
+    request = SimpleNamespace(operation=operation)
+
+    asyncio.run(
+        lifecycle_module._execute_remote_module_lifecycle(
+            cast(Any, context), cast(Any, request), cast(Any, object())
+        )
+    )
+
+    assert actions == [(action, operation) for action in expected]
+
+
+# Recover / resolve-conflict re-entry takes a fresh deadline (#3465)
+_REENTRY_NOW = datetime(2026, 11, 1, tzinfo=UTC)
+_REENTRY_TIMEOUT = timedelta(seconds=120)
+_REENTRY_EXPIRED = _REENTRY_NOW - timedelta(minutes=10)
+# The recover case is seeded mid-recovery; the pre-check only runs from ``active``.
+_REENTRY_FIRST_STATE = {"recover": "active"}
+
+
+def _run_reentry(
+    migrated_url: str, dsns: Callable[[str], str], operation: str, job_attempt: int
+) -> ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1:
+    async def main() -> ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1:
+        spec = CASES[operation]
+        vehicle = build_vehicle()
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
+            case = await seed_case(
+                seed,
+                vehicle,
+                purpose=spec["purpose"],
+                operation=operation,
+                activation_state=_REENTRY_FIRST_STATE.get(operation, spec["activation_state"]),
+                **spec["seed"],
+            )
+            await seed.execute(
+                "UPDATE jobs SET attempt = %s WHERE id = %s", (job_attempt, case.job_id)
+            )
+            ports = ExternalBootHandlerPorts(
+                resolver=resolver_for(vehicle),
+                incarnation_credential=SecretStr(case.credential),
+                secret_registry=SecretRegistry(),
+                acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
+                authority_executor=_VehicleExecutor(vehicle),
+                clock=lambda: _REENTRY_NOW,
+                recovery_readiness_timeout=_REENTRY_TIMEOUT,
+            )
+            handler = build_operations(ports).get(operation)
+            assert handler is not None
+            job = build_job(
+                JobKind.BOOT,
+                {
+                    "run_id": str(vehicle.run_id),
+                    "external_boot_authority_v1": case.marker,
+                    "recovery_request_v1": {
+                        "request_identity": "sha256:" + "1" * 64,
+                        "readiness_deadline": _REENTRY_EXPIRED.isoformat(),
+                    },
+                },
+            ).model_copy(update={"id": case.job_id, "attempt": job_attempt})
+            async with await role_connection(dsns("kdive_worker")) as worker:
+                return await handler(
+                    worker, job, ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+                )
+
+    return asyncio.run(main())
+
+
+@pytest.mark.parametrize("operation", ["recover", "resolve-conflict"])
+def test_reentry_gets_a_fresh_deadline_not_a_refusal(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], operation: str
+) -> None:
+    result = _run_reentry(migrated_url, authority_role_dsns, operation, job_attempt=2)
+
+    assert isinstance(result, ExternalBootAuthoritySuccessV1)
+    assert isinstance(result.result, _RecoveryAttemptResult)
+    assert result.result.deadline == _REENTRY_NOW + _REENTRY_TIMEOUT
+
+
+@pytest.mark.parametrize("operation", ["recover", "resolve-conflict"])
+def test_first_entry_still_refuses_an_expired_deadline(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], operation: str
+) -> None:
+    with pytest.raises(ExternalBootAuthorityFailure) as raised:
+        _run_reentry(migrated_url, authority_role_dsns, operation, job_attempt=1)
+
+    failure = raised.value.result.result
+    assert isinstance(failure, _FailureResult)
+    assert failure.error_category == ErrorCategory.READINESS_FAILURE.value

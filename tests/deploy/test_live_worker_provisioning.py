@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import shlex
 import socket
 import stat
 import subprocess
+import tempfile
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -47,6 +50,17 @@ def _text(path: Path) -> str:
         text = re.sub(
             r"(?m)^- name: Import reusable [^\n]+\n(?:^(?!- name:).+\n)*",
             expand_worker_import,
+            text,
+        )
+
+        # Inline the credential installation files at the call sites main.yml imports them.
+        def expand_task_import(match: re.Match[str]) -> str:
+            imported = ROLE / "tasks" / match.group(1)
+            return imported.read_text(encoding="utf-8").removeprefix("---\n")
+
+        text = re.sub(
+            r"(?m)^- name: Import the [^\n]+\n  ansible\.builtin\.import_tasks: (\S+)\n",
+            expand_task_import,
             text,
         )
         # Follow the shared endpoint task at the same call site the runner executes it.
@@ -238,7 +252,17 @@ def test_provider_authority_failed_convergence_stops_the_service() -> None:
         task for task in tasks if task["name"] == "Converge the production authority"
     )
     rescue = convergence["rescue"]
-    assert convergence["block"][0]["ansible.builtin.include_role"]["name"] == "gdbstub_acl"
+    block = convergence["block"]
+    firewall = next(i for i, task in enumerate(block) if "ansible.builtin.include_role" in task)
+    assert block[firewall]["ansible.builtin.include_role"]["name"] == "gdbstub_acl"
+    assert (
+        block[firewall - 1]["ansible.builtin.set_fact"]["provider_authority_host_failure_phase"]
+        == "Protected-port firewall convergence"
+    )
+    assert (
+        "Disabled provider authority cleanup"
+        in block[firewall + 1]["ansible.builtin.set_fact"]["provider_authority_host_failure_phase"]
+    )
     assert any(
         task.get("ansible.builtin.systemd_service", {}).get("state") == "stopped" for task in rescue
     )
@@ -509,6 +533,7 @@ def test_live_authority_local_mutation_is_closed_and_owner_only() -> None:
     assert "AWS_SHARED_CREDENTIALS_FILE" in tasks
 
     environment = _text(AUTHORITY_ENV_TEMPLATE)
+    assert environment.splitlines()[2] == "LIBGUESTFS_BACKEND=direct"
     assert "KDIVE_LIBVIRT_RECOVERY_ROOT={{ live_vm_host_authority_recovery_root }}" in environment
     assert "KDIVE_LIBVIRT_ROOTFS_ROOT={{ live_vm_host_authority_rootfs_root }}" in environment
     assert "KDIVE_LIBVIRT_CONSOLE_ROOT={{ live_vm_host_authority_console_root }}" in environment
@@ -1047,10 +1072,10 @@ def test_authority_runtime_is_recreated_at_boot_with_exact_acl() -> None:
     assert "ConditionPathIsDirectory=/run/kdive/provider-authority/libvirt" in tasks
 
 
-def test_fixed_worker_user_unit_renders_the_configured_libvirt_group() -> None:
+def test_fixed_worker_system_unit_renders_the_configured_libvirt_group() -> None:
     tasks = _text(MAIN_TASKS)
-    assert "ExecStart=/usr/bin/sg {{ live_vm_host_worker_libvirt_group }} -c" in tasks
-    assert "ExecStart=/usr/bin/sg kdive-live-libvirt -c" not in tasks
+    assert "SupplementaryGroups=kvm {{ live_vm_host_worker_libvirt_group }}" in tasks
+    assert "SupplementaryGroups=kvm kdive-live-libvirt" not in tasks
 
 
 def test_ansible_uses_declarative_account_and_file_modules() -> None:
@@ -1359,6 +1384,17 @@ def test_installer_pins_grpc_system_openssl_and_zlib_for_the_sync() -> None:
     assert prefix in source
 
 
+def test_installer_uv_provisioning_uses_existing_selection() -> None:
+    play = yaml.safe_load(_text(LOCAL_PLAY))[0]
+    install = next(
+        task
+        for task in play["tasks"]
+        if task["name"] == "Install the fixed live-worker lifecycle contract"
+    )
+    assert install["ansible.builtin.command"]["argv"][-2:] == ["--uv", "{{ live_vm_host_uv_bin }}"]
+    assert install["no_log"] is True
+
+
 def test_installer_resolves_uv_before_it_mutates_the_host() -> None:
     """A bare ``uv`` exits 127 under ``sudo``, whose ``secure_path`` hides a user-local one.
 
@@ -1367,13 +1403,14 @@ def test_installer_resolves_uv_before_it_mutates_the_host() -> None:
     (#2506).
     """
     source = _text(INSTALLER)
-    resolve = 'uv_bin="$(_resolve_uv_bin)"'
+    resolve = 'uv_bin="$(_resolve_uv_bin "${uv_selection[@]}")"'
     first_mutation = 'getent group "$control_group" >/dev/null || groupadd'
     sync = '"$uv_bin" sync --locked --no-editable --no-dev --group live'
     assert resolve in source
     assert sync in source
     assert source.index(resolve) < source.index(first_mutation)
     assert source.index(resolve) < source.index(sync)
+    assert source.index(resolve) < source.index("IFS= read -r witness_dsn")
 
 
 def test_installer_uv_resolution_names_the_remedy_and_refuses(tmp_path: Path) -> None:
@@ -1397,7 +1434,123 @@ _resolve_uv_bin
     assert "uv is not resolvable" in result.stderr
     assert str(tmp_path) in result.stderr
     assert "secure_path" in result.stderr
-    assert "/usr/local/bin" in result.stderr
+    assert "--uv" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "symlink",
+        "missing",
+        "relative",
+        "empty",
+        "directory",
+        "nonexec",
+        "owner",
+        "writable",
+        "ancestor_owner",
+        "ancestor_writable",
+        "version",
+        "version_exit",
+    ],
+)
+def test_installer_uv_explicit_selection(tmp_path: Path, fault: str | None) -> None:
+    stub = tmp_path / "selected-uv"
+    marker = tmp_path / "executed"
+    version = "not-uv" if fault == "version" else "uv 0.12.22"
+    stub.write_text(
+        f"#!/bin/bash\nprintf executed > '{marker}'\nprintf '%s\\n' '{version}'\n"
+        + ("exit 1\n" if fault == "version_exit" else ""),
+        encoding="utf-8",
+    )
+    stub.chmod(0o644 if fault == "nonexec" else 0o755)
+    link = tmp_path / "uv-link"
+    link.symlink_to(stub)
+    selected = {
+        "symlink": str(link),
+        "missing": str(tmp_path / "absent"),
+        "relative": "selected-uv",
+        "empty": "",
+        "directory": str(tmp_path),
+    }.get(fault or "", str(stub))
+    # Ownership is the privilege boundary; emulate metadata only, keeping real file,
+    # canonicalization, execution and version checks on an unprivileged test runner.
+    command = r"""
+source "$1"
+fixture="$3"; fault="$4"; ancestor="$5"
+stat() {
+  local owner=0 mode=755 target="${@: -1}"
+  if [[ $target == "$fixture" ]]; then
+    [[ $fault != owner ]] || owner=1000
+    [[ $fault != writable ]] || mode=775
+  elif [[ $target == "$ancestor" ]]; then
+    [[ $fault != ancestor_owner ]] || owner=1000
+    [[ $fault != ancestor_writable ]] || mode=777
+  fi
+  printf '%s %s\n' "$owner" "$mode"
+}
+export PATH=/usr/bin:/bin
+_resolve_uv_bin "$2"
+"""
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            command,
+            "bash",
+            str(INSTALLER),
+            selected,
+            str(stub),
+            fault or "",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if fault in {None, "symlink"}:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == str(stub.resolve())
+        assert marker.exists()
+    else:
+        assert result.returncode != 0
+        assert result.stdout == ""
+        assert "uv" in result.stderr
+        assert marker.exists() == (fault in {"version", "version_exit"})
+
+
+@pytest.mark.parametrize("valid_version", [True, False])
+def test_installer_uv_version_probe_preserves_caller_input(
+    tmp_path: Path, valid_version: bool
+) -> None:
+    stub = tmp_path / "uv"
+    eof = tmp_path / "eof"
+    version = "uv 0.12.22" if valid_version else "unsuitable"
+    stub.write_text(
+        f"#!/bin/bash\nif IFS= read -r input; then exit 99; fi\n"
+        f"printf eof > '{eof}'\nprintf '%s\\n' '{version}'\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    command = r"""
+source "$1"
+export PATH="$2"
+status=0
+_resolve_uv_bin >/dev/null || status=$?
+IFS= read -r remaining
+printf '%s\n%s\n' "$status" "$remaining"
+"""
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(tmp_path)],
+        input="synthetic-witness-input\n",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert eof.read_text() == "eof"
+    assert result.stdout.splitlines() == ["0" if valid_version else "1", "synthetic-witness-input"]
 
 
 def test_installer_never_emits_the_witness_dsn() -> None:
@@ -1424,7 +1577,7 @@ def test_installer_never_emits_the_witness_dsn() -> None:
 
 def test_installer_uv_resolution_returns_an_absolute_path(tmp_path: Path) -> None:
     stub = tmp_path / "uv"
-    stub.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    stub.write_text("#!/bin/bash\nprintf 'uv 0.12.22\\n'\n", encoding="utf-8")
     stub.chmod(0o755)
     command = r"""
 source "$1"
@@ -1934,39 +2087,161 @@ def test_libvirt_config_and_shared_provider_directories_are_fixed() -> None:
         assert path in provisioning
 
 
-def test_session_libvirtd_is_boot_persistent_via_user_unit() -> None:
-    """The dedicated session daemon survives reboots (#2032): linger + an enabled user unit."""
-    tasks = _text(MAIN_TASKS)
-    defaults = _yaml(DEFAULTS)
-    packages = defaults["live_vm_host_packages"]
-    assert isinstance(packages, list)
-    assert "login" in packages
-    assert "kdive-libvirtd-live.service" in tasks
-    assert (
-        "ExecStart=/usr/bin/sg {{ live_vm_host_worker_libvirt_group }} -c \\\n"
-        "        '/usr/sbin/libvirtd --daemon --config /etc/kdive/libvirtd-live.conf "
-        "--pid-file /run/kdive/live-libvirt/libvirt/libvirtd.pid'" in tasks
+def test_session_libvirtd_has_system_manager_credentials() -> None:
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    install = next(
+        t for t in tasks if t["name"] == "Install the boot-persistent session libvirtd system unit"
     )
-    # The user manager is reached through the runner's XDG_RUNTIME_DIR (no login session needed).
-    enable = tasks.index("- name: Enable the boot-persistent session libvirtd user unit")
-    start = tasks.index("- name: Start the operator-owned dedicated session libvirtd")
-    assert "scope: user" in tasks[enable:start]
-    # The unit's destination directory must exist before the copy: systemd does not
-    # pre-create ~/.config/systemd/user and a clean host has no user units yet (#2044).
-    ensure_dir = tasks.index("- name: Ensure the runner's systemd user unit directory exists")
-    install = tasks.index("- name: Install the boot-persistent session libvirtd user unit")
-    assert ensure_dir < install
-    ensure_block = tasks[ensure_dir:install]
-    assert "state: directory" in ensure_block
-    assert 'mode: "0700"' in ensure_block
-    assert (
-        "{{ ansible_facts.getent_passwd[live_vm_host_operator_user][4] }}/.config/systemd/user"
-        in (ensure_block)
+    unit = install["ansible.builtin.copy"]
+    assert unit["dest"] == "/etc/systemd/system/kdive-libvirtd-live.service"
+    assert unit["owner"] == unit["group"] == "root"
+    content = unit["content"]
+    assert "User={{ live_vm_host_operator_user }}" in content
+    assert "Group={{ live_vm_host_operator_user }}" in content
+    assert "SupplementaryGroups=kvm {{ live_vm_host_worker_libvirt_group }}" in content
+    assert "ExecStart=/usr/sbin/libvirtd --daemon" in content
+    assert "WantedBy=multi-user.target" in content
+    assert "After=systemd-tmpfiles-setup.service" in content
+    for name in (
+        "Enable the boot-persistent session libvirtd system unit",
+        "Start the operator-owned dedicated session libvirtd",
+    ):
+        task = next(t for t in tasks if t["name"] == name)
+        assert task["ansible.builtin.systemd_service"].get("scope", "system") == "system"
+        assert "become_user" not in task
+    assert not any(
+        t["name"] == "Ensure the runner's systemd user unit directory exists" for t in tasks
     )
-    # Linger must be provisioned before the unit: it is what keeps the runner's user manager
-    # alive from boot with no login session.
-    assert tasks.index("loginctl enable-linger") < install
-    assert enable < start, "the unit enables unconditionally; only the start is stale-gated"
+
+
+@pytest.mark.parametrize(
+    "state,allowed",
+    [("active", False), ("activating", False), ("inactive", True), ("failed", True)],
+)
+def test_legacy_session_migration_refuses_active_unit(state: str, allowed: bool) -> None:
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    guard = next(
+        t for t in tasks if t["name"] == "Refuse automatic takeover from the legacy user unit"
+    )
+    evaluate = Environment(undefined=StrictUndefined).compile_expression(
+        guard["ansible.builtin.assert"]["that"][0]
+    )
+    assert bool(evaluate(live_vm_host_legacy_libvirt_state={"stdout": state})) is allowed
+    assert tasks.index(guard) < next(
+        i
+        for i, t in enumerate(tasks)
+        if t["name"] == "Reconcile the selected libvirt tuple under a protected hierarchy"
+    )
+
+
+@pytest.mark.parametrize(
+    "live,pid,owner,allowed",
+    [
+        (False, "", "0", True),
+        (True, "31", "31", True),
+        (True, "31", "0", False),
+        (True, "31", "32", False),
+    ],
+)
+def test_session_migration_refuses_unmanaged_daemon(
+    live: bool, pid: str, owner: str, allowed: bool
+) -> None:
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    guard = next(
+        t for t in tasks if t["name"] == "Refuse takeover of an unmanaged selected session daemon"
+    )
+    expression = guard["ansible.builtin.assert"]["that"][0]
+    evaluate = Environment(undefined=StrictUndefined).compile_expression(expression)
+    assert (
+        bool(
+            evaluate(
+                live_vm_host_worker_libvirtd_live=live,
+                live_vm_host_worker_libvirtd_pid=pid,
+                live_vm_host_system_libvirt_pid={"stdout": owner},
+            )
+        )
+        is allowed
+    )
+    assert tasks.index(guard) < next(
+        i
+        for i, t in enumerate(tasks)
+        if t["name"] == "Remove only the inactive legacy selected user unit"
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata,allowed",
+    [
+        ({"exists": False}, True),
+        ({"exists": True, "isreg": True, "islnk": False, "pw_name": "operator"}, True),
+        ({"exists": True, "isreg": True, "islnk": False, "pw_name": "other"}, False),
+        ({"exists": True, "isreg": False, "islnk": True, "pw_name": "operator"}, False),
+    ],
+)
+def test_session_migration_retirement_checks_file_owner(
+    metadata: dict[str, object], allowed: bool
+) -> None:
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    task = next(
+        t
+        for t in tasks
+        if t["name"] == "Require a regular operator-owned legacy unit before retirement"
+    )
+    env = Environment(undefined=StrictUndefined)
+    assert (
+        all(
+            env.compile_expression(clause)(
+                live_vm_host_legacy_libvirt_unit={"stat": metadata},
+                live_vm_host_operator_user="operator",
+            )
+            for clause in task["ansible.builtin.assert"]["that"]
+        )
+        is allowed
+    )
+
+
+@pytest.mark.parametrize("mode", ["kvm", "tcg", "empty", "malformed", "missing", "error"])
+def test_selected_endpoint_native_kvm_probe(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    tasks = yaml.safe_load(_text(VERIFY_TASKS))
+    task = next(
+        t for t in tasks if t["name"] == "Verify native KVM on the selected libvirt endpoints"
+    )
+    assert task["become_user"] == "{{ item.user }}"
+    assert task["loop"][0]["uri"] == "{{ live_vm_host_worker_libvirt_uri }}"
+    assert task["loop"][1]["uri"] == "{{ live_vm_host_authority_libvirt_uri }}"
+    assert task["loop"][1]["user"] == "{{ live_vm_host_authority_account }}"
+    script = task["ansible.builtin.command"]["argv"][2]
+    closed = []
+    xml = (
+        "<capabilities><host><cpu><arch>x86_64</arch></cpu></host>"
+        "<guest><os_type>hvm</os_type><arch name='x86_64'><emulator>/qemu</emulator>"
+        f"<domain type='{mode}'/></arch></guest><guest><os_type>hvm</os_type>"
+        "<arch name='ppc64le'><emulator>/qemu-ppc</emulator><domain type='qemu'/>"
+        "</arch></guest></capabilities>"
+    )
+
+    def capabilities() -> str:
+        if mode == "error":
+            raise RuntimeError("capability request failed")
+        return "" if mode == "empty" else "<broken" if mode == "malformed" else xml
+
+    connection = SimpleNamespace(getCapabilities=capabilities, close=lambda: closed.append(True))
+
+    def open_endpoint(uri: str) -> object:
+        assert uri == "test:///selected"
+        return None if mode == "missing" else connection
+
+    monkeypatch.setitem(sys.modules, "libvirt", SimpleNamespace(open=open_endpoint))
+    monkeypatch.setattr(sys, "argv", ["probe", "test:///selected", "operator"])
+    if mode == "kvm":
+        exec(script, {})
+    else:
+        with pytest.raises(RuntimeError if mode == "error" else SystemExit):
+            exec(script, {})
+    assert closed == ([] if mode == "missing" else [True])
 
 
 def test_live_vm_host_packages_declare_kmod_for_host_depmod() -> None:
@@ -2043,6 +2318,79 @@ def test_el10_guestfs_builder_runs_after_its_host_dependencies() -> None:
     )
     assert build["ansible.builtin.script"] == "build-el10-guestfs-binding.sh"
     assert (LOCAL_WORKER / "files/build-el10-guestfs-binding.sh").is_file()
+
+
+def _el10_source_download(
+    tmp_path: Path, distro: str, arch: str = "x86_64", dnf_exit: int = 0
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    release = tmp_path / "os-release"
+    release.write_text(f"ID={distro}\n", encoding="utf-8")
+    arguments = tmp_path / "dnf-args"
+    script = _text(LOCAL_WORKER / "files/build-el10-guestfs-binding.sh")
+    block = script[script.index("  source_nevr=") : script.index("  [[ -f $stage/$source_rpm")]
+    block = block.replace("/etc/os-release", '"$1"')
+    command = (
+        r"""
+set -euo pipefail
+source_rpm=libguestfs-1.58.1-9.el10_2.src.rpm
+stage="$2/source directory"
+rpm() { printf '%s\n' "$TEST_ARCH"; }
+dnf() { printf '%s\n' "$@" > "$DNF_ARGS"; return "$DNF_EXIT"; }
+"""
+        + block
+    )
+    result = subprocess.run(
+        ["bash", "-c", command, "bash", str(release), str(tmp_path)],
+        env={
+            **os.environ,
+            "TEST_ARCH": arch,
+            "DNF_ARGS": str(arguments),
+            "DNF_EXIT": str(dnf_exit),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, arguments.read_text().splitlines() if arguments.exists() else []
+
+
+@pytest.mark.parametrize(
+    ("distro", "arch", "repository"),
+    [
+        ("rocky", "x86_64", "appstream-source"),
+        ("almalinux", "x86_64", "appstream-source"),
+        ("rhel", "x86_64", "rhel-10-for-x86_64-appstream-source-rpms"),
+        ("rhel", "ppc64le", "rhel-10-for-ppc64le-appstream-source-rpms"),
+    ],
+)
+def test_el10_guestfs_download_uses_only_distribution_source(
+    tmp_path: Path, distro: str, arch: str, repository: str
+) -> None:
+    result, arguments = _el10_source_download(tmp_path, distro, arch)
+    assert result.returncode == 0, result.stderr
+    # --repo disables other enabled repos as well as avoiding disabled third-party sources.
+    assert arguments == [
+        "-q",
+        "download",
+        "--source",
+        f"--repo={repository}",
+        "--destdir",
+        str(tmp_path / "source directory"),
+        "libguestfs-1.58.1-9.el10_2",
+    ]
+
+
+def test_el10_guestfs_source_download_rejects_unsupported_distro(tmp_path: Path) -> None:
+    result, arguments = _el10_source_download(tmp_path, "fedora")
+    assert result.returncode != 0
+    assert "does not support distribution: fedora" in result.stderr
+    assert not arguments
+
+
+def test_el10_guestfs_source_download_propagates_failure(tmp_path: Path) -> None:
+    result, arguments = _el10_source_download(tmp_path, "rocky", dnf_exit=17)
+    assert result.returncode == 17
+    assert arguments
 
 
 def test_el10_rootfs_tools_are_provisioned_without_changing_other_redhat_hosts() -> None:
@@ -2434,6 +2782,219 @@ def test_installer_launches_session_libvirt_with_unlimited_process_limits() -> N
     source = _text(INSTALLER)
 
     assert 'prlimit --memlock=unlimited --core=unlimited -- runuser -u "$operator"' in source
+
+
+def test_installer_waits_for_daemon_readiness_before_relocking_the_runtime() -> None:
+    source = _text(INSTALLER)
+    start = source[source.index("_start_libvirt_daemon() {") :]
+    start = start[: start.index("\n}\n")]
+
+    launch = start.index("--daemon")
+    wait = start.index("_await_libvirt_daemon_ready")
+    lock = start.index("_lock_libvirt_runtime")
+    assert launch < wait < lock < start.index("_reconcile_libvirt_tuple")
+    assert "_start_libvirt_daemon /run/kdive /run/kdive/live-libvirt" in source
+
+
+# A stand-in for `libvirtd --daemon` with libvirt's real start order: the launcher returns once
+# the pid file is written and the socket listens; driver initialization, which creates a state
+# directory under the runtime tree, runs afterwards.
+_FAKE_LIBVIRTD = """#!/usr/bin/python3
+import os
+import socket
+import sys
+import time
+
+pid_path = sys.argv[sys.argv.index("--pid-file") + 1]
+runtime_child = os.path.join(os.environ["XDG_RUNTIME_DIR"], "libvirt")
+if os.environ.get("FAKE_LAUNCH_FAILS"):
+    with open(os.environ["FAKE_JOURNAL"], "w", encoding="utf-8") as journal:
+        journal.write("libvirtd: Unable to obtain pidfile\\n")
+    sys.exit(1)
+status_read, status_write = os.pipe()
+if os.fork():
+    os.close(status_write)
+    os.read(status_read, 1)
+    sys.exit(0)
+os.setsid()
+null = os.open(os.devnull, os.O_RDWR)
+for fd in (0, 1, 2):
+    os.dup2(null, fd)
+listener = socket.socket(socket.AF_UNIX)
+listener.bind(os.path.join(runtime_child, "libvirt-sock"))
+os.chmod(os.path.join(runtime_child, "libvirt-sock"), 0o770)
+listener.listen()
+with open(pid_path, "w", encoding="utf-8") as pid_file:
+    pid_file.write(f"{os.getpid()}\\n")
+os.write(status_write, b"0")
+time.sleep(float(os.environ["FAKE_INIT_DELAY"]))
+if os.environ.get("FAKE_INIT_FAILS"):
+    with open(os.environ["FAKE_JOURNAL"], "w", encoding="utf-8") as journal:
+        journal.write("libvirtd: Driver state initialization failed\\n")
+    sys.exit(1)
+os.mkdir(os.path.join(runtime_child, "hostdevmgr"))
+time.sleep(60)
+"""
+
+_FAKE_COMMANDS = {
+    "libvirtd": _FAKE_LIBVIRTD,
+    # The installer's own launch and probe paths, minus the privilege change.
+    "prlimit": '#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n',
+    "runuser": '#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n',
+    "journalctl": '#!/bin/sh\ncat -- "$FAKE_JOURNAL"\n',
+    # Ready exactly when the fake daemon's driver initialization has finished.
+    "virsh": '#!/bin/sh\ntest -z "$FAKE_NEVER_READY" && test -d "$XDG_READY_DIR"\n',
+}
+
+
+def _run_fake_libvirt_start(
+    tmp_path: Path, *, init_delay: float, failure: str = ""
+) -> subprocess.CompletedProcess[str]:
+    # The daemon socket lives under the runtime root, and a pytest-xdist tmp_path pushes it past
+    # the 108-byte AF_UNIX path limit, so the runtime root gets a short directory of its own.
+    with tempfile.TemporaryDirectory(prefix="kdive-") as short_root:
+        return _start_fake_libvirt(
+            tmp_path, Path(short_root) / "live-libvirt", init_delay=init_delay, failure=failure
+        )
+
+
+def _start_fake_libvirt(
+    tmp_path: Path, runtime_root: Path, *, init_delay: float, failure: str
+) -> subprocess.CompletedProcess[str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in _FAKE_COMMANDS.items():
+        (bin_dir / name).write_text(body, encoding="utf-8")
+        (bin_dir / name).chmod(0o755)
+    (runtime_root / "libvirt").mkdir(parents=True, mode=0o750)
+    command = r"""
+source "$1"
+_libvirt_family=Debian-family _libvirt_daemon=libvirtd _libvirt_config=libvirtd-live.conf
+_libvirt_socket=libvirt-sock _libvirt_pid=libvirtd.pid _libvirt_uri=qemu+unix:///session
+_libvirt_executable="$(command -v libvirtd)"
+eval "$(declare -f _lock_libvirt_runtime | sed '1s/^_lock_libvirt_runtime/_installer_lock/')"
+_lock_libvirt_runtime() {
+  [[ -d $XDG_READY_DIR ]] || echo "runtime locked before the daemon was ready" >&2
+  _installer_lock "$@"
+}
+eval "$(declare -f _await_libvirt_daemon_ready | sed '1s/^_await/_installer_await/')"
+_await_libvirt_daemon_ready() {
+  _installer_await_libvirt_daemon_ready "$1" "$2" "$3" "${FAKE_READY_TIMEOUT:-$4}"
+}
+_start_libvirt_daemon "$2" "$3" op "$4" "$5" "$4"
+"""
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_INIT_DELAY": str(init_delay),
+        "FAKE_JOURNAL": str(tmp_path / "journal"),
+        "XDG_READY_DIR": str(runtime_root / "libvirt" / "hostdevmgr"),
+    }
+    if failure:
+        env[failure] = "1"
+    if failure == "FAKE_NEVER_READY":
+        env["FAKE_READY_TIMEOUT"] = "2"
+    try:
+        return subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                command,
+                "bash",
+                str(INSTALLER),
+                str(runtime_root.parent),
+                str(runtime_root),
+                str(os.getuid()),
+                str(os.getgid()),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+    finally:
+        pid_path = runtime_root / "libvirt" / "libvirtd.pid"
+        if pid_path.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_path.read_text(encoding="utf-8")), 9)
+
+
+def test_installer_relocks_the_runtime_only_after_the_daemon_finishes_init(
+    tmp_path: Path,
+) -> None:
+    result = _run_fake_libvirt_start(tmp_path, init_delay=1.0)
+
+    assert result.returncode == 0, result.stderr
+    assert "runtime locked before the daemon was ready" not in result.stderr
+
+
+def test_installer_fails_fast_with_the_daemon_log_when_init_fails(tmp_path: Path) -> None:
+    result = _run_fake_libvirt_start(tmp_path, init_delay=0.5, failure="FAKE_INIT_FAILS")
+
+    assert result.returncode != 0
+    assert "exited during initialization" in result.stderr
+    assert "did not produce a complete live tuple" in result.stderr
+    assert "Driver state initialization failed" in result.stderr
+
+
+def test_installer_fails_when_a_live_daemon_never_becomes_ready(tmp_path: Path) -> None:
+    result = _run_fake_libvirt_start(tmp_path, init_delay=0.5, failure="FAKE_NEVER_READY")
+
+    assert result.returncode != 0
+    assert "was not ready within 2s" in result.stderr
+    assert "did not produce a complete live tuple" in result.stderr
+
+
+def test_installer_reports_the_daemon_journal_when_launch_fails(tmp_path: Path) -> None:
+    result = _run_fake_libvirt_start(tmp_path, init_delay=0, failure="FAKE_LAUNCH_FAILS")
+
+    assert result.returncode != 0
+    assert "failed to start" in result.stderr
+    assert "Unable to obtain pidfile" in result.stderr
+
+
+def test_installer_readiness_wait_does_not_follow_a_pid_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere"
+    target.write_text("999999999\n", encoding="utf-8")
+    pid_path = tmp_path / "libvirtd.pid"
+    pid_path.symlink_to(target)
+    runuser = tmp_path / "runuser"
+    runuser.write_text(_FAKE_COMMANDS["runuser"], encoding="utf-8")
+    runuser.chmod(0o755)
+    command = r"""
+source "$1"
+_await_libvirt_daemon_ready "$2" op qemu+unix:///session 1
+"""
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(pid_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "was not ready within 1s" in result.stderr
+    assert "999999999" not in result.stderr
+
+
+def test_installer_readiness_wait_is_bounded(tmp_path: Path) -> None:
+    command = r"""
+source "$1"
+_await_libvirt_daemon_ready "$2" op qemu+unix:///session 1
+"""
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "bash", str(INSTALLER), str(tmp_path / "absent.pid")],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "was not ready within 1s" in result.stderr
 
 
 def test_installer_adopts_complete_matching_live_tuple(tmp_path: Path) -> None:
@@ -3031,15 +3592,41 @@ def test_installer_makes_the_session_libvirt_runtime_root_boot_durable() -> None
     assert "systemd-tmpfiles --create" in installer
 
 
+def test_role_installs_the_same_boot_runtime_policy_as_the_installer() -> None:
+    tasks = yaml.safe_load(_text(MAIN_TASKS))
+    names = [task["name"] for task in tasks]
+    name = "Install the session libvirt runtime tmpfiles policy"
+    policy = tasks[names.index(name)]["ansible.builtin.copy"]
+    assert policy["dest"] == "/etc/tmpfiles.d/kdive-live-libvirt.conf"
+    assert policy["owner"] == policy["group"] == "root"
+    assert policy["mode"] == "0644"
+    rendered = (
+        Environment(undefined=StrictUndefined)
+        .from_string(policy["content"])
+        .render(
+            live_vm_host_operator_user="operator", live_vm_host_worker_libvirt_group="socket-group"
+        )
+    )
+    installer_rules = (
+        "\n".join(line for line in _text(INSTALLER).splitlines() if line.startswith("d /run/kdive"))
+        .replace("${operator}", "operator")
+        .replace("${libvirt_group}", "socket-group")
+    )
+    assert rendered.strip() == installer_rules
+    assert names.index(name) < names.index(
+        "Enable the boot-persistent session libvirtd system unit"
+    )
+
+
 def test_session_libvirtd_unit_depends_on_a_runtime_root_it_cannot_create() -> None:
     """Pin the reason the tmpfiles rule exists, so removing it fails here rather than at boot.
 
-    The user unit names the pid file under `/run/kdive/live-libvirt/libvirt` and sets
-    XDG_RUNTIME_DIR to the root, but declares no RuntimeDirectory and no ExecStartPre — a user
-    unit cannot create either path under root-owned `/run/kdive`.
+    The operator-owned unit names the pid file under `/run/kdive/live-libvirt/libvirt` and sets
+    XDG_RUNTIME_DIR to the root, but declares no RuntimeDirectory and no ExecStartPre — its operator
+    cannot create either path under root-owned `/run/kdive`.
     """
     tasks = _text(MAIN_TASKS)
-    unit_start = tasks.index("Install the boot-persistent session libvirtd user unit")
+    unit_start = tasks.index("Install the boot-persistent session libvirtd system unit")
     unit = tasks[unit_start : unit_start + 1400]
     # The pragma marks a runtime path, not a credential: detect-secrets reads the long
     # slash-separated literal below as a base64 high-entropy string.
@@ -3127,3 +3714,439 @@ def test_local_worker_host_packages_provision_pahole_per_family() -> None:
         packages = defaults[family_list]
         assert isinstance(packages, list)
         assert provider in packages, family_list
+
+
+def test_installed_local_authority_play_preflights_without_runner() -> None:
+    path = ROOT / "deploy/ansible/playbooks/installed-local-authority.yml"
+    play = yaml.safe_load(_text(path))[0]
+    assert play["hosts"] == "live_vm_runners"
+    assert play["roles"] == ["libvirt_stack", "libvirt_pool_net", "live_vm_host"]
+    assert play["vars"]["live_vm_host_operator_user"] == ("{{ installed_authority_operator_user }}")
+    preflight = play["pre_tasks"][-1]
+    assert preflight["ansible.builtin.include_role"] == {
+        "name": "live_vm_host",
+        "tasks_from": "authority_preflight.yml",
+    }
+    assert "when" not in preflight
+    assert "playbooks/installed-local-authority.yml" in _text(ROOT / "justfile")
+
+
+def test_installed_local_authority_requires_pinned_enabled_inputs() -> None:
+    path = ROOT / "deploy/ansible/playbooks/installed-local-authority.yml"
+    tasks = yaml.safe_load(_text(path))[0]["pre_tasks"]
+    identity = tasks[0]["ansible.builtin.assert"]["that"]
+    assert "installed_authority_operator_user is defined" in identity
+    assert "installed_authority_operator_user | length > 0" in identity
+    assert "live_vm_repo_version is match('^[0-9a-f]{40}$')" in identity
+    assert "ansible_facts['distribution'] == 'Ubuntu'" in identity
+    assert "ansible_facts['distribution_version'] == '26.04'" in identity
+    assert "ansible_facts['architecture'] == 'x86_64'" in identity
+    assert tasks[1]["ansible.builtin.assert"]["that"] == [
+        "live_vm_host_authority_enabled | bool",
+        "live_vm_host_worker_authority_enabled | bool",
+        "live_vm_host_authority_local_mutation_enabled | bool",
+        "live_vm_host_authority_system_manifest_source | length > 0",
+    ]
+    assert tasks[1]["no_log"] is True
+    assert "when" not in tasks[0] and "when" not in tasks[1]
+
+
+_ROUTE_FILE = "/etc/kdive/live-worker-authority.env"
+ROUTE_TEMPLATE = ROLE / "templates" / "live-worker-authority.env.j2"
+_ROUTE_NAMES = (
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_INSTANCE",
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_REQUEST_SOCKET",
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_SERVER_CA_REF",
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_CERT_REF",
+    "KDIVE_WORKER_EXTERNAL_BOOT_AUTHORITY_CLIENT_KEY_REF",
+)
+
+
+def _render_fully(text: str, variables: dict[str, object]) -> str:
+    """Render until stable: role defaults nest templates (instance -> authority instance).
+
+    Ansible's template module and lookup keep a template's trailing newline; plain jinja2 drops it.
+    """
+    environment = Environment(undefined=StrictUndefined, keep_trailing_newline=True)
+    for _ in range(5):
+        rendered = environment.from_string(text).render(variables)
+        if rendered == text:
+            return rendered
+        text = rendered
+    raise AssertionError("role defaults did not settle")
+
+
+def _task(tasks: list[dict[str, object]], name: str) -> dict[str, object]:
+    return next(task for task in tasks if task.get("name") == name)
+
+
+def test_worker_authority_route_file_is_published_verified_and_withdrawn() -> None:
+    """#3215: the role publishes the route the lifecycle client forwards, in its exact format."""
+    tasks = cast(list[dict[str, object]], yaml.safe_load(MAIN_TASKS.read_text(encoding="utf-8")))
+    publish = _task(tasks, "Publish the fixed-worker authority route for stack bring-up")
+    template = cast(dict[str, str], publish["ansible.builtin.template"])
+    assert (template["src"], template["dest"]) == (ROUTE_TEMPLATE.name, _ROUTE_FILE)
+    assert (template["owner"], template["group"], template["mode"]) == ("root", "root", "0644")
+    assert publish["when"] == "live_vm_host_worker_authority_enabled | bool"
+    defaults = cast(dict[str, object], yaml.safe_load(DEFAULTS.read_text(encoding="utf-8")))
+    rendered = _render_fully(
+        ROUTE_TEMPLATE.read_text(encoding="utf-8"), {**defaults, "inventory_hostname": "lane-host"}
+    )
+    lines = rendered.splitlines()
+    assert [line.split("=", 1)[0] for line in lines] == list(_ROUTE_NAMES)
+    assert lines[0] == f"{_ROUTE_NAMES[0]}=lane-host"
+    assert lines[1].endswith("=/run/kdive/provider-authority/request/authority.sock")
+    assert lines[4].endswith("=external-boot-authority/client-key")
+    assert rendered.endswith("\n")
+
+    withdraw = _task(tasks, "Withdraw the fixed-worker authority route when the client is disabled")
+    assert withdraw["ansible.builtin.file"] == {"path": _ROUTE_FILE, "state": "absent"}
+    assert withdraw["when"] == "not (live_vm_host_worker_authority_enabled | bool)"
+
+    checks = cast(list[dict[str, object]], yaml.safe_load(VERIFY_TASKS.read_text(encoding="utf-8")))
+    exact = _task(checks, "Assert the authority route is public, root-owned and exact")
+    assertion = cast(dict[str, object], exact["ansible.builtin.assert"])
+    that = "\n".join(cast(list[str], assertion["that"]))
+    assert 'mode == "0644"' in that
+    assert f"lookup('ansible.builtin.template', '{ROUTE_TEMPLATE.name}')" in that
+    presence = _task(checks, "Assert the authority route is published only with the worker client")
+    assert "live_vm_host_worker_authority_enabled" in str(presence["ansible.builtin.assert"])
+
+    teardown = cast(list[dict[str, object]], yaml.safe_load(_text(AUTHORITY_TEARDOWN)))
+    plays = cast(list[dict[str, object]], teardown[0]["tasks"])
+    for name in (
+        "Remove authority unit and endpoint artifacts",
+        "Inspect removed authority endpoint artifacts",
+    ):
+        assert _ROUTE_FILE in cast(list[str], _task(plays, name)["loop"])
+
+
+def _host_dump_installer_function(name: str) -> str:
+    source = _text(INSTALLER)
+    start = source.index(name + "() {")
+    return source[start : source.index("\n}\n", start) + 3]
+
+
+@pytest.mark.parametrize("source", ["installer", "ansible"])
+@pytest.mark.parametrize("unsafe", [None, "acl", "default_acl", "symlink"])
+def test_host_dump_preparation_refuses_unsafe_acl_or_link(
+    tmp_path: Path, source: str, unsafe: str | None
+) -> None:
+    import struct
+
+    parent = tmp_path / "kdive"
+    parent.mkdir()
+    root = parent / "host-dump"
+    root.mkdir(mode=0o3770)
+    root.chmod(0o3770)
+    if unsafe in {"acl", "default_acl"}:
+        entries = [
+            (1, 7, 0xFFFFFFFF),
+            (2, 7, os.getuid() + 100000),
+            (4, 7, 0xFFFFFFFF),
+            (16, 7, 0xFFFFFFFF),
+            (32, 0, 0xFFFFFFFF),
+        ]
+        acl = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *entry) for entry in entries)
+        acl_path = root if unsafe == "acl" else parent
+        attribute = "system.posix_acl_access" if unsafe == "acl" else "system.posix_acl_default"
+        os.setxattr(acl_path, attribute, acl)
+    elif unsafe == "symlink":
+        root.rmdir()
+        target = tmp_path / "private"
+        target.mkdir(mode=0o700)
+        root.symlink_to(target, target_is_directory=True)
+    before = root.stat().st_mode
+    if source == "installer":
+        code = _host_dump_installer_function("_check_host_dump_acl")
+        argv = [
+            "/bin/bash",
+            "-c",
+            code.replace("/var/lib/kdive", str(parent)) + "\n_check_host_dump_acl",
+        ]
+    else:
+        tasks = yaml.safe_load((LOCAL_WORKER / "tasks/shared_directories.yml").read_text())
+        task = next(task for task in tasks if task["name"] == "Validate host-dump ACL safety")
+        code = task["ansible.builtin.command"]["argv"][2]
+        argv = ["python3", "-c", code.replace("/var/lib/kdive", str(parent))]
+    result = subprocess.run(argv, capture_output=True, text=True, check=False)
+    assert (result.returncode == 0) == (unsafe is None), result.stderr
+    assert root.stat().st_mode == before
+
+
+@pytest.mark.parametrize(
+    "mode,existing,restore_failure",
+    [
+        ("Disabled", False, False),
+        ("Enforcing", False, False),
+        ("Enforcing", True, False),
+        ("Enforcing", False, True),
+    ],
+)
+def test_host_dump_installer_prepares_selinux(
+    tmp_path: Path, mode: str, existing: bool, restore_failure: bool
+) -> None:
+    log = tmp_path / "calls log"
+    quoted_log = shlex.quote(str(log))
+    functions = f"""
+getenforce() {{ echo {mode}; }}
+semanage() {{
+  echo "semanage $*" >> {quoted_log}
+  [[ $2 != -a || {str(not existing).lower()} == true ]]
+}}
+restorecon() {{
+  echo "restorecon $*" >> {quoted_log}
+  return {int(restore_failure)}
+}}
+"""
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            functions
+            + _host_dump_installer_function("_label_host_dump_spool")
+            + "\n_label_host_dump_spool",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) == (not restore_failure), result.stderr
+    calls = log.read_text() if log.exists() else ""
+    assert ("svirt_image_t" in calls) == (mode == "Enforcing")
+    assert ("fcontext -m" in calls) == existing
+    assert ("restorecon -R /var/lib/kdive/host-dump" in calls) == (mode == "Enforcing")
+
+
+def test_host_dump_preparation_contract_is_fixed_and_ordered() -> None:
+    tasks = yaml.safe_load((LOCAL_WORKER / "tasks/shared_directories.yml").read_text())
+    task = next(
+        task for task in tasks if task["name"] == "Prepare the trusted host-dump spool root"
+    )
+    assert task["ansible.builtin.file"] == {
+        "path": "/var/lib/kdive/host-dump",
+        "state": "directory",
+        "follow": False,
+        "owner": "root",
+        "group": "{{ live_vm_host_worker_libvirt_group }}",
+        "mode": "3770",
+    }
+    names = [task["name"] for task in tasks]
+    assert (
+        names.index("Validate host-dump ACL safety")
+        < names.index(task["name"])
+        < names.index("Recheck host-dump ACL safety")
+    )
+    installer = _text(INSTALLER)
+    call = '_require_real_directory /var/lib/kdive/host-dump 0 "$libvirt_group_gid" 3770'
+    assert (
+        "_check_host_dump_acl\n" + call + "\n_check_host_dump_acl\n_label_host_dump_spool"
+        in installer
+    )
+    defaults = yaml.safe_load((LOCAL_WORKER / "defaults/main.yml").read_text())
+    assert "/var/lib/kdive/host-dump" in defaults["local_worker_host_svirt_image_directories"]
+
+
+def test_host_dump_selinux_preparation_requires_utilities() -> None:
+    code = "getenforce() { echo Enforcing; }\n" + _host_dump_installer_function(
+        "_label_host_dump_spool"
+    )
+    result = subprocess.run(
+        ["/bin/bash", "-c", code + "\n_label_host_dump_spool"],
+        env={"PATH": "/nonexistent"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "requires semanage and restorecon" in result.stderr
+
+
+def test_authority_proof_issues_its_one_day_pki_through_authority_pki() -> None:
+    """#3273: the carrier delegates issuance to authority-pki.sh and keeps its one-day PKI."""
+    proof = _text(AUTHORITY_PROOF)
+    pki = '"$pki" '
+    assert 'pki="$source_root/scripts/operations/authority-pki.sh"' in proof
+    assert f'{pki}ca --dir "$secrets" --subject kdive-2150-proof-ca --days 1 --key new' in proof
+    assert (
+        f'{pki}leaf --dir "$secrets" --name server --usage server --days 1 --key new \\\n'
+        '  --authority-instance "$authority_instance"'
+    ) in proof
+    for client in ("health-client", "proof-client"):
+        assert (
+            f'{pki}leaf --dir "$secrets" --name {client} --usage client --days 1 --key new'
+        ) in proof
+    assert "openssl req" not in proof
+    assert "openssl x509 -req" not in proof
+    assert "issue_certificate" not in proof
+    assert proof.index('install -d -m 0700 "$secrets"') < proof.index(f"{pki}ca ")
+    assert proof.index(f'{pki}leaf --dir "$secrets" --name proof-client') < proof.index(
+        "live_vm_host_authority_server_certificate_source: $secrets/server.pem"
+    )
+
+
+def test_credential_installation_is_shared_with_the_renewal_playbook() -> None:
+    """ADR-0803: the credential tasks moved verbatim into files main.yml imports in place."""
+    tasks_dir = ROLE / "tasks"
+
+    def task_list(name: str) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], yaml.safe_load((tasks_dir / name).read_text()))
+
+    authority = task_list("authority_credentials.yml")
+    worker = task_list("worker_authority_tls.yml")
+    assert [task["name"] for task in authority] == ["Install external-boot authority credentials"]
+    assert [task["name"] for task in worker] == [
+        "Inspect the fixed-worker authority secrets root without following links",
+        "Refuse a substituted fixed-worker authority secrets root",
+        "Create the protected fixed-worker authority secrets root",
+        "Install protected fixed-worker authority TLS files",
+    ]
+    install = authority[0]
+    assert install["ansible.builtin.copy"] == {
+        "src": "{{ item.source }}",
+        "dest": "{{ live_vm_host_authority_credentials_dir }}/{{ item.name }}",
+        "owner": "{{ live_vm_host_authority_account }}",
+        "group": "{{ live_vm_host_authority_account }}",
+        "mode": "0400",
+    }
+    assert [item["name"] for item in install["loop"]] == [
+        "database-dsn",
+        "service-credential",
+        "server-certificate",
+        "server-ca",
+        "worker-client-ca",
+        "health-client-certificate",
+        "health-client-key",
+    ]
+    assert install["no_log"] is True
+    assert install["register"] == "live_vm_host_authority_credentials"
+    assert install["notify"] == "Restart the external-boot authority service after deployed changes"
+    files = worker[3]
+    assert files["ansible.builtin.copy"]["mode"] == "0440"
+    assert files["ansible.builtin.copy"]["owner"] == "root"
+    assert files["ansible.builtin.copy"]["group"] == "{{ live_vm_host_authority_client_group }}"
+    assert [item["name"] for item in files["loop"]] == [
+        "server-ca",
+        "client-certificate",
+        "client-key",
+    ]
+    assert files["no_log"] is True
+    assert worker[2]["ansible.builtin.file"]["mode"] == "0750"
+
+    main = [task.get("name") for task in task_list("main.yml")]
+    worker_import = main.index("Import the fixed-worker authority TLS installation")
+    assert main[worker_import + 1] == "Import reusable worker slots and runtime paths"
+    authority_import = main.index("Import the external-boot authority credential installation")
+    assert main[authority_import - 1] == "Record the installed external-boot authority revision"
+    assert main[authority_import + 1] == "Install protected authority S3 credentials"
+
+
+def test_renewal_playbook_installs_credentials_in_the_reviewed_order() -> None:
+    """ADR-0803: preconditions, authority files, one restart, then worker files and verification."""
+    playbook = ROOT / "deploy" / "ansible" / "playbooks" / "renew-local-authority-tls.yml"
+    play = cast(list[dict[str, Any]], yaml.safe_load(playbook.read_text()))[0]
+    assert play["hosts"] == "live_vm_runners"
+    tasks = cast(list[dict[str, Any]], play["tasks"])
+    names = [task["name"] for task in tasks]
+
+    def module(task: dict[str, Any]) -> str:
+        known = {"name", "when", "loop", "loop_control", "register", "delegate_to", "become"}
+        known |= {"changed_when", "check_mode", "vars"}
+        (key,) = [k for k in task if k not in known]
+        return key
+
+    allowed = {
+        "ansible.builtin.assert",
+        "ansible.builtin.command",
+        "ansible.builtin.import_role",
+        "ansible.builtin.meta",
+        "ansible.builtin.slurp",
+        "ansible.builtin.systemd_service",
+    }
+    assert {module(task) for task in tasks} <= allowed
+    imports = [
+        (
+            task["ansible.builtin.import_role"]["name"],
+            task["ansible.builtin.import_role"]["tasks_from"],
+        )
+        for task in tasks
+        if module(task) == "ansible.builtin.import_role"
+    ]
+    assert imports == [
+        ("local_worker_host", "worker_install_dirs.yml"),
+        ("live_vm_host", "authority_preflight.yml"),
+        ("live_vm_host", "authority_credentials.yml"),
+        ("live_vm_host", "worker_authority_tls.yml"),
+        ("live_vm_host", "tls_expiry.yml"),
+    ]
+    assert tasks[0]["when"] is False
+    lane = cast(list[str], tasks[1]["ansible.builtin.assert"]["that"])
+    assert "live_vm_host_worker_authority_instance == live_vm_host_authority_instance" in lane
+
+    order = [
+        "Validate protected authority inputs before host mutation",
+        "Verify the source certificate chains each side checks at runtime",
+        "Require each source certificate to match its key",
+        "Require a clean controller checkout at exactly the installed revision",
+        "Install the authority credentials",
+        "Reset the authority unit's failed state before its planned restart",
+        "Restart the authority after changed credentials",
+        "Restart the authority when no credential changed",
+        "Install the fixed-worker authority TLS files",
+        "Require installed authority certificates to outlive the expiry margin",
+        "Require the authority to be active",
+        "Verify the installed certificate chains each side checks at runtime",
+        "Require each worker to verify the authority serving the installed certificate",
+    ]
+    assert [names.index(name) for name in order] == sorted(names.index(name) for name in order)
+    by_name = {task["name"]: task for task in tasks}
+    reset = by_name["Reset the authority unit's failed state before its planned restart"]
+    assert reset["ansible.builtin.command"]["argv"][:2] == ["systemctl", "reset-failed"]
+    assert by_name["Restart the authority after changed credentials"]["ansible.builtin.meta"] == (
+        "flush_handlers"
+    )
+    restart = by_name["Restart the authority when no credential changed"]
+    assert restart["when"] == "not live_vm_host_authority_credentials.changed"
+    assert restart["ansible.builtin.systemd_service"]["state"] == "restarted"
+    for task in tasks[: names.index("Install the authority credentials")]:
+        if module(task) == "ansible.builtin.command":
+            assert task["delegate_to"] == "localhost" and task["become"] is False, task["name"]
+    expiry = by_name["Require installed authority certificates to outlive the expiry margin"]
+    checked = [item["name"] for item in expiry["vars"]["live_vm_host_tls_expiry_certificates"]]
+    assert len(checked) == 6
+    assert all(
+        "key" not in item["path"] for item in expiry["vars"]["live_vm_host_tls_expiry_certificates"]
+    )
+
+
+def test_authority_proof_resolves_the_role_siblings_it_imports() -> None:
+    """#3273: live_vm_host imports local_worker_host, so every carrier play sets the roles path."""
+    proof = _text(AUTHORITY_PROOF)
+    runs = re.findall(
+        r'(ANSIBLE_ROLES_PATH="?\$source_root/deploy/ansible/roles"?(?: \\\n\s*| ))?'
+        r"uv run --with ansible-core==2\.21\.1 ansible-playbook",
+        proof,
+    )
+    assert len(runs) == 3
+    assert all(runs), runs
+    assert proof.count("ansible-playbook") == 3
+    assert "role: $source_root/deploy/ansible/roles/live_vm_host" in proof
+
+
+def test_authority_proof_tears_down_only_after_its_prerequisites_installed_acl() -> None:
+    """#3273: teardown becomes unprivileged accounts, which needs the role-installed acl."""
+    defaults = _yaml(DEFAULTS)
+    assert "acl" in cast(list[str], defaults["live_vm_host_authority_packages"])
+    proof = _text(AUTHORITY_PROOF)
+    marker = '"$remote_root/prerequisites-installed"'
+    prerequisites = proof.index("--tags authority_prerequisites")
+    assert proof.index(f"touch {marker}") > prerequisites
+    assert proof.index(f"touch {marker}") < proof.index('createdb "$database"')
+    cleanup = proof[proof.index("<<'REMOTE_CLEANUP'") : proof.index("\nREMOTE_CLEANUP\n")]
+    guard = (
+        f"if [[ ! -f {marker} ]]; then\n"
+        '  echo "teardown skipped: the authority prerequisites never installed" >&2\n'
+        "elif [[ -f $source_root/deploy/ansible/playbooks/authority_host_teardown.yml"
+    )
+    assert guard in cleanup
+    assert cleanup.index(guard) < cleanup.index("ansible-playbook -i inventory")

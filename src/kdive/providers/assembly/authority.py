@@ -4,7 +4,6 @@ from collections.abc import Callable
 
 from pydantic import SecretStr
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.providers.external_boot_authority.local_client import (
     LocalAuthorityBinding,
@@ -49,24 +48,3 @@ def local_authority_sender_factory(
         lambda: _AuthorityUnixTransport(binding, _resolve_tls_material(binding, secret_backend)),
         borrow,
     )
-
-
-def recovery_orphan_authority_sender_factory(
-    secrets: SecretBackend, borrow: Callable[[], SecretStr]
-) -> Callable[[], AuthorityRequestSender] | None:
-    """Build the one fixed local authority route for closed orphan requests."""
-    binding = local_authority_binding()
-    if binding is None:
-        return None
-
-    def build() -> AuthorityRequestSender:
-        sender = local_authority_sender_factory(secrets, borrow, binding=binding)
-        if sender is None:
-            raise CategorizedError(
-                "authority: binding-unavailable",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                terminal=True,
-            )
-        return sender
-
-    return build

@@ -27,8 +27,10 @@ guest, repeated setup, and booted again.
 - **Fedora 44:** every install, boot, confinement and cleanup check held.
 - **Ubuntu 26.04:** installed and booted, but its session-mode guests run unconfined under
   AppArmor (#3067).
-- **Rocky Linux 10:** host preparation stops when Docker comes from Docker's repository (#3068).
-  The lab's stale clean image cannot start Docker at all until its packages are upgraded.
+- **Rocky Linux 10:** the original proof stopped at source repository selection (#3068).
+  The corrected binding builder has passed build/import checks with Docker's repository
+  definition and with podman-docker. This focused proof does not establish a passing
+  clean-host installation cell; the full installation still needs qualification.
 
 See the [proof record](../../design/2026-10-01-host-install-proof-record-2807.md).
 
@@ -82,8 +84,10 @@ These are the points where the two families genuinely diverge, not just in packa
   AlmaLinux use `sudo dnf config-manager --set-enabled crb` after installing
   `dnf-plugins-core`. On subscribed RHEL, enable its CodeReady Builder repository through
   `subscription-manager`. The EL10 binding builder also needs the distribution's AppStream
-  source repository definition; it enables source repositories only for its exact-source
-  download. Fedora uses its packaged binding.
+  source repository definition: `appstream-source` on Rocky/AlmaLinux, or
+  `rhel-10-for-<rpm-arch>-appstream-source-rpms` on RHEL. The builder selects only that
+  repository for its exact-source download, excluding third-party repositories even
+  when they are enabled. It does not persist repository changes. Fedora uses its packaged binding.
 - **Container engine.** The engine and the compose v2 plugin are separate packages on every
   family: Debian/Ubuntu pair `docker.io` with `docker-compose-v2`, Fedora pairs `moby-engine`
   with `docker-compose`, and openSUSE Tumbleweed pairs `docker` with `docker-compose`. In each

@@ -1,0 +1,16 @@
+-- Let ops.resolve_recovery_orphan take its quarantine row lock as kdive_server (#3322).
+--
+-- Admission locks the selected quarantined rows with SELECT ... FOR UPDATE OF q, and
+-- PostgreSQL requires UPDATE privilege on at least one column of a table locked that way.
+-- 0138 granted kdive_server SELECT only, so every call failed with InsufficientPrivilege.
+--
+-- The grant is column-scoped to created_at, the column whose direct update does least harm:
+-- it is an insertion timestamp that no fencing function, digest comparison, status check,
+-- table constraint or code path reads. Every column the authority's SECURITY DEFINER
+-- functions compare (status, ownership/observed/journal digests, identities, bindings,
+-- disposition_job_id, resolved_at) stays non-updatable by kdive_server.
+--
+-- 0138 also granted kdive_worker SELECT, INSERT, UPDATE here; 0144 revoked all of them, and
+-- quarantine writes go only through kdive_provider_authority's functions. This migration
+-- leaves that model unchanged.
+GRANT UPDATE (created_at) ON public.external_boot_recovery_quarantine TO kdive_server;

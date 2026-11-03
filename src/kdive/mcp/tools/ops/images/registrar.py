@@ -53,7 +53,16 @@ def register(
 def _register_images_publish(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(name=PUBLISH_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def images_publish(
-        provider: Annotated[str, Field(description="The provider whose plane builds the image.")],
+        provider: Annotated[
+            str,
+            Field(
+                description=(
+                    "The provider whose plane builds the image: local-libvirt. remote-libvirt is "
+                    "refused with not_implemented; stage remote images with the Ansible image "
+                    "playbook instead."
+                )
+            ),
+        ],
         name: Annotated[str, Field(description="The catalog image name to build and publish.")],
         packages: Annotated[
             tuple[str, ...],
@@ -68,6 +77,8 @@ def _register_images_publish(app: FastMCP, pool: AsyncConnectionPool) -> None:
         One job covers build, validation, and catalog publication, so this is also the entry
         point for promoting an already-realized ``defined`` baseline. Re-issuing it for the same
         ``provider``/``name`` returns the existing job rather than enqueuing a second one.
+        A remote-libvirt request enqueues nothing and answers ``not_implemented``: remote base
+        images are built and staged by the operator's Ansible image playbook.
         """
         return await publish(
             pool,

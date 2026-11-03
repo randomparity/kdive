@@ -4,19 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from tests.live_vm import require_live_vm_remote
+from tests.integration.live_stack.remote_quiescence import cells, scenario
+from tests.integration.live_stack.scenario import run_cell
 
 
 @pytest.mark.live_vm
 @pytest.mark.live_vm_remote
 def test_remote_capture_operation_waits_for_fresh_monitor_ordering() -> None:
-    """Run only with a Resource-bound remote FIFO/file-operation fixture.
-
-    The current remote live contract provides TLS, base-image, object-store, and reconciler
-    fixtures, but no Resource-bound remote file-operation/SSH fixture capable of creating and
-    opening the test-owned FIFO on the libvirt host. Collection is intentional: the remote live
-    recipe executes this exact carrier and reports it unavailable instead of mistaking an empty
-    marker family or a local fake for cross-connection proof.
-    """
-    require_live_vm_remote()
-    pytest.skip("Resource-bound remote FIFO/file-operation fixture is unavailable")
+    """Run the Resource-bound TLS proof against an accepted, held native NBD operation."""
+    selected = cells()
+    assert len(selected) == 1, "expected one native x86 remote quiescence cell"
+    run_cell(selected[0], scenario)

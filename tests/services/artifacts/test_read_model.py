@@ -6,8 +6,12 @@ import asyncio
 from uuid import UUID, uuid4
 
 import psycopg
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.catalog.read_model import raw_pcap_key, raw_vmcore_key
+from kdive.domain.capture import CaptureMethod
+from tests.capture_store import journal_existing_test_pair
+from tests.integration._seed import seed_unbound_running_run
 
 
 async def _connect(url: str) -> psycopg.AsyncConnection:
@@ -52,7 +56,8 @@ async def _artifact(
 
 def test_raw_vmcore_key_returns_only_matching_unredacted_run_key(migrated_url: str) -> None:
     async def _run() -> None:
-        run_id = uuid4()
+        async with AsyncConnectionPool(migrated_url, open=False) as pool:
+            run_id = UUID(await seed_unbound_running_run(pool))
         other_run_id = uuid4()
         raw_key = f"local/runs/{run_id}/vmcore-host_dump"
         async with await _connect(migrated_url) as conn:
@@ -60,6 +65,9 @@ def test_raw_vmcore_key_returns_only_matching_unredacted_run_key(migrated_url: s
             await _artifact(conn, run_id, f"{raw_key}-redacted", sensitivity="redacted")
             await _artifact(conn, other_run_id, f"local/runs/{other_run_id}/vmcore-kdump")
 
+            await journal_existing_test_pair(
+                conn, str(run_id), raw_key, method=CaptureMethod.HOST_DUMP
+            )
             assert await raw_vmcore_key(conn, run_id) == raw_key
             assert await raw_vmcore_key(conn, uuid4()) is None
 

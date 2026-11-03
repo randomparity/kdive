@@ -119,6 +119,7 @@ def test_debug_port_records_reject_extra_fields_and_serialize_defaults() -> None
 
     assert stop.model_dump(mode="json") == {
         "reason": "breakpoint-hit",
+        "signal_name": None,
         "bkptno": "1",
         "stopped_thread": None,
         "frame": {

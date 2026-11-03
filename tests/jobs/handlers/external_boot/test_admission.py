@@ -565,6 +565,98 @@ def test_the_built_payload_survives_dump_and_load(migrated_url: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("attempts", "refusal", "carried_nonce"),
+    [
+        (("discharged",), None, None),
+        (("discharged", "discharged"), None, None),
+        (("open",), None, "1" * 32),
+        (("discharged", "open"), None, "2" * 32),
+        ((), "no retained PREP evidence", None),
+        (("open", "open"), "PREP evidence is ambiguous", None),
+        (("discharged", "unfinished"), "no retained PREP evidence", None),
+        (("unfinished",), "no retained PREP evidence", None),
+        (("evidence-only",), "no retained PREP evidence", None),
+    ],
+    ids=[
+        "released",
+        "two-released",
+        "open-carries-receipt",
+        "open-beside-released",
+        "no-obligation",
+        "ambiguous",
+        "released-beside-unfinished",
+        "unfinished",
+        "evidence-only",
+    ],
+)
+def test_remote_activated_teardown_after_release_needs_no_receipt(
+    migrated_url: str, attempts: tuple[str, ...], refusal: str | None, carried_nonce: str | None
+) -> None:
+    """#3406: a teardown whose reap obligations are all discharged carries no PREP receipt."""
+
+    async def body(conn: AsyncConnection, vehicle: Vehicle) -> None:
+        await seed_case(
+            conn,
+            vehicle,
+            purpose="teardown",
+            activation_state="recovery_failed",
+            attempt_state="failed",
+            with_materialization=True,
+            with_recovery_point=True,
+        )
+        await conn.execute(
+            "UPDATE resources SET kind='remote-libvirt' WHERE id=("
+            "SELECT a.resource_id FROM systems s JOIN allocations a ON a.id=s.allocation_id "
+            "WHERE s.id=%s)",
+            (vehicle.system_id,),
+        )
+        await conn.execute(
+            "UPDATE runs SET target_kind='remote-libvirt' WHERE id=%s", (vehicle.run_id,)
+        )
+        repository = RemoteModuleAttemptObligationRepository()
+        for nonce, state in zip(("1" * 32, "2" * 32), attempts, strict=False):
+            attempt = ModuleAttempt(vehicle.system_id, vehicle.run_id, nonce)
+            await repository.open_mutation_obligation(conn, attempt)
+            if state == "unfinished":
+                continue
+            await repository.record_terminal_evidence(conn, attempt, _evidence(attempt))
+            if state == "evidence-only":
+                continue
+            await repository.open_reap_obligation(conn, attempt)
+            if state == "discharged":
+                await repository.discharge_reap_obligation(conn, attempt)
+        local = resolver_for(vehicle).resolve(ResourceKind.LOCAL_LIBVIRT)
+
+        async def build() -> tuple[JobKind, BootPayload | TeardownPayload]:
+            return await build_external_boot_payload(
+                conn,
+                activation_id=vehicle.activation_id,
+                purpose="teardown",
+                operation="teardown",
+                provider_kind="remote-libvirt",
+                authority_instance=AUTHORITY_INSTANCE,
+                operation_identity="teardown-remote",
+                resolver=ProviderResolver({ResourceKind.REMOTE_LIBVIRT: local}),
+            )
+
+        if refusal is not None:
+            with pytest.raises(CategorizedError, match=refusal):
+                await build()
+            return
+        kind, payload = await build()
+        assert kind is JobKind.TEARDOWN
+        assert isinstance(payload, TeardownPayload)
+        receipt = payload.remote_module_attempt_v1
+        if carried_nonce is None:
+            assert receipt is None
+        else:
+            assert receipt is not None
+            assert receipt.module_attempt_obligation.operation_nonce == carried_nonce
+
+    _drive(migrated_url, body)
+
+
+@pytest.mark.parametrize(
     ("activation_state", "receipts", "refusal"),
     [
         ("preparing", 0, None),

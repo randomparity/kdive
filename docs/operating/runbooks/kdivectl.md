@@ -69,7 +69,9 @@ server running another revision, so compare the client and server versions when 
 missing or rejected.
 
 Scalar parameters use typed flags or positionals shown by `--help`; complex parameters use
-`--<parameter>-json` with a JSON object or array. The server validates the payload's structure.
+`--<parameter>-json` with a JSON object or array, or a JSON number or string where the tool
+accepts one (for example `allocations renew --extend-json 2`). The server validates the payload's
+structure.
 For example, after setting `KDIVE_TOKEN` to a token with membership in the example project:
 
 ```bash

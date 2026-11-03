@@ -16,7 +16,7 @@ _RECONCILER_CUTOFF_COLUMNS = ("singleton", "complete", "cutoff_at")
 def test_latest_migrations_are_discovered_in_order() -> None:
     migrations = migrate.discover_migrations()
 
-    assert [(item.version, item.filename) for item in migrations[-52:]] == [
+    assert [(item.version, item.filename) for item in migrations[-67:]] == [
         ("0116", "0116_capture_claimable_queue_depth.sql"),
         ("0117", "0117_worker_bootstrap_key_insert.sql"),
         ("0118", "0118_worker_audit_log_insert.sql"),
@@ -69,6 +69,21 @@ def test_latest_migrations_are_discovered_in_order() -> None:
         ("0168", "0168_tearing_down_authority_teardown.sql"),
         ("0169", "0169_ended_allocation_authority_teardown.sql"),
         ("0170", "0170_repeated_provider_conflict_terminal.sql"),
+        ("0171", "0171_authority_system_discharge.sql"),
+        ("0172", "0172_settled_install_build_use_release.sql"),
+        ("0175", "0175_capture_publication_upload_fence.sql"),
+        ("0176", "0176_vmcore_retention_write_fence.sql"),
+        ("0177", "0177_recovery_orphan_quarantine_row_lock.sql"),
+        ("0178", "0178_external_boot_conflict_from_head.sql"),
+        ("0179", "0179_external_boot_prestop_system_holders.sql"),
+        ("0180", "0180_remote_module_activate_evidence.sql"),
+        ("0181", "0181_release_fail_while_recovering.sql"),
+        ("0182", "0182_release_cleanup_evidence_phase.sql"),
+        ("0183", "0183_authority_first_activation_proof.sql"),
+        ("0184", "0184_cleanup_evidence_drop_resolve_conflict.sql"),
+        ("0185", "0185_recover_fail_while_recovering.sql"),
+        ("0186", "0186_quarantine_publication_adopted_identity.sql"),
+        ("0187", "0187_remote_module_attempt_adopted_preparation.sql"),
     ]
 
 

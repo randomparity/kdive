@@ -1126,3 +1126,107 @@ def _request_for_candidate(candidate: Any) -> CaptureRequest:
         max_bytes=1_048_576,
         max_polls=1,
     )
+
+
+@pytest.mark.parametrize("outcome", ["aborted_before_spawn", "aborted_before_identity"])
+@pytest.mark.parametrize(
+    "failure", [None, "ack", "publication", "disposal", "authority", "session", "cancellation"]
+)
+def test_supervisor_closes_launch_abort_under_fence(
+    monkeypatch: pytest.MonkeyPatch, launch_token: str, outcome: str, failure: str | None
+) -> None:
+    from kdive.jobs.capture_operations import supervisor as module
+    from kdive.jobs.capture_operations.launcher import LaunchAbortEvidence
+
+    events: list[str] = []
+    job = _job()
+    request = _request(job)
+    expected_operation = _operation(job, request, launch_token)
+    _patch_repository(monkeypatch, expected_operation, events)
+    launch_error = RuntimeError("injected launch failure")
+    lost = asyncio.Event()
+    recovery_entered = asyncio.Event()
+    recovery_gate = asyncio.Event()
+
+    class AbortingLauncher:
+        async def launch(self, *args: Any, on_abort: Any) -> None:
+            on_abort(
+                LaunchAbortEvidence(
+                    process_created=outcome == "aborted_before_identity",
+                    process_absent=True,
+                    provider_quiescence={"result": "absent"},
+                    exit_outcome=cast(Any, outcome),
+                    exit_code=None,
+                )
+            )
+            if failure == "authority":
+                lost.set()
+            raise launch_error
+
+        def dispose_operation_spool(self, operation_id: UUID) -> bool:
+            assert operation_id == expected_operation.id
+            assert "unlock" not in events
+            events.append("dispose-abort")
+            return failure != "disposal"
+
+    async def acknowledge(*args: Any) -> CaptureOperation:
+        assert "unlock" not in events
+        events.append("ack")
+        if failure == "ack":
+            raise PermissionError("authority refused")
+        return expected_operation
+
+    async def recover(conn: AsyncConnection, operation: CaptureOperation) -> CaptureOperation:
+        assert operation is expected_operation
+        assert "unlock" not in events
+        events.append("recover-publication")
+        if failure == "cancellation":
+            recovery_entered.set()
+            await recovery_gate.wait()
+        if failure == "publication":
+            raise RuntimeError("publication refused")
+        return operation
+
+    monkeypatch.setattr(module, "acknowledge_exit", acknowledge)
+    supervisor = CaptureOperationSupervisor(
+        launcher=cast(GatedCaptureLauncher, AbortingLauncher()), credential=SecretStr("credential")
+    )
+
+    async def run() -> None:
+        conn = _Connection(events, fail_probe=1 if failure == "session" else None)
+        with module.capture_authority_scope(lost), pytest.raises(RuntimeError) as raised:
+            task = asyncio.create_task(
+                supervisor.execute(
+                    cast(AsyncConnection, conn),
+                    job,
+                    _snapshot(request, events),
+                    request,
+                    publisher=_publisher(events),
+                    publication_recoverer=recover,
+                )
+            )
+            if failure == "cancellation":
+                try:
+                    await asyncio.wait_for(recovery_entered.wait(), timeout=1)
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    task.cancel()
+                    await asyncio.sleep(0)
+                    assert not task.done() and "unlock" not in events
+                finally:
+                    recovery_gate.set()
+            await task
+        assert raised.value is launch_error
+
+    asyncio.run(run())
+    assert "identity" not in events and "running" not in events and "publish" not in events
+    assert events.count("ack") == (0 if failure in {"authority", "session"} else 1)
+    if failure in {None, "cancellation"}:
+        closure = ["ack", "recover-publication", "dispose-abort", "spool_recorded", "unlock"]
+        assert [event for event in events if event in closure] == closure
+    else:
+        assert "spool_recorded" not in events
+        if failure in {"ack", "authority", "session"}:
+            assert "recover-publication" not in events
+        if failure != "disposal":
+            assert "dispose-abort" not in events

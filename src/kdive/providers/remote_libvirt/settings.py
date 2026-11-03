@@ -3,7 +3,7 @@
 A dependency-light module (imports only :class:`Setting`). The connection identity (URI, TLS cert
 refs, gdbstub address/range, base image, allocation cap) moved to the declarative ``systems.toml``
 ``[[remote_libvirt]]`` inventory instance (M2.6 Phase 3, #395); only the libvirt host topology
-knobs the v2 model does not carry — storage pool, network, and QEMU machine type — remain env
+knobs the v2 model does not carry — storage pools, network, and QEMU machine type — remain env
 settings here.
 """
 
@@ -81,6 +81,19 @@ REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES = Setting(
     ),
     suggest="a positive integer number of bytes, e.g. 10737418240",
 )
+REMOTE_LIBVIRT_PCAP_POOL = Setting(
+    name="KDIVE_REMOTE_LIBVIRT_PCAP_POOL",
+    parse=str,
+    default="kdive-pcap",
+    group="remote-libvirt",
+    processes=_RT,
+    help=(
+        "Dedicated libvirt directory pool for traffic-capture pcaps (ADR-0432). site.yml "
+        "provisions it root:root 0711, searchable but not writable by the QEMU user, and labelled "
+        "or AppArmor-allowed so QEMU can write the pcap the provider pre-creates. A non-default "
+        "name must match the libvirt_pool_net_pcap_pool_name Ansible variable."
+    ),
+)
 
 REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS = Setting(
     name="KDIVE_REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS",
@@ -112,5 +125,6 @@ SETTINGS = [
     REMOTE_LIBVIRT_MACHINE,
     REMOTE_LIBVIRT_BOOT_ARTIFACT_POOL,
     REMOTE_LIBVIRT_BOOT_ARTIFACT_MAX_BYTES,
+    REMOTE_LIBVIRT_PCAP_POOL,
     REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS,
 ]

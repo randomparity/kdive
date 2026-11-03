@@ -11,6 +11,8 @@ import pytest
 
 from kdive.images.families import family_for
 from kdive.images.rootfs.catalog import load_rootfs_catalog
+from kdive.mcp.responses import ToolResponse
+from kdive.serialization import JsonValue
 from scripts.coverage_campaign.contract import build_contract
 from scripts.coverage_campaign.evidence import Outcome
 from scripts.coverage_campaign.results import qualify
@@ -21,6 +23,7 @@ from tests.integration.live_stack.image_smoke import (
     native_cells,
     os_matches,
     parse_probe,
+    provenance_matches,
     ssh,
     toolchain_command,
 )
@@ -149,3 +152,66 @@ def test_ssh_connects_to_the_endpoint_host(tmp_path: Path, monkeypatch: pytest.M
     argv = seen[0]
     assert argv[argv.index("-p") + 1] == "47201"
     assert argv[-3:] == ["root@192.0.2.10", "--", "true"]
+
+
+def test_ssh_timeout_does_not_replay_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+
+    def run(argv: list[str], *, timeout: float, **_kwargs: object):
+        calls.append(argv)
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(subprocess.TimeoutExpired):
+        ssh(Endpoint("127.0.0.1", 22), tmp_path / "key", "make install")
+    assert len(calls) == 1
+
+
+def test_ssh_forwards_per_attempt_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    timeouts = []
+
+    def run(argv: list[str], *, timeout: float, **_kwargs: object):
+        timeouts.append(timeout)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    ssh(Endpoint("127.0.0.1", 22), tmp_path / "key", "true", timeout_s=2.0)
+    assert timeouts == [2.0]
+
+
+def test_published_provenance_matches_canonical_producer_fields() -> None:
+    described = ToolResponse.success(
+        "image",
+        "registered",
+        data={"provenance": {"os_release": {"id": "fedora", "version_id": "43"}, "arch": "x86_64"}},
+    )
+    provenance_matches(described, _CATALOG["fedora-kdive-ready-43-cloud"])
+
+
+@pytest.mark.parametrize(
+    "field,value", [("id", "rocky"), ("version_id", "44"), ("id", ""), ("version_id", "")]
+)
+def test_published_provenance_rejects_wrong_or_missing_os(field: str, value: str) -> None:
+    release: dict[str, JsonValue] = {"id": "fedora", "version_id": "43"}
+    if value:
+        release[field] = value
+    else:
+        del release[field]
+    described = ToolResponse.success(
+        "image", "registered", data={"provenance": {"os_release": release, "arch": "x86_64"}}
+    )
+    with pytest.raises(AssertionError, match="provenance names"):
+        provenance_matches(described, _CATALOG["fedora-kdive-ready-43-cloud"])
+
+
+@pytest.mark.parametrize("arch", ["ppc64le", ""])
+def test_published_provenance_rejects_wrong_or_missing_arch(arch: str) -> None:
+    described = ToolResponse.success(
+        "image",
+        "registered",
+        data={"provenance": {"os_release": {"id": "fedora", "version_id": "43"}, "arch": arch}},
+    )
+    with pytest.raises(AssertionError, match="provenance names"):
+        provenance_matches(described, _CATALOG["fedora-kdive-ready-43-cloud"])

@@ -1,0 +1,7 @@
+<config>
+  <system-updater name="generic" format="info">
+    <action name="install" command="/usr/local/libexec/kdive-wicked/netconfig install"/>
+    <action name="remove" command="/usr/local/libexec/kdive-wicked/netconfig remove"/>
+    <action name="batch" command="/usr/local/libexec/kdive-wicked/netconfig batch"/>
+  </system-updater>
+</config>

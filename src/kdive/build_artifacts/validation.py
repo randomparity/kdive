@@ -71,6 +71,7 @@ _EXTERNAL_BOOT_DEBUGINFO_MAX_BYTES = 1_610_612_736
 _EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES = 2 * 1024 * 1024 * 1024
 _EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS = 200_000
 _EXTERNAL_BOOT_ARCHIVE_MAX_BYTES = 8 * 1024 * 1024 * 1024
+_STAGED_DEBUGINFO_PATH = "vmlinux"
 _EXTERNAL_BOOT_MEMBER_MAX_BYTES = 512 * 1024 * 1024
 _EXTERNAL_BOOT_EXTENSION_MAX_BYTES = 1024 * 1024
 _EXTERNAL_BOOT_DECODED_KERNEL_MAX_BYTES = 2 * 1024 * 1024 * 1024
@@ -434,12 +435,18 @@ def _external_boot_evidence(
             max_bytes=_EXTERNAL_BOOT_ARCHIVE_COMPRESSED_MAX_BYTES,
         )
     bundle_digest = _ObjectDigest(store, keys["kernel"], bundle_head.size_bytes)
+    debuginfo = _debuginfo_evidence(store, keys=keys, heads=heads)
     archive = _scan_external_boot_archive(
         store,
         keys["kernel"],
         bundle_head.size_bytes,
         arch,
         range_observer=bundle_digest.observe,
+        staged_debuginfo=(
+            None
+            if debuginfo is None
+            else (str(debuginfo["sha256"]), cast("int", debuginfo["size_bytes"]))
+        ),
     )
     if build_id and archive["gnu_build_id"] != build_id:
         raise _build_failure(
@@ -460,7 +467,6 @@ def _external_boot_evidence(
             "sha256": _digest_object(store, keys["initrd"], initrd_head.size_bytes),
             "size_bytes": initrd_head.size_bytes,
         }
-    debuginfo = _debuginfo_evidence(store, keys=keys, heads=heads)
     bundle_digest.drain()
     evidence: dict[str, JsonValue] = {
         "schema": "external-boot-evidence-v1",
@@ -481,7 +487,10 @@ def _external_boot_evidence(
         "module_uncompressed_bytes": archive["module_uncompressed_bytes"],
     }
     if debuginfo is not None:
-        evidence["debuginfo"] = debuginfo
+        staged = archive.get("staged_module_source_manifest")
+        evidence["debuginfo"] = (
+            debuginfo if staged is None else {**debuginfo, "staged_module_source_manifest": staged}
+        )
     return evidence
 
 
@@ -720,6 +729,7 @@ def _scan_external_boot_archive(
     arch: str,
     *,
     range_observer: Callable[[int, bytes], None] | None = None,
+    staged_debuginfo: tuple[str, int] | None = None,
 ) -> dict[str, JsonValue]:
     entries: list[dict[str, JsonValue]] = []
     releases: set[str] = set()
@@ -797,9 +807,10 @@ def _scan_external_boot_archive(
             module_release=module_release,
         )
     entries.sort(key=lambda entry: str(entry["path"]).encode())
-    document = {"entries": entries, "schema": "module-source-manifest-v1"}
-    encoded = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    manifest = hashlib.sha256(b"kdive-module-source-manifest-v1\0" + encoded.encode()).hexdigest()
+    manifest = _module_source_manifest(entries)
+    staged = _staged_module_source_manifest(
+        entries, staged_debuginfo, module_bytes=module_bytes, module_members=module_members
+    )
     return {
         "archive_member_count": member_count,
         "archive_uncompressed_bytes": archive_bytes,
@@ -812,10 +823,50 @@ def _scan_external_boot_archive(
         "gnu_build_id": boot["gnu_build_id"],
         "gnu_build_id_size_bytes": boot["gnu_build_id_size_bytes"],
         "release": module_release,
-        "module_source_manifest": _SHA256_PREFIX + manifest,
+        "module_source_manifest": manifest,
         "module_member_count": module_members,
         "module_uncompressed_bytes": module_bytes,
+        **({} if staged is None else {"staged_module_source_manifest": staged}),
     }
+
+
+def _module_source_manifest(entries: list[dict[str, JsonValue]]) -> str:
+    ordered = sorted(entries, key=lambda entry: str(entry["path"]).encode())
+    document = {"entries": ordered, "schema": "module-source-manifest-v1"}
+    encoded = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    digest = hashlib.sha256(b"kdive-module-source-manifest-v1\0" + encoded.encode()).hexdigest()
+    return _SHA256_PREFIX + digest
+
+
+def _staged_module_source_manifest(
+    entries: list[dict[str, JsonValue]],
+    debuginfo: tuple[str, int] | None,
+    *,
+    module_bytes: int,
+    module_members: int,
+) -> str | None:
+    """Manifest of the module tree with the uploaded vmlinux added as ``vmlinux`` (#3131).
+
+    None when no file is staged, the tree already has that name, or the combined tree would
+    exceed the module bounds the remote source build enforces.
+    """
+    if debuginfo is None:
+        return None
+    digest, size = debuginfo
+    if (
+        any(entry["path"] == _STAGED_DEBUGINFO_PATH for entry in entries)
+        or module_members + 1 > _EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS
+        or module_bytes + size > _EXTERNAL_BOOT_ARCHIVE_MAX_BYTES
+    ):
+        return None
+    staged: dict[str, JsonValue] = {
+        "mode": "0644",
+        "path": _STAGED_DEBUGINFO_PATH,
+        "sha256": digest,
+        "size": size,
+        "type": "file",
+    }
+    return _module_source_manifest([*entries, staged])
 
 
 def _canonical_tar_path(member: tarfile.TarInfo) -> str:

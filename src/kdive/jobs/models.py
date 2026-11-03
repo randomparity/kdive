@@ -19,7 +19,10 @@ from psycopg import AsyncConnection
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.external_boot_activation import ExternalBootTerminalEvidenceV1
+from kdive.domain.external_boot_activation import (
+    ExternalBootConflictEvidenceV1,
+    ExternalBootTerminalEvidenceV1,
+)
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.providers.external_boot_authority.protocol import AuthorityTeardownResponseV1
 from kdive.providers.system_authority.protocol import AuthoritySystemResponseV1
@@ -161,6 +164,13 @@ class _RecoveryAttemptResult(_ResultBase):
     _normalize_timestamp = field_validator("deadline")(_utc_datetime)
 
 
+class _ConflictResult(_ResultBase):
+    """ADR-0805: the authority journaled a terminal conflict for this operation."""
+
+    operation: Literal["conflict"]
+    evidence: ExternalBootConflictEvidenceV1
+
+
 class ExternalBootCmdlineMismatchV1(_ClosedModel):
     schema_: Literal["external-boot-cmdline-mismatch-v1"] = Field(
         "external-boot-cmdline-mismatch-v1", alias="schema"
@@ -264,6 +274,7 @@ type ExternalBootResultPayload = Annotated[
     | _TeardownResult
     | _DeadlineResult
     | _RecoveryAttemptResult
+    | _ConflictResult
     | _FailureResult,
     Field(discriminator="operation"),
 ]
@@ -361,10 +372,10 @@ class ExternalBootAuthorityResultV1(BaseModel):
         operation = self.result.operation
         admitted_operation = self.admitted_operation
         allowed = {
-            "activate": {"activate", "deadline", "fail"},
-            "recover": {"recover", "deadline", "recovery-attempt", "fail"},
-            "resolve-conflict": {"resolve-conflict", "recovery-attempt", "fail"},
-            "release": {"release", "cleanup", "fail"},
+            "activate": {"activate", "deadline", "conflict", "fail"},
+            "recover": {"recover", "deadline", "recovery-attempt", "conflict", "fail"},
+            "resolve-conflict": {"resolve-conflict", "recovery-attempt", "conflict", "fail"},
+            "release": {"release", "cleanup", "conflict", "fail"},
             "teardown": {"teardown", "fail"},
         }
         if admitted_operation not in allowed[self.purpose]:
@@ -428,8 +439,8 @@ class ExternalBootAuthoritySuccessV1(ExternalBootAuthorityResultV1):
 
     @model_validator(mode="after")
     def _not_failure(self) -> ExternalBootAuthoritySuccessV1:
-        if self.result.operation == "fail":
-            raise ValueError("success carrier cannot contain a fail operation")
+        if self.result.operation in {"fail", "conflict"}:
+            raise ValueError("success carrier cannot contain a fail or conflict operation")
         return self
 
 
@@ -440,6 +451,16 @@ class ExternalBootAuthorityFailureV1(ExternalBootAuthorityResultV1):
     def _failure(self) -> ExternalBootAuthorityFailureV1:
         if self.result.operation != "fail":
             raise ValueError("failure carrier requires a fail operation")
+        return self
+
+
+class ExternalBootAuthorityConflictV1(ExternalBootAuthorityResultV1):
+    """A conflict the worker records only from the authority's terminal journal head."""
+
+    @model_validator(mode="after")
+    def _conflict(self) -> ExternalBootAuthorityConflictV1:
+        if self.result.operation != "conflict":
+            raise ValueError("conflict carrier requires a conflict operation")
         return self
 
 

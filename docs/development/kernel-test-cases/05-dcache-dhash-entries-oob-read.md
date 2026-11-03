@@ -5,8 +5,8 @@
 - **Subsystem**: VFS, dcache
 - **Public report**: [CVE-2026-43071](https://nvd.nist.gov/vuln/detail/CVE-2026-43071)
 - **Additional tracker**: [Debian CVE-2026-43071](https://security-tracker.debian.org/tracker/CVE-2026-43071)
-- **Fix reference**: Stable backport referenced in [ChangeLog-7.0.1](https://www.kernel.org/pub/linux/kernel/v7.x/ChangeLog-7.0.1)
-- **Fixed release**: Linux 7.0.1
+- **Fix reference**: Upstream [`f08fe8891c3e`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=f08fe8891c3eeb63b73f9f1f6d97aa629c821579) ("dcache: Limit the minimal number of bucket to two"), stable backport in [ChangeLog-7.0.1](https://www.kernel.org/pub/linux/kernel/v7.x/ChangeLog-7.0.1)
+- **Fixed release**: Linux 7.1-rc1 upstream; Linux 7.0.1 stable
 - **Primary symptom**: Page fault or OOB read in `__d_lookup()`
 - **VM suitability**: Easy. Deterministic boot-parameter test.
 

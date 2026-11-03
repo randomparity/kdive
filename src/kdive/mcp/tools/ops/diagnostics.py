@@ -236,7 +236,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool, service_factory: ServiceFa
     async def ops_diagnostics(
         provider: Annotated[
             str | None,
-            Field(description="Diagnose one named registered provider; omit for all registered."),
+            Field(
+                description="Diagnose one exact enabled registered provider; omit for all enabled. "
+                "Unknown or disabled targets return an audited diagnostic error."
+            ),
         ] = None,
         with_egress: Annotated[
             bool,
@@ -250,7 +253,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool, service_factory: ServiceFa
         """Run the deployment diagnostics. Platform operator-gated.
 
         Returns one verdict carrying each check's three-state status, detail, fix, and the
-        provider it covered. A check that could not be run (a down dependency) reports an
+        provider it covered. Shared provider-independent checks remain included for valid targets.
+        A check that could not be run (a down dependency) reports an
         ``error`` distinctly — it is not a contract failure. ``with_egress`` adds the mutating
         probe (off by default; the provisioning is audited distinctly).
         """

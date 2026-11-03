@@ -108,6 +108,38 @@ def test_plan_with_debuginfo_round_trips_canonically() -> None:
     assert plan.identity != golden.identity
 
 
+_DEBUGINFO = {"key": "builds/vmlinux", "version": "v1", "sha256": ZERO_DIGEST, "size_bytes": 4096}
+_STAGED_MANIFEST = "sha256:" + "7" * 64
+
+
+def test_debuginfo_member_without_staged_manifest_keeps_its_stored_identity() -> None:
+    plan = ExternalBootPlan.model_validate(_plan_data() | {"debuginfo": _DEBUGINFO})
+
+    assert b"staged_module_source_manifest" not in plan.to_canonical_json()
+    assert plan.identity == (
+        "sha256:6d596bb67273253a63126469c9e2a45e00e5f891a7d0fb203c79c372e125fb53"
+    )
+    assert plan.module_tree_debuginfo is None
+    assert plan.module_tree_manifest == ZERO_DIGEST
+
+
+def test_staged_manifest_round_trips_and_becomes_the_module_tree_manifest() -> None:
+    member = _DEBUGINFO | {"staged_module_source_manifest": _STAGED_MANIFEST}
+    plan = ExternalBootPlan.model_validate(_plan_data() | {"debuginfo": member})
+
+    assert ExternalBootPlan.from_canonical_json(plan.to_canonical_json()) == plan
+    assert plan.module_tree_debuginfo is not None
+    assert plan.module_tree_manifest == _STAGED_MANIFEST
+    assert plan.module_obligation.source_manifest == ZERO_DIGEST
+
+
+def test_plan_without_debuginfo_uses_the_module_obligation_manifest() -> None:
+    plan = ExternalBootPlan.model_validate(_plan_data())
+
+    assert plan.module_tree_debuginfo is None
+    assert plan.module_tree_manifest == ZERO_DIGEST
+
+
 def test_plan_rejects_an_explicit_null_debuginfo_as_non_canonical() -> None:
     serialized = ExternalBootPlan.model_validate(_plan_data()).to_canonical_json()
     with_null = serialized.replace(
@@ -577,3 +609,30 @@ def test_preparation_observation_enforces_phase_and_exact_binding() -> None:
             operation_identity="prepare-1",
             materialization=materialization,
         )
+
+
+def test_plan_keeps_the_root_subvolume_flag_through_a_direct_root_device() -> None:
+    data = _plan_data()
+    root = cast("dict[str, object]", data["root"])
+    arguments = ["root=UUID=x", "rootfstype=btrfs", "rootflags=subvol=root"]
+    data["root"] = {**root, "arguments": arguments}
+    data["platform_arguments"] = ["root=/dev/vda", "rootfstype=btrfs", "rootflags=subvol=root"]
+    data["cmdline"] = "root=/dev/vda rootfstype=btrfs rootflags=subvol=root"
+
+    plan = ExternalBootPlan.model_validate(data)
+
+    assert plan.cmdline.endswith("rootflags=subvol=root")
+
+
+def test_plan_with_initrd_carries_the_inspected_subvolume_flag() -> None:
+    data = _plan_data()
+    root = cast("dict[str, object]", data["root"])
+    arguments = ["root=UUID=x", "rootfstype=btrfs", "rootflags=subvol=root"]
+    data["root"] = {**root, "arguments": arguments}
+    data["platform_arguments"] = arguments
+    data["cmdline"] = " ".join(arguments)
+    data["initrd"] = {"key": "i", "sha256": ZERO_DIGEST, "size_bytes": 1, "version": "v1"}
+
+    plan = ExternalBootPlan.model_validate(data)
+
+    assert plan.cmdline == "root=UUID=x rootfstype=btrfs rootflags=subvol=root"

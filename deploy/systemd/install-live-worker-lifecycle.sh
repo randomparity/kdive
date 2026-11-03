@@ -105,6 +105,52 @@ _require_real_directory() {
   chmod "$mode" -- "$path"
 }
 
+_check_host_dump_acl() {
+  python3 - <<'PYTHON'
+import os
+from pathlib import Path
+
+root = Path('/var/lib/kdive/host-dump')
+try:
+    for path, forbidden in (
+        (root.parent, {'system.posix_acl_default'}),
+        (root, {'system.posix_acl_access', 'system.posix_acl_default'}),
+    ):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            if path == root:
+                continue
+            raise
+        try:
+            if forbidden.intersection(os.listxattr(fd)):
+                raise SystemExit('host_dump preparation refuses ACLs; inspect and remove '
+                                 'the incompatible ACLs before rerunning host preparation')
+        finally:
+            os.close(fd)
+except OSError as exc:
+    raise SystemExit('host_dump ACL safety cannot be established; inspect the real spool '
+                     'path and ACL access before rerunning host preparation') from exc
+PYTHON
+}
+
+_label_host_dump_spool() {
+  local mode
+  if ! command -v getenforce >/dev/null; then
+    return 0
+  fi
+  mode="$(getenforce)"
+  [[ $mode == Enforcing ]] || return 0
+  if ! command -v semanage >/dev/null || ! command -v restorecon >/dev/null; then
+    echo "host_dump SELinux preparation requires semanage and restorecon; install policycoreutils-python-utils" >&2
+    return 1
+  fi
+  if ! semanage fcontext -a -t svirt_image_t '/var/lib/kdive/host-dump(/.*)?'; then
+    semanage fcontext -m -t svirt_image_t '/var/lib/kdive/host-dump(/.*)?' || return
+  fi
+  restorecon -R /var/lib/kdive/host-dump
+}
+
 _fixture_inventory_is_exact() {
   local catalog="$1" entry relative
   [[ -d $catalog && ! -L $catalog ]] || return 1
@@ -465,6 +511,87 @@ _reconcile_libvirt_tuple() {
   _libvirt_tuple_action="start"
 }
 
+# `--daemon` returns once the daemon has written its pid file and is listening, but libvirt
+# initializes its drivers only afterwards, in a background thread, and accepts no client until
+# that finishes. Driver initialization creates state directories under the runtime tree, so
+# locking the tree before it is done makes initialization fail and the daemon exit (#3208). A
+# completed client connection is the first outside sign that it is done. Every check here is
+# read-only: the tree stays exactly as the daemon is writing it. The operator owns the tree until
+# the lock and can repoint the pid file at anything, so it is read as the operator, with a bound.
+_await_libvirt_daemon_ready() {
+  local pid_path="$1" operator="$2" uri="$3" timeout_seconds="$4" deadline pid="" probe_error=""
+
+  deadline=$((SECONDS + timeout_seconds))
+  while ((SECONDS < deadline)); do
+    if [[ -z $pid && -f $pid_path && ! -L $pid_path ]]; then
+      pid="$(
+        timeout -k 1 1 runuser -u "$operator" -- head -c 32 -- "$pid_path" 2>/dev/null
+      )" || pid=""
+      [[ $pid =~ ^[1-9][0-9]*$ ]] || pid=""
+    fi
+    if [[ -n $pid ]] && ! kill -0 "$pid" 2>/dev/null; then
+      echo "session libvirt daemon $pid exited during initialization" >&2
+      return 1
+    fi
+    if [[ -n $pid ]] && probe_error="$(
+      timeout 5 runuser -u "$operator" -- virsh -q -c "$uri" uri 2>&1 >/dev/null
+    )"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "session libvirt daemon was not ready within ${timeout_seconds}s;" \
+    "last probe: ${probe_error:-none}" >&2
+  return 1
+}
+
+# A daemonized libvirt daemon detaches from the installer's stderr. Where journald runs it logs
+# there; otherwise to ~/.cache/libvirt/<daemon>.log of the account it runs as.
+_report_libvirt_daemon_log() {
+  local operator_uid="$1" daemon="$2" since="$3"
+
+  echo "the daemon's own journal since its launch:" >&2
+  journalctl --no-pager --quiet --output=short-iso --lines=40 --since="@$since" \
+    "_UID=$operator_uid" "_COMM=$daemon" >&2 || :
+  echo "(without journald the daemon logs to ~/.cache/libvirt/$daemon.log of uid $operator_uid)" >&2
+}
+
+_start_libvirt_daemon() {
+  local runtime_parent="$1" runtime_root="$2" operator="$3" operator_uid="$4" group_gid="$5"
+  local lock_uid="$6" libvirt_pid_path libvirt_socket_path launched_at ready=true
+
+  if ! command -v virsh >/dev/null; then
+    echo "virsh is required to confirm the session libvirt daemon is ready" >&2
+    return 1
+  fi
+  libvirt_pid_path="$runtime_root/libvirt/$_libvirt_pid"
+  libvirt_socket_path="$runtime_root/libvirt/$_libvirt_socket"
+  launched_at="$(date +%s)"
+  # Launch with explicit core and memlock limits rather than whatever the escalation path left.
+  # The session daemon starts QEMU workloads and needs to pass both limits through. We are root
+  # here, so raising their hard limits is permitted before runuser drops privileges.
+  if ! prlimit --memlock=unlimited --core=unlimited -- runuser -u "$operator" -- \
+    env XDG_RUNTIME_DIR="$runtime_root" \
+    "$_libvirt_executable" --daemon --config "/etc/kdive/$_libvirt_config" \
+    --pid-file "$libvirt_pid_path"; then
+    echo "selected $_libvirt_family $_libvirt_daemon failed to start" >&2
+    _report_libvirt_daemon_log "$operator_uid" "$_libvirt_daemon" "$launched_at"
+    return 1
+  fi
+  _await_libvirt_daemon_ready "$libvirt_pid_path" "$operator" "$_libvirt_uri" 60 || ready=false
+  _lock_libvirt_runtime "$runtime_parent" "$runtime_root" \
+    "$operator_uid" "$group_gid" "$lock_uid" "$lock_uid"
+  _reconcile_libvirt_tuple "$libvirt_socket_path" "$libvirt_pid_path" "$_libvirt_daemon" \
+    "$operator_uid" "$group_gid"
+  _restore_libvirt_runtime
+  if [[ $ready != true || $_libvirt_tuple_action != adopt ]]; then
+    echo "selected $_libvirt_family $_libvirt_daemon did not produce a complete live tuple;" \
+      "inspect $libvirt_pid_path and $libvirt_socket_path, then rerun" >&2
+    _report_libvirt_daemon_log "$operator_uid" "$_libvirt_daemon" "$launched_at"
+    return 1
+  fi
+}
+
 _select_libvirt_tuple() {
   local os_release="$1"
   local ID="" ID_LIKE="" distro_tokens
@@ -571,19 +698,38 @@ _cleanup_source_link() {
   _created_source_link=""
 }
 
-# The venv build below needs `uv`, and this script runs as root under `sudo`, whose `secure_path`
-# hides a user-local ~/.local/bin: a bare `uv` there exits 127 with no context, after the host has
-# already been mutated (#2506). Resolve it to an absolute path up front instead, and refuse with
-# the remedy. `command -v` also reports functions and builtins, so the result must be a path.
+# Resolve before host mutation or reading secrets. Explicit provisioning selection uses
+# the root-controlled canonical path; default direct callers retain their PATH contract.
 _resolve_uv_bin() {
-  local resolved
-  resolved="$(command -v uv 2>/dev/null)" || resolved=""
-  if [[ $resolved != /* ]]; then
-    echo "uv is not resolvable from PATH=$PATH; this installer runs as root, and sudo's" \
-      "secure_path hides a user-local uv. Invoke it through 'sudo env \"PATH=\$PATH\"', as" \
-      ".github/workflows/live.yml and docs/operating/runbooks/live-stack.md do; where root is" \
-      "reached through Ansible's become instead, install uv where root resolves it (pip installs" \
-      "the console script to /usr/local/bin)." >&2
+  local resolved candidate metadata owner mode version
+  if (($#)); then
+    resolved="$1"
+    if [[ $resolved != /* || ! -f $resolved || ! -x $resolved ]]; then
+      echo "uv selection must be an absolute executable regular file; supply --uv PATH to the installed uv." >&2
+      return 1
+    fi
+    resolved="$(readlink -e -- "$resolved")" || return 1
+    candidate="$resolved"
+    while :; do
+      metadata="$(stat -c '%u %a' -- "$candidate")" || return 1
+      read -r owner mode <<<"$metadata"
+      if [[ $owner != 0 ]] || (((8#$mode & 0022) != 0)); then
+        echo "uv selection has unsafe ownership or permissions at $candidate; use a root-owned path without group/other write access." >&2
+        return 1
+      fi
+      [[ $candidate != / ]] || break
+      candidate="${candidate%/*}"
+      [[ -n $candidate ]] || candidate=/
+    done
+  else
+    resolved="$(command -v uv 2>/dev/null)" || resolved=""
+    if [[ $resolved != /* || ! -f $resolved || ! -x $resolved ]]; then
+      echo "uv is not resolvable as an executable from PATH=$PATH; sudo secure_path may hide it. Supply --uv PATH to the installed root-owned uv." >&2
+      return 1
+    fi
+  fi
+  if ! version="$("$resolved" --version </dev/null 2>/dev/null)" || [[ ! $version =~ ^uv\ [0-9]+\.[0-9]+\.[0-9]+($|[[:space:]]) ]]; then
+    echo "uv selection at $resolved did not identify a working uv; supply --uv PATH to a working installation." >&2
     return 1
   fi
   printf '%s\n' "$resolved"
@@ -621,12 +767,13 @@ if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
 fi
 
 usage() {
-  echo "usage: $0 --operator USER --source PATH" >&2
+  echo "usage: $0 --operator USER --source PATH [--uv PATH]" >&2
   exit 2
 }
 
 operator=""
 source_root=""
+uv_selection=()
 while (($#)); do
   case "$1" in
   --operator)
@@ -637,6 +784,11 @@ while (($#)); do
   --source)
     [[ $# -ge 2 ]] || usage
     source_root="$2"
+    shift 2
+    ;;
+  --uv)
+    [[ $# -ge 2 ]] || usage
+    uv_selection=("$2")
     shift 2
     ;;
   *) usage ;;
@@ -652,7 +804,7 @@ done
   echo "fixed local-libvirt fixture catalog is missing from the installation source" >&2
   exit 1
 }
-uv_bin="$(_resolve_uv_bin)" || exit 1
+uv_bin="$(_resolve_uv_bin "${uv_selection[@]}")" || exit 1
 operator_uid="$(id -u "$operator")"
 _select_libvirt_tuple /etc/os-release
 IFS= read -r witness_dsn || [[ -n $witness_dsn ]]
@@ -714,6 +866,10 @@ install -d -o "$operator" -g "$libvirt_group" -m 2770 \
   /var/lib/kdive/rootfs /var/lib/kdive/console \
   /var/lib/kdive/pcap /var/lib/kdive/build /var/lib/kdive/install
 _require_real_directory /var/lib/kdive 0 0 0755
+_check_host_dump_acl
+_require_real_directory /var/lib/kdive/host-dump 0 "$libvirt_group_gid" 3770
+_check_host_dump_acl
+_label_host_dump_spool
 _require_real_directory /var/lib/kdive/fixtures 0 "$libvirt_group_gid" 0750
 install_fixed_fixture_catalog "$source_root/fixtures/local-libvirt" \
   /var/lib/kdive/fixtures/local-libvirt 0 "$libvirt_group_gid"
@@ -837,24 +993,8 @@ _reconcile_libvirt_tuple "$libvirt_socket_path" "$libvirt_pid_path" "$_libvirt_d
 libvirt_tuple_action="$_libvirt_tuple_action"
 _restore_libvirt_runtime
 if [[ $libvirt_tuple_action == start ]]; then
-  # Launch with explicit core and memlock limits rather than whatever the escalation path left.
-  # The session daemon starts QEMU workloads and needs to pass both limits through. We are root
-  # here, so raising their hard limits is permitted before runuser drops privileges.
-  prlimit --memlock=unlimited --core=unlimited -- runuser -u "$operator" -- \
-    env XDG_RUNTIME_DIR=/run/kdive/live-libvirt \
-    "$_libvirt_executable" --daemon --config "/etc/kdive/$_libvirt_config" \
-    --pid-file "$libvirt_pid_path"
-  _lock_libvirt_runtime /run/kdive /run/kdive/live-libvirt \
-    "$operator_uid" "$libvirt_group_gid" 0 0
-  _reconcile_libvirt_tuple "$libvirt_socket_path" "$libvirt_pid_path" "$_libvirt_daemon" \
-    "$operator_uid" "$libvirt_group_gid"
-  libvirt_tuple_action="$_libvirt_tuple_action"
-  _restore_libvirt_runtime
-  if [[ $libvirt_tuple_action != adopt ]]; then
-    echo "selected $_libvirt_family $_libvirt_daemon did not produce a complete live tuple;" \
-      "inspect $libvirt_pid_path and $libvirt_socket_path, then rerun" >&2
-    exit 1
-  fi
+  _start_libvirt_daemon /run/kdive /run/kdive/live-libvirt \
+    "$operator" "$operator_uid" "$libvirt_group_gid" 0
 fi
 
 systemctl daemon-reload

@@ -174,11 +174,17 @@ class _HostBoundary:
             expected_cmdline=b"root=UUID=x",
         )
 
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def recover_modules(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        del acknowledged
         self.actions.append("recover-modules")
         self.record_phase(metadata, "module-restored")
 
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def define_source(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        del acknowledged
         self.actions.append("define-source")
         self.record_phase(metadata, "source-restored")
 

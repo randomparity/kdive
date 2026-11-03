@@ -24,8 +24,11 @@ from pydantic import SecretStr
 
 from kdive.db import migrate
 from kdive.jobs import queue
+from kdive.jobs.handlers.runs import install as runs_install
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.tools.jobs import cancel_job
 from kdive.mcp.tools.ops import build_uses
+from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.reconciler.cleanup.artifacts.artifact_retention import gc_expired_build_artifacts
 from kdive.security import audit
 from kdive.security.authz.rbac import PlatformRole, Role
@@ -222,6 +225,8 @@ _ORDINARY_TABLES = {
     "systems",
     "tool_invocation",
     "upload_manifests",
+    "vmcore_capture_executions",
+    "vmcore_retention_baseline",
 }
 _SERVER_MUTATIONS = {
     "INSERT": _ORDINARY_TABLES
@@ -231,6 +236,8 @@ _SERVER_MUTATIONS = {
         "investigation_build_gc_cursor",
         "investigation_build_tombstones",
         "system_object_sweep_cursors",
+        "vmcore_capture_executions",
+        "vmcore_retention_baseline",
     },
     "UPDATE": _ORDINARY_TABLES
     - {
@@ -245,6 +252,7 @@ _SERVER_MUTATIONS = {
         "system_object_sweep_cursors",
         "system_root_provenance",
         "tool_invocation",
+        "vmcore_retention_baseline",
     },
     "DELETE": {
         "artifacts",
@@ -299,6 +307,8 @@ _WORKER_SELECT = {
     "system_shapes",
     "systems",
     "upload_manifests",
+    "vmcore_capture_executions",
+    "vmcore_retention_baseline",
 }
 _WORKER_MUTATIONS = {
     "INSERT": {
@@ -314,6 +324,7 @@ _WORKER_MUTATIONS = {
         "snapshots",
         "system_bootstrap_keys",
         "upload_manifests",
+        "vmcore_capture_executions",
     },
     "UPDATE": {
         "allocations",
@@ -330,6 +341,7 @@ _WORKER_MUTATIONS = {
         "snapshots",
         "systems",
         "upload_manifests",
+        "vmcore_capture_executions",
     },
     "DELETE": {
         "artifacts",
@@ -378,6 +390,7 @@ _RECONCILER_MUTATIONS = {
         "system_object_sweep_cursors",
         "systems",
         "upload_manifests",
+        "vmcore_capture_executions",
     },
     "DELETE": {
         "artifacts",
@@ -3057,3 +3070,177 @@ def test_kubernetes_registration_requires_a_bounded_matching_uid_binding(
                 b"controller-key-encrypted-envelope",
             ),
         )
+
+
+@pytest.mark.parametrize("provider_fails", [False, True])
+def test_cancelled_install_releases_only_after_provider_settles(
+    pg_conn: psycopg.Connection,
+    role_dsn: RoleDsns,
+    provider_fails: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Actual cancel and LOGIN roles retain bytes until the real provider thread exits."""
+    holder = "docker:cancel-settlement"
+    secret = "cancel-settlement-credential"  # pragma: allowlist secret — synthetic test credential
+    _register(role_dsn, holder, hashlib.sha256(secret.encode()).digest())
+    investigation, generation, job_id = _seed_claim(pg_conn, holder=holder)
+    pg_conn.execute(
+        "UPDATE jobs SET authorizing = authorizing || '{\"agent_session\": null}'::jsonb "
+        "WHERE id = %s",
+        (job_id,),
+    )
+    row = pg_conn.execute(
+        "SELECT id FROM runs WHERE investigation_id = %s", (investigation,)
+    ).fetchone()
+    assert row is not None
+    run_id = row[0]
+    entered, finish, exited = Event(), Event(), Event()
+    release_results: list[bool] = []
+    real_release = runs_install.release_build_use
+
+    async def observed_release(
+        conn: psycopg.AsyncConnection, use_id: UUID | None, *, incarnation_credential: SecretStr
+    ) -> bool:
+        assert exited.is_set(), "release invoked before provider thread exited"
+        result = await real_release(conn, use_id, incarnation_credential=incarnation_credential)
+        release_results.append(result)
+        return result
+
+    monkeypatch.setattr(runs_install, "release_build_use", observed_release)
+
+    class BlockingInstaller:
+        def install(self, request: InstallRequest) -> None:
+            entered.set()
+            try:
+                assert finish.wait(DEFAULT_WAIT_TIMEOUT_S), "provider was not unblocked"
+                if provider_fails:
+                    raise RuntimeError("provider failure after cancellation")
+            finally:
+                exited.set()
+
+    def pin_count() -> int:
+        row = pg_conn.execute(
+            "SELECT count(*) FROM investigation_build_uses WHERE job_id = %s", (job_id,)
+        ).fetchone()
+        assert row is not None
+        return row[0]
+
+    async def exercise() -> None:
+        async with (
+            await psycopg.AsyncConnection.connect(
+                role_dsn("kdive_worker"), autocommit=True
+            ) as worker,
+            AsyncConnectionPool(
+                role_dsn("kdive_server"), min_size=1, max_size=1, open=False
+            ) as server,
+        ):
+            await server.wait()
+            task = asyncio.create_task(
+                runs_install._run_install_step(
+                    worker,
+                    run_id,
+                    BlockingInstaller(),
+                    InstallRequest(
+                        system_id=uuid4(), run_id=run_id, kernel_ref="kernel", cmdline=""
+                    ),
+                    job_id=job_id,
+                    attempt=1,
+                    incarnation_credential=SecretStr(secret),
+                )
+            )
+            try:
+                assert await asyncio.to_thread(entered.wait, DEFAULT_WAIT_TIMEOUT_S)
+                assert pin_count() == 1
+                ctx = RequestContext(
+                    principal="principal",
+                    agent_session="session",
+                    projects=("project-a",),
+                    roles={"project-a": Role.CONTRIBUTOR},
+                )
+                response = await cancel_job(server, ctx, str(job_id))
+                assert response.status == "canceled"
+                assert pg_conn.execute(
+                    "SELECT state, worker_id, attempt FROM jobs WHERE id = %s", (job_id,)
+                ).fetchone() == ("canceled", holder, 1)
+                repeated = await cancel_job(server, ctx, str(job_id))
+                assert repeated.status == "error"
+                assert repeated.data["current_status"] == "canceled"
+                for _ in range(2):
+                    task.cancel()
+                    # A scheduled loop turn delivers cancellation while the thread stays blocked.
+                    await asyncio.sleep(0)
+                    assert not task.done()
+                    assert not exited.is_set()
+                    assert pin_count() == 1
+                finish.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(asyncio.shield(task), DEFAULT_WAIT_TIMEOUT_S)
+                assert exited.is_set()
+                assert pin_count() == 0
+                assert release_results == [True]
+            finally:
+                finish.set()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "fence", ["attempt", "holder", "terminated", "credential", "failed", "succeeded"]
+)
+def test_canceled_release_preserves_other_fences(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns, fence: str
+) -> None:
+    holder, credential = "docker:canceled-fence", b"c" * 32
+    _register(role_dsn, holder, credential)
+    investigation, generation, job_id = _seed_claim(pg_conn, holder=holder)
+    use_id = uuid4()
+    assert _acquire(role_dsn, use_id, investigation, generation, job_id, 1, credential)
+    pg_conn.execute("UPDATE jobs SET state = 'canceled' WHERE id = %s", (job_id,))
+    if fence == "attempt":
+        pg_conn.execute("UPDATE jobs SET attempt = 2 WHERE id = %s", (job_id,))
+    elif fence == "holder":
+        pg_conn.execute("UPDATE jobs SET worker_id = 'replacement' WHERE id = %s", (job_id,))
+    elif fence == "terminated":
+        pg_conn.execute(
+            "UPDATE worker_incarnations SET state = 'terminated', terminated_at = now(), "
+            "outcome = 'killed' WHERE incarnation = %s",
+            (holder,),
+        )
+    elif fence == "credential":
+        _register(role_dsn, "docker:other-owner", b"o" * 32)
+        credential = b"o" * 32
+    else:
+        pg_conn.execute("UPDATE jobs SET state = %s WHERE id = %s", (fence, job_id))
+    with psycopg.connect(role_dsn("kdive_worker"), autocommit=True) as worker:
+        assert worker.execute(
+            "SELECT public.release_investigation_build_use(%s, %s)", (use_id, credential)
+        ).fetchone() == (False,)
+    assert pg_conn.execute(
+        "SELECT count(*) FROM investigation_build_uses WHERE use_id = %s", (use_id,)
+    ).fetchone() == (1,)
+
+
+def test_settled_release_preserves_function_authority(
+    pg_conn: psycopg.Connection, role_dsn: RoleDsns
+) -> None:
+    row = pg_conn.execute(
+        "SELECT prosecdef, proconfig FROM pg_proc "
+        "WHERE oid = 'release_investigation_build_use(uuid,bytea)'::regprocedure"
+    ).fetchone()
+    assert row == (True, ['search_path=""'])
+    for role in role_dsn.logins:
+        with psycopg.connect(role_dsn(role), autocommit=True) as login:
+            if role == "kdive_worker":
+                assert login.execute(
+                    "SELECT public.release_investigation_build_use(%s, %s)",
+                    (uuid4(), b"x" * 32),
+                ).fetchone() == (False,)
+            else:
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    login.execute(
+                        "SELECT public.release_investigation_build_use(%s, %s)",
+                        (uuid4(), b"x" * 32),
+                    )

@@ -208,6 +208,20 @@ def test_boolean_parameter_uses_store_true() -> None:
     assert flag is not None and flag.action == "store_true" and flag.arg_type is None
 
 
+@pytest.mark.parametrize(
+    ("spec", "action"),
+    [
+        ({"type": "boolean", "default": True}, "bool_optional"),
+        ({"anyOf": [{"type": "boolean"}, {"type": "null"}], "default": True}, "bool_optional"),
+        ({"type": "boolean", "default": False}, "store_true"),
+    ],
+)
+def test_true_default_boolean_can_express_false(spec: dict[str, object], action: str) -> None:
+    # An optional boolean that defaults to true needs --no-<flag> to send false (#3244).
+    flag = gen._flag_for("wait", {**spec, "description": "Wait."}, False)
+    assert flag is not None and flag.action == action
+
+
 def test_number_parameter_maps_to_float() -> None:
     flag = gen._flag_for("ratio", {"type": "number", "description": "R."}, False)
     assert flag is not None and flag.arg_type == "float"
@@ -238,6 +252,21 @@ def test_nested_object_parameter_defers_to_json_params() -> None:
     )
     verb = gen._verb_for(tool)
     assert verb.flags == () and verb.json_params == ("profile",)
+
+
+def test_scalar_union_records_its_json_scalar_types() -> None:
+    tool = _tool(
+        "demo.run",
+        {
+            "properties": {
+                "amount": {"anyOf": [{"type": "number"}, {"type": "string"}]},
+                "profile": {"type": "object", "properties": {"x": {"type": "string"}}},
+            },
+        },
+    )
+    verb = gen._verb_for(tool)
+    assert verb.json_params == ("amount", "profile")
+    assert verb.json_scalars == (("amount", ("number", "string")),)
 
 
 def test_ref_into_defs_resolves_to_its_enum_choices() -> None:

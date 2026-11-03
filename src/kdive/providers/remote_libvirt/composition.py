@@ -110,6 +110,7 @@ from kdive.providers.remote_libvirt.resource_details import project_resource_det
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
 from kdive.providers.remote_libvirt.retrieve.provider import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
+from kdive.providers.shared.debug_common.drgn_program import read_vmcoreinfo_build_id
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     real_module_debuginfo_resolver,
@@ -147,6 +148,7 @@ def _capture_operation_configuration(resource_id: UUID, resolved: RemoteLibvirtC
         ca_cert_ref=resolved.cert_refs.ca_cert_ref,
         secrets_root=str(secrets_root_from_env()),
         storage_pool=resolved.storage_pool,
+        pcap_pool=resolved.pcap_pool,
     ).to_canonical_json()
 
 
@@ -160,6 +162,7 @@ def _capture_remote_config(configuration: RemoteCaptureConfiguration) -> RemoteL
         ),
         concurrent_allocation_cap=1,
         storage_pool=configuration.storage_pool,
+        pcap_pool=configuration.pcap_pool,
     )
 
 
@@ -479,6 +482,7 @@ def build_runtime(
         fetch_versioned_object=lambda ref, version_id: (
             store.get_artifact(ref, None, version_id=version_id).data
         ),
+        read_build_id=read_vmcoreinfo_build_id,
     )
     vmcore_introspector = RemoteLibvirtVmcoreIntrospect.from_env(
         secret_registry=secret_registry, store=store
@@ -550,7 +554,7 @@ def build_runtime(
         # System's console (ADR-0433, #1435). Built lazily at job time so this composition stays
         # buildable without S3 config (ADR-0076), like the snapshotter's own lazy store.
         console=ConsoleCapabilities(
-            snapshotter=RemoteLibvirtConsoleSnapshotter(store),
+            snapshotter=RemoteLibvirtConsoleSnapshotter(store, secret_registry=secret_registry),
             reader_factory=lambda: build_remote_console_reader(
                 secret_registry=secret_registry, store=store
             ),

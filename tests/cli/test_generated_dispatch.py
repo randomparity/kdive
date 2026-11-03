@@ -18,6 +18,7 @@ import pytest
 
 from kdive.cli import dispatch
 from kdive.cli.__main__ import build_parser
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
 from kdive.cli.commands.generated_args import GENERATED_ARG_PREFIX, assemble_generated_payload
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 
@@ -310,6 +311,42 @@ def test_unclassifiable_tool_is_refused(monkeypatch: pytest.MonkeyPatch, capsys)
     assert "not positively classified" in capsys.readouterr().out
 
 
+def test_hidden_read_only_verb_calls_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Absent from the caller's catalog but a read-only descriptor: the server answers (#3301).
+    client = _install(monkeypatch, _read_tool("present.tool"))
+    monkeypatch.setattr(dispatch, "ensure_token_valid", _raise_expiring)
+    assert _run(_verb("runs.list"), _ns()) == 0
+    assert client.calls == [("runs.list", {})]
+
+
+@pytest.mark.parametrize(
+    ("read_only", "destructive"), [(False, False), (False, True), (True, True)]
+)
+def test_hidden_mutating_verb_stays_refused(
+    monkeypatch: pytest.MonkeyPatch, capsys, read_only: bool, destructive: bool
+) -> None:
+    client = _install(monkeypatch, _read_tool("present.tool"))
+    verb = _verb("runs.cancel", read_only=read_only, destructive=destructive)
+    assert _run(verb, _ns(yes=True)) == 3
+    assert client.calls == []
+    assert "not positively classified" in capsys.readouterr().out
+
+
+def test_visible_tool_keeps_live_tier_over_read_only_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _install(monkeypatch, _mutating_tool("runs.list"))
+    monkeypatch.setattr(dispatch, "ensure_token_valid", _raise_expiring)
+    assert _run(_verb("runs.list"), _ns()) == 3
+    assert client.calls == []
+
+
+def test_visible_unclassified_tool_stays_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _install(monkeypatch, _Tool("runs.list"))
+    assert _run(_verb("runs.list"), _ns()) == 3
+    assert client.calls == []
+
+
 def test_denied_envelope_maps_to_exit_3(monkeypatch: pytest.MonkeyPatch) -> None:
     denied = {
         "object_id": "h",
@@ -397,3 +434,27 @@ def test_fixtures_list_verb_no_longer_parses() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["fixtures", "list"])
     assert build_parser().parse_args(["fixtures", "validate"]).subcommand == "validate"
+
+
+def _debug_continue_payload(monkeypatch: pytest.MonkeyPatch, *flags: str) -> dict[str, object]:
+    client = _install(monkeypatch, _mutating_tool("debug.continue"))
+    verb = next(v for v in GENERATED_VERBS if v.tool == "debug.continue")
+    args = build_parser().parse_args(["debug", "continue", "--session-id", "ses-1", *flags])
+    assert _run(verb, args) == 0
+    [(tool, payload)] = client.calls
+    assert tool == "debug.continue"
+    return payload
+
+
+def test_a_true_default_boolean_can_send_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    # debug.continue's wait defaults to true, so a bare store_true switch could never send the
+    # wait=false that leaves the guest running (#3244).
+    assert _debug_continue_payload(monkeypatch, "--no-wait") == {
+        "session_id": "ses-1",
+        "wait": False,
+    }
+
+
+def test_a_true_default_boolean_sends_true_or_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _debug_continue_payload(monkeypatch, "--wait")["wait"] is True
+    assert "wait" not in _debug_continue_payload(monkeypatch)

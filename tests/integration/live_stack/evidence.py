@@ -27,6 +27,12 @@ from scripts.coverage_campaign.evidence import Context, Evidence, Outcome, read_
 from tests.integration.live_stack.skew import _fetch_version, _resolve, readyz_urls
 from tests.integration.live_stack.spine import report_artifact_dir
 from tests.live_vm.installed_local_authority_support import _active_worker_readyz_urls
+from tests.live_vm.installed_remote_authority_support import (
+    installed_authority_revision,
+)
+from tests.live_vm.installed_remote_authority_support import (
+    load_config as load_remote_config,
+)
 
 AUTHORITY_REVISION = "/opt/kdive-provider-authority/revision"
 _ROOT = Path(__file__).resolve().parents[3]
@@ -129,6 +135,35 @@ def _worker_revision(
     return next((r for r in revisions if r != head), revisions[0])
 
 
+def remote_authority_revision() -> str | None:
+    """The remote proof host's installed authority revision; ``None`` when no config is named."""
+    config = load_remote_config()
+    return None if config is None else installed_authority_revision(config)
+
+
+def _remote_authority(
+    local: str | None,
+    head: str,
+    read: Callable[[], str | None],
+    resolve: Callable[[str], str | None],
+) -> str | None:
+    """The authority a remote cell records (ADR-0788): any stale one, else the remote one.
+
+    An unknown remote revision is never replaced by the test host's own authority.
+    """
+    installed = read()
+    remote = None
+    if installed is not None:
+        remote = resolve(installed) if installed else None
+        if remote is None:
+            raise RuntimeError(
+                "the remote authority's installed revision cannot be resolved in this checkout; "
+                "fetch the installed commit"
+            )
+    stale = [revision for revision in (local, remote) if revision and revision != head]
+    return stale[0] if stale else remote
+
+
 def run_identity(
     base_url: str,
     *,
@@ -140,8 +175,12 @@ def run_identity(
     matrix: Callable[[], str] = _matrix,
     os_release: Callable[[], str] = lambda: Path("/etc/os-release").read_text(encoding="utf-8"),
     present: Callable[[str], bool] = _present,
+    remote_authority: Callable[[], str | None] | None = None,
 ) -> RunIdentity:
-    """Read the candidate, matrix, host and deployed role revisions for one cell."""
+    """Read the candidate, matrix, host and deployed role revisions for one cell.
+
+    ``remote_authority`` reads the provider host's authority for a remote authority cell.
+    """
     head = git("rev-parse", "HEAD")
     if not head:
         raise RuntimeError("cannot read the test checkout's git HEAD; run from a git checkout")
@@ -164,6 +203,11 @@ def run_identity(
                 "installed commit, or remove the stale install"
             )
         roles["authority"] = authority
+    if remote_authority is not None:
+        local = roles.pop("authority", None)
+        served = _remote_authority(local, head, remote_authority, resolve)
+        if served:
+            roles["authority"] = served
     return RunIdentity(
         candidate_sha=head,
         matrix_sha256=matrix(),

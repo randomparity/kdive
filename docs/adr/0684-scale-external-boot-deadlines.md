@@ -84,3 +84,40 @@ meaningful for new operations through the equality check and governs historical 
   provider cannot prove the remaining time after queue and prior work.
 - **Change remote or recovery-orphan timeouts.** judgment: neither uses this local console
   readiness window, and the campaign operator assigned remote timeouts elsewhere.
+
+### Amendment (2026-10-28): a re-entered release recovery begins its own budget (#3395)
+
+This qualifies the rule that a replay uses the request's original deadline, for the derived
+RECOVER of a release only.
+
+A release request's readiness deadline is stamped once at admission, five minutes ahead (a local
+System's is scaled as above). A later job attempt of the same release may start after that
+deadline, and always does when it follows a lease-lapse reclaim, because the lease is also five
+minutes. `begin_external_boot_derived_release_recovery` refuses an elapsed deadline, so the retry
+was answered `superseded` and the release wedged.
+
+`release_handler` now begins the derived RECOVER against `clock + recovery_readiness_timeout`
+when the job attempt is later than the first, or the activation is already `recovering`. A first
+attempt keeps the request's deadline, so one that waited in the queue past it is still
+refused and spends an attempt before the next recovers. Each attempt's budget is therefore its
+own, and a release that keeps failing is bounded by its attempts and leases, not by one
+deadline. `recover` and `resolve-conflict` keep the original-deadline rule. A failed attempt's
+own failure is still refused while the activation is `recovering`; that is #3396.
+
+### Amendment (2026-10-29): a re-entered recover or resolve-conflict gets its own budget (#3410)
+
+This supersedes the closing sentence of the previous amendment, which left `recover` and
+`resolve-conflict` on the original-deadline rule.
+
+Both handlers' first pass commits a mid-operation `recovery-attempt` result that stamps a
+readiness deadline five minutes ahead, and the job row stays `running`. The job is re-claimed
+only after its five-minute lease lapses, so on re-entry (the activation is `recovering`)
+`before_port` always found the stamped deadline elapsed and refused with a readiness failure
+before the authority was called. A remote `resolve-conflict` therefore never reached its
+mutation.
+
+Both handlers now skip that check on re-entry and proceed to the authority call, which is
+bounded by its own transport deadline, the job's attempts and its leases. A local-libvirt
+authority client still derives its transport deadline from the request's recorded deadline;
+that path is unchanged. The first pass is
+unchanged: it still refuses a request whose deadline already elapsed before it stamps an attempt.

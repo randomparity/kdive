@@ -41,6 +41,7 @@ def _identity(
     read: Callable[[str], str | None] = lambda _path: _HEAD,
     running_workers: Callable[[], str] = lambda: _SLOTS,
     present: Callable[[str], bool] = lambda _path: True,
+    remote_authority: Callable[[], str | None] | None = None,
 ) -> RunIdentity:
     served: dict[str, str | None] = {
         ":9464/": "abc1234",
@@ -67,6 +68,7 @@ def _identity(
         matrix=lambda: "c" * 64,
         os_release=lambda: 'ID=ubuntu\nVERSION_ID="26.04"\n',
         present=present,
+        remote_authority=remote_authority,
     )
 
 
@@ -133,6 +135,43 @@ def test_presence_is_false_only_when_absence_is_proven(tmp_path: Path) -> None:
         assert _present(str(locked / "revision"))
     finally:
         locked.chmod(0o700)
+
+
+@pytest.mark.parametrize(
+    ("local", "remote", "recorded"),
+    [
+        ("abc1234", "abc1234", _HEAD),  # both current: the serving remote one
+        ("def5678", "abc1234", _OTHER),  # a stale test-host authority is still judged
+        ("abc1234", "def5678", _OTHER),  # a stale remote authority fails the cell
+        (None, "abc1234", _HEAD),  # no test-host authority
+        ("abc1234", None, None),  # remote unknown: never the test host's in its place
+        ("def5678", None, _OTHER),  # remote unknown, stale test host: still judged
+    ],
+)
+def test_a_remote_authority_cell_records_the_serving_authority(
+    local: str | None, remote: str | None, recorded: str | None
+) -> None:
+    # ADR-0788: a remote-libvirt authority cell is served by the provider host's authority.
+    identity = _identity(
+        read=lambda _p: local,
+        present=lambda _p: local is not None,
+        remote_authority=lambda: remote,
+    )
+    assert identity.deployed_roles.get("authority") == recorded
+
+
+@pytest.mark.parametrize("remote", ["", "zzz"])
+def test_an_unidentifiable_remote_authority_stops_the_run(remote: str) -> None:
+    with pytest.raises(RuntimeError, match="remote authority"):
+        _identity(remote_authority=lambda: remote)
+
+
+def test_a_failed_remote_authority_read_stops_the_run() -> None:
+    def fail() -> str | None:
+        raise RuntimeError("remote authority control failed: timeout")
+
+    with pytest.raises(RuntimeError, match="remote authority control failed"):
+        _identity(remote_authority=fail)
 
 
 def test_no_running_worker_slot_omits_the_worker_role() -> None:

@@ -178,13 +178,25 @@ def test_the_expected_table_decides_every_operation() -> None:
     assert set(_ADMITTING_STATES) | _NEVER_ADMITTED == set(ExternalBootOperation)
 
 
+def _absence(proven: bool):
+    async def _proven(_conn: AsyncConnection, _system_id: UUID) -> bool:
+        return proven
+
+    return _proven
+
+
+@pytest.mark.parametrize("proven", [False, True])
 def test_authority_preactivation_policy_admits_only_activation_entry_operations(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, proven: bool
 ) -> None:
+    """A proven absence receipt admits allocation release alone (ADR-0754)."""
+
     async def _fenced(_conn: AsyncConnection, _system_id: UUID) -> bool:
         return True
 
     monkeypatch.setattr(admission_module, "ordinary_mutation_is_fenced", _fenced)
+    monkeypatch.setattr(admission_module, "preactivation_absence_is_proven", _absence(proven))
+    monkeypatch.setattr(admission_module, "torn_down_after_activation", _absence(False))
     _restricted_by(monkeypatch, None)
     admitted = {
         _OP.RUN_CREATE,
@@ -192,7 +204,7 @@ def test_authority_preactivation_policy_admits_only_activation_entry_operations(
         _OP.RUN_CANCEL,
         _OP.RUN_INSTALL,
         _OP.RUN_BOOT,
-    }
+    } | ({_OP.ALLOCATION_RELEASE} if proven else set())
     system_id = uuid4()
     for operation in ExternalBootOperation:
         if operation in admitted:
@@ -408,3 +420,21 @@ def test_every_registered_mutating_tool_is_guarded_or_exempt() -> None:
 def test_every_operation_the_matrix_decides_has_a_guarded_tool() -> None:
     """The forward half: a member added without a call site fails too."""
     assert set(GUARDED_TOOLS.values()) == set(ExternalBootOperation)
+
+
+def test_a_torn_down_activated_owner_admits_allocation_release_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Teardown after activation lifts the fence for release only (#3382)."""
+
+    async def _fenced(_conn: AsyncConnection, _system_id: UUID) -> bool:
+        return True
+
+    monkeypatch.setattr(admission_module, "ordinary_mutation_is_fenced", _fenced)
+    monkeypatch.setattr(admission_module, "preactivation_absence_is_proven", _absence(False))
+    monkeypatch.setattr(admission_module, "torn_down_after_activation", _absence(True))
+    _restricted_by(monkeypatch, None)
+    system_id = uuid4()
+    _check(system_id, _OP.ALLOCATION_RELEASE)
+    with pytest.raises(ExternalBootDenied):
+        _check(system_id, _OP.SYSTEM_POWER)

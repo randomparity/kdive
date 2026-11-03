@@ -68,10 +68,15 @@ database_login=$4
 proof_incarnation=$5
 source_root="$remote_root/source"
 cleanup_status=0
-if [[ -f $source_root/deploy/ansible/playbooks/authority_host_teardown.yml \
+# Teardown becomes unprivileged accounts, which needs the acl package the prerequisite
+# step installs; before that step completes no authority state exists to retire.
+if [[ ! -f "$remote_root/prerequisites-installed" ]]; then
+  echo "teardown skipped: the authority prerequisites never installed" >&2
+elif [[ -f $source_root/deploy/ansible/playbooks/authority_host_teardown.yml \
   && -f $remote_root/inventory ]]; then
   cd "$remote_root"
-  uv run --with ansible-core==2.21.1 ansible-playbook -i inventory \
+  env ANSIBLE_ROLES_PATH="$source_root/deploy/ansible/roles" \
+    uv run --with ansible-core==2.21.1 ansible-playbook -i inventory \
     "$source_root/deploy/ansible/playbooks/authority_host_teardown.yml" \
     --extra-vars "authority_database_admin_dsn=postgresql:///$database?host=/var/run/postgresql" \
     --extra-vars "authority_database_login=$database_login" \
@@ -148,7 +153,7 @@ authority_instance=$7
 proof_incarnation=$8
 source_root="$remote_root/source"
 secrets="$remote_root/secrets"
-ansible="uv run --with ansible-core==2.21.1 ansible-playbook"
+ansible="env ANSIBLE_ROLES_PATH=$source_root/deploy/ansible/roles uv run --with ansible-core==2.21.1 ansible-playbook"
 
 git clone -q "$remote_root/kdive.bundle" "$source_root"
 git -C "$source_root" checkout -q "$revision"
@@ -178,6 +183,7 @@ echo "prerequisites: installing through the live_vm_host role"
 cd "$remote_root"
 $ansible -i inventory proof.yml --tags authority_prerequisites \
   --extra-vars "live_vm_host_authority_enabled=true"
+touch "$remote_root/prerequisites-installed"
 
 sudo -n -u postgres createdb "$database"
 sudo -n install -d -o postgres -g postgres -m 0700 "$remote_root/migrate"
@@ -230,40 +236,12 @@ printf '%s\n' "$worker_credential" >"$secrets/worker-credential"
 chmod 0600 "$secrets/database-dsn" "$secrets/worker-credential"
 unset database_dsn database_password worker_credential
 
-server_name=$(python3 - "$authority_instance" <<'PY'
-import base64
-import hashlib
-import sys
-
-digest = hashlib.sha256(sys.argv[1].encode()).digest()
-print(base64.b32encode(digest).decode().rstrip("=").lower() + ".authority.kdive.invalid")
-PY
-)
-openssl ecparam -name prime256v1 -genkey -noout -out "$secrets/ca.key"
-openssl req -x509 -new -sha256 -key "$secrets/ca.key" -days 1 \
-  -subj /CN=kdive-2150-proof-ca -out "$secrets/ca.pem" \
-  -addext basicConstraints=critical,CA:TRUE,pathlen:0 \
-  -addext keyUsage=critical,keyCertSign,cRLSign
-
-issue_certificate() {
-  local name=$1 eku=$2 san=${3:-}
-  openssl ecparam -name prime256v1 -genkey -noout -out "$secrets/$name.key"
-  openssl req -new -sha256 -key "$secrets/$name.key" -subj "/CN=$name" \
-    -out "$secrets/$name.csr"
-  {
-    echo '[proof]'
-    echo 'basicConstraints=critical,CA:FALSE'
-    echo 'keyUsage=critical,digitalSignature'
-    echo "extendedKeyUsage=$eku"
-    [[ -z $san ]] || echo "subjectAltName=DNS:$san"
-  } >"$secrets/$name.ext"
-  openssl x509 -req -sha256 -in "$secrets/$name.csr" -CA "$secrets/ca.pem" \
-    -CAkey "$secrets/ca.key" -CAcreateserial -days 1 -extfile "$secrets/$name.ext" \
-    -extensions proof -out "$secrets/$name.pem" >/dev/null 2>&1
-}
-issue_certificate server serverAuth "$server_name"
-issue_certificate health-client clientAuth
-issue_certificate proof-client clientAuth
+pki="$source_root/scripts/operations/authority-pki.sh"
+"$pki" ca --dir "$secrets" --subject kdive-2150-proof-ca --days 1 --key new
+"$pki" leaf --dir "$secrets" --name server --usage server --days 1 --key new \
+  --authority-instance "$authority_instance"
+"$pki" leaf --dir "$secrets" --name health-client --usage client --days 1 --key new
+"$pki" leaf --dir "$secrets" --name proof-client --usage client --days 1 --key new
 chmod 0600 "$secrets"/*
 
 python3 - "$authority_instance" >"$secrets/request.json" <<'PY'
@@ -383,7 +361,7 @@ database_login=$6
 authority_instance=$7
 proof_incarnation=$8
 source_root="$remote_root/source"
-ansible="uv run --with ansible-core==2.21.1 ansible-playbook"
+ansible="env ANSIBLE_ROLES_PATH=$source_root/deploy/ansible/roles uv run --with ansible-core==2.21.1 ansible-playbook"
 cd "$remote_root"
 
 echo "reboot: validating boot-persistent authority services"

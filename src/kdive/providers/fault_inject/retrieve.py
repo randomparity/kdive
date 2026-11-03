@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from uuid import UUID
 
-from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.artifacts.storage import ConditionalArtifactWriteRequest, StoredArtifact
+from kdive.artifacts.vmcore_retention import capture_metadata, require_capture_write, vmcore_keys
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -28,9 +29,12 @@ class FaultInjectRetrieve:
 
     _SYNTHETIC_DATA = b"fault-inject-vmcore"
 
-    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
-        raw = self._put(run_id, f"vmcore-{method.value}", Sensitivity.SENSITIVE)
-        redacted = self._put(run_id, f"vmcore-{method.value}-redacted", Sensitivity.REDACTED)
+    def capture(
+        self, system_id: UUID, run_id: UUID, method: CaptureMethod, *, execution_id: UUID
+    ) -> CaptureOutput:
+        raw_key, redacted_key = vmcore_keys(TENANT, run_id, method, execution_id)
+        raw = self._put(raw_key, execution_id, Sensitivity.SENSITIVE)
+        redacted = self._put(redacted_key, execution_id, Sensitivity.REDACTED)
         return CaptureOutput(
             raw=raw,
             redacted=redacted,
@@ -57,17 +61,17 @@ class FaultInjectRetrieve:
         results: dict[str, object] = {command: "synthetic" for command in commands}
         return CrashOutput(results=results, transcript="fault-inject postmortem", truncated=False)
 
-    def _put(self, run_id: UUID, name: str, sens: Sensitivity) -> StoredArtifact:
+    def _put(self, key: str, execution_id: UUID, sens: Sensitivity) -> StoredArtifact:
         if self._store is None:
             self._store = self._store_factory()
-        return self._store.put_artifact(
-            ArtifactWriteRequest(
-                tenant=TENANT,
-                owner_kind="runs",
-                owner_id=str(run_id),
-                name=name,
-                data=b"fault-inject-vmcore",
-                sensitivity=sens,
-                retention_class=_RETENTION_CLASS,
+        return require_capture_write(
+            self._store.create_if_absent(
+                ConditionalArtifactWriteRequest(
+                    key=key,
+                    data=self._SYNTHETIC_DATA,
+                    metadata=capture_metadata(execution_id),
+                    sensitivity=sens,
+                    retention_class=_RETENTION_CLASS,
+                )
             )
         )
