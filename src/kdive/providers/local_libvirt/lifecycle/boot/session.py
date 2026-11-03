@@ -1502,6 +1502,24 @@ class LocalExternalBootSessionFactory:
                 exc.add_note(f"cleanup failed: {error!r}")
             raise
 
+    def open_pinned(
+        self,
+        lease: LocalExternalBootOperationLease,
+        expected: ExpectedOperationOwnership,
+    ) -> LocalExternalBootOperationPin:
+        """Pin the lease and check ownership only: no libvirt connection, domain or overlay."""
+        ownership = self._pin_lease(lease)
+        pin = ownership._pin
+        try:
+            _require_expected_ownership(ownership.ownership, expected)
+        except BaseException as exc:
+            try:
+                pin.close()
+            except BaseException as close_error:
+                exc.add_note(f"cleanup failed: {close_error!r}")
+            raise
+        return pin
+
     def open_teardown(
         self,
         lease: LocalExternalBootOperationLease,

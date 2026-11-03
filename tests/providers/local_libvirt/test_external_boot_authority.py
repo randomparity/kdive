@@ -248,6 +248,11 @@ class _FakeIO:
         self.actions.append(f"open:{authority.ref}")
         return _FakeContext(self)
 
+    def open_pinned(self, authority: OpaqueProviderRef, expected: object) -> _FakeContext:
+        del expected
+        self.actions.append(f"open:{authority.ref}")
+        return _FakeContext(self)
+
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         del recovery
         if self.finalize_error is not None:

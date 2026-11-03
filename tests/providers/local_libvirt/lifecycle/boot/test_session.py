@@ -546,6 +546,40 @@ def _expected(*, activation_id: UUID | None = ACTIVATION_ID) -> ExpectedOperatio
     )
 
 
+def _refusing_connection_factory() -> LocalExternalBootSessionFactory:
+    def refuse(*_args: object) -> Any:
+        raise AssertionError("a pinned-only open must not touch libvirt, artifacts or the overlay")
+
+    return LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=refuse,
+        open_artifact_root=refuse,
+        open_guest=refuse,
+        open_overlay=refuse,
+    )
+
+
+def test_open_pinned_holds_the_lease_without_a_domain() -> None:
+    lease = _lease()
+    pin = _refusing_connection_factory().open_pinned(lease, _expected())
+
+    assert lease.pins == 1
+    pin.close()
+    assert lease.pins == 0
+
+
+def test_open_pinned_refuses_foreign_ownership_and_releases_the_pin() -> None:
+    lease = _lease()
+    foreign = ExpectedOperationOwnership(
+        system_id=SYSTEM_ID, run_id=UUID(int=7), activation_id=ACTIVATION_ID
+    )
+
+    with pytest.raises(ValueError, match="does not match expected ownership"):
+        _refusing_connection_factory().open_pinned(lease, foreign)
+
+    assert lease.pins == 0
+
+
 def test_projection_directory_is_binding_confined_and_closes_descriptor(tmp_path: Path) -> None:
     activation = tmp_path / "activation"
     activation.mkdir(mode=0o700)

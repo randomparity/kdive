@@ -1063,6 +1063,12 @@ class LocalExternalBootIO(Protocol):
         *,
         local_timing: LocalExternalBootTimingV1 | None = None,
     ) -> AbstractContextManager[LocalExternalBootOperation]: ...
+    def open_pinned(
+        self, authority: OpaqueProviderRef, expected: ExpectedOperationOwnership
+    ) -> AbstractContextManager[None]:
+        """Hold the operation lease for a store-only call: no domain, overlay or connection."""
+        ...
+
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None: ...
     def record_cleanup_quarantine(
         self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
@@ -1721,6 +1727,22 @@ class RealLocalExternalBootIO:
             raise
         else:
             session.close()
+
+    @contextmanager
+    def open_pinned(
+        self, authority: OpaqueProviderRef, expected: ExpectedOperationOwnership
+    ) -> Iterator[None]:
+        pin = self._session_factory.open_pinned(self._resolve_operation_lease(authority), expected)
+        try:
+            yield
+        except BaseException as primary:
+            try:
+                pin.close()
+            except BaseException as close_error:
+                primary.add_note(f"cleanup failed: {close_error!r}")
+            raise
+        else:
+            pin.close()
 
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         with RecoveryMetadataStore(self._recovery_root) as store:
@@ -3085,7 +3107,7 @@ class LocalLibvirtExternalBoot:
         binding: ExternalBootActivationBinding,
         authority: OpaqueProviderRef,
     ) -> tuple[RecoveryObjectObservation, ...]:
-        with self._io.open(authority, _expected_binding(binding)):
+        with self._io.open_pinned(authority, _expected_binding(binding)):
             receipt = self._io.read_cleanup_quarantine(binding)
         if receipt is None or receipt.managed:
             return ()
@@ -3107,7 +3129,7 @@ class LocalLibvirtExternalBoot:
     def observe_object(
         self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
     ) -> RecoveryObjectObservation:
-        with self._io.open(authority, _expected_binding(binding.binding)):
+        with self._io.open_pinned(authority, _expected_binding(binding.binding)):
             receipt = self._io.read_cleanup_quarantine(binding.binding)
         if receipt is None:
             return RecoveryObjectObservation(
@@ -3131,7 +3153,7 @@ class LocalLibvirtExternalBoot:
         if observed.observed_digest != expected_observed_digest:
             raise ValueError("cleanup quarantine observation changed before delete")
         # The re-read and delete run under the pinned session (ADR-0710 amendment, 2026-10-01).
-        with self._io.open(authority, _expected_binding(binding.binding)):
+        with self._io.open_pinned(authority, _expected_binding(binding.binding)):
             receipt = self._io.read_cleanup_quarantine(binding.binding)
             if receipt is not None:
                 current = self._quarantine_observation(receipt)
@@ -3150,7 +3172,7 @@ class LocalLibvirtExternalBoot:
         if observed.observed_digest != expected_observed_digest or not observed.present:
             raise ValueError("cleanup quarantine observation changed before adopt")
         # Pinned like delete_recovery_object (ADR-0710 amendment, 2026-10-01).
-        with self._io.open(authority, _expected_binding(binding.binding)):
+        with self._io.open_pinned(authority, _expected_binding(binding.binding)):
             receipt = self._io.read_cleanup_quarantine(binding.binding)
             if receipt is None:
                 raise ValueError("cleanup quarantine disappeared before adopt")
@@ -4063,12 +4085,14 @@ class RecoveryMetadataStore:
         )
         if tombstone != expected or proof.point_digest != expected.point_digest:
             raise ValueError("cleanup tombstone does not match recovery point")
-        standing = self.read_cleanup_quarantine(recovery.binding)
-        if standing is not None and standing.managed:
-            return  # an adopted receipt is kept as is: no path un-adopts it (ADR-0787)
         receipt = CleanupQuarantineReceiptV1(tombstone=tombstone, proof=proof)
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
+            # Held across the managed check and the replace, as adoption and finalize hold it.
+            fcntl.flock(directory_fd, fcntl.LOCK_EX)
+            standing = self._read_cleanup_quarantine_at(directory_fd, recovery.binding)
+            if standing is not None and standing.managed:
+                return  # an adopted receipt is kept as is: no path un-adopts it (ADR-0787)
             temporary = ".cleanup-quarantine.next"
             _replace_private_file(
                 directory_fd,
@@ -4077,10 +4101,10 @@ class RecoveryMetadataStore:
                 _cleanup_quarantine_bytes(receipt),
             )
             os.fsync(directory_fd)
+            if self._read_cleanup_quarantine_at(directory_fd, recovery.binding) != receipt:
+                raise ValueError("cleanup quarantine receipt failed exact reopen")
         finally:
             os.close(directory_fd)
-        if self.read_cleanup_quarantine(recovery.binding) != receipt:
-            raise ValueError("cleanup quarantine receipt failed exact reopen")
 
     def read_cleanup_quarantine(
         self, binding: ExternalBootActivationBinding
