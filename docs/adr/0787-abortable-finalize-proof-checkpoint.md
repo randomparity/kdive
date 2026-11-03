@@ -263,10 +263,11 @@ removes no store file, so the receipt survived there.
   exclusive `flock` on the activation's recovery directory across their read and write.
   Finalize re-reads the receipt under it and keeps a `managed` one with its tombstone, as the
   adopted discard branch does; an adoption that finds the receipt gone fails as changed. This
-  corrects the earlier "System lane already serializes" judgment for this pair.
-  `record_cleanup_quarantine` takes the same lock (#3492): it re-reads the receipt under it and
-  returns on a `managed` one, so an adoption landing between its check and its replace is never
-  overwritten with an unmanaged receipt.
+  corrects the earlier "System lane already serializes" judgment for this pair; it does not
+  cover `record_cleanup_quarantine`.
+  #3492 extends the lock there: `record_cleanup_quarantine` takes it, re-reads the receipt under
+  it and returns on a `managed` one, so an adoption landing between its check and its replace is
+  never overwritten with an unmanaged receipt.
 
 Considered & rejected:
 
