@@ -490,5 +490,6 @@ Considered & rejected:
 - **Reference-count the pair.** judgment: a new persisted counter that a crash between its
   update and the unlink would leave wrong, for a fact the anchors already carry.
 - **Never remove the pair at finalize; leave it to teardown collection.** judgment: a Run
-  released and finalized without a System teardown would leak the pair indefinitely. The chosen rule also keeps it while a sibling stays
-  unfinalized, until that sibling finalizes or teardown collection removes it (#3486).
+  released and finalized without a System teardown would leak the pair indefinitely. The chosen
+  rule also keeps the pair while a sibling stays unfinalized, until that sibling finalizes or
+  teardown collection removes it (#3486).
