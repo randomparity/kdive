@@ -26,6 +26,7 @@ import libvirt
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, resolve_local_timing
+from kdive.domain.platform.arch_traits import rendered_machine_alias
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
     ReadinessResult,
@@ -1939,7 +1940,7 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
         "os": None
         if os_element is None
         else {
-            "type": None if os_type is None else (os_type.text, os_type.attrib),
+            "type": None if os_type is None else (os_type.text, _canonical_os_type_attrib(os_type)),
             "kernel": os_element.findtext("kernel"),
             "initrd": os_element.findtext("initrd"),
             "cmdline": os_element.findtext("cmdline"),
@@ -1972,6 +1973,14 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
     }
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     return _digest(b"kdive-local-authority-domain-semantics-v2", payload)
+
+
+def _canonical_os_type_attrib(os_type: ET.Element) -> dict[str, str]:
+    """Project ``os/type`` attributes with libvirt's versioned machine mapped to the alias."""
+    attrib = dict(os_type.attrib)
+    if "machine" in attrib:
+        attrib["machine"] = rendered_machine_alias(attrib.get("arch"), attrib["machine"])
+    return attrib
 
 
 def _memory_bytes(memory: ET.Element | None) -> int | None:

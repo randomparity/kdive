@@ -23,6 +23,9 @@ class ArchTraits:
     """
 
     machine: str
+    #: Prefix of the versioned machine names libvirt rewrites ``machine`` to when it defines a
+    #: domain (``pc-q35-10.2``, ``pseries-9.0``); see :func:`rendered_machine_alias`.
+    machine_family: str
     console_device: str
     pin_nic_slot: bool
     kvm_cpu_mode: str
@@ -40,6 +43,7 @@ class ArchTraits:
 _TRAITS: dict[str, ArchTraits] = {
     "x86_64": ArchTraits(
         machine="q35",
+        machine_family="pc-q35",
         console_device="ttyS0",
         pin_nic_slot=True,
         kvm_cpu_mode="host-passthrough",
@@ -49,6 +53,7 @@ _TRAITS: dict[str, ArchTraits] = {
     ),
     "ppc64le": ArchTraits(
         machine="pseries",
+        machine_family="pseries",
         console_device="hvc0",
         pin_nic_slot=False,
         kvm_cpu_mode="host-model",
@@ -100,3 +105,16 @@ def default_crashkernel_summary() -> str:
         A comma-separated ``"<size> on <arch>"`` summary over every supported architecture.
     """
     return ", ".join(f"{_TRAITS[arch].default_crashkernel} on {arch}" for arch in sorted(_TRAITS))
+
+
+def rendered_machine_alias(arch: str | None, machine: str) -> str:
+    """Map a libvirt-stored machine name back to the alias kdive renders for ``arch``.
+
+    libvirt rewrites the rendered alias (``q35``) to a versioned name (``pc-q35-10.2``) when it
+    defines a domain. A name outside the architecture's family, or an unknown architecture,
+    is returned unchanged so a different machine type stays a different identity.
+    """
+    traits = _TRAITS.get(arch) if arch else None
+    if traits and (machine == traits.machine or machine.startswith(f"{traits.machine_family}-")):
+        return traits.machine
+    return machine
