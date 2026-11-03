@@ -738,6 +738,13 @@ def test_archive_writer_adds_the_staged_vmlinux_with_manifest_parity(tmp_path: P
         image.path.unlink(missing_ok=True)
 
 
+def test_a_staged_vmlinux_without_an_archive_is_refused(tmp_path: Path) -> None:
+    wanted = request(tmp_path, debuginfo=tmp_path / "debuginfo")
+
+    with pytest.raises(ValueError, match="needs an archive"):
+        volumes._build_request_image(wanted, b"operation")  # noqa: SLF001
+
+
 def test_archive_writer_refuses_a_tree_that_already_has_a_vmlinux(tmp_path: Path) -> None:
     modules = tmp_path / "modules"
     modules.mkdir()

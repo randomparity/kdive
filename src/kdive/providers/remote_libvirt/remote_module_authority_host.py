@@ -26,6 +26,7 @@ from kdive.providers.external_boot_authority.protocol import (
 )
 from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
 from kdive.providers.ports.external_boot import ExternalBootArtifactStager, OpaqueProviderRef
+from kdive.providers.remote_libvirt.debuginfo_module_tree import STAGED_NAME
 from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
     PriorPower,
@@ -357,7 +358,7 @@ class ConcreteRemoteModuleAuthorityHost:
             work_dir=configured.work_dir,
             archive=directory / "modules",
             debuginfo=(
-                None if authority.plan.module_tree_debuginfo is None else directory / "debuginfo"
+                None if authority.plan.module_tree_debuginfo is None else directory / STAGED_NAME
             ),
         )
 

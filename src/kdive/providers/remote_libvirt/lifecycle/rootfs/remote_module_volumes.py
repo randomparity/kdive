@@ -918,6 +918,8 @@ def _prepared(
 
 def _build_request_image(request: VolumeRequest, operation: bytes) -> BuiltSourceImage:
     if request.archive is None:
+        if request.debuginfo is not None:
+            raise ValueError("a staged vmlinux needs an archive-backed module preparation")
         return request.writer.build(operation, request.entries)
     if request.entries:
         raise ValueError("archive-backed module preparation forbids in-memory entries")
