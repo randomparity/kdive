@@ -54,8 +54,8 @@ from kdive.services.external_boot.plan import (
     construct_external_boot_plan,
     external_boot_root_arguments,
 )
+from kdive.services.external_boot.route_admission import admit_authority_route
 from kdive.services.external_boot.routing import (
-    admit_authority_route,
     authority_reservation_geometry,
 )
 from kdive.services.runs.build_catalog import resolve_build, resolve_build_expiry

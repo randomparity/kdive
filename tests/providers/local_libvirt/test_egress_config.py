@@ -11,6 +11,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.config import (
     local_authority_instance_for_resource,
     local_guest_egress_for_resource,
+    local_relocated_authority_for_resource,
 )
 
 _BLOCK = """
@@ -89,3 +90,28 @@ def test_authority_instance_is_explicit_and_malformed_inventory_fails_closed(
     with pytest.raises(CategorizedError) as excinfo:
         local_authority_instance_for_resource("loc")
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_relocation_declaration_resolves_only_for_the_named_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_systems_toml(
+        tmp_path, monkeypatch, name="loc", egress='relocated_authority_instance = "authority-a"'
+    )
+    assert local_relocated_authority_for_resource("loc") == "authority-a"
+    assert local_authority_instance_for_resource("loc") is None
+    assert local_relocated_authority_for_resource("other") is None
+
+
+def test_invalid_inventory_fails_closed_for_the_relocation_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_systems_toml(
+        tmp_path,
+        monkeypatch,
+        name="loc",
+        egress='authority_instance = "a"\nrelocated_authority_instance = "a"',
+    )
+    with pytest.raises(CategorizedError) as exc:
+        local_relocated_authority_for_resource("loc")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR

@@ -41,11 +41,11 @@ returns `configuration_error` before activation. Create a new Run without `build
 upload a build with an initrd, then complete the build, install, and boot the new Run.
 
 When the server routes Runs to an external-boot authority but the System's Resource does
-not name that authority (or the System belongs to another), this call returns
+not route to it (no matching `authority_instance` or fixture `relocated_authority_instance`)
+or the System is recorded as owned by another authority, this call returns
 `configuration_error` with `reason: "authority_resource_route_mismatch"` or
-`"authority_system_binding_mismatch"` before any job or activation. Align the Resource's
-`authority_instance` with the server route, or provision a new System on the intended
-Resource.
+`"authority_system_binding_mismatch"` before any job or activation. End the System and
+provision a new one on a Resource that routes to the authority.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -259,11 +259,11 @@ calling `runs.create` without `build_ref`, then upload and complete a fresh exte
 An unchanged already-installed variant remains an idempotent no-op after expiry.
 
 When the server routes Runs to an external-boot authority but the System's Resource does
-not name that authority (or the System belongs to another), this call returns
+not route to it (no matching `authority_instance` or fixture `relocated_authority_instance`)
+or the System is recorded as owned by another authority, this call returns
 `configuration_error` with `reason: "authority_resource_route_mismatch"` or
-`"authority_system_binding_mismatch"` before any job or activation. Align the Resource's
-`authority_instance` with the server route, or provision a new System on the intended
-Resource.
+`"authority_system_binding_mismatch"` before any job or activation. End the System and
+provision a new one on a Resource that routes to the authority.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

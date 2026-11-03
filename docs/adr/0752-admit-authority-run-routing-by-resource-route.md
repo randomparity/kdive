@@ -1,8 +1,8 @@
-# 0752 — Admit authority Run routing only for a Resource that names the authority
+# 0752 — Admit authority Run routing by the Resource's declared authority
 
 ## Status
 
-Proposed
+Accepted (2026-11-03)
 
 ## Context
 

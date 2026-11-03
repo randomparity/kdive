@@ -4798,8 +4798,8 @@ def test_authority_install_refuses_a_system_the_authority_does_not_own(
 ) -> None:
     """The defect case of #3138: refused before any job, even with a replayed key (ADR-0752)."""
     monkeypatch.setattr(
-        "kdive.services.external_boot.routing.authority_instance_for_resource",
-        lambda _kind, _name: resource_route,
+        "kdive.services.external_boot.route_admission.authority_admission_routes_for_resource",
+        lambda _kind, _name: frozenset() if resource_route is None else frozenset({resource_route}),
     )
 
     async def _run() -> None:

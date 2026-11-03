@@ -127,18 +127,19 @@ PUBLIC_BLOCKED = (
 )
 ROUTED_BLOCKED = (
     "fixture mode needs the lane's plain local-libvirt resource without an authority_instance; "
-    "an authority-routed resource makes systems.provision the blocked public path (#3144, #3148)"
+    "an authority-routed resource makes systems.provision the public authority-owned path"
 )
 NO_PLAIN_BLOCKED = (
     "the lane inventory routes every [[local_libvirt]] entry through an authority_instance; "
-    "run fixture mode on the lane's fixture-mode inventory (live-testing runbook)"
+    "run fixture mode on the lane's fixture-mode inventory, which declares "
+    "relocated_authority_instance instead (live-testing runbook)"
 )
 # Operator decision D1 (#3186): a fixture-mode record names how its System was made.
 FIXTURE_PROVENANCE = (
     "fixture-mode System: provisioned through the fixed worker, then moved onto the authority's "
-    "private daemon by scripts/live-vm/provision-authority-fixture.py, because public authority "
-    "provisioning is blocked by #3144/#3148; every operation under test runs against the real "
-    "authority"
+    "private daemon by scripts/live-vm/provision-authority-fixture.py, and admitted to "
+    "the authority by the Resource's relocated_authority_instance declaration (ADR-0752); every "
+    "operation under test runs against the real authority"
 )
 # Every non-terminal job that names the System or one of its Runs.
 _OPEN_JOBS = (

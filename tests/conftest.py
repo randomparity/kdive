@@ -394,6 +394,6 @@ def resource_routed_to_server_authority(monkeypatch: pytest.MonkeyPatch) -> None
     from kdive.providers.external_boot_authority.settings import AUTHORITY_INSTANCE
 
     monkeypatch.setattr(
-        "kdive.services.external_boot.routing.authority_instance_for_resource",
-        lambda _kind, _name: config.get(AUTHORITY_INSTANCE),
+        "kdive.services.external_boot.route_admission.authority_admission_routes_for_resource",
+        lambda _kind, _name: frozenset({config.get(AUTHORITY_INSTANCE)}),
     )
