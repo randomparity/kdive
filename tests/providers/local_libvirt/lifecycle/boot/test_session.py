@@ -456,6 +456,36 @@ def test_authority_semantic_identity_handles_a_partial_os_type(
     )
 
 
+_TCG_DEFAULT_CPU = (
+    '<cpu mode="custom" match="exact" check="none"><model fallback="forbid">POWER9</model></cpu>'
+)
+_PINNED_CPU = '<cpu mode="custom" check="partial"><model>POWER9</model></cpu>'
+
+
+@pytest.mark.parametrize("arch", ["ppc64le", "x86_64"])
+def test_authority_semantic_identity_ignores_a_libvirt_defaulted_cpu(arch: str) -> None:
+    rendered = _with_machine(arch, "pseries" if arch == "ppc64le" else "q35")
+
+    assert owned_system_semantic_identity(
+        rendered, SYSTEM_ID, OVERLAY
+    ) == owned_system_semantic_identity(
+        rendered.replace("<os>", f"{_TCG_DEFAULT_CPU}<os>"), SYSTEM_ID, OVERLAY
+    )
+
+
+def test_authority_semantic_identity_keeps_a_rendered_cpu() -> None:
+    bare = _xml()
+    pinned = bare.replace("<os>", f"{_PINNED_CPU}<os>")
+    other = pinned.replace("POWER9", "POWER10")
+    passthrough = bare.replace("<os>", '<cpu mode="host-passthrough"/><os>')
+
+    digests = {owned_system_semantic_identity(x, SYSTEM_ID, OVERLAY) for x in (bare, pinned, other)}
+    assert len(digests) == 3
+    assert owned_system_semantic_identity(
+        passthrough, SYSTEM_ID, OVERLAY
+    ) != owned_system_semantic_identity(bare, SYSTEM_ID, OVERLAY)
+
+
 _BASE = "/var/lib/kdive/provider-authority/bases/base.qcow2"
 _UNRELABELED_BACKING = (
     f'<backingStore type="file"><format type="qcow2"/><source file="{_BASE}">'
