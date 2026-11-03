@@ -4400,7 +4400,7 @@ class _ProvingTeardownOperations(_CollectingTeardownOperations):
         self.proved: list[str] = []
 
     def activation_volumes_absent(self, binding: Any, refs: Any) -> bool:
-        assert refs.module_volumes
+        del refs
         self.proved.append(binding.activation_id)
         return binding.activation_id not in self.keep
 
@@ -4422,10 +4422,10 @@ async def test_remote_system_teardown_collects_a_never_finalized_activation(
     _seed_activation_residue(store, other)
     before = _store_names(store)
 
-    assert await _system_teardown(store)
+    assert await _system_teardown(store, _ProvingTeardownOperations())
 
     after = _store_names(store)
-    assert after - before == {_teardown_name(store)}
+    assert after == {_teardown_name(store)}
     assert {name.rsplit(".", 1)[1] for name in before - after} == {
         "terminal",
         "restored",
@@ -4444,14 +4444,6 @@ async def test_remote_system_teardown_collects_a_never_finalized_activation(
         "object-index",
         "cleanup-quarantine",
     }
-    other_key = store._terminal_key(
-        other.binding.system_id,
-        other.binding.activation_id,
-        other.binding.run_id,
-        other.plan_identity,
-    )
-    assert f"{other_key}.terminal" in after
-    assert sum(name.endswith((".request", ".result", ".completion")) for name in after) == 3
     adapter.close()
 
 
@@ -4664,6 +4656,97 @@ def test_remote_activation_volumes_absent_reads_every_named_volume() -> None:
     assert not operations.activation_volumes_absent(binding, refs)
 
 
+def _seed_recovered_sibling(
+    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+) -> RemoteExternalBootRecoveryRecord:
+    """Another activation with every per-activation file, a recovery record and its receipt."""
+    objects = sorted(
+        (OpaqueProviderRef(ref=f"volumes/sibling-{kind}") for kind in ("source", "scratch")),
+        key=OpaqueProviderRef.to_canonical_json,
+    )
+    sibling = RemoteExternalBootRecoveryRecord.model_validate(
+        _sibling(record, "00000000-0000-4000-8000-0000000000aa")
+        .model_copy(update={"recovery_objects": tuple(objects)})
+        .model_dump(mode="python", by_alias=True)
+    )
+    _publish_terminal(store, sibling)
+    _seed_activation_residue(store, sibling)
+    store.record_cleanup_quarantine(
+        RemoteCleanupQuarantineV1(
+            binding=sibling.binding,
+            plan_identity=sibling.plan_identity,
+            recovery_ref=store.publish_recovery(sibling),
+            operation_identity="cleanup-sibling",
+            attempt_id=uuid4(),
+            journal_sequence=6,
+            journal_digest="sha256:" + "a" * 64,
+        )
+    )
+    return sibling
+
+
+def _activation_names(
+    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+) -> set[str]:
+    """An activation's own files on disk plus the plan's shared materialization pair."""
+    derived, anchors = store._activation_file_groups(
+        record.binding, record.plan_identity, keep_plan=False
+    )
+    return {name for name in derived + anchors if store._read(name) is not None}
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_collects_every_provable_activation(
+    tmp_path: Path,
+) -> None:
+    """#3486: finalized and proven siblings go; an unproven one and an adopted trio stay."""
+    adapter, record, request, _context, store = await _finalized_release_store(tmp_path)
+    finalized = _sibling(record, "00000000-0000-4000-8000-0000000000a1")
+    absent = _sibling(record, "00000000-0000-4000-8000-0000000000a2")
+    kept = _sibling(record, "00000000-0000-4000-8000-0000000000a3")
+    for sibling in (finalized, absent, kept):
+        _publish_terminal(store, sibling)
+    store._publish(
+        store._finalized_name(finalized.binding, finalized.plan_identity),
+        RemoteCleanupQuarantineV1(
+            binding=finalized.binding,
+            plan_identity=finalized.plan_identity,
+            recovery_ref=OpaqueProviderRef(ref="remote-external-boot/" + "e" * 64),
+            operation_identity="cleanup-finalized",
+            attempt_id=uuid4(),
+            journal_sequence=5,
+            journal_digest="sha256:" + "f" * 64,
+        ).to_canonical_json(),
+    )
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+    await adapter.adopt_recovery_object(
+        observed.binding, authority_reference(request), observed.observed_digest
+    )
+    kept_names = _activation_names(store, kept)
+    absent_request = store.reopen_terminal(absent.binding, absent.plan_identity).request
+    operations = _ProvingTeardownOperations(keep=frozenset({kept.binding.activation_id}))
+
+    assert await _system_teardown(store, operations)
+
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None and receipt.managed
+    identity = external_boot_authority._recovery_identity(receipt.recovery_ref)
+    index = f"{store._recovery_key(record.binding, record.plan_identity)}.recovery-index"
+    assert _store_names(store) == {
+        _teardown_name(store),
+        f"{identity}.recovery",
+        f"{identity}.cleanup-quarantine",
+        index,
+        *kept_names,
+    }
+    assert sorted(operations.proved) == [absent.binding.activation_id, kept.binding.activation_id]
+    with pytest.raises(external_boot_authority.RemoteCleanupFinalizedError):
+        store.stage(absent_request, 1.0)
+    cleanup = request.model_copy(update={"activation_id": UUID(absent.binding.activation_id)})
+    assert adapter._observe(cleanup).category == "absent"
+    adapter.close()
+
+
 @pytest.mark.anyio
 async def test_remote_finalize_after_teardown_collection_writes_nothing(tmp_path: Path) -> None:
     """#3472: an orphan delete that read the receipt before collection publishes no marker."""
@@ -4694,7 +4777,8 @@ async def test_remote_teardown_collection_resumes_after_a_crash_at_any_unlink(
         staged = store.reopen_terminal(record.binding, record.plan_identity).request
         if finalized:
             await adapter.finalize(request, context)
-        operations = _CollectingTeardownOperations()
+        _seed_recovered_sibling(store, record)
+        operations = _ProvingTeardownOperations()
         seen = 0
 
         def failing(path: str, *args: Any, _at: int = crash_at, **kwargs: Any) -> None:
@@ -4720,7 +4804,7 @@ async def test_remote_teardown_collection_resumes_after_a_crash_at_any_unlink(
         adapter.close()
         if not crashed:
             break
-    assert crashes >= (5 if finalized else 10)
+    assert crashes >= (25 if finalized else 30)
 
 
 @pytest.mark.anyio

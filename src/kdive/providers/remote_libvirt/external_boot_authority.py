@@ -3178,19 +3178,80 @@ class RemoteExternalBootCoordinator:
         return self._store.checkpoint_system_teardown(record, phase, completed_at=completed_at)
 
     def collect_torn_down_activation(self, record: RemoteSystemTeardownRecordV1) -> None:
-        """Collect a completed teardown's activation files; a failure is logged, not raised.
+        """Collect every activation of a completed teardown's System that is proven safe.
 
-        The System is already destroyed and the ``complete`` record keeps refusing late stages,
-        so a failure is logged rather than turned into a teardown refusal (ADR-0787, #3472).
+        The named activation's volumes were proven absent before ``complete``. Another activation
+        is collected only when finalized or when every volume its records name reads absent;
+        otherwise its records stay, since they are the only pointer to those volumes. A failure
+        is logged, not raised: the System is already destroyed and the ``complete`` record keeps
+        refusing late stages (ADR-0787, #3472, #3486).
         """
         if record.phase != "complete":
             return
         try:
-            self._store.collect_torn_down_activation(
-                record.intent.binding, record.intent.plan_identity
-            )
+            proven, kept_plans = self._prove_siblings(record)
         except Exception:  # noqa: BLE001 - the service's following observe collects again
             logger.exception("remote store collection after System teardown failed")
+            return
+        binding, plan_identity = record.intent.binding, record.intent.plan_identity
+
+        def named() -> None:
+            self._store.collect_torn_down_activation(
+                binding, plan_identity, keep_plan=plan_identity in kept_plans
+            )
+
+        collections: list[Callable[[], object]] = [named]
+        for sibling, plan, claims in proven:
+
+            def collect(
+                sibling: ExternalBootActivationBinding = sibling,
+                plan: str = plan,
+                claims: RemoteFinalizedTeardownRefsV1 | None = claims,
+            ) -> bool:
+                return self._store.collect_proven_activation(
+                    sibling, plan, claims, keep_plan=plan in kept_plans
+                )
+
+            collections.append(collect)
+        for collection in collections:
+            try:
+                collection()
+            except Exception:  # noqa: BLE001 - one activation's failure keeps the others going
+                logger.exception("remote store collection after System teardown failed")
+
+    def _prove_siblings(
+        self, record: RemoteSystemTeardownRecordV1
+    ) -> tuple[
+        list[tuple[ExternalBootActivationBinding, str, RemoteFinalizedTeardownRefsV1 | None]],
+        set[str],
+    ]:
+        """Other activations proven safe to collect, and the plans a kept one still uses."""
+        named = (record.intent.binding, record.intent.plan_identity)
+        operations = cast(RemoteSystemTeardownOperations, self._operations)
+        proven: list[
+            tuple[ExternalBootActivationBinding, str, RemoteFinalizedTeardownRefsV1 | None]
+        ] = []
+        kept_plans: set[str] = set()
+        for binding, plan_identity in self._store.system_activations(named[0].system_id):
+            if (binding, plan_identity) == named:
+                continue
+            try:
+                claims = self._store.activation_claims(binding, plan_identity)
+                absent = claims is None or operations.activation_volumes_absent(binding, claims)
+            except Exception:  # noqa: BLE001 - an unprovable activation is kept, not collected
+                logger.warning("remote store cannot prove an activation's volumes", exc_info=True)
+                claims, absent = None, False
+            if absent:
+                proven.append((binding, plan_identity, claims))
+                continue
+            kept_plans.add(plan_identity)
+            logger.warning(
+                "remote store keeps System %s run %s activation %s: a volume it names may remain",
+                binding.system_id,
+                binding.run_id,
+                binding.activation_id,
+            )
+        return proven, kept_plans
 
     def inspect_system_teardown(
         self, state: RemoteSystemTeardownState, *, domain_validated: bool
