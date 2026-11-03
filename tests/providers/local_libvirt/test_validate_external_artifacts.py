@@ -12,6 +12,7 @@ import struct
 import tarfile
 from collections.abc import Callable
 from compression import zstd
+from pathlib import Path
 from typing import IO, Literal
 
 import pytest
@@ -24,6 +25,9 @@ from kdive.build_artifacts.validation import (
     validate_external_artifacts,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
+    _source_tree_manifest,  # noqa: PLC2701
+)
 from kdive.serialization import JsonValue
 
 _EM_PPC64 = 21
@@ -449,10 +453,11 @@ def test_external_boot_evidence_records_the_uploaded_vmlinux() -> None:
 
     evidence = _evidence_with_vmlinux(vmlinux)
 
-    assert evidence["debuginfo"] == {
-        "sha256": "sha256:" + hashlib.sha256(vmlinux).hexdigest(),
-        "size_bytes": len(vmlinux),
-    }
+    debuginfo = evidence["debuginfo"]
+    assert isinstance(debuginfo, dict)
+    assert debuginfo["sha256"] == "sha256:" + hashlib.sha256(vmlinux).hexdigest()
+    assert debuginfo["size_bytes"] == len(vmlinux)
+    assert str(debuginfo["staged_module_source_manifest"]).startswith("sha256:")
 
 
 def test_external_boot_evidence_rejects_an_oversize_vmlinux(
@@ -489,8 +494,9 @@ def test_external_boot_evidence_reuses_the_scan_digest_for_trailing_padding(
         arch: str,
         *,
         range_observer: Callable[[int, bytes], None] | None = None,
+        staged_debuginfo: tuple[str, int] | None = None,
     ) -> dict[str, JsonValue]:
-        archive = original_scan(store, key, size_bytes, arch)
+        archive = original_scan(store, key, size_bytes, arch, staged_debuginfo=staged_debuginfo)
         assert range_observer is not None
         range_observer(0, kernel[:64])
         return archive
@@ -1675,3 +1681,80 @@ def test_chunked_entry_final_size_mismatch_is_build_failure() -> None:
             store, manifest=[entry], keys={"kernel": "k"}, declared_build_id=None
         )
     assert e.value.category is ErrorCategory.BUILD_FAILURE
+
+
+def _tree_bundle(*, extra: tuple[str, bytes] | None = None) -> bytes:
+    """A gzip tar with a boot member and a module tree that has explicit directory members."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _tar_add(tar, "boot/vmlinuz", _BZIMAGE_BODY)
+        for name in ("lib/modules/6.9.0", "lib/modules/6.9.0/kernel"):
+            info = tarfile.TarInfo(name)
+            info.type, info.mode = tarfile.DIRTYPE, 0o755
+            tar.addfile(info)
+        _tar_add(tar, "lib/modules/6.9.0/modules.dep", b"")
+        _tar_add(tar, "lib/modules/6.9.0/kernel/foo.ko", b"module")
+        if extra is not None:
+            _tar_add(tar, f"lib/modules/6.9.0/{extra[0]}", extra[1])
+    return buf.getvalue()
+
+
+def _scan_staged(blob: bytes, vmlinux: bytes) -> dict[str, JsonValue]:
+    store = _FakeStore(
+        {"k": blob}, {"k": HeadResult(len(blob), "csum", "e", STORE_MTIME, "test-version")}
+    )
+    return validation._scan_external_boot_archive(  # noqa: SLF001
+        store,
+        "k",
+        len(blob),
+        "x86_64",
+        staged_debuginfo=("sha256:" + hashlib.sha256(vmlinux).hexdigest(), len(vmlinux)),
+    )
+
+
+def test_staged_manifest_equals_the_manifest_of_the_tree_with_the_file(tmp_path: Path) -> None:
+    vmlinux = b"dwarf vmlinux bytes"
+    blob = _tree_bundle()
+
+    evidence = _scan_staged(blob, vmlinux)
+
+    tree = tmp_path / "tree"
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            prefix = "lib/modules/6.9.0/"
+            if member.name.startswith(prefix):
+                member.name = member.name[len(prefix) :]
+                tar.extract(member, tree, filter="data")
+    (tree / "vmlinux").write_bytes(vmlinux)
+    (tree / "vmlinux").chmod(0o644)
+    expected, _count, _bytes = _source_tree_manifest(tree)
+    assert evidence["staged_module_source_manifest"] == expected
+    assert evidence["staged_module_source_manifest"] != evidence["module_source_manifest"]
+
+
+def test_staged_manifest_is_omitted_when_the_tree_already_has_a_vmlinux() -> None:
+    evidence = _scan_staged(_tree_bundle(extra=("vmlinux", b"module-tree file")), b"dwarf")
+
+    assert "staged_module_source_manifest" not in evidence
+
+
+def test_staged_manifest_is_omitted_when_the_combined_tree_exceeds_the_module_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_ARCHIVE_MAX_BYTES", 1_000_000)
+    vmlinux = b"x" * 1_000_000
+
+    assert "staged_module_source_manifest" not in _scan_staged(_tree_bundle(), vmlinux)
+
+
+def test_scan_without_a_requested_debuginfo_reports_no_staged_manifest() -> None:
+    store = _FakeStore(
+        {"k": _KERNEL_TAR},
+        {"k": HeadResult(len(_KERNEL_TAR), "csum", "e", STORE_MTIME, "test-version")},
+    )
+
+    evidence = validation._scan_external_boot_archive(  # noqa: SLF001
+        store, "k", len(_KERNEL_TAR), "x86_64"
+    )
+
+    assert "staged_module_source_manifest" not in evidence

@@ -265,6 +265,9 @@ removes no store file, so the receipt survived there.
   adopted discard branch does; an adoption that finds the receipt gone fails as changed. This
   corrects the earlier "System lane already serializes" judgment for this pair; it does not
   cover `record_cleanup_quarantine`.
+  #3492 extends the lock there: `record_cleanup_quarantine` takes it, re-reads the receipt under
+  it and returns on a `managed` one, so an adoption landing between its check and its replace is
+  never overwritten with an unmanaged receipt.
 
 Considered & rejected:
 
@@ -447,3 +450,18 @@ Considered & rejected:
   bounds the remedy.
 - **Do nothing.** judgment: #3475 requires a bound on release, and the teardown bound kept the
   trap.
+
+### Amendment (2026-11-03): remote finalize re-checks `managed` under the store lock (#3493)
+
+The 2026-11-02 amendment's sentence "Finalize still does not re-check `managed` under the lock"
+no longer holds. Both callers read the receipt before `finalize_cleanup_quarantine` takes the
+store lock, so an adoption could land between their read and the lock, and finalize then
+removed the adopted receipt, its recovery record and the indexes.
+
+- `_finalize_cleanup_quarantine` reads the receipt again under the lock before it writes the
+  finalized marker or unlinks anything. An absent or `managed` receipt returns with nothing
+  written or removed, as System teardown collection already treats an adopted one. A receipt
+  that differs from the caller's in any other way is refused as
+  `remote cleanup proof differs from the quarantine receipt`.
+- The System lane still orders these calls in one authority process; the store no longer
+  depends on that.
