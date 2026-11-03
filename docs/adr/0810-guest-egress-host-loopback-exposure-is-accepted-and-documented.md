@@ -12,10 +12,16 @@ extends the same gate to remote authority Systems. With `restrict=off`, libslirp
 guest's connections to its gateway address (`10.0.2.2`) into connections to the host's own
 `127.0.0.1`. The connection originates from the QEMU process on the host, so a network-zone
 firewall never sees it, and a service bound to loopback only is reachable by an untrusted guest
-kernel. Issue [#3496](https://github.com/randomparity/kdive/issues/3496) (part of #3311) asks
+kernel. That includes kdive's own per-System loopback listeners: every System's SSH `hostfwd`
+(`127.0.0.1:<port>`) and, when enabled, its gdbstub (`-gdb tcp:127.0.0.1:<port>`, no authentication).
+An egress-enabled guest can therefore probe other guests' SSH and gdbstub ports on the same host. Issue [#3496](https://github.com/randomparity/kdive/issues/3496) (part of #3311) asks
 which of three mitigations to adopt: libvirt's passt backend, an allowlisted package proxy with
 `restrict=on`, or acceptance with documentation. The documentation half is
 [#3495](https://github.com/randomparity/kdive/issues/3495).
+
+The customization-boot egress NIC (`user,id=kdivebuild,restrict=off`, `_append_egress_nic`) is not
+gated by `guest_egress` and has the same mapping; it runs build-time code and is covered by this
+decision as well.
 
 The NIC is not a libvirt `<interface>`. It is a raw `-netdev user,...,restrict=<on|off>,hostfwd=...`
 on the domain's `qemu:commandline` (`src/kdive/providers/local_libvirt/lifecycle/xml.py`,
@@ -39,11 +45,22 @@ target, drops all guest UDP including DNS, and drops ICMP beyond the gateway.
 
 **libvirt's passt backend cannot close the mapping.** passt maps the guest's default-gateway
 address to the host's loopback by default; `--no-map-gw` or `--map-host-loopback none` turns that
-off (passt man page). libvirt 12.0.0 and current master build the passt command line from a fixed
-set (`--one-off`, `--socket`, `--pid`, `--mtu`, `--interface`, `--log-file`, `--hostname`, `--fqdn`,
-`--address`, `--netmask`, `--gateway`, `--tcp-ports`, `--udp-ports`) and expose neither option in
-the domain XML. libvirt starts passt itself, so `qemu:commandline` cannot add one. A passt-backed
-guest therefore has the same host-loopback exposure as slirp `restrict=off`.
+off (passt man page); it is also off when the host has no default route. libvirt 12.0.0 and current
+master (qemu_passt.c) build the passt command line from a fixed set of options and expose neither
+`--no-map-gw` nor `--map-host-loopback` in the domain XML. libvirt starts passt itself, so
+`qemu:commandline` cannot add one. A libvirt passt-backed guest therefore has the same
+host-loopback exposure as slirp `restrict=off`.
+
+**QEMU's own passt netdev has the control, and the libvirt sandbox blocks it.** QEMU 10.1 added
+`-netdev passt` with `map-host-loopback` and `tcp-ports` options (qapi/net.json `NetDevPasstOptions`,
+"Since: 10.1"); it is built into the Fedora 44 QEMU. Because it is a netdev, it could ride the same
+`qemu:commandline` route as today's NIC. QEMU starts passt itself (net/passt.c,
+`g_subprocess_launcher_spawnv`). Checked on the Fedora 44 host with a bare `-machine none` QEMU:
+`-netdev passt,id=n0,map-host-loopback=none,tcp-ports=127.0.0.1/22222:22` starts with the sandbox
+off, and fails with `Error creating daemon: Failed to fork (Operation not permitted)` under
+`-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`, the argument
+libvirt adds by default. That is a start-up check only: no guest booted, and the effect of
+`map-host-loopback=none` on guest traffic was not exercised.
 
 **A guestfwd proxy path is narrow.** Under `restrict=on` slirp still honours `guestfwd` targets
 (libslirp tcp_input.c: restricted connections are dropped "unless it happens to be a guestfwd").
@@ -57,15 +74,17 @@ on (qemu_command.c), which is the default.
 | Host | libvirt | QEMU | passt | libslirp | libvirt passt knob for gateway mapping |
 |---|---|---|---|---|---|
 | Ubuntu 26.04 | 12.0.0 | 10.2.1 | git 2026-01-20 | 4.9.1 | none |
-| Fedora 44 | 12.0.0 | 10.2.2 | 2026-10-02 | 4.9.1 | none |
+| Fedora 44 (installed, verified) | 12.0.0 | 10.2.2 | 2026-10-02 | 4.9.1 | none |
 | Rocky 10.2 / RHEL 10 | 11.10.0 | 10.1.0 (qemu-kvm) | 2025-12-10 | 4.7.0 | none |
 | openSUSE Tumbleweed | 12.8.0 | 11.1.2 | 2026-10-02 | 4.9.5 | none |
 | openSUSE Leap 16 (SLES 16 basis; SLES itself not checked) | 11.4.0 | 10.0.x | 2025-04-15 | 4.8.0 | none |
 
-Every row carries libvirt at or above 9.0.0, which introduced `<backend type='passt'/>`, so passt
-is available everywhere; the gap is the missing control, not the backend. Debian was not checked.
-Fedora 44's values come from the installed packages; the others come from the Ubuntu, Rocky and
-openSUSE package indexes. Ubuntu 24.04 already needed an AppArmor workaround for libguestfs'
+QEMU's own passt netdev needs QEMU 10.1 or later, which leaves out Leap 16; whether the Ubuntu,
+Rocky and openSUSE QEMU builds compile it in was not checked.
+
+Every row carries libvirt at or above 9.0.0, which introduced `<backend type='passt'/>` (libvirt
+formatdomain, "Since 9.0.0"), so passt is available everywhere; the gap is the missing control, not the backend. Debian was not checked.
+The non-Fedora rows are package-index metadata, not installed and run. Ubuntu 24.04 already needed an AppArmor workaround for libguestfs'
 passt ([ADR-0222](0222-ubuntu-build-fs-libguestfs-diagnostics.md)), a signal that confinement
 policy for passt differs per distribution.
 
@@ -79,9 +98,9 @@ The exposure is a named property of `guest_egress = true`, not an unknown. An op
 it accepts that an untrusted guest kernel can reach services bound to the worker host's loopback,
 and must either keep such services off loopback-only trust or not enable egress on that host.
 
-Revisit when either condition changes: QEMU exposes libslirp's `disable_host_loopback`, or libvirt
-exposes passt's `--no-map-gw` (or `--map-host-loopback`). Either makes a one-flag mitigation that
-keeps the current NIC shape.
+Revisit when any of these changes: QEMU exposes libslirp's `disable_host_loopback`; libvirt exposes
+passt's `--no-map-gw` or `--map-host-loopback`; or QEMU's own passt netdev becomes usable under
+libvirt's sandbox. Each gives a mitigation that keeps the current `qemu:commandline` NIC shape.
 
 ## Consequences
 
@@ -89,24 +108,36 @@ keeps the current NIC shape.
   unaffected.
 - The `guest_egress` threat statement in ADR-0313 stays as written; #3495 adds the loopback
   specifics to it and to the runbooks.
-- The host-side controls available today are operator-owned and untested by this record. The
-  worker slot accounts own the QEMU processes, so a firewall rule scoped to those uids and to new
-  loopback connections is a candidate recipe. It would need a live proof on a lab host before any
-  runbook recommends it, and it does not cover a deployment whose QEMU shares a uid with kdive's
-  own services.
+- Host-side controls are operator-owned and untested by this record. The fixed worker slot accounts
+  run the session libvirt daemon, so QEMU runs under them; a firewall rule scoped to those uids and
+  to new loopback connections is a candidate recipe. It needs a live proof on a lab host before any
+  runbook recommends it, and it does not apply where QEMU shares a uid with kdive's own services.
+  Running with no default route on the host also disables passt's mapping, but not slirp's.
 - ADR-0721's dispatcher and the three return-route helpers are untouched.
 
 ## Considered & rejected
 
 - **libvirt passt backend.** Rejected: it does not mitigate. passt's default gateway mapping is the
   same exposure, and libvirt 12.0.0 and master offer no way to turn it off. Adopting it would also
-  replace the raw hostfwd with `<portForward>`, move the guest onto host-derived addressing so the
-  ADR-0721 dispatcher and the `10.0.2.2` helpers stop matching, and add per-distribution
-  AppArmor/SELinux policy for passt. If a libvirt release exposes `--no-map-gw`, the mitigation
+  replace the raw hostfwd with `<portForward>`, bring the addressing change below, and add
+  per-distribution AppArmor/SELinux policy for passt. If a libvirt release exposes `--no-map-gw`, the mitigation
   becomes worth that cost and the decision is revisited.
-- **Spawning passt from kdive.** Rejected: it gives the control but moves passt's lifecycle,
-  confinement and cleanup onto kdive, which the provider has no host-process channel for
-  (rejected on the same ground for the host relay in ADR-0721).
+- **QEMU's `-netdev passt,map-host-loopback=none`.** Rejected: it keeps the NIC shape and closes the
+  mapping, but QEMU forks passt, so it works only with libvirt's seccomp sandbox (`spawn=deny`)
+  disabled. `seccomp_sandbox` is a daemon-wide libvirt setting, so the change would weaken QEMU's
+  containment for every guest running an untrusted kernel, trading a smaller boundary for a larger
+  one. It also needs QEMU 10.1 or later (not Leap 16), a MAC-policy answer for QEMU executing passt
+  on each distribution, and a move to host-derived guest addressing (below).
+- **A passt started outside QEMU** (a per-System service, joined by `-netdev stream`). This gives
+  the control without the sandbox change, and it is the strongest alternative to accepting the
+  exposure. Rejected for now: kdive would own passt's lifecycle, cleanup and confinement per
+  System, which the provider has no channel for (the same ground on which ADR-0721 rejected a host
+  relay), and it carries the addressing change below. It is the option to cost if an operator
+  requires the mitigation.
+- **Addressing change common to every passt route.** The guest receives host-derived addresses
+  instead of slirp's `10.0.2.15` lease and `10.0.2.2` gateway. The ADR-0721 dispatcher and the
+  three return-route helpers key on that subnet and would stop matching, and the SSH `hostfwd`
+  becomes a passt port-forward whose source address as seen by the guest was not examined.
 - **Allowlisted package proxy with `restrict=on` and `guestfwd`.** Rejected for now. It does close
   the loopback path, and it makes egress stricter than today's open NAT. But the chardev form
   serializes guest connections, the per-connection `cmd:` form needs the seccomp spawn denial and
