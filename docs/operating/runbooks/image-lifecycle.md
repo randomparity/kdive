@@ -337,6 +337,22 @@ longer the boundary — **your network zone's firewall is**. Enable this only fo
 in a lab micro-zone whose network firewall already restricts egress. When the flag is absent or
 false, behavior is exactly as before (`restrict=on`, no egress).
 
+**Security — host loopback is reachable too.** With `restrict=off`, QEMU user-mode networking
+maps the guest's gateway address, `10.0.2.2`, to the host's loopback interface. An egress-enabled
+guest can open TCP connections to any service that listens only on host loopback, as the account
+libvirt runs QEMU as: the libvirt QEMU user under `qemu:///system`, the invoking account under
+`qemu:///session`. For an authority System with `guest_egress` in its manifest, remote authority
+Systems included, it is the authority account that owns the private session daemon. Your
+network-zone firewall does not see these connections, because they terminate on the host. That
+includes kdive's own per-System listeners: other guests' loopback SSH forward ports and, on Systems
+provisioned with `debug.gdbstub`, the unauthenticated QEMU gdbstub, which gives the reaching guest
+control of that other guest. The image-build customization boot has its own ungated `restrict=off`
+NIC with the same mapping, so it reaches host-loopback services whether or not `guest_egress` is
+set. Before enabling `guest_egress`, treat every loopback-only service on that host as reachable by
+the guest's kernel and userspace, or do not enable it on that host. Whether kdive will mitigate this
+is tracked in #3496; until then the exposure is part of what you accept (ADR-0313, amendment of
+2026-11-03).
+
 **Note:** `restrict=off` opens the *route*; the guest still needs to DHCP the NIC and populate
 `/etc/resolv.conf` (SLIRP hands out `10.0.2.15` with DNS at `10.0.2.3`). The `kdive-ready` images do
 this under direct-kernel boot; if a custom image does not bring the NIC up, runtime installs still
