@@ -134,6 +134,24 @@ def test_construct_plan_carries_the_uploaded_vmlinux() -> None:
     )
 
 
+def test_construct_plan_carries_the_staged_module_tree_manifest() -> None:
+    build = _with_debuginfo(_build())
+    evidence = build.canonical_document["external_boot_evidence"]
+    assert isinstance(evidence, dict)
+    staged = "sha256:" + "7" * 64
+    evidence["debuginfo"] = {
+        "sha256": _SHA,
+        "size_bytes": 4096,
+        "staged_module_source_manifest": staged,
+    }
+
+    plan = _construct(build)
+
+    assert plan.debuginfo is not None
+    assert plan.debuginfo.staged_module_source_manifest == staged
+    assert plan.module_tree_manifest == staged
+
+
 def test_construct_plan_omits_debuginfo_for_evidence_without_it() -> None:
     build = _build()
     build.artifacts["vmlinux"] = {"version_id": "vmlinux-v1"}

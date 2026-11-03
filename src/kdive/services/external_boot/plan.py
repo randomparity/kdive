@@ -112,12 +112,16 @@ def _debuginfo_source(
         or not isinstance(debuginfo_ref, str)
     ):
         raise _invalid("external_boot_debuginfo_incomplete")
-    return {
+    source: dict[str, JsonValue] = {
         "key": debuginfo_ref,
         "version": vmlinux.get("version_id"),
         "sha256": debuginfo_evidence.get("sha256"),
         "size_bytes": debuginfo_evidence.get("size_bytes"),
     }
+    staged = debuginfo_evidence.get("staged_module_source_manifest")
+    if staged is not None:
+        source["staged_module_source_manifest"] = staged
+    return source
 
 
 def external_boot_root_arguments(

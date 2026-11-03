@@ -16,6 +16,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     convert_kernel_bundle_modules,
 )
+from kdive.providers.remote_libvirt.lifecycle.rootfs import remote_module_volumes as volumes
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     AttachmentInspection,
 )
@@ -707,6 +708,57 @@ def test_real_ext4_writer_builds_canonical_archive_with_manifest_parity(tmp_path
     finally:
         expected.path.unlink(missing_ok=True)
         image.path.unlink(missing_ok=True)
+
+
+def test_archive_writer_adds_the_staged_vmlinux_with_manifest_parity(tmp_path: Path) -> None:
+    writer = Ext4SourceFilesystemWriter(tmp_path)
+    operation = OPERATION.to_wire_bytes()
+    archive = _canonical_module_archive(tmp_path)
+    vmlinux = tmp_path / "debuginfo"
+    vmlinux.write_bytes(b"dwarf")
+    vmlinux.chmod(0o600)
+    expected = writer.build(
+        operation,
+        (
+            ModuleTreeEntry("kernel", 0o40755),
+            ModuleTreeEntry("kernel/a.ko", 0o100755, content=b"module"),
+            ModuleTreeEntry("alias", 0o120777, link_target="kernel/a.ko"),
+            ModuleTreeEntry("vmlinux", 0o100644, content=b"dwarf"),
+        ),
+    )
+    image = writer.build_from_archive(operation, archive, vmlinux)
+
+    try:
+        assert image.evidence == expected.evidence == writer.inspect(image.path)
+        assert image.evidence.entry_count == 4
+        extracted = writer.extract(image.path, tmp_path / "readback")
+        assert (extracted / "modules/vmlinux").read_bytes() == b"dwarf"
+    finally:
+        expected.path.unlink(missing_ok=True)
+        image.path.unlink(missing_ok=True)
+
+
+def test_archive_writer_refuses_a_tree_that_already_has_a_vmlinux(tmp_path: Path) -> None:
+    modules = tmp_path / "modules"
+    modules.mkdir()
+    (modules / "vmlinux").write_bytes(b"module-tree file")
+    staged = tmp_path / "debuginfo"
+    staged.write_bytes(b"dwarf")
+
+    with pytest.raises(ValueError, match="already has vmlinux"):
+        volumes._link_debuginfo(modules, staged)  # noqa: SLF001
+
+
+def test_archive_writer_bounds_the_tree_including_the_staged_vmlinux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _canonical_module_archive(tmp_path)
+    staged = tmp_path / "debuginfo"
+    staged.write_bytes(b"x" * 10)
+    monkeypatch.setattr(volumes, "MAX_CONTENT_BYTES", len(b"module") + 9)
+
+    with pytest.raises(CategorizedError, match="failed to build remote module ext4 source image"):
+        Ext4SourceFilesystemWriter(tmp_path).build_from_archive(b"operation", archive, staged)
 
 
 def test_archive_writer_hashes_module_contents_without_read_bytes(

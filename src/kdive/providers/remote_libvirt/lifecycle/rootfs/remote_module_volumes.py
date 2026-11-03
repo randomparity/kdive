@@ -53,6 +53,7 @@ from kdive.providers.shared.external_boot_bounds import (
 )
 
 SCRATCH_CAPACITY_BYTES = 10 * 1024**3
+_DEBUGINFO_TREE_NAME = "vmlinux"
 _MIN_SOURCE_CAPACITY_BYTES = 64 * 1024**2
 _SOURCE_BLOCK_BYTES = 4096
 _SOURCE_FIXED_OVERHEAD_BYTES = 16 * 1024**2
@@ -100,7 +101,9 @@ class FilesystemImageWriter(Protocol):
 
 
 class ArchiveFilesystemImageWriter(FilesystemImageWriter, Protocol):
-    def build_from_archive(self, operation: bytes, archive: Path) -> BuiltSourceImage: ...
+    def build_from_archive(
+        self, operation: bytes, archive: Path, debuginfo: Path | None = None
+    ) -> BuiltSourceImage: ...
 
 
 class Ext4SourceFilesystemWriter:
@@ -116,11 +119,16 @@ class Ext4SourceFilesystemWriter:
             lambda modules: _populate_module_entries(modules, entries),
         )
 
-    def build_from_archive(self, operation: bytes, archive: Path) -> BuiltSourceImage:
-        """Build from the canonical file-backed module tar without materializing its contents."""
+    def build_from_archive(
+        self, operation: bytes, archive: Path, debuginfo: Path | None = None
+    ) -> BuiltSourceImage:
+        """Build from the canonical file-backed module tar without materializing its contents.
+
+        ``debuginfo`` joins the tree as ``vmlinux`` (#3131).
+        """
         return self._build_source(
             operation,
-            lambda modules: _extract_canonical_module_archive(archive, modules),
+            lambda modules: _extract_canonical_module_archive(archive, modules, debuginfo),
         )
 
     def _build_source(
@@ -227,6 +235,7 @@ class VolumeRequest:
     # systemd host is a RAM-backed tmpfs sized at half of memory.
     work_dir: Path | None = None
     archive: Path | None = None
+    debuginfo: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,7 +351,9 @@ def _populate_module_entries(
     return len(entries), content_bytes
 
 
-def _extract_canonical_module_archive(archive_path: Path, modules: Path) -> tuple[int, int]:
+def _extract_canonical_module_archive(
+    archive_path: Path, modules: Path, debuginfo: Path | None = None
+) -> tuple[int, int]:
     count = 0
     content_bytes = 0
     prior_name: bytes | None = None
@@ -370,7 +381,21 @@ def _extract_canonical_module_archive(archive_path: Path, modules: Path) -> tupl
                 validate_module_tree_bounds(entry_count=count, content_bytes=content_bytes)
                 destination = modules.joinpath(*PurePosixPath(path).parts)
                 _extract_archive_member(archive, member, destination, kind)
-    return count, content_bytes
+    if debuginfo is None:
+        return count, content_bytes
+    size = _link_debuginfo(modules, debuginfo)
+    validate_module_tree_bounds(entry_count=count + 1, content_bytes=content_bytes + size)
+    return count + 1, content_bytes + size
+
+
+def _link_debuginfo(modules: Path, debuginfo: Path) -> int:
+    """Hard-link the staged vmlinux into the tree; the work directory is one filesystem."""
+    destination = modules / _DEBUGINFO_TREE_NAME
+    if os.path.lexists(destination):
+        raise ValueError(f"module tree already has {_DEBUGINFO_TREE_NAME}")
+    debuginfo.chmod(0o644)
+    os.link(debuginfo, destination, follow_symlinks=False)
+    return destination.lstat().st_size
 
 
 def _canonical_archive_path(value: str) -> str:
@@ -899,9 +924,10 @@ def _build_request_image(request: VolumeRequest, operation: bytes) -> BuiltSourc
     build = getattr(request.writer, "build_from_archive", None)
     if not callable(build):
         raise ValueError("archive-backed module preparation requires an archive writer")
-    return cast(ArchiveFilesystemImageWriter, request.writer).build_from_archive(
-        operation, request.archive
-    )
+    writer = cast(ArchiveFilesystemImageWriter, request.writer)
+    if request.debuginfo is None:
+        return writer.build_from_archive(operation, request.archive)
+    return writer.build_from_archive(operation, request.archive, request.debuginfo)
 
 
 def prepare_attempt_volumes(
