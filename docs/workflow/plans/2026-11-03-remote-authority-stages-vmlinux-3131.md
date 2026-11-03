@@ -33,10 +33,10 @@ docs and ADR amendments (~80).
 | `src/kdive/build_artifacts/validation.py` | `_module_source_manifest(entries)` helper; staged manifest in `debuginfo` evidence | 2 |
 | `src/kdive/services/external_boot/plan.py` | copy key into the member | 2 |
 | `src/kdive/providers/remote_libvirt/debuginfo_module_tree.py` | new stager wrapper | 1 |
-| `src/kdive/providers/external_boot_authority/host.py` | wrap `artifact_stager` | 1 |
+| `src/kdive/providers/external_boot_authority/host.py` | wrap `artifact_stager` (fetch for the module host, not the materializer) | 1 |
 | `src/kdive/providers/remote_libvirt/lifecycle/rootfs/remote_module_volumes.py` | `VolumeRequest.debuginfo`, link into tree | 1, 3 |
 | `src/kdive/providers/remote_libvirt/remote_module_authority_host.py` | derive, `_volume_request(directory)` | 2 |
-| `src/kdive/services/remote_module_authority_preparation.py` | worker check | 2 |
+| `src/kdive/services/remote_module_authority_preparation.py`, `src/kdive/providers/remote_libvirt/external_boot_authority.py` (`_operation_matches_authority` only) | worker check, request validator | 2 |
 | docs: ADR-0723, ADR-0724 amendments; `docs/operating/external-build-upload.md`, `docs/operating/providers/remote-libvirt.md` | | 4 |
 
 ## Task 1: plan member and properties
@@ -59,25 +59,30 @@ class DebuginfoSource(ArtifactSource):
     )
 ```
 ```python
-    @property
-    def module_tree_debuginfo(self) -> DebuginfoSource | None:
-        member = self.debuginfo
-        return member if member and member.staged_module_source_manifest else None
+@property
+def module_tree_debuginfo(self) -> DebuginfoSource | None:
+    member = self.debuginfo
+    return member if member and member.staged_module_source_manifest else None
 
-    @property
-    def module_tree_manifest(self) -> str:
-        member = self.module_tree_debuginfo
-        if member is None:
-            return self.module_obligation.source_manifest
-        return cast(str, member.staged_module_source_manifest)
+
+@property
+def module_tree_manifest(self) -> str:
+    member = self.module_tree_debuginfo
+    if member is None:
+        return self.module_obligation.source_manifest
+    return cast(str, member.staged_module_source_manifest)
 ```
+Add a golden test: a plan whose `debuginfo` member lacks the key serializes to the exact bytes and
+identity it had before this change (literal digest taken from `main` before the edit).
 Steps: write tests, see red, implement, green, commit `feat(external-boot): plan carries the staged module-tree manifest (#3131)`.
 
 ## Task 2: build evidence and plan construction
 
 Verification: `Mode: focused-test`. (a) `_scan_external_boot_archive(..., staged_debuginfo=(sha, size))`
-returns `staged_module_source_manifest` equal to `_source_tree_manifest` of the extracted modules
-plus a `vmlinux` file; omitted for a tree with a `vmlinux` entry and when not requested. File
+returns `staged_module_source_manifest` equal to `_source_tree_manifest` (from
+`remote_module_volumes`) of a real directory holding the extracted modules plus a `vmlinux` file
+(no mkfs needed); omitted for a tree with a `vmlinux` entry, for a combined tree over the entry or
+byte module bounds, and when not requested. File
 `tests/providers/local_libvirt/test_validate_external_artifacts.py`; red `TypeError`; green
 `just test-verbose tests/providers/local_libvirt/test_validate_external_artifacts.py`. (b) plan
 construction copies `evidence["debuginfo"]["staged_module_source_manifest"]`; file
@@ -91,7 +96,10 @@ domain `kdive-module-source-manifest-v1\0`); `_scan_external_boot_archive` gains
 `{"mode": "0644", "path": "vmlinux", "sha256": sha, "size": size, "type": "file"}`. The caller
 computes `_debuginfo_evidence` before the scan and passes `(sha256, size_bytes)`; when the result
 carries the key it is stored under `evidence["debuginfo"]`. `_debuginfo_source` in `plan.py` adds
-the key when present in the evidence.
+the key when present in the evidence. The scan compares `module_bytes + size` and
+`module_members + 1` with the module limits (`MAX_MODULE_REGULAR_BYTES`, `MAX_MODULE_ENTRIES`;
+`providers/shared/external_boot_bounds.py` imports `validation`, so the scan reads them from
+their definition site, not through that module).
 
 ## Task 3: stager wrapper
 
@@ -103,21 +111,28 @@ reused (store untouched); an existing mismatching one is refused. Red: `ModuleNo
 green: `just test-verbose tests/providers/remote_libvirt/test_debuginfo_module_tree.py`.
 
 Interfaces: `class DebuginfoModuleTreeStager: __init__(self, inner: ExternalBootArtifactStager,
-object_store: ObjectStore)`; `materialize_artifacts(plan, directory_fd) -> tuple[dict[str,
+object_store: ObjectStore, *, fetch: bool)`; composite installed digest
+`"sha256:" + hashlib.sha256(b"kdive-remote-installed-with-debuginfo-v1\0" + base.encode() +
+b"\0" + sha.encode() + b"\0" + str(size).encode()).hexdigest()`; `materialize_artifacts(plan, directory_fd) -> tuple[dict[str,
 object], str]`. Store call confirmed in the repo: `store.get_artifact_stream(key, None,
 version_id=...)` yielding `.reader`. Writes `.debuginfo.next` (`O_EXCL|O_NOFOLLOW`, 0600), fsync,
-rename to `debuginfo`, fsync directory. `host.py:1777` becomes
-`DebuginfoModuleTreeStager(build_authority_artifact_stager(object_store), object_store)`.
+rename to `debuginfo`, fsync directory. `host.py:1777` builds one wrapper with `fetch=True` for `RemoteModuleAuthorityHostFactory` and
+one with `fetch=False` for `ConcreteRemoteExternalBootMaterializer`; a composition test asserts
+each. A missing object version raises the store's categorized error before any System stop.
 
 ## Task 4: volume build and binding
 
 Verification: `Mode: focused-test`. (a) `Ext4SourceFilesystemWriter.build_from_archive(operation,
-archive, debuginfo)` image whose readback manifest equals the Task 2 value for the same inputs
-(skip when `mkfs.ext4` is absent, like the existing writer tests); an existing `vmlinux` in the
+archive, debuginfo)` image whose readback manifest equals `_source_tree_manifest` of the
+extracted tree plus the file (skip when `mkfs.ext4` is absent, like the existing writer tests);
+`_build_request_image` passes `debuginfo=` only when set, so existing doubles (the fake at
+`test_remote_module_authority_host.py:158`) change only for a staged-plan case; an existing `vmlinux` in the
 archive and a byte-bound overflow raise. File `tests/providers/remote_libvirt/lifecycle/` (the
 existing volume tests). (b) `derive_operation` returns `plan.module_tree_manifest`; the worker
-check accepts it and rejects the module-only manifest for a staged plan; `_volume_request` passes
-`directory/"debuginfo"` only for a staged plan: `test_remote_module_authority_host.py`.
+check and `RemoteModuleVolumePreparationRequestV1` accept it and reject the module-only manifest
+for a staged plan (and still accept it for an unstaged one); execute and restore pass
+`directory/"debuginfo"` only for a staged plan: `test_remote_module_authority_host.py`,
+`test_external_boot_authority.py`. Finish with `rg "module_obligation.source_manifest" src`.
 
 Implementation: `VolumeRequest.debuginfo: Path | None = None`; protocol and writer
 `build_from_archive(self, operation, archive, debuginfo=None)`; after

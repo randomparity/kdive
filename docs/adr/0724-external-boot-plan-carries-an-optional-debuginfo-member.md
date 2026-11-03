@@ -51,8 +51,9 @@ Item 5 left the remote write and recovery mechanism to #3131 and named two route
 
 The remote authority adds the `vmlinux` to the module source tree as the regular file `vmlinux`,
 so the appliance installs it at `/lib/modules/<release>/vmlinux` and its capture, replace and
-restore cover it. drgn 0.2.0 searches that path by default (`/lib/modules/%s/vmlinux` in the
-shipped `_drgn` binary, read on 2026-11-03), so the file resolves symbols although it is not at
+restore cover it. drgn 0.2.0 searches that path by default (`strings` on
+`_drgn.cpython-314-x86_64-linux-gnu.so` from `drgn-0.2.0-1.fc44` lists `/boot/vmlinux-%s`,
+`/lib/modules/%s/vmlinux` and `/lib/modules/%s/vmlinux.debug`, 2026-11-03), so the file resolves symbols although it is not at
 the `/usr/lib/debug/lib/modules/<release>/vmlinux` path that
 [ADR-0723](0723-drgn-live-reads-a-staged-dwarf-vmlinux.md) item 5 names for the other paths. The
 appliance protocol, schemas and image are unchanged.
@@ -67,7 +68,7 @@ without it (a Run completed before #3131) is ignored by the remote authority, as
 Consequences: an authority host from before #3131 rejects a plan that carries the new key
 (`extra="forbid"`); upgrade authority hosts before workers and the server, as under Consequences
 below. The tree's 8 GiB and 200,000-entry bounds count the file; a module tree near the bound
-fails the source build. Materialize and each prepare or restore read the object once more.
+fails the source build. Each prepare or restore reads the object once more.
 
 Considered & rejected:
 
@@ -76,6 +77,10 @@ Considered & rejected:
   image per architecture, for a path drgn also finds under `/lib/modules/<release>/`.
 - **Hash the extra file into the operation only.** judgment: the appliance and the source volume
   hash the whole tree, so the tree manifest must change; a side digest would leave them unbound.
+- **Leave the remote member ignored.** judgment: ADR-0723 item 5 requires every install path to
+  stage it; drgn-live on a remote guest-agent attach stays silent and unusable.
+- **Fetch the `vmlinux` at materialization too.** judgment: the materializer publishes only
+  the kernel and initrd, so the fetch there reads 1.5 GiB it does not use.
 - **Compute the combined manifest at derivation time.** judgment: it needs the multi-gigabyte
   bundle before the attempt exists; the build already holds the entries.
 
