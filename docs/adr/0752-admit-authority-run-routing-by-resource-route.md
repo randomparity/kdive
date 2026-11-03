@@ -72,7 +72,7 @@ do not recover it: `ops.force_teardown` takes the same authority-marked teardown
 `systems.teardown`, which the issue's live evidence shows failing
 (`journal-conflict` / `provider-not-configured`) because the authority cannot observe a
 fixed-worker domain, and `ops.force_release` uses the guarded release service that
-refuses while the activation is open. That recovery is tracked in its own issue; no
+refuses while the activation is open. That recovery is tracked in #3520; no
 manual SQL or ownership rewrite is authorized.
 
 ## Considered & rejected

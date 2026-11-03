@@ -76,7 +76,7 @@ Import-closure test stays green.
 (`route_external_boot_teardown`); the live evidence in the issue shows that route failing
 (`journal-conflict`, `provider-not-configured`) because the authority cannot observe a
 fixed-worker domain. `ops.force_release` uses the guarded release service, which refuses
-while the activation is open. Recovery is therefore split into its own issue; this change
+while the activation is open. Recovery is therefore split into #3520; this change
 designs no recovery contract.
 
 ## Failure model
@@ -88,7 +88,7 @@ designs no recovery contract.
 - Accepted failure classes: a route or relocation declaration added to a Resource after the fixed worker provisioned Systems on it admits those Systems (no per-System evidence exists; ADR-0752 Consequences); an operator changing configuration between requests makes a
   replayed key refuse until the route is restored.
 - Covered elsewhere: provider conflict #3144 (closed), attempt recovery #3143, DWARF
-  staging #3130/#3131, stranded-allocation recovery (new issue).
+  staging #3130/#3131, stranded-allocation recovery #3520.
 
 ## Threat model
 
