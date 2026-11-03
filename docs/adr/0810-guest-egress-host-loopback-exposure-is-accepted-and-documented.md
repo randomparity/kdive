@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (2026-11-03)
 
 ## Context
 
@@ -93,8 +93,9 @@ policy for passt differs per distribution.
 ## Decision
 
 We will accept the host-loopback exposure under `guest_egress`, document it as a residual threat
-(#3495), and not change the NIC. The follow-up implementation issue
-[#3497](https://github.com/randomparity/kdive/issues/3497) closes as not planned.
+(#3495), and not change the NIC. The operator chose this option on 2026-11-03 from the three
+candidates in #3496. This decision closes the follow-up implementation issue
+[#3497](https://github.com/randomparity/kdive/issues/3497) as not planned.
 
 The exposure is a named property of `guest_egress = true`, not an unknown. An operator who enables
 it accepts that an untrusted guest kernel can reach services bound to the worker host's loopback,
@@ -124,6 +125,12 @@ two keep the `qemu:commandline` route but still bring the addressing change belo
   host (ADR-0804) runs QEMU as the authority account and would need its own analysis. It needs a live proof on a lab host before any
   runbook recommends it, and it does not apply where QEMU shares a uid with kdive's own services.
   Running with no default route on the host also disables passt's mapping, but not slirp's.
+- The exposure covers more than unrelated host services: other guests' SSH `hostfwd` ports and the
+  unauthenticated gdbstub listener on the same host are reachable from an egress-enabled guest,
+  and the ungated `kdivebuild` customization NIC (`_append_egress_nic`) has the same reach with
+  `guest_egress` off. #3495's documentation states these.
+- Follow-up candidates, not decided here: gating or constraining the `kdivebuild` NIC, and proving
+  the uid-scoped loopback firewall recipe on a lab host.
 - ADR-0721's dispatcher and the three return-route helpers are untouched.
 
 ## Considered & rejected
