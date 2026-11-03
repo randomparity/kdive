@@ -2323,6 +2323,8 @@ class _ExternalIO:
         self.operation_fault = operation_fault
         self.close_fault = close_fault
         self.opened: list[ExpectedOperationOwnership] = []
+        self.pinned: list[ExpectedOperationOwnership] = []
+        self.pin_closes = 0
         self.close_attempts = 0
         self.preparation_receipts: dict[str, ExternalBootPreparationObservation] = {}
 
@@ -2337,6 +2339,13 @@ class _ExternalIO:
         assert authority == OpaqueProviderRef(ref="authority/current")
         self.opened.append(expected)
         return _ExternalContext(self)
+
+    def open_pinned(
+        self, authority: OpaqueProviderRef, expected: ExpectedOperationOwnership
+    ) -> _ExternalPin:
+        assert authority == OpaqueProviderRef(ref="authority/current")
+        self.pinned.append(expected)
+        return _ExternalPin(self)
 
     def observe_preparation(
         self, request: ExternalBootPreparationRequest
@@ -2540,6 +2549,18 @@ class _ExternalContext:
             if exc is None:
                 raise close_error
             exc.add_note(f"cleanup failed: {close_error!r}")
+
+
+class _ExternalPin:
+    def __init__(self, io: _ExternalIO) -> None:
+        self.io = io
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: object, exc: BaseException | None, traceback: object) -> None:
+        del exc_type, exc, traceback
+        self.io.pin_closes += 1
 
 
 def _cleanup_proof_for(point: RecoveryPoint) -> FinalizeCleanupProof:
@@ -4713,10 +4734,20 @@ def test_observe_requires_exact_running_target_before_kernel_probe(
         ports.observe(_point(metadata), OpaqueProviderRef(ref="authority/current"))
 
 
+class _RealPin:
+    def __init__(self, factory: _RealSessionFactory) -> None:
+        self.factory = factory
+
+    def close(self) -> None:
+        self.factory.pin_closes += 1
+
+
 class _RealSessionFactory:
     def __init__(self, session: _RealSession) -> None:
         self.session = session
         self.expected: list[ExpectedOperationOwnership] = []
+        self.pinned: list[ExpectedOperationOwnership] = []
+        self.pin_closes = 0
 
     def open(
         self,
@@ -4726,6 +4757,15 @@ class _RealSessionFactory:
         del lease
         self.expected.append(expected)
         return self.session
+
+    def open_pinned(
+        self,
+        lease: LocalExternalBootOperationLease,
+        expected: ExpectedOperationOwnership,
+    ) -> _RealPin:
+        del lease
+        self.pinned.append(expected)
+        return _RealPin(self)
 
 
 class _RecordingRecoveryWriter:
@@ -5449,10 +5489,12 @@ class _WriteObservingIO(RealLocalExternalBootIO):
         self.factory = factory
         self.closes_at_write: list[int] = []
         self.open_sessions_at_write: list[int] = []
+        self.open_pins_at_write: list[int] = []
 
     def _record_write(self) -> None:
         self.closes_at_write.append(self.session.close_attempts)
         self.open_sessions_at_write.append(len(self.factory.expected) - self.session.close_attempts)
+        self.open_pins_at_write.append(len(self.factory.pinned) - self.factory.pin_closes)
 
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         self._record_write()
@@ -5623,13 +5665,22 @@ def test_cleanup_writes_refuse_without_an_operation_session(tmp_path: Path) -> N
 
 
 def _production_ports(
-    root: Path, events: list[str]
+    root: Path, events: list[str], *, torn_down: bool = False
 ) -> tuple[LocalLibvirtExternalBoot, LocalOperationLeaseScope]:
-    """The production session stack over `root`, with only libvirt faked."""
+    """The production session stack over `root`, with only libvirt faked.
+
+    `torn_down` models a System whose domain and overlay are gone: any libvirt use fails.
+    """
     system_id = UUID(_BINDING.system_id)
     domain = Domain(events, _session_xml(overlay=overlay_path(system_id), system_id=system_id))
+
+    def connect() -> Conn:
+        if torn_down:
+            raise AssertionError("a torn-down System must not be reached through libvirt")
+        return Conn(events, domain)
+
     factory = LocalExternalBootSessionFactory(
-        connect=lambda: Conn(events, domain),
+        connect=connect,
         pin_lease=LocalOperationLane().pin,
         open_artifact_root=LocalArtifactRoot(root).open,
         open_guest=lambda: Guest(events),
@@ -5910,31 +5961,33 @@ def test_recovery_object_writes_run_under_one_session(tmp_path: Path, dispositio
     with pytest.raises(ValueError, match="observation changed"):
         dispose(observed.binding, authority, "sha256:" + "0" * 64)
     assert resolutions == [authority.ref]
-    assert io.open_sessions_at_write == []
+    assert io.open_pins_at_write == []
 
     dispose(observed.binding, authority, observed.observed_digest)
 
     assert resolutions == [authority.ref] * 4
-    assert factory.expected == [_EXPECTED_OWNERSHIP] * 4
-    assert io.closes_at_write == [2]
-    assert io.open_sessions_at_write == [1]
-    assert session.close_attempts == 4
+    assert factory.expected == []
+    assert factory.pinned == [_EXPECTED_OWNERSHIP] * 4
+    assert factory.pin_closes == 4
+    assert io.open_pins_at_write == [1]
+    assert io.open_sessions_at_write == [0]
+    assert session.close_attempts == 0
     _assert_disposed(root, point, disposition)
 
 
-class _SecondOpenRefused(_RealSessionFactory):
-    def open(
+class _SecondPinRefused(_RealSessionFactory):
+    def open_pinned(
         self,
         lease: LocalExternalBootOperationLease,
         expected: ExpectedOperationOwnership,
-    ) -> _RealSession:
-        if len(self.expected) == 1:
-            raise RuntimeError("owned domain is gone")
-        return super().open(lease, expected)
+    ) -> _RealPin:
+        if len(self.pinned) == 1:
+            raise ValueError("operation lease does not match expected ownership")
+        return super().open_pinned(lease, expected)
 
 
 @pytest.mark.parametrize("disposition", ["delete", "adopt"])
-@pytest.mark.parametrize("refusal", ["lease", "session"])
+@pytest.mark.parametrize("refusal", ["lease", "ownership"])
 def test_recovery_object_writes_refuse_when_the_write_session_cannot_open(
     tmp_path: Path, disposition: str, refusal: str
 ) -> None:
@@ -5943,7 +5996,7 @@ def test_recovery_object_writes_refuse_when_the_write_session_cannot_open(
     point, receipt = _quarantined(root)
     host = _RealPreparation(_metadata("recovered"), root)
     session = _RealSession(host)
-    factory = _SecondOpenRefused(session) if refusal == "session" else _RealSessionFactory(session)
+    factory = _SecondPinRefused(session) if refusal == "ownership" else _RealSessionFactory(session)
     resolutions: list[str] = []
 
     def resolve(reference: OpaqueProviderRef) -> LocalExternalBootOperationLease:
@@ -5956,13 +6009,13 @@ def test_recovery_object_writes_refuse_when_the_write_session_cannot_open(
     dispose = _dispose(LocalLibvirtExternalBoot(io), disposition)
     observed = LocalLibvirtExternalBoot._quarantine_observation(receipt)
 
-    with pytest.raises(RuntimeError, match="lease is not active|domain is gone"):
+    with pytest.raises((RuntimeError, ValueError), match="lease is not active|does not match"):
         dispose(
             observed.binding, OpaqueProviderRef(ref="authority/current"), observed.observed_digest
         )
 
     assert len(resolutions) == 2
-    assert io.closes_at_write == []
+    assert io.open_pins_at_write == []
     with RecoveryMetadataStore(root) as store:
         assert store.read_cleanup_quarantine(point.binding) == receipt
         assert store.cleanup_complete(point.recovery_ref, point)
@@ -5990,7 +6043,7 @@ def test_session_pinned_recovery_object_writes_with_the_production_factory(
     with scope.issue(authority, _BINDING):
         result = dispose(observed.binding, authority, observed.observed_digest)
 
-    assert events.count(f"domain.open:kdive-{_BINDING.system_id}") == 3
+    assert not [event for event in events if event.startswith("domain.open")]
     _assert_disposed(root, point, disposition)
     if disposition == "adopt":
         assert result.present and result.managed
@@ -5999,6 +6052,87 @@ def test_session_pinned_recovery_object_writes_with_the_production_factory(
     assert list(root.iterdir()) == []
     with scope.issue(authority, _BINDING):
         assert not ports.observe_object(observed.binding, authority).present
+
+
+@pytest.mark.parametrize("disposition", ["delete", "adopt"])
+def test_quarantine_port_reaches_an_unmanaged_receipt_after_teardown(
+    tmp_path: Path, disposition: str
+) -> None:
+    """#3489: no domain, overlay or libvirt connection is needed to dispose of a row."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    ports, scope = _production_ports(root, [], torn_down=True)
+    authority = OpaqueProviderRef(ref="authority/current")
+    observed = LocalLibvirtExternalBoot._quarantine_observation(receipt)
+
+    with scope.issue(authority, _BINDING):
+        assert ports.quarantined_objects(point.binding, authority) == (observed,)
+        assert ports.observe_object(observed.binding, authority) == observed
+        _dispose(ports, disposition)(observed.binding, authority, observed.observed_digest)
+
+    _assert_disposed(root, point, disposition)
+
+
+def test_quarantine_port_observes_a_kept_managed_receipt_after_teardown(tmp_path: Path) -> None:
+    """#3489: the receipt #3467 keeps is observable, not listable, and never deleted."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    with RecoveryMetadataStore(root) as store:
+        store.adopt_cleanup_quarantine(receipt)
+    ports, scope = _production_ports(root, [], torn_down=True)
+    authority = OpaqueProviderRef(ref="authority/current")
+
+    with scope.issue(authority, _BINDING):
+        assert ports.quarantined_objects(point.binding, authority) == ()
+        kept = ports.observe_object(
+            LocalLibvirtExternalBoot._quarantine_observation(
+                receipt.model_copy(update={"managed": True})
+            ).binding,
+            authority,
+        )
+        assert kept.present and kept.managed
+        with pytest.raises(ValueError, match="observation changed before delete"):
+            ports.delete_recovery_object(kept.binding, authority, kept.observed_digest)
+        assert ports.adopt_object(kept.binding, authority, kept.observed_digest).managed
+
+    with RecoveryMetadataStore(root) as store:
+        assert store.read_cleanup_quarantine(point.binding) is not None
+
+
+def test_open_pinned_closes_the_pin_and_notes_a_failed_close() -> None:
+    class FailingPin(_RealPin):
+        def close(self) -> None:
+            super().close()
+            raise OSError("close secondary")
+
+    class Factory(_RealSessionFactory):
+        def open_pinned(
+            self, lease: LocalExternalBootOperationLease, expected: ExpectedOperationOwnership
+        ) -> _RealPin:
+            del lease
+            self.pinned.append(expected)
+            return FailingPin(self)
+
+    factory = Factory(cast(_RealSession, object()))
+    io = RealLocalExternalBootIO(
+        Path("/unused"),
+        cast(LocalExternalBootMaterializer, object()),
+        cast(GuestRecoveryWriter, object()),
+        lambda _authority: cast(LocalExternalBootOperationLease, object()),
+        cast(LocalExternalBootSessionFactory, factory),
+        1024,
+    )
+
+    with (
+        pytest.raises(RuntimeError, match="body") as raised,
+        io.open_pinned(OpaqueProviderRef(ref="authority/current"), _EXPECTED_OWNERSHIP),
+    ):
+        raise RuntimeError("body")
+
+    assert factory.pin_closes == 1
+    assert any("close secondary" in note for note in raised.value.__notes__)
 
 
 def _preparation_request(phase: str) -> ExternalBootPreparationRequest:
