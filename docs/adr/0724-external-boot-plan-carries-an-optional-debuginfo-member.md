@@ -59,6 +59,8 @@ space is #3125), and directories created for the file stay after recovery. A ser
 from before #3130 rejects a materialization or recovery point that carries the new members.
 This reverses the upgrade order under Consequences for this change only: with #3129 already on
 every host, upgrade the server and workers before, or together with, the local authority host.
+The reversal covers only the materialization and recovery members; the plan key's order, authority
+hosts before workers and the server, is unchanged.
 
 Considered & rejected:
 
