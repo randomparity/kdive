@@ -64,9 +64,8 @@ Local only; remote already behaves this way.
 3. **Accepted failure classes.**
    - Adopted receipts accumulate on hosts. Accepted: one small directory or file per adoption,
      bounded by audited operator decisions; the ADR amendment names who removes it.
-   - After local teardown the recovery-object port cannot observe or act on the receipt.
-     Accepted: the port's session needs the System domain for every row, not only adopted
-     ones; a follow-up candidate, not this change.
+   - ~~After local teardown the recovery-object port cannot observe or act on the receipt.~~
+     Resolved by #3489: the port opens a lease-pinned session that needs no domain.
    - A corrupt adopted receipt or tombstone makes the local teardown absence check raise, so
      teardown does not complete. Accepted: both are canonical JSON the store wrote, and a
      corrupt one already refuses every other read.
