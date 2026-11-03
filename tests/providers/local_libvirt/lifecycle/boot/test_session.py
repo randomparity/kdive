@@ -477,10 +477,14 @@ def test_authority_semantic_identity_keeps_a_rendered_cpu() -> None:
     bare = _xml()
     pinned = bare.replace("<os>", f"{_PINNED_CPU}<os>")
     other = pinned.replace("POWER9", "POWER10")
+    full = pinned.replace('check="partial"', 'check="full"')
     passthrough = bare.replace("<os>", '<cpu mode="host-passthrough"/><os>')
 
     digests = {owned_system_semantic_identity(x, SYSTEM_ID, OVERLAY) for x in (bare, pinned, other)}
     assert len(digests) == 3
+    assert owned_system_semantic_identity(
+        full, SYSTEM_ID, OVERLAY
+    ) == owned_system_semantic_identity(pinned, SYSTEM_ID, OVERLAY)
     assert owned_system_semantic_identity(
         passthrough, SYSTEM_ID, OVERLAY
     ) != owned_system_semantic_identity(bare, SYSTEM_ID, OVERLAY)

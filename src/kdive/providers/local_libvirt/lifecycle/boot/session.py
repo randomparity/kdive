@@ -1980,9 +1980,10 @@ def _rendered_cpu_projection(cpu: ET.Element | None) -> tuple[str | None, str | 
 
     KDIVE renders ``host-passthrough``/``host-model`` (KVM) or a pinned ``custom`` element with
     ``check='partial'``.  A TCG domain gets no rendered ``<cpu>``, but libvirt adds a defaulted
-    ``custom`` element (``check='none'``), which must not move the identity.
+    ``custom`` element (``check='none'``), which must not move the identity.  Any other ``check``
+    (``partial``, or libvirt's ``full`` rewrite of a pinned model) stays in the digest.
     """
-    if cpu is None or (cpu.get("mode") == "custom" and cpu.get("check") != "partial"):
+    if cpu is None or (cpu.get("mode") == "custom" and cpu.get("check") in (None, "none")):
         return None
     return (cpu.get("mode"), cpu.findtext("model"))
 
