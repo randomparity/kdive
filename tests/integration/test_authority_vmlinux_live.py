@@ -148,7 +148,7 @@ async def _prove(system: AuthoritySystem, tree: Path) -> dict[str, object]:
     try:
         with tempfile.TemporaryDirectory() as scratch:
             activation = await activate(
-                system, kernel_tree=tree, evidence_dir=Path(scratch), with_vmlinux=True
+                system, kernel_tree=tree, evidence_dir=Path(scratch) / "upload", with_vmlinux=True
             )
         release = await asyncio.to_thread(_wait_for_agent, config, system.system_id)
         staged = await asyncio.to_thread(_vmlinux_facts, config, system.system_id, release)
@@ -172,6 +172,8 @@ async def _prove(system: AuthoritySystem, tree: Path) -> dict[str, object]:
     await asyncio.to_thread(run_as_authority, config, _DOMAIN_POWER, "stop", system.system_id)
     assert restored["present"] == "False", "the restore left the staged vmlinux behind"
     observed |= {"baseline_release": baseline, "vmlinux_after_restore": "absent"}
+    observed["uploaded_vmlinux_bytes"] = (tree / "vmlinux").stat().st_size
+    print("vmlinux-staging-observed " + json.dumps(observed, sort_keys=True))
     return observed
 
 

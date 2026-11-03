@@ -108,4 +108,7 @@ bullet below. Criterion 5, the live remote-lab proof, is an open item without a 
   and `test_external_boot_authority.py`. Teardown needs no change: records hold digests only.
 - Docs and ADR amendments: `task-test-not-applicable`; prose with no executable consumer, covered
   by `just records` and the doc guards.
-- Live remote-lab proof: open item unless a lab grant exists.
+- Live remote-lab proof: `focused-test` `tests/integration/test_authority_vmlinux_live.py`
+  (`live_stack`, dormant without a remote authority lane): the file lands with the uploaded
+  SHA-256, a real `drgn -k` resolves from it, and the restore removes it. x86_64 only; ppc64le
+  stays open.
