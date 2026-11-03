@@ -373,6 +373,63 @@ def test_stage_downloads_and_stages_verified_bytes(tmp_path: Path) -> None:
     assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []  # unique partial cleaned up
 
 
+def test_stage_leaves_investigation_dir_group_rwx_under_restrictive_umask(tmp_path: Path) -> None:
+    old = os.umask(0o022)
+    try:
+        dest = tmp_path / "inv" / f"{_TOKEN}.qcow2"
+        store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+        stage_uploaded_rootfs(
+            store,
+            object_key="local/investigations/inv/rootfs-token",
+            dest=dest,
+            system_id=uuid4(),
+            encoding=None,
+            uncompressed_size=None,
+        )
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(dest.parent.stat().st_mode) & 0o070 == 0o070
+
+
+def test_stage_refuses_foreign_restrictive_investigation_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inv = tmp_path / "inv"
+    inv.mkdir(mode=0o755)
+    inv.chmod(0o755)
+    monkeypatch.setattr(os, "geteuid", lambda: inv.stat().st_uid + 1)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    with pytest.raises(CategorizedError) as caught:
+        stage_uploaded_rootfs(
+            store,
+            object_key="local/investigations/inv/rootfs-token",
+            dest=inv / f"{_TOKEN}.qcow2",
+            system_id=uuid4(),
+            encoding=None,
+            uncompressed_size=None,
+        )
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details["path"] == str(inv)
+    assert stat.S_IMODE(inv.stat().st_mode) == 0o755
+
+
+def test_stage_reuses_group_rwx_investigation_dir_unchanged(tmp_path: Path) -> None:
+    inv = tmp_path / "inv"
+    inv.mkdir()
+    inv.chmod(0o2770)
+    before = inv.stat().st_mode
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    stage_uploaded_rootfs(
+        store,
+        object_key="local/investigations/inv/rootfs-token",
+        dest=inv / f"{_TOKEN}.qcow2",
+        system_id=uuid4(),
+        encoding=None,
+        uncompressed_size=None,
+    )
+    assert inv.stat().st_mode == before
+
+
 def test_stage_missing_object_is_config_error(tmp_path: Path) -> None:
     store = _FakeStore(None, checksum=None)
     with pytest.raises(CategorizedError) as error:
