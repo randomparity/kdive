@@ -14,37 +14,61 @@ activation stays `preparing` and release is fenced (`external_boot_restricted`).
 
 ## Design
 
-`admit_authority_route(conn, system_id, binding) -> str | None` in
-`services/external_boot/routing.py` replaces direct `server_authority_instance` use in the
-Run handlers:
+**Inventory field.** `LocalLibvirtInstance.relocated_authority_instance: str | None`
+(`inventory/model.py`), `min_length=1`, `max_length=255`, non-blank, same validator as
+`authority_instance`. A model validator rejects an entry that sets both
+(`"authority_instance and relocated_authority_instance are mutually exclusive"`), so there is
+no precedence rule to document. The remote provider is out of scope (no fixture lane there).
+Accessor `local_relocated_authority_for_resource(name)` beside
+`local_authority_instance_for_resource` in `providers/local_libvirt/config.py` (same
+fail-closed handling of an invalid inventory). `providers/system_authority/routing.py` gains
+`authority_admission_routes_for_resource(kind, name) -> frozenset[str]` returning the
+Resource's route and/or relocation (empty for other kinds); the registrar keeps using
+`authority_instance_for_resource` unchanged, so provisioning behaviour is untouched.
+
+**Admission.** `admit_authority_route(conn, system_id, binding) -> str | None` in a new
+`services/external_boot/route_admission.py` (not `routing.py`: worker handlers import that
+module, and the import-closure test forbids `providers.local_libvirt.config` there):
 
 1. `A = server_authority_instance(binding)`; `None` returns `None` (ordinary path).
-2. Resource route = `authority_instance_for_resource(binding.kind, binding.resource_name)`
-   (`None` when the name is absent). Unequal to `A` raises `configuration_error`
-   `authority_resource_route_mismatch`.
-3. If `authority_system_binding(conn, system_id)` exists with a different
-   `authority_instance`, raise `authority_system_binding_mismatch`.
+2. `owner = authority_system_binding(conn, system_id)`; a binding with a different authority
+   raises `authority_system_binding_mismatch`; a binding equal to `A` admits.
+3. Otherwise `A` must be in the Resource's admission routes (none when the name is absent), else
+   raise `authority_resource_route_mismatch`.
 4. Return `A`.
 
-Call sites: `install_run` and `boot_run` before `keyed_mutation` (so a stored key cannot
-bypass it), and `_restage_and_enqueue_install` / `_enqueue_external_boot` again under the
-System lock before any write. Raised errors render through
-`ToolResponse.failure_from_error`. Detail text names the cause and the fix; it does not
-suggest editing database rows. Wrapper docstrings and the generated tool reference state
-the refusal.
+Call sites: `install_run` and `boot_run` before `keyed_mutation`, and
+`_restage_and_enqueue_install` / `_enqueue_external_boot` again under the System lock. Errors
+render through `ToolResponse.failure_from_error`; the detail names the cause and the fix and
+does not suggest editing database rows. Wrapper docstrings and the generated tool reference
+state the refusal.
 
-No schema, migration, deployment setting or provider operation changes. Fixture-mode
-relocated Systems on a routed Resource, authority-owned Systems and no-route Systems are
-admitted as before; the live carriers are unchanged.
+**Lane and docs.** The fixture-mode inventory copy (runbook "Fixture-mode inventory") replaces
+the `[[local_libvirt]]` entry's `authority_instance` line with
+`relocated_authority_instance = "<I>"` instead of deleting it; the runbook, the example inventory
+and the `NO_PLAIN_BLOCKED`/`ROUTED_BLOCKED`/`FIXTURE_PROVENANCE` wording in
+`tests/integration/live_stack/authority_lane.py` (#3144/#3148 are closed) are updated.
+`provision-authority-fixture.py` and `installed_local_authority_support.py` are unchanged. The
+lane's existing "no `authority_instance` on the allocated resource" check still holds.
+
+No migration and no ADR-0623 change: the declaration is not an ownership row and grants no
+ownership state; it only widens admission for the operator-named authority.
+
+## Tests
+
+Real-DB: defect case (no declaration) refused for install and boot incl. replayed key, no job
+or activation; Resource route admitted; relocation declaration admitted (fixture); binding
+equal admitted; binding for another authority refused even with a declaration; no server route
+unchanged; ADR-0713 reuse test admitted once its Resource carries a matching route; stale
+Run/System binding. Inventory: field parses, blank rejected, both-set rejected, absent default.
+Import-closure test stays green.
 
 ## Success
 
 - Defect case refused before keyed replay, enqueue, run-step deletion, activation or
   reservation; a replayed key is refused too.
-- Matching-route and no-route paths keep their outcomes and replay.
+- Declared fixture, authority-owned and no-route Systems keep their outcomes and replay.
 - Authorization still precedes the diagnostics.
-- Real-DB tests cover: no Resource route, different Resource route, different recorded
-  owner, owner matching, no-route, replay, stale Run/System binding.
 
 ## Stranded-allocation recovery (verified: not cleared)
 

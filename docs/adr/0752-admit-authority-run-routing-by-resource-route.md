@@ -14,29 +14,45 @@ the System. A System the fixed worker provisioned, on a Resource with no
 activation stays `preparing`, and `allocations.release` is fenced with
 `external_boot_restricted`, so the allocation is stranded.
 
-An earlier draft required an authority System binding (ADR-0623 ownership row) for every
-authority-routed Run. That also refused the fixture-mode and ADR-0713 reuse Systems, which
-the authority legitimately serves from a Resource that routes to it but which were never
-provisioned through the authority-owned path. The Resource's own route is the correct
-discriminator: the registrar already selects it per Resource
-(`authority_instance_for_resource`, ADR-0623).
+The live-vm fixture lane (`system_mode: "fixture"`, live-testing runbook) is the one
+legitimate instance of that shape: its System is provisioned by the fixed worker on a plain
+Resource, then relocated onto the authority's private daemon by
+`provision-authority-fixture.py`, and the lane drives `runs.install`/`runs.boot` through the
+real authority. The server cannot see which daemon holds a domain, and the relocation writes no
+ownership row (ADR-0623 rows exist only for authority-provisioned Systems). Resource route
+and ownership row alone therefore cannot tell the defect from the fixture lane; an explicit
+operator declaration can.
 
 ## Decision
 
+Add an optional `relocated_authority_instance` to the `[[local_libvirt]]` inventory entry:
+the operator's declaration that Systems on this Resource are moved onto that authority's
+daemon after provisioning. It is mutually exclusive with `authority_instance` (a Resource is
+either authority-provisioning or relocated-fixture; setting both is an inventory error at
+load), and non-blank like it. It changes no provisioning behavior: `systems.provision` still
+takes the ordinary path on that Resource.
+
 After `server_authority_instance(binding)` returns authority `A`, `runs.install` and
-`runs.boot` resolve the System's own Resource route with
-`authority_instance_for_resource(kind, resource_name)` and refuse with
-`configuration_error` unless it equals `A`
-(`reason: authority_resource_route_mismatch`). When the System has an authority System
-binding whose `authority_instance` differs from `A`, refuse with
-`reason: authority_system_binding_mismatch`. Otherwise admit. No binding row is required.
+`runs.boot` admit the Run only when any of these holds, else refuse with
+`configuration_error`:
+
+- the Resource's `authority_instance` equals `A`;
+- the Resource's `relocated_authority_instance` equals `A`;
+- the System has an authority System binding (ADR-0623) whose `authority_instance` equals
+  `A`.
+
+A recorded binding naming a different authority refuses with
+`reason: authority_system_binding_mismatch` whatever the Resource declares. Any other
+failure refuses with `reason: authority_resource_route_mismatch`. No authority route keeps the
+ordinary path.
 
 The check runs before keyed replay (a stored key cannot bypass a now-invalid route) and
-again under the System lock before any job, run-step deletion, activation or reservation
-is written. A refusal names the cause and the fix: align the Resource's
-`authority_instance` with the server route, or provision a new System on the intended
-Resource. No authority route keeps the ordinary path unchanged. This decision changes no
-schema, ownership record, deployment setting or provider operation.
+again under the System lock before any job, run-step deletion, activation or reservation is
+written. A refusal names the cause and the fix: declare `authority_instance` or
+`relocated_authority_instance` on the Resource, or provision the System on the intended
+Resource. The check lives in a server-side module outside the worker handlers' import
+closure. No schema, migration, ownership record, deployment setting or provider operation
+changes; the declaration is inventory configuration only.
 
 ## Consequences
 
