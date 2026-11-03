@@ -61,7 +61,7 @@ changes; the declaration is inventory configuration only.
 The relocation declaration is Resource-wide operator trust: it carries no per-System
 evidence, so an operator who declares it on a Resource whose Systems are not relocated
 re-creates the defect for those Systems. The decision narrows the defect to that explicit
-operator act; it does not prove physical location.
+operator act; it does not prove physical location. The Resource-route arm has the same limit: a System the fixed worker provisioned before the operator added `authority_instance` to its Resource is admitted afterwards and strands exactly as in #3138. Enabling a route on a Resource that holds fixed-worker Systems is an operator transition that needs those Systems ended first; a per-System provisioning record would close it and is outside this change.
 
 Invalid calls create no job, activation, reservation or keyed result. Restoring a valid
 configuration restores idempotent replay. Fixture-mode Systems relocated onto a routed

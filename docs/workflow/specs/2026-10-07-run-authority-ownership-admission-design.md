@@ -85,7 +85,7 @@ designs no recovery contract.
   deployments; operators configure routes and Resource `authority_instance`.
 - Invariants: a Run reaches an authority only when the operator's inventory routes or declares the System's Resource for it, or a recorded binding names it (a declaration is Resource-wide trust, not per-System proof); refusals
   create no durable state; RBAC and replay remain.
-- Accepted failure classes: an operator changing configuration between requests makes a
+- Accepted failure classes: a route or relocation declaration added to a Resource after the fixed worker provisioned Systems on it admits those Systems (no per-System evidence exists; ADR-0752 Consequences); an operator changing configuration between requests makes a
   replayed key refuse until the route is restored.
 - Covered elsewhere: provider conflict #3144 (closed), attempt recovery #3143, DWARF
   staging #3130/#3131, stranded-allocation recovery (new issue).
