@@ -169,12 +169,23 @@ connections to services that listen only on host loopback, not only to external 
   the invoking account under `qemu:///session`. For an authority System whose manifest sets
   `guest_egress`, including a remote authority System, whose only NIC is this user-mode NIC
   (ADR-0804), it is the authority account that owns the private session daemon.
+- **What is reachable.** Any loopback-only listener on the host, including kdive's own
+  per-System listeners: the `hostfwd` SSH forward ports of other guests
+  (`hostfwd=tcp:127.0.0.1:<ssh_port>-:22`) and, for Systems provisioned with
+  `debug.gdbstub`, the QEMU gdbstub (`-gdb tcp:127.0.0.1:<gdb_port>`). The gdbstub speaks
+  the unauthenticated GDB remote protocol, so a guest that reaches it controls the other guest's
+  execution and memory. Another guest's SSH forward still needs that guest's credentials.
+- **The customization boot is covered too.** The image-build customization domain adds a
+  second user-mode NIC, `-netdev user,id=kdivebuild,restrict=off`, with no operator gate and no
+  `hostfwd` (`_append_egress_nic` in `lifecycle/xml.py`). It has the same `10.0.2.2` mapping, so a
+  customization boot reaches the host's loopback services regardless of `guest_egress`.
 - **The zone firewall does not cover it.** The residual-threat bullet names the operator's
   network-zone firewall as the enforcement boundary. That firewall filters traffic that leaves
   the host. A connection to `10.0.2.2` terminates in the host's own loopback, so the network-zone
   firewall does not see it and the opt-in's safety argument does not extend to this path.
 - **Unaffected.** With `guest_egress` absent or `false`, `restrict=on` blocks the path along
-  with all other guest-initiated traffic. The inbound `hostfwd` SSH forward is unchanged.
+  with all other guest-initiated traffic on the System's own NIC (the customization boot above
+  is the exception). The inbound `hostfwd` SSH forward is unchanged.
   Ordinary remote-libvirt guests use a libvirt network, not user-mode networking.
 
 This amendment discloses the exposure only. Whether to mitigate it, accept it, or change the

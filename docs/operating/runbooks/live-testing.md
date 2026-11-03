@@ -496,8 +496,8 @@ instance, immutable base, machine and fixed port ranges; validate it with the ex
 An entry has no `network` field: an authority System's only NIC is its user-mode SSH forward
 ([ADR-0804](../../adr/0804-remote-authority-systems-have-only-the-forward-nic.md)), and the
 preflight rejects a manifest that still names one. The entry's optional `guest_egress` (default
-`false`) opts the guest into outbound NAT through that NIC, which also exposes host-loopback services to the guest
-(see [image lifecycle](image-lifecycle.md)). Before deploying this manifest shape
+`false`) opts the guest into outbound NAT through that NIC, which also exposes host-loopback
+services to the guest (see [image lifecycle](image-lifecycle.md)). Before deploying this manifest shape
 over an earlier one, confirm that `system-provisioning/remote/` under the authority's state
 directory holds no `*.provision.json` intent; the authority refuses an intent of the old shape.
 
