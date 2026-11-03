@@ -36,6 +36,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.upload_publication import (
     _sibling_already_published,
     _staging_fault,
 )
+from kdive.providers.local_libvirt.lifecycle.storage import ensure_shared_artifact_directory
 from kdive.providers.shared.staging.staging_partials import unlink_partial_if_unheld
 
 _log = logging.getLogger(__name__)
@@ -502,8 +503,10 @@ def stage_uploaded_rootfs(
     )
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
+        ensure_shared_artifact_directory(dest.parent)
         # After the mkdir (there is no filesystem to measure until the staging directory exists)
-        # and before the partial is created, so a refused stage leaves nothing at all behind.
+        # and before the partial is created, so a refused stage leaves nothing behind but the
+        # directory's group access.
         _require_staging_free_space(dest, budget=budget, system_id=system_id)
         with _flocked_partial(partial) as guard_fd:
             _reserve_staging_space(
