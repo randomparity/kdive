@@ -413,7 +413,13 @@ def test_stage_refuses_foreign_restrictive_investigation_dir(
     assert stat.S_IMODE(inv.stat().st_mode) == 0o755
 
 
-def test_stage_reuses_group_rwx_investigation_dir_unchanged(tmp_path: Path) -> None:
+def test_stage_reuses_group_rwx_investigation_dir_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_fchmod(_fd: int, _mode: int) -> None:
+        raise AssertionError("a group-rwx directory must not be chmodded")
+
+    monkeypatch.setattr(os, "fchmod", fail_fchmod)
     inv = tmp_path / "inv"
     inv.mkdir()
     inv.chmod(0o2770)
