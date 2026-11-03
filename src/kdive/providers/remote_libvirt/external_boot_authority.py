@@ -77,6 +77,9 @@ logger = logging.getLogger(__name__)
 
 _MAX_RECORD_BYTES = 1_048_576
 _MAX_PREPARATION_BYTES = 1_048_576
+# Names finalize parses by content and a completed System teardown collects (ADR-0787, #3475).
+_FINALIZE_COUNTED_SUFFIXES = (".request", ".lifecycle-request", ".preparation")
+_FINALIZE_SCAN_BOUND = 4096
 _OBSERVATION_NAMESPACE = UUID("9cf0fa94-f250-4e5f-a950-155e7860b692")
 type PriorPower = Literal["running", "inactive"]
 PREPARATION_ABANDONED = "abandoned"
@@ -1498,9 +1501,6 @@ class RemoteModuleVolumePreparationStore:
             for name in os.listdir(self._root_fd)
             if len(name) == 64 + len(".request") and name.endswith(".request")
         ]
-        # Only .request names count: finalized markers stay for the life of the store.
-        if len(names) > 4096:
-            raise ProviderRecoveryRefusal("remote preparation store exceeds teardown scan bound")
         matches: list[RemoteModuleVolumePreparationRequestV1] = []
         for name in names:
             digest = name.removesuffix(".request")
@@ -1925,8 +1925,9 @@ class RemoteModuleVolumePreparationStore:
 
         A file that does not parse cannot be proven foreign. The deleting scan leaves it in
         place; a ``strict`` scan, which captures what teardown must still prove, refuses it.
-        The scan is unbounded (ADR-0787, #3419): store files accumulate until something
-        collects a torn-down activation's files.
+        Only finalize's callers are bounded, by the count in ``_finalize_cleanup_quarantine``;
+        teardown and collection scans stay unbounded because they are the remedy (ADR-0787,
+        #3475).
         """
         return [
             name
@@ -2224,6 +2225,22 @@ class RemoteModuleVolumePreparationStore:
                 self._finalize_cleanup_quarantine(receipt)
 
     def _finalize_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
+        counted = sum(
+            1
+            for name in os.listdir(self._root_fd)
+            for suffix in _FINALIZE_COUNTED_SUFFIXES
+            if len(name) == 64 + len(suffix)
+            and name.endswith(suffix)
+            and all(character in "0123456789abcdef" for character in name.removesuffix(suffix))
+        )
+        if counted > _FINALIZE_SCAN_BOUND:
+            raise ProviderRecoveryRefusal(
+                "remote preparation store holds more than 4096 request, lifecycle-request and "
+                "preparation records, so finalize is refused; tear down Systems on this host so "
+                "teardown collects their records, or, once every System on this host is torn "
+                "down, follow the runbook procedure Clear store files of torn-down Systems, then "
+                "retry"
+            )
         identity = _recovery_identity(receipt.recovery_ref)
         record = self._recovery_record(identity)
         if record is not None and (
