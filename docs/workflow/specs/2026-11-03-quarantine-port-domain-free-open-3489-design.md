@@ -25,25 +25,33 @@ Add a lease-pinned open that does exactly the ownership half of `open` and nothi
 
 ## Failure model
 
-1. **Actors and deployments.** Local operator and the orphan-resolution service on a local-libvirt
-   host, calling through the authority seam with an operation lease.
-2. **Invariants and assets.** The ownership check against the lease is unchanged: a mismatched
-   System, Run or Activation is refused before any store access. A delete or adopt happens only
-   while the lease pin is held. A `managed` receipt is never deleted by the port.
+1. **Actors and deployments.** Local operator, the orphan-resolution service, and the mutation
+   service's release-path inventory call (`quarantined_objects`), on a local-libvirt host, through
+   the authority seam with an operation lease issued per call. Release now gets the same answer a
+   live domain gives (a `managed` receipt lists as `()`) instead of failing closed.
+2. **Invariants and assets.** `expected` ownership is still checked against the lease before any
+   store access. Delete and adopt write only while an issued lease scope is pinned. A `managed`
+   receipt is never deleted by the port. Fencing otherwise rests on what the domain never gave: DB
+   selection and the authority-instance check, the System-lane serializer, `observe_object`'s
+   full-binding match and the store `flock` (ADR-0787 2026-11-01 amendment).
 3. **Accepted failure classes.** A domain or overlay that is absent, wrong or foreign no longer
    fails these four calls. Accepted: they never touch either, and the receipt is keyed by binding.
-   An unrelated lease holder is refused by the lease pin, not by the domain.
+   A call outside an issued lease scope is refused by the pin (the lease is per-call, so the
+   pin proves scope, not identity).
 4. **Covered elsewhere.** Cleanup-record session open: #3492. Remote port: no owner (excluded).
 
 ## Success
 
 1. With the domain and overlay absent, the four methods observe, list, delete (unmanaged) and
-   adopt a kept receipt and return the same results as with a live domain.
+   adopt a kept receipt and return the same results as with a live domain. Fixtures: a `managed` receipt kept by teardown
+   (observe; delete refused; list `()`) and an unmanaged receipt of another activation (all four).
 2. A lease whose ownership does not match `expected` raises the existing "does not match expected
    ownership" `ValueError` from `open_pinned` and closes the pin.
 3. The pin closes exactly once on success and on failure of the body, as with `open`.
 4. delete and adopt write while the pin is open.
-5. ADR-0710 and the #3467 design reflect the change.
+5. ADR-0710 and the #3467 design reflect the change; ADR-0710's amendment states it overrides
+   ADR-0787's 2026-11-01 remark that the local port needs the domain (ADR-0787 itself is outside
+   the charter surface).
 
 ## Validation
 

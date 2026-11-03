@@ -9,8 +9,8 @@ sites. **Tech stack:** Python, pytest, `just`.
 Zero lint/type warnings (`just lint`, `just type`); do not touch `record_cleanup_quarantine`;
 ADR-0710 is append-only (new `### Amendment` section only).
 
-Expected implementation size: 90–140 changed lines (M) — one factory method, one IO method, four
-call-site edits and about four tests.
+Expected implementation size: 150–230 changed lines (M) — one factory method, one IO method, four
+call-site edits, fake updates and about six tests including rewrites of pinned-write tests.
 
 ## File map
 
@@ -19,9 +19,16 @@ call-site edits and about four tests.
   `open_pinned`; port calls at the four sites (`quarantined_objects`, `observe_object`,
   `delete_recovery_object`, `adopt_object`).
 - tests: `tests/providers/local_libvirt/lifecycle/boot/test_session.py`,
-  `tests/providers/local_libvirt/test_external_boot.py` (fakes gain `open_pinned`; also
-  `test_external_boot_authority.py` and `tests/providers/contract/bindings/local_libvirt.py` if
-  the type check requires it).
+  `tests/providers/local_libvirt/test_external_boot.py`: IO fakes (`_ExternalIO`) and
+  session-factory fakes (`_RealSessionFactory`, `_SecondOpenRefused`) gain a genuine `open_pinned`
+  that does not delegate to `open`, with a pin open/close counter; also
+  `tests/jobs/handlers/external_boot/test_orphan_resolution.py` (`_LocalSessionFactoryBoundary`),
+  `test_external_boot_authority.py` and `tests/providers/contract/bindings/local_libvirt.py`.
+  Rewrite targets: `test_recovery_object_writes_refuse_when_the_write_session_cannot_open[session]`
+  (replace with an ownership-mismatch arm; keep the lease arm), the
+  `domain.open` count and `factory.expected`/`close_attempts` assertions in
+  `test_session_pinned_recovery_object_writes_with_the_production_factory`, and
+  `_WriteObservingIO.open_sessions_at_write` (count pins, not sessions).
 - docs: ADR-0710 amendment; #3467 design accepted-class line.
 
 ## Task 1: factory `open_pinned`
@@ -91,8 +98,12 @@ four methods. Update fakes (`_ExternalIO`, authority and contract fakes) to prov
 ## Task 3: docs
 
 Append `### Amendment (2026-11-03): quarantine-row port opens pinned without a domain (#3489)` to
-ADR-0710 (decision, consequence: the 2026-10-01 amendment's "missing domain already fails" no
-longer holds for these four; rejected: reuse `open_teardown` -- judgment: opens a libvirt
-connection these methods never use; skip the pin -- judgment: loses the pinned-write property).
-Strike the accepted class in the #3467 design with a pointer to #3489.
+ADR-0710 (decision; consequence: the 2026-10-01 amendment's "missing domain already fails" no longer holds
+for these four, and ADR-0787's 2026-11-01 remark that the local port needs the domain is
+overridden; fencing is DB selection, authority-instance check, System-lane serializer,
+`observe_object` binding match, store `flock`, and the pin requiring an issued lease scope;
+rejected: reuse `open_teardown` -- judgment: opens a libvirt connection these methods never use;
+skip the pin -- judgment: the write would run outside an issued lease scope).
+Strike the accepted class in the #3467 design with a pointer to #3489. Follow-up candidate: an
+ADR-0787 append-only pointer (outside this charter's surface).
 Verification: `Mode: task-test-not-applicable` prose; `just records`, `just lint`.
