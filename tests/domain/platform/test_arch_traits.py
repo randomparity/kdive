@@ -10,6 +10,7 @@ from kdive.domain.platform.arch_traits import (
     SUPPORTED_ARCHES,
     arch_traits,
     default_crashkernel_summary,
+    rendered_machine_alias,
 )
 
 
@@ -76,3 +77,24 @@ def test_unknown_arch_is_a_configuration_error_not_a_silent_x86_default() -> Non
         arch_traits("s390x")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "s390x" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("arch", "machine", "expected"),
+    [
+        ("x86_64", "q35", "q35"),
+        ("x86_64", "pc-q35-10.2", "q35"),
+        ("x86_64", "pc-q35-rhel9.4.0", "q35"),
+        ("ppc64le", "pseries", "pseries"),
+        ("ppc64le", "pseries-9.0", "pseries"),
+        ("x86_64", "pc-i440fx-10.2", "pc-i440fx-10.2"),
+        ("ppc64le", "pc-q35-10.2", "pc-q35-10.2"),
+        ("x86_64", "pseries-9.0", "pseries-9.0"),
+        ("riscv64", "pc-q35-10.2", "pc-q35-10.2"),
+        (None, "pc-q35-10.2", "pc-q35-10.2"),
+    ],
+)
+def test_rendered_machine_alias_collapses_only_the_arch_family(
+    arch: str | None, machine: str, expected: str
+) -> None:
+    assert rendered_machine_alias(arch, machine) == expected
