@@ -235,7 +235,8 @@ the store alone.
 2. List the storage pool (`virsh vol-list <pool>`) and confirm that it holds no `kdive-module-…`
    or `kdive-boot-v1-…` volume. If one remains, resolve it first: the store records are its only
    pointer.
-3. Copy the directory aside, then remove every file in it except:
+3. Copy the directory aside with its modes and owner kept (`sudo cp -a` into a new directory only
+   root can read), list its files, then remove the listed files by exact name, except:
    - each `<key>.teardown` record, which refuses a late stage of that System;
    - each `<identity>.cleanup-quarantine` whose JSON has `"managed":true`, its
      `<identity>.recovery`, and the `.recovery-index` file whose content is `<identity>`.
