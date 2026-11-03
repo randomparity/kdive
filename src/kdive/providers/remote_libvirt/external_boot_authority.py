@@ -3193,29 +3193,18 @@ class RemoteExternalBootCoordinator:
         except Exception:  # noqa: BLE001 - the service's following observe collects again
             logger.exception("remote store collection after System teardown failed")
             return
-        binding, plan_identity = record.intent.binding, record.intent.plan_identity
-
-        def named() -> None:
+        plan_identity = record.intent.plan_identity
+        try:
             self._store.collect_torn_down_activation(
-                binding, plan_identity, keep_plan=plan_identity in kept_plans
+                record.intent.binding, plan_identity, keep_plan=plan_identity in kept_plans
             )
-
-        collections: list[Callable[[], object]] = [named]
-        for sibling, plan, claims in proven:
-
-            def collect(
-                sibling: ExternalBootActivationBinding = sibling,
-                plan: str = plan,
-                claims: RemoteFinalizedTeardownRefsV1 | None = claims,
-            ) -> bool:
-                return self._store.collect_proven_activation(
-                    sibling, plan, claims, keep_plan=plan in kept_plans
-                )
-
-            collections.append(collect)
-        for collection in collections:
+        except Exception:  # noqa: BLE001 - one activation's failure keeps the others going
+            logger.exception("remote store collection after System teardown failed")
+        for binding, plan, claims in proven:
             try:
-                collection()
+                self._store.collect_proven_activation(
+                    binding, plan, claims, keep_plan=plan in kept_plans
+                )
             except Exception:  # noqa: BLE001 - one activation's failure keeps the others going
                 logger.exception("remote store collection after System teardown failed")
 
