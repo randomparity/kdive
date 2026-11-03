@@ -112,7 +112,8 @@ This *activates* an existing extension point rather than inventing a new path.
 `_append_ssh_forward`, which emits `restrict=off` when `guest_egress` is set and `restrict=on`
 otherwise. Everything else about the NIC (loopback-only `hostfwd`, the pinned PCI slot, the
 `virtio-net-pci` device) is unchanged. The forward still binds SSH to `127.0.0.1` only; egress
-opens the guest's *outbound* path, not any new inbound host exposure.
+opens the guest's *outbound* path, not any new inbound host exposure (but see the 2026-11-03
+amendment below: the outbound path also reaches host loopback).
 
 ### 4. The knob is unreachable from the request
 
@@ -189,7 +190,8 @@ connections to services that listen only on host loopback, not only to external 
   Ordinary remote-libvirt guests use a libvirt network, not user-mode networking.
 
 This amendment discloses the exposure only. Whether to mitigate it, accept it, or change the
-NIC backend is tracked in #3496 and is not decided here.
+NIC backend is tracked in #3496 (the exposure itself in #3311, which ADR-0804 also cites) and is
+not decided here.
 
 ## Considered & rejected
 
