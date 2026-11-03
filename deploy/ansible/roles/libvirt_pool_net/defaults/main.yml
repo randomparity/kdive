@@ -4,3 +4,16 @@ libvirt_pool_net_boot_artifact_pool_target: /var/lib/libvirt/kdive/boot-artifact
 libvirt_pool_net_boot_artifact_pool_owner: root
 libvirt_pool_net_boot_artifact_pool_group: libvirt
 libvirt_pool_net_boot_artifact_pool_mode: "0770"
+
+# Traffic-capture pcap pool (ADR-0432 amendment, #3316). The directory is root:root 0711: the
+# capturer pre-creates each pcap for the domain's QEMU user, which may search the directory but not
+# write it. The owner map names the QEMU user the role checks that against. The target sits outside
+# /var/lib/libvirt/kdive, whose boot artifact pool leaves it root:libvirt 0770 and so
+# untraversable by QEMU.
+libvirt_pool_net_pcap_pool_name: kdive-pcap
+libvirt_pool_net_pcap_pool_target: /var/lib/libvirt/kdive-pcap
+libvirt_pool_net_pcap_pool_mode: "0711"
+libvirt_pool_net_pcap_pool_owner_by_family:
+  Debian: libvirt-qemu
+  RedHat: qemu
+  Suse: qemu

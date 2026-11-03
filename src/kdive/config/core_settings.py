@@ -86,6 +86,22 @@ def _nonnegative_int_at_most(maximum: int) -> Callable[[str], int]:
     return parse
 
 
+def _positive_int_at_most(maximum: int) -> Callable[[str], int]:
+    """Parse a positive integer with an upper bound, e.g. a SigV4 presign expiry (1..604800)."""
+
+    def parse(raw: str) -> int:
+        value = _positive_int(raw)
+        if value > maximum:
+            raise ValueError(f"must be <= {maximum}, got {value}")
+        return value
+
+    return parse
+
+
+#: SigV4's presigned-URL expiry ceiling (7 days); the object store rejects a longer one.
+_SIGV4_MAX_PRESIGN_SECONDS = 604_800
+
+
 def _positive_int(raw: str) -> int:
     """Parse a count that is meaningless at zero or below."""
     value = int(raw)
@@ -346,15 +362,17 @@ ARTIFACT_INLINE_MAX_BYTES = Setting(
 )
 ARTIFACT_DOWNLOAD_TTL_SECONDS = Setting(
     name="KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS",
-    parse=_int,
+    # Every value is a SigV4 presign expiry, which the object store rejects above 7 days (#3313).
+    parse=_positive_int_at_most(_SIGV4_MAX_PRESIGN_SECONDS),
     default="900",
     group="artifacts",
     processes=_SERVER,
     help=(
         "Expiry in seconds of the presigned download URL `artifacts.get` mints in "
-        "`refs.download_uri` for a redacted artifact (ADR-0140)."
+        "`refs.download_uri` for a redacted artifact (ADR-0140). From 1 to 604800 (7 days), "
+        "the SigV4 presigned-URL range."
     ),
-    suggest="an integer number of seconds, e.g. 900",
+    suggest="an integer number of seconds from 1 to 604800, e.g. 900",
 )
 REPORT_INLINE_MAX_BYTES = Setting(
     name="KDIVE_REPORT_INLINE_MAX_BYTES",
@@ -487,14 +505,6 @@ BUILD_WORKSPACE = Setting(
     group="build",
     processes=_WORKER,
     help="Worker scratch root for kernel builds.",
-)
-KERNEL_SRC = Setting(
-    name="KDIVE_KERNEL_SRC",
-    parse=_str,
-    default="",
-    group="build",
-    processes=_WORKER,
-    help="Kernel source tree the worker builds from.",
 )
 BUILD_COMPONENT_ROOTS = Setting(
     name="KDIVE_BUILD_COMPONENT_ROOTS",
@@ -907,7 +917,10 @@ WORKER_DEATH_VERIFIER = Setting(
     default="disabled",
     group="worker-death",
     processes=_SERVER,
-    help="Authoritative worker-death verifier; disabled omits build-use recovery tools.",
+    help=(
+        "Recovery-tool registration mode; docker/kubernetes include the tools, "
+        "disabled/local omit them. Death evidence comes from witness termination rows."
+    ),
 )
 DOCKER_DEATH_API = Setting(
     name="KDIVE_DOCKER_DEATH_API",
@@ -915,7 +928,10 @@ DOCKER_DEATH_API = Setting(
     default="http://worker-death-api:2375",
     group="worker-death",
     processes=_SERVER,
-    help="Private inspect-only Docker authority endpoint used by the Docker death verifier.",
+    help=(
+        "Legacy Docker registration-marker endpoint; validated but not contacted. "
+        "Recovery uses witness termination rows."
+    ),
 )
 
 
@@ -1042,7 +1058,24 @@ KUBERNETES_CREDENTIAL_ENVELOPE_KEY = Setting(
     suggest="a readable Fernet envelope-key file path",
 )
 
+VMCORE_RETENTION_DAYS = Setting(
+    name="KDIVE_VMCORE_RETENTION_DAYS",
+    parse=_positive_int,
+    default=None,
+    group="artifacts",
+    processes=_STORE_USERS,
+    help=(
+        "Optional positive days before Run-owned raw/redacted vmcore evidence is eligible for "
+        "retirement; unset disables deletion. Both Run and Investigation must be terminal. "
+        "Uses PostgreSQL time and the later sibling capture timestamp. Eligibility is not a "
+        "cleanup completion deadline. Disabling cannot restore retired evidence."
+    ),
+    suggest="a positive integer number of days; leave unset to retain evidence",
+)
+
+
 SETTINGS = [
+    VMCORE_RETENTION_DAYS,
     DATABASE_URL,
     MIGRATION_DATABASE_URL,
     WORKER_DATABASE_URL,
@@ -1076,7 +1109,6 @@ SETTINGS = [
     LIVE_SCRIPT_MAX_TIMEOUT_SECONDS,
     SECRETS_ROOT,
     BUILD_WORKSPACE,
-    KERNEL_SRC,
     BUILD_COMPONENT_ROOTS,
     LOCAL_BUILD_REMOTE_ALLOWLIST,
     BUILD_USER,

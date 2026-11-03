@@ -79,6 +79,13 @@ tools. No `-stack-select-frame` session state, no frame-local values.
 No schema, migration, persistence, or destructive-op gate change; the MCP surface change is
 additive.
 
+### Amendment (2026-10-20): frame-local values are returned (#3243)
+
+This qualifies the Decision's "no frame-local values" without replacing the rest of it:
+[ADR-0781](0781-read-frame-variables.md) makes `read_frame` return the selected frame's
+arguments and locals from `-stack-list-variables --thread T --frame L --simple-values`, which
+takes no caller expression and leaves no selected-frame state.
+
 ## Consequences
 
 - The stopped-kernel call chain is reachable as structured, redacted, bounded data over the
@@ -119,3 +126,9 @@ additive.
   numeric contract; a single `max_frames` cap plus a `level` selector covers the use cases.
 - **Local-libvirt-only ops.** Rejected: the engine is shared and remote-libvirt has the same
   gap; placing them on `GdbMiEngine` follows the tier's existing seam (as ADR-0248 did).
+
+### Amendment (2026-10-20): frame-local values are returned (#3243)
+
+This qualifies the first rejection above: [ADR-0781](0781-read-frame-variables.md) returns
+frame arguments and locals. The command takes no caller expression, so the expression surface
+ADR-0034 excluded stays closed, and the whole frame record is redacted in one pass.

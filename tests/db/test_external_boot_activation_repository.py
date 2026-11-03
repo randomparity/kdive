@@ -178,6 +178,31 @@ def _authority(activation: ExternalBootActivation) -> _AuthorityArgs:
     }
 
 
+async def _seed_pre_recovery_conflict(
+    conn: psycopg.AsyncConnection,
+    activation: ExternalBootActivation,
+    attempt_id: UUID,
+    evidence: ExternalBootConflictEvidenceV1,
+) -> None:
+    """Park a preparing activation in ``recovery_conflict`` as the authority would (ADR-0805)."""
+    await conn.execute(
+        "INSERT INTO external_boot_recovery_attempts (activation_id, attempt_number, attempt_id, "
+        "authority_generation, recovery_basis, state, conflict_evidence) "
+        "VALUES (%s, 1, %s, %s, 'pre_recovery', 'conflict', %s)",
+        (
+            activation.id,
+            attempt_id,
+            activation.authority_generation,
+            Jsonb(evidence.model_dump(mode="json", by_alias=True)),
+        ),
+    )
+    await conn.execute(
+        "UPDATE external_boot_activations SET state = 'recovery_conflict', current_attempt_id = %s "
+        "WHERE id = %s",
+        (attempt_id, activation.id),
+    )
+
+
 async def _ledger_snapshot(conn: psycopg.AsyncConnection) -> tuple[str | None, ...]:
     snapshots: list[str | None] = []
     for table, order in (
@@ -905,14 +930,7 @@ def test_pre_recovery_conflict_resolution_retains_attempt_history(migrated_url: 
                 observed_at=_AT,
             )
             first_attempt = uuid4()
-            observed = await repo.record_conflict(
-                conn,
-                **_authority(activation),
-                expected_state=ExternalBootActivationState.PREPARING,
-                attempt_id=first_attempt,
-                evidence=conflict,
-            )
-            assert observed.status is CasStatus.APPLIED
+            await _seed_pre_recovery_conflict(conn, activation, first_attempt, conflict)
 
             second_attempt = uuid4()
             before = await _ledger_snapshot(conn)
@@ -967,17 +985,6 @@ def test_pre_recovery_conflict_resolution_retains_attempt_history(migrated_url: 
             current_attempt = await repo.get_current_recovery_attempt(conn, activation.id)
             assert current_attempt is not None
             assert current_attempt.attempt_id == second_attempt
-            before = await _ledger_snapshot(conn)
-            with pytest.raises(ValueError, match="direct-conflict"):
-                await repo.record_conflict(
-                    conn,
-                    **_authority(activation),
-                    expected_state=ExternalBootActivationState.RECOVERING,
-                    attempt_id=uuid4(),
-                    evidence=conflict,
-                )
-            assert await _ledger_snapshot(conn) == before
-
             terminal = ExternalBootTerminalEvidenceV1(
                 activation_id=activation.id,
                 system_id=system_id,
@@ -1078,13 +1085,7 @@ def test_teardown_cleanup_releases_capacity_and_fences_terminal_state(
                 objects=(),
                 observed_at=_AT,
             )
-            await repo.record_conflict(
-                conn,
-                **_authority(activation),
-                expected_state=ExternalBootActivationState.PREPARING,
-                attempt_id=uuid4(),
-                evidence=conflict,
-            )
+            await _seed_pre_recovery_conflict(conn, activation, uuid4(), conflict)
             if cleanup_state is ExternalBootActivationState.RECOVERY_FAILED:
                 obligations = RemoteModuleAttemptObligationRepository()
                 attempt = ModuleAttempt(system_id, run_id, "b" * 32)

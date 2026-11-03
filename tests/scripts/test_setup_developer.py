@@ -17,7 +17,14 @@ def _stub(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def _run(tmp_path: Path, *, failure: str = "", arch: str = "x86_64"):
+def _run(
+    tmp_path: Path,
+    *,
+    failure: str = "",
+    arch: str = "x86_64",
+    uv_bin: str = "",
+    path_entry: str = "",
+):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     log = tmp_path / "install.log"
@@ -25,7 +32,7 @@ def _run(tmp_path: Path, *, failure: str = "", arch: str = "x86_64"):
     _stub(
         bindir / "uv",
         """
-if [[ "$*" == 'tool dir --bin' ]]; then echo "$TEST_BIN"; exit; fi
+if [[ "$*" == 'tool dir --bin' ]]; then echo "${TEST_UV_BIN:-$TEST_BIN}"; exit; fi
 printf 'uv %s\\n' "$*" >> "$TEST_LOG"
 [[ "$TEST_FAILURE" != uv ]]
 """,
@@ -87,8 +94,9 @@ echo complete
         ["bash", str(script)],
         env={
             **os.environ,
-            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "PATH": f"{path_entry or bindir}:{os.environ['PATH']}",
             "TEST_BIN": str(bindir),
+            "TEST_UV_BIN": uv_bin,
             "TEST_LOG": str(log),
             "TEST_FAILURE": failure,
             "TEST_ARCH": arch,
@@ -97,7 +105,7 @@ echo complete
         capture_output=True,
         check=False,
     )
-    return result, log.read_text()
+    return result, log.read_text() if log.exists() else ""
 
 
 def test_installs_all_developer_tool_families(tmp_path: Path) -> None:
@@ -120,6 +128,26 @@ def test_install_or_verification_failure_prevents_success(tmp_path: Path, failur
     assert "complete" not in result.stdout
     if failure == "docker":
         assert "unavailable to this session" in result.stderr
+
+
+def test_uv_bin_spelling_with_dotdot_matches_resolved_path_entry(tmp_path: Path) -> None:
+    # uv reports $XDG_DATA_HOME/../bin unnormalized; PATH names the same directory.
+    result, _ = _run(tmp_path, uv_bin=f"{tmp_path}/share/../bin")
+    assert result.returncode == 0, result.stderr
+    assert "complete" in result.stdout
+
+
+def test_path_refusal_names_the_canonical_directory(tmp_path: Path) -> None:
+    result, _ = _run(tmp_path, uv_bin=f"{tmp_path}/share/../missing/bin")
+    assert result.returncode != 0
+    assert f"Add {tmp_path}/missing/bin to PATH" in result.stderr
+
+
+def test_uv_bin_symlink_spelling_is_kept(tmp_path: Path) -> None:
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path / "bin")
+    result, _ = _run(tmp_path, uv_bin=str(alias), path_entry=str(alias))
+    assert result.returncode == 0, result.stderr
 
 
 def test_power_builds_shellcheck_natively(tmp_path: Path) -> None:

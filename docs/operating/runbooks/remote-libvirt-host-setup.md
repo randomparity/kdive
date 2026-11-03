@@ -18,6 +18,11 @@ The resulting host needs:
   or modular `virtproxyd` according to the host distribution.
 - A **directory (`dir`) storage pool** and guest network. The remote module-restoration volume
   naming contract assumes a dir pool ([ADR-0588](../../adr/0588-remote-module-volume-ownership-lives-in-the-volume-name.md)).
+- A `kdive-pcap` dir pool at `/var/lib/libvirt/kdive-pcap` for traffic captures: `root:root 0711`,
+  labelled `svirt_image_t` on an SELinux-enforcing host, and allowed by a write-only
+  `libvirt-qemu.d` drop-in on an AppArmor host. The provider pre-creates each capture file for the
+  domain's QEMU user
+  ([ADR-0432](../../adr/0432-remote-libvirt-traffic-capturer.md) amendment).
 - Firewall rules admitting the worker to TLS and the gdbstub range. The gdbstub uses raw TCP;
   the libvirt TLS connection does not protect it. Verify both an allowed worker connection and
   refusal from outside the configured worker network.
@@ -100,9 +105,9 @@ Adjust the namespace and Secret name to your deployment. If the emitted refs use
 `remote-clientcert.pem`, use those names on the left side of `--from-file` too. Mount the client
 bundle and CA certificate; keep the CA signing key on the PKI controller.
 
-The storage pool, network, and machine settings remain runtime configuration
+The storage pool, network, machine, and pcap pool settings remain runtime configuration
 (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, `KDIVE_REMOTE_LIBVIRT_NETWORK`,
-`KDIVE_REMOTE_LIBVIRT_MACHINE`); see the [configuration reference](../../guide/reference/config.md).
+`KDIVE_REMOTE_LIBVIRT_MACHINE`, `KDIVE_REMOTE_LIBVIRT_PCAP_POOL`); see the [configuration reference](../../guide/reference/config.md).
 Onboard the tenant's budget and quota using [project onboarding](../project-onboarding.md).
 
 ### Object-store reachability
@@ -212,3 +217,37 @@ This proves only TLS connectivity and volume visibility from that worker. Separa
 paths from step 1. Neither the TLS probe nor a catalog row proves the guest boots or captures a
 core. The [remote live-stack runbook](remote-live-stack.md) defines the disposable host-process
 lifecycle tests and their completion evidence.
+
+## Clear store files of torn-down Systems
+
+The external-boot authority keeps provider-host records under
+`/var/lib/kdive/provider-authority/remote-module-preparations/evidence`. A completed System
+teardown removes the records of every activation of that System it can prove safe
+([ADR-0787](../../adr/0787-abortable-finalize-proof-checkpoint.md), #3486). Systems torn down
+before #3472, and activations whose volumes were still present at teardown, keep their files; the
+authority logs `remote store keeps System … activation …` for the second case.
+
+Release and orphan delete refuse with `remote preparation store holds more than 4096 …` once the
+store holds more than 4096 `.request`, `.lifecycle-request` and `.preparation` files
+([ADR-0787](../../adr/0787-abortable-finalize-proof-checkpoint.md), #3475). A completed teardown
+collects its provable activations' files, so tearing down Systems lowers the count. It does not
+remove the files of activations kept at teardown, of Systems torn down before #3472, or files that
+do not parse (the authority logs `unreadable and left in place`). When those hold the store over
+the limit, tearing down live Systems does not help: drain the host and use this procedure.
+
+Use this procedure only when every System ever placed on this host is `torn_down`. With a System
+in any other state, including `failed`, its records may be the only pointer to its volumes; leave
+the store alone.
+
+1. Stop the authority: `sudo systemctl stop kdive-external-boot-authority.service`.
+2. List the storage pool (`virsh vol-list <pool>`) and confirm that it holds no `kdive-module-…`
+   or `kdive-boot-v1-…` volume. If one remains, resolve it first: the store records are its only
+   pointer.
+3. Copy the directory aside with its modes and owner kept (`sudo cp -a` into a new directory only
+   root can read), list its files, then remove the listed files by exact name, except:
+   - each `<key>.teardown` record, which refuses a late stage of that System;
+   - each `<identity>.cleanup-quarantine` whose JSON has `"managed":true`, its
+     `<identity>.recovery`, and the `.recovery-index` file whose content is `<identity>`.
+4. Start the authority again: `sudo systemctl start kdive-external-boot-authority.service`.
+
+The operator who later removes an adopted receipt removes all three of its files together.

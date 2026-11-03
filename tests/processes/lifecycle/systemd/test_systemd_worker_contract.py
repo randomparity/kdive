@@ -60,18 +60,18 @@ def test_start_string_and_secret_allow_exact_utf8_4_kib_boundary() -> None:
     exact_secret = "€" * 1365 + "x"
 
     request = LifecycleRequest.model_validate(
-        start_payload(source_root=exact_path, worker_database_url=exact_secret)
+        start_payload(rootfs_dir=exact_path, worker_database_url=exact_secret)
     )
 
     assert request.settings is not None
-    assert request.settings.source_root == exact_path
+    assert request.settings.rootfs_dir == exact_path
     assert request.settings.worker_database_url.get_secret_value() == exact_secret
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("source_root", "/" + "€" * 1366),
+        ("rootfs_dir", "/" + "€" * 1366),
         ("worker_database_url", "€" * 1366 + "x"),
     ],
 )
@@ -147,9 +147,19 @@ def test_start_accepts_capacity_only_with_complete_authority_geometry() -> None:
 def test_start_rejects_relative_worker_paths() -> None:
     payload = start_payload()
     settings = cast(dict[str, object], payload["settings"])
-    settings["source_root"] = "relative/source"
+    settings["rootfs_dir"] = "relative/rootfs"
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="worker paths must be absolute"):
+        LifecycleRequest.model_validate(payload)
+
+
+def test_start_rejects_the_removed_source_root_setting() -> None:
+    """#3193: no worker reads a kernel source root, so a start that still sends one fails closed."""
+    payload = start_payload()
+    settings = cast(dict[str, object], payload["settings"])
+    settings["source_root"] = "/srv/kdive"
+
+    with pytest.raises(ValidationError, match="extra_forbidden"):
         LifecycleRequest.model_validate(payload)
 
 

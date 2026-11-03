@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Environment for the local-libvirt developer setup example.
 #
-# Sources the canonical live-stack defaults (DB / OIDC / S3 / HTTP / kernel-src), then
+# Sources the canonical live-stack defaults (DB / OIDC / S3 / HTTP / kernel fixture), then
 # layers the few values this example needs. Source it, don't execute it:
 #
 #   source examples/local-libvirt/env.sh
@@ -19,7 +19,7 @@ if ! command -v uv >/dev/null 2>&1 && [[ -x "${HOME}/.local/bin/uv" ]]; then
 fi
 
 # Reuse the live-stack env so this example tracks the same defaults the rest of the project
-# documents. It already exports KDIVE_KERNEL_SRC=~/src/linux, KDIVE_INSTALL_STAGING=
+# documents. It exports KDIVE_KERNEL_SRC=~/src/linux when that tree exists, KDIVE_INSTALL_STAGING=
 # /var/lib/kdive/install, and the OIDC issuer on :8090 (the host-published mock issuer).
 # shellcheck source=scripts/live-stack/env.sh disable=SC1091
 source "${repo_root}/scripts/live-stack/env.sh" || return $?

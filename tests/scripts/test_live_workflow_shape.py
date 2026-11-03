@@ -924,19 +924,17 @@ def test_live_jobs_do_not_restore_the_retired_root_worker_mode() -> None:
 
 
 def test_tcg_job_resolves_the_kernel_tree_before_the_app_tier_starts() -> None:
-    """Ordering: restart_host_processes captures KDIVE_KERNEL_SRC when it forks the worker.
+    """Ordering: the kernel fixture tree resolves before the stack and the proofs that read it.
 
-    stack-services.sh's restart_host_processes reads KDIVE_KERNEL_SRC at fork time and defaults
-    it to ${HOME}/src/linux, which does not exist on a hosted runner. Exporting the fetched tree
-    after
-    stack-services.sh would leave the worker permanently pointed at that nonexistent path.
+    The spine's proofs read KDIVE_KERNEL_SRC in the test process (the workers never do, #3193),
+    and env.sh otherwise defaults it to ${HOME}/src/linux, which does not exist on a hosted runner.
     """
     spine = _tcg_spine()
     assert spine.index("fetch-kernel-tree.sh") < spine.index(
         "scripts/live-stack/stack-services.sh"
     ), (
-        "KDIVE_KERNEL_SRC must be resolved before stack-services.sh forks the worker, which "
-        "captures it"
+        "KDIVE_KERNEL_SRC must be resolved before stack-services.sh, ahead of the proofs that "
+        "read it"
     )
     assert "fetch-kernel-tree.sh /var/lib/kdive/build/" in spine
 
@@ -945,7 +943,7 @@ def test_native_job_resolves_the_kernel_tree_before_the_app_tier_starts() -> Non
     native = _job_run_blocks("native")
     assert native.index("fetch-kernel-tree.sh") < native.index(
         "scripts/live-stack/stack-services.sh"
-    ), "KDIVE_KERNEL_SRC must be resolved before native stack-services.sh forks the fixed worker"
+    ), "KDIVE_KERNEL_SRC must be resolved before native stack-services.sh and the live_vm proofs"
     assert "fetch-kernel-tree.sh /var/lib/kdive/build/" in native
 
 

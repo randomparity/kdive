@@ -58,6 +58,26 @@ records only `result_requeued`.
 - A worker running this code before the migration has its marked `fail` refused (`22023`). The
   job then stays `running` until reclaim, which is no worse than the churn before this change.
 
+### Amendment (2026-10-21): a refusal the authority proves is a conflict skips the repeat check (#3327)
+
+This qualifies the first consequence, which counts every provider-call refusal toward the two
+identical failures. Under [ADR-0805](0805-authority-observed-conflict-is-recorded-from-its-journal-head.md)
+the authority re-observes a refused `activate`, `recover` or `resolve-conflict` call. When that
+observation is a `conflict`, it answers with the observation instead of `provider-conflict`, and
+the worker records `recovery_conflict` after that one generation. Refusals over any other observed
+state still reach this ADR's repeat check unchanged.
+
+### Amendment (2026-10-27): a failed remote module PREPARE no longer leaves an unresolved operation (#3348)
+
+This qualifies the consequence that a provider-conflict raised during preparation churns the job.
+For a remote module PREPARE the cause was the PREPARE journal operation left at `mutation-started`
+after the appliance failed; the next generation's `begin` and the System teardown were refused
+because of it. The authority now closes that operation when the host reports the failure as
+abandoned, after restoring the System's power ([ADR-0585](0585-remote-offline-module-restoration-appliance.md)
+amendment of the same date). The retry runs instead of reaching the repeat check, and a teardown
+is no longer refused for it. A failure the host could not abandon still leaves the operation
+unresolved and churns as described above.
+
 ## Considered & rejected
 
 - **Do nothing; rely on #2898's provider fixes.** judgment: the next deterministic provider defect
@@ -81,3 +101,91 @@ records only `result_requeued`.
 - **Remember failures in the authority service process.** judgment: the memory would be lost on a
   restart and not shared across authority instances. Sending its verdict would also add a new wire
   reason.
+
+### Amendment (2026-10-28): a release failure while recovering commits, and the retry adopts (#3396)
+
+This closes a gap in the bound-failure path for a release, not in the repeat rule itself.
+
+[ADR-0614](0614-derived-external-boot-release-phases.md)'s derived RECOVER moves a release's
+activation to `recovering` before its restore. The release `fail` admission named no such state, so
+every failure after that point was refused: the job kept `running` until its lease lapsed, on every
+attempt, and the repeat check never ran.
+
+Migration 0181 admits a release `fail` while the activation is `recovering` when the current
+recovery attempt belongs to the failing authority's generation. The commit behaves as it does for
+every other failure: the job is requeued, or fails when terminal or out of attempts, and the
+authority is retired. A retired authority proves its job's attempt ended, so allocation and the
+derived-release begin now adopt a retired prior authority of the same job and release, joined to
+the current recovering attempt by generation, as they already adopted a `current` or `superseded`
+one. Retiring rather than superseding keeps the commit's one behaviour for failures; a superseded
+authority has a successor, and a failed attempt has none yet.
+
+A failure in the window before a retry's own begin, after it has taken over but while the current
+attempt is still its predecessor's, is still refused, and the job is recovered by the lease lapse as
+before.
+
+A terminal release failure that finds its recovery in flight (the final attempt, or a terminal
+category) also closes the recovery, as the recover readiness branch does: the current attempt
+becomes `failed` and the activation `recovery_failed`, both with terminal evidence, and the System's
+open module obligations are discharged as a `terminal_escape`. `recovery_failed` claims only that
+this release's recovery did not complete and will not be resumed. It does not claim the host is at
+the source or the target state, because the restore may have stopped part way, and the evidence's
+composite is the authority's quiescence digest from its takeover acknowledgement, not an observation
+made after the failure. The discharge also lets the module-volume sweep reclaim the attempt's
+storage before the System is torn down, as the recover readiness branch does. The release job is not
+retried from `recovery_failed`; the reconciler's release lane still selects a `recovery_failed`
+activation that holds a ready reservation, as it already did for one a recover produced, and its
+handler refuses that state. The System is torn down from it, which is always admitted. A
+non-terminal failure still requeues the job and leaves the activation `recovering` for the next
+attempt to adopt.
+
+### Amendment (2026-10-30): the release lane selects only `recovered` (#3426)
+
+The reconciler's release lane no longer selects `abandoned`, `recovery_conflict` or
+`recovery_failed` activations. The release handler refuses all three, so each reconciler pass built
+a release payload that could never advance, and a refused job never records a release row. The
+System teardown is the exit for `recovery_conflict` and `recovery_failed`. An `abandoned`
+activation that still holds a ready reservation has no release path in either lane; that gap is
+outside this change. The lane keeps `recovered`, which the handler admits.
+
+### Amendment (2026-10-28): only `provider-conflict` carries `authority_reason` (#3391)
+
+[ADR-0808](0808-a-definite-authority-rejection-ends-the-lifecycle-wait.md) adds `details["admission"]`
+to other authority rejections. It does not add `authority_reason` to them, and it leaves
+`failure_context` and the repeat check unchanged. A `provider-conflict` is still ambiguous to the
+lifecycle wait, which ends at its deadline.
+
+### Amendment (2026-10-30): recover and resolve-conflict failures commit while recovering (#3429)
+
+The #3396 amendment fixed this gap for release only. Two failure commits from a recover or
+resolve-conflict job were still refused, so the job stayed `running` until its lease lapsed and
+ended `lease_expired`. First, the resolve-conflict `fail` admission named only
+`recovery_conflict`, but the job's own `recovery-attempt` commit moves the activation to
+`recovering`. Second, the recover readiness branch returned `superseded` when a readiness failure
+arrived before any recovery attempt existed.
+
+Migration 0185 makes the `fail` admission accept the same activation states that allocation
+already admits for each purpose: resolve-conflict now also accepts `recovering`. The terminal close
+from #3396 now covers `recover` and `resolve-conflict` as well as `release`. A terminal failure
+(marked terminal, on the job's last attempt, or a repeated `provider-conflict` under this ADR's
+rule) that finds the activation `recovering` marks the current
+attempt `failed` and the activation `recovery_failed`, with the same evidence and the same
+`terminal_escape` discharge. The recover-only readiness branch is removed because the widened
+close covers it. A recover failure on an `active` activation commits, and the activation stays
+`active`.
+
+Recover and resolve-conflict do not need release's same-generation ownership check. Their
+allocation already lets a job take over any `recovering` attempt, and the job that fails holds the
+System's one `current` authority. A non-terminal failure still requeues the job and leaves the
+recovery for the next attempt.
+
+- **Admit the failure and leave the activation `recovering`.** verified: the reconciler recovery
+  lane (`_CANDIDATE_SQL["recovery"]`, `src/kdive/reconciler/repairs/external_boot.py`, main
+  237f78212) selects every `recovering` activation whose attempt deadline has passed. Nothing
+  renews that deadline, so the lane would redrive a recovery its last job gave up on, on every
+  sweep and without bound.
+- **Return a failed resolve-conflict to `recovery_conflict`.** judgment: the mutation may have
+  stopped part way, so the original conflict binding no longer describes the host. Only
+  `recovery_failed` claims nothing about the host state.
+- **Retry a SUPERSEDED commit through `fail_external_boot` in the worker.** judgment: the database
+  would still refuse the same admission, and the operator excluded this change for #3429.

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 import libvirt
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
 from kdive.providers.ports.external_boot import (
     AbsentComponentState,
     ExternalBootActivationBinding,
@@ -20,7 +23,9 @@ from kdive.providers.ports.external_boot import (
     RunningKernelObservation,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
+    RemoteExternalBootObservedState,
     RemoteExternalBootRecoveryRecord,
+    RemoteFinalizedTeardownRefsV1,
     RemoteModuleTerminalRecord,
     RemoteSystemTeardownInspection,
     RemoteSystemTeardownState,
@@ -29,10 +34,12 @@ from kdive.providers.remote_libvirt.external_boot_materialization import (
     ConcreteRemoteExternalBootMaterializer,
 )
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
+    AcknowledgedDefinition,
     RemoteExternalBootRecovery,
     _AgentRunner,
     activate_definition,
     boot_projection_identity,
+    observe_definition,
     observe_guest_identity,
     parse_projected_domain_xml,
     prepare_target_definition,
@@ -55,7 +62,16 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     overlay_volume_name,
     supplied_base_volume_name,
 )
+from kdive.providers.shared.guest_agent import GuestDomain
 from kdive.providers.shared.runtime_paths import domain_name_for
+
+# Pause between identity reads while the guest agent is not yet answering, and the most one
+# observation waits: the worker's own deadline spans the whole job, so a longer server-side wait
+# would outlive the caller and hold the System's lane. Live remote boots connect the guest agent
+# 50 to 54 s after the domain starts; 300 s is about five times that, so a slower host, a larger
+# image or a cold page cache is waited out, while a guest that never answers still frees the lane.
+_OBSERVE_POLL_S = 1.0
+_OBSERVE_WAIT_S = 300.0
 
 
 class _Volume(Protocol):
@@ -107,7 +123,9 @@ class ConcreteRemoteExternalBootOperations:
         monotonic: Callable[[], float],
         agent_exec: _AgentRunner,
         identity_port: RemoteDeviceIdentityPort | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        self._sleep = sleep
         self._materializer = materializer
         self._connection = connection
         self._pool_name = pool_name
@@ -143,7 +161,9 @@ class ConcreteRemoteExternalBootOperations:
             or str(modules.request.authority.run_id) != binding.run_id
             or modules.request.authority.plan_identity != plan.identity
         ):
-            raise ValueError("remote module terminal record differs from activation binding")
+            raise ProviderRecoveryRefusal(
+                "remote module terminal record differs from activation binding"
+            )
         with self._connection() as connection:
             domain = connection.lookupByName(domain_name_for(UUID(binding.system_id)))
             source_xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
@@ -172,7 +192,9 @@ class ConcreteRemoteExternalBootOperations:
             source_modules = AbsentComponentState()
         else:
             if result.capture_manifest is None:
-                raise ValueError("remote module result omitted captured source manifest")
+                raise ProviderRecoveryRefusal(
+                    "remote module result omitted captured source manifest"
+                )
             source_modules = PresentComponentState(manifest=result.capture_manifest)
         objects = {
             materialization.artifacts.kernel,
@@ -212,7 +234,7 @@ class ConcreteRemoteExternalBootOperations:
         if recovery.materialization.artifacts.initrd is not None:
             expected.add(recovery.materialization.artifacts.initrd)
         if not expected.issubset(recovery.recovery_objects):
-            raise ValueError("remote recovery omitted an owned private artifact")
+            raise ProviderRecoveryRefusal("remote recovery omitted an owned private artifact")
         boot_references = [(recovery.materialization.artifacts.kernel, "kernel")]
         if recovery.materialization.artifacts.initrd is not None:
             boot_references.append((recovery.materialization.artifacts.initrd, "initrd"))
@@ -231,16 +253,16 @@ class ConcreteRemoteExternalBootOperations:
                 or str(parsed.run_id) != recovery.binding.run_id
                 or parsed.digest != digest
             ):
-                raise ValueError("remote recovery boot artifact identity differs")
+                raise ProviderRecoveryRefusal("remote recovery boot artifact identity differs")
         paths = {
             reference: pool.storageVolLookupByName(reference.ref).path() for reference in expected
         }
         for path in paths.values():
             if not path.startswith("/"):
-                raise ValueError("remote recovery artifact path is not absolute")
+                raise ProviderRecoveryRefusal("remote recovery artifact path is not absolute")
         os_element = parse_projected_domain_xml(recovery.definition.target_xml).find("os")
         if os_element is None:
-            raise ValueError("remote target definition omitted operating-system paths")
+            raise ProviderRecoveryRefusal("remote target definition omitted operating-system paths")
         recorded_kernel = os_element.findtext("kernel")
         recorded_initrd = os_element.findtext("initrd")
         if (
@@ -251,7 +273,9 @@ class ConcreteRemoteExternalBootOperations:
                 and recorded_initrd != paths[recovery.materialization.artifacts.initrd]
             )
         ):
-            raise ValueError("remote recovery artifact paths differ from target definition")
+            raise ProviderRecoveryRefusal(
+                "remote recovery artifact paths differ from target definition"
+            )
 
     def activate(
         self,
@@ -283,13 +307,63 @@ class ConcreteRemoteExternalBootOperations:
         with self._connection() as connection:
             self._validate_owned_artifacts(connection, recovery)
             domain = connection.lookupByName(domain_name_for(UUID(recovery.binding.system_id)))
-            return observe_guest_identity(self._agent_exec, domain, recovery.definition)
+            return self._observe_when_ready(domain, recovery, deadline)
+
+    def _observe_when_ready(
+        self,
+        domain: GuestDomain,
+        recovery: RemoteExternalBootRecoveryRecord,
+        deadline: float,
+    ) -> RunningKernelObservation:
+        """Retry the one-shot identity read while the guest agent is not yet answering (#3376).
+
+        ``observe_guest_identity`` leaves the wait to its caller. Only ``TRANSPORT_FAILURE`` is
+        waited out; any other category is a real answer and propagates. The wait ends at the call's
+        own deadline, capped at ``_OBSERVE_WAIT_S``, with ``READINESS_FAILURE``, chained to the last
+        transport failure.
+        """
+        deadline = min(deadline, self._monotonic() + _OBSERVE_WAIT_S)
+        while True:
+            try:
+                return observe_guest_identity(self._agent_exec, domain, recovery.definition)
+            except CategorizedError as exc:
+                if exc.category is not ErrorCategory.TRANSPORT_FAILURE:
+                    raise
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    raise CategorizedError(
+                        "the guest agent did not answer before the observation deadline",
+                        category=ErrorCategory.READINESS_FAILURE,
+                        details={
+                            "system_id": recovery.binding.system_id,
+                            "observe_wait_cap_s": _OBSERVE_WAIT_S,
+                        },
+                    ) from exc
+                self._sleep(min(_OBSERVE_POLL_S, remaining))
 
     def recover(
         self,
         recovery: RemoteExternalBootRecoveryRecord,
         authority: OpaqueProviderRef,
         deadline: float,
+    ) -> None:
+        self._recover(recovery, authority, deadline, None)
+
+    def recover_acknowledged(
+        self,
+        recovery: RemoteExternalBootRecoveryRecord,
+        authority: OpaqueProviderRef,
+        acknowledged: AcknowledgedDefinition,
+        deadline: float,
+    ) -> None:
+        self._recover(recovery, authority, deadline, acknowledged)
+
+    def _recover(
+        self,
+        recovery: RemoteExternalBootRecoveryRecord,
+        authority: OpaqueProviderRef,
+        deadline: float,
+        acknowledged: AcknowledgedDefinition | None,
     ) -> None:
         del authority
         if self._monotonic() >= deadline:
@@ -300,7 +374,36 @@ class ConcreteRemoteExternalBootOperations:
                 RemoteExternalBootRecovery(
                     definition=recovery.definition, prior_power=recovery.prior_power
                 ),
+                acknowledged,
             )
+
+    def observe_state(
+        self, recovery: RemoteExternalBootRecoveryRecord, deadline: float
+    ) -> RemoteExternalBootObservedState:
+        """Read the definition side, power, and owned-volume absence without any write."""
+        self._require_deadline(deadline, "observation")
+        boot = [recovery.materialization.artifacts.kernel]
+        if recovery.materialization.artifacts.initrd is not None:
+            boot.append(recovery.materialization.artifacts.initrd)
+        modules = (recovery.module_recovery.source_volume, recovery.module_recovery.scratch_volume)
+        with self._connection() as connection:
+            which, preserved, boot_identity, active = observe_definition(
+                connection, recovery.definition
+            )
+            boot_pool = connection.storagePoolLookupByName(self._pool_name)
+            module_pool = connection.storagePoolLookupByName(recovery.module_recovery.pool.ref)
+            absent = all(
+                self._lookup_optional(boot_pool, reference.ref) is None for reference in boot
+            ) and all(
+                self._lookup_optional(module_pool, reference.ref) is None for reference in modules
+            )
+        return RemoteExternalBootObservedState(
+            definition=which,
+            preserved=preserved,
+            boot=boot_identity,
+            active=active,
+            recovery_objects_absent=absent,
+        )
 
     @staticmethod
     def _lookup_optional(pool: _Pool, name: str) -> _Volume | None:
@@ -327,7 +430,9 @@ class ConcreteRemoteExternalBootOperations:
                 recovery.module_recovery.scratch_volume,
             ):
                 if self._lookup_optional(module_pool, reference.ref) is not None:
-                    raise ValueError("remote module volume remains before authorized cleanup")
+                    raise ProviderRecoveryRefusal(
+                        "remote module volume remains before authorized cleanup"
+                    )
             boot = [recovery.materialization.artifacts.kernel]
             if recovery.materialization.artifacts.initrd is not None:
                 boot.append(recovery.materialization.artifacts.initrd)
@@ -347,16 +452,16 @@ class ConcreteRemoteExternalBootOperations:
                     or str(parsed.run_id) != recovery.binding.run_id
                     or parsed.digest != digest
                 ):
-                    raise ValueError("remote cleanup boot artifact identity differs")
+                    raise ProviderRecoveryRefusal("remote cleanup boot artifact identity differs")
                 self._require_deadline(deadline, "cleanup")
                 volume = self._lookup_optional(boot_pool, reference.ref)
                 if volume is None:
                     continue
                 if volume.name() != reference.ref:
-                    raise ValueError("remote cleanup volume name differs")
+                    raise ProviderRecoveryRefusal("remote cleanup volume name differs")
                 volume.delete(0)
                 if self._lookup_optional(boot_pool, reference.ref) is not None:
-                    raise ValueError("remote cleanup volume remained after deletion")
+                    raise ProviderRecoveryRefusal("remote cleanup volume remained after deletion")
 
     @staticmethod
     def _lookup_domain_optional(
@@ -369,6 +474,44 @@ class ConcreteRemoteExternalBootOperations:
                 return None
             raise
 
+    def _module_volume_names(
+        self, operation_nonce: str, system_id: str, run_id: str
+    ) -> set[tuple[str, str]]:
+        return {
+            (
+                self._pool_name,
+                render_module_volume_name(system_id, run_id, operation_nonce, purpose),
+            )
+            for purpose in ("source.ext4", "scratch.ext4")
+        }
+
+    @staticmethod
+    def _boot_artifact_facts(
+        state: RemoteSystemTeardownState,
+    ) -> list[tuple[str, Literal["kernel", "initrd"], str | None]]:
+        """Boot artifacts to protect, from the live materialization or the finalized marker."""
+        if state.finalized is not None:
+            return [(item.ref, item.kind, item.sha256) for item in state.finalized.boot_artifacts]
+        if state.materialization is None:
+            return []
+        materialization = state.materialization.materialization
+        facts: list[tuple[str, Literal["kernel", "initrd"], str | None]] = [
+            (
+                materialization.artifacts.kernel.ref,
+                "kernel",
+                materialization.extracted_vmlinuz_sha256,
+            )
+        ]
+        if materialization.artifacts.initrd is not None:
+            facts.append(
+                (
+                    materialization.artifacts.initrd.ref,
+                    "initrd",
+                    materialization.verified_initrd_sha256,
+                )
+            )
+        return facts
+
     def _protected_teardown_volumes(
         self, state: RemoteSystemTeardownState
     ) -> frozenset[tuple[str, str]]:
@@ -376,14 +519,14 @@ class ConcreteRemoteExternalBootOperations:
             (self._pool_name, overlay_volume_name(state.binding.system_id)),
             (self._pool_name, supplied_base_volume_name(state.binding.system_id)),
         }
-        materialization = state.materialization
-        if materialization is not None:
-            artifacts = materialization.materialization.artifacts
-            protected.add((self._pool_name, artifacts.kernel.ref))
-            if artifacts.initrd is not None:
-                protected.add((self._pool_name, artifacts.initrd.ref))
+        protected.update(
+            (self._pool_name, ref) for ref, _kind, _digest in self._boot_artifact_facts(state)
+        )
+        finalized = state.finalized
         terminal = state.terminal
-        if terminal is not None:
+        if finalized is not None and finalized.module_volumes:
+            protected.update(finalized.module_volumes)
+        elif terminal is not None:
             module = terminal.response.recovery
             protected.update(
                 {
@@ -391,42 +534,27 @@ class ConcreteRemoteExternalBootOperations:
                     (module.pool.ref, module.scratch_volume.ref),
                 }
             )
+        elif finalized is not None and finalized.operation_nonce is not None:
+            protected.update(
+                self._module_volume_names(
+                    finalized.operation_nonce, state.binding.system_id, state.binding.run_id
+                )
+            )
         elif state.preparation is not None:
             operation = state.preparation.operation
             protected.update(
-                {
-                    (
-                        self._pool_name,
-                        render_module_volume_name(
-                            operation.system_id,
-                            operation.run_id,
-                            operation.operation_nonce,
-                            purpose,
-                        ),
-                    )
-                    for purpose in ("source.ext4", "scratch.ext4")
-                }
+                self._module_volume_names(
+                    operation.operation_nonce, operation.system_id, operation.run_id
+                )
             )
         return frozenset(protected)
 
     def _teardown_boot_volumes(
         self, state: RemoteSystemTeardownState
     ) -> frozenset[tuple[str, str]]:
-        materialization_record = state.materialization
-        if materialization_record is None:
-            return frozenset()
-        materialization = materialization_record.materialization
-        candidates = [(materialization.artifacts.kernel, "kernel")]
-        if materialization.artifacts.initrd is not None:
-            candidates.append((materialization.artifacts.initrd, "initrd"))
         boot: set[tuple[str, str]] = set()
-        for reference, kind in candidates:
-            parsed = parse_boot_artifact_name(reference.ref)
-            digest = (
-                materialization.extracted_vmlinuz_sha256
-                if kind == "kernel"
-                else materialization.verified_initrd_sha256
-            )
+        for ref, kind, digest in self._boot_artifact_facts(state):
+            parsed = parse_boot_artifact_name(ref)
             if (
                 parsed is None
                 or parsed.partial
@@ -435,8 +563,8 @@ class ConcreteRemoteExternalBootOperations:
                 or str(parsed.run_id) != state.binding.run_id
                 or parsed.digest != digest
             ):
-                raise ValueError("remote teardown boot artifact identity differs")
-            boot.add((self._pool_name, reference.ref))
+                raise ProviderRecoveryRefusal("remote teardown boot artifact identity differs")
+            boot.add((self._pool_name, ref))
         return frozenset(boot)
 
     def _validate_teardown_domain(
@@ -445,12 +573,13 @@ class ConcreteRemoteExternalBootOperations:
         domain: _Domain,
         state: RemoteSystemTeardownState,
     ) -> None:
-        documents = [domain.XMLDesc(0), domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)]
         recovery = state.recovery
         pool = connection.storagePoolLookupByName(self._pool_name)
         overlay = pool.storageVolLookupByName(overlay_volume_name(state.binding.system_id)).path()
+        inactive = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+        live = domain.XMLDesc(0)
         if recovery is None:
-            for document in documents:
+            for document in (live, inactive):
                 require_disk_grub_source(
                     document,
                     system_id=UUID(state.binding.system_id),
@@ -462,13 +591,15 @@ class ConcreteRemoteExternalBootOperations:
             (recovery.definition.source_definition, recovery.definition.source_boot),
             (recovery.definition.target_definition, recovery.definition.target_boot),
         }
-        for document in documents:
-            observed = (
-                preserved_definition_identity(document),
-                boot_projection_identity(document),
+        # libvirt expands a running domain's XML (host-model CPU, ids, aliases, tty paths), so
+        # its preserved digest never equals the recorded one: the persistent document carries the
+        # full identity and the live one only the boot projection (ADR-0583 amendment, #3377).
+        allowed_boots = {boot for _definition, boot in allowed}
+        observed = (preserved_definition_identity(inactive), boot_projection_identity(inactive))
+        if observed not in allowed or boot_projection_identity(live) not in allowed_boots:
+            raise ProviderRecoveryRefusal(
+                "remote teardown domain identity differs from durable recovery"
             )
-            if observed not in allowed:
-                raise ValueError("remote teardown domain identity differs from durable recovery")
 
     def _prove_teardown_graph(
         self, connection: RemoteExternalBootPreparationConn, state: RemoteSystemTeardownState
@@ -484,7 +615,9 @@ class ConcreteRemoteExternalBootOperations:
         with self._connection() as connection:
             domain = self._lookup_domain_optional(connection, state.binding.system_id)
             if domain is None:
-                raise ValueError("remote teardown cannot validate an absent System domain")
+                raise ProviderRecoveryRefusal(
+                    "remote teardown cannot validate an absent System domain"
+                )
             self._validate_teardown_domain(connection, domain, state)
             self._prove_teardown_graph(connection, state)
 
@@ -506,7 +639,7 @@ class ConcreteRemoteExternalBootOperations:
             if domain is None:
                 return
             if domain.isActive():
-                raise ValueError("remote System domain became active before undefine")
+                raise ProviderRecoveryRefusal("remote System domain became active before undefine")
             self._validate_teardown_domain(connection, domain, state)
             self._prove_teardown_graph(connection, state)
             try:
@@ -546,34 +679,58 @@ class ConcreteRemoteExternalBootOperations:
             )
 
     def unfinished_preparation_absent(self, state: RemoteSystemTeardownState) -> bool:
-        preparation = state.preparation
-        if preparation is None:
-            return True
-        operation = preparation.operation
-        names = (
-            render_module_volume_name(
-                operation.system_id,
-                operation.run_id,
-                operation.operation_nonce,
-                "source.ext4",
-            ),
-            render_module_volume_name(
-                operation.system_id,
-                operation.run_id,
-                operation.operation_nonce,
-                "scratch.ext4",
-            ),
-        )
+        if state.finalized is not None:
+            nonce = state.finalized.operation_nonce
+            if nonce is None:
+                return True
+            names = {
+                name
+                for _pool, name in self._module_volume_names(
+                    nonce, state.binding.system_id, state.binding.run_id
+                )
+            }
+        else:
+            preparation = state.preparation
+            if preparation is None:
+                return True
+            operation = preparation.operation
+            names = {
+                name
+                for _pool, name in self._module_volume_names(
+                    operation.operation_nonce, operation.system_id, operation.run_id
+                )
+            }
         with self._connection() as connection:
             self._prove_teardown_graph(connection, state)
             return all(
                 self._teardown_volume_absent(connection, self._pool_name, name) for name in names
             )
 
+    def activation_volumes_absent(
+        self, binding: ExternalBootActivationBinding, refs: RemoteFinalizedTeardownRefsV1
+    ) -> bool:
+        """Whether every pool volume an activation's records name reads absent (#3486).
+
+        Reads only: a present volume keeps the activation's records, the only pointer to it.
+        """
+        volumes = set(refs.module_volumes)
+        volumes |= {(self._pool_name, item.ref) for item in refs.boot_artifacts}
+        if refs.operation_nonce is not None:
+            volumes |= self._module_volume_names(
+                refs.operation_nonce, binding.system_id, binding.run_id
+            )
+        with self._connection() as connection:
+            return all(
+                self._teardown_volume_absent(connection, pool, name)
+                for pool, name in sorted(volumes)
+            )
+
     def remove_system_artifacts(self, state: RemoteSystemTeardownState) -> None:
         with self._connection() as connection:
             if self._lookup_domain_optional(connection, state.binding.system_id) is not None:
-                raise ValueError("remote System domain remains before storage deletion")
+                raise ProviderRecoveryRefusal(
+                    "remote System domain remains before storage deletion"
+                )
             self._prove_teardown_graph(connection, state)
             protected = self._protected_teardown_volumes(state)
             overlay = (self._pool_name, overlay_volume_name(state.binding.system_id))
@@ -586,7 +743,7 @@ class ConcreteRemoteExternalBootOperations:
                     not self._teardown_volume_absent(connection, *volume)
                     for volume in remaining_non_boot
                 ):
-                    raise ValueError(
+                    raise ProviderRecoveryRefusal(
                         "remote module recovery remains before System storage deletion"
                     )
                 for pool_name, name in sorted(allowed_boot):
@@ -594,14 +751,18 @@ class ConcreteRemoteExternalBootOperations:
                     volume = self._lookup_optional(pool, name)
                     if volume is not None:
                         if volume.name() != name:
-                            raise ValueError("remote boot artifact name differs before deletion")
+                            raise ProviderRecoveryRefusal(
+                                "remote boot artifact name differs before deletion"
+                            )
                         volume.delete(0)
             for pool_name, name in (overlay, baseline):
                 pool = connection.storagePoolLookupByName(pool_name)
                 volume = self._lookup_optional(pool, name)
                 if volume is not None:
                     if volume.name() != name:
-                        raise ValueError("remote System volume name differs before deletion")
+                        raise ProviderRecoveryRefusal(
+                            "remote System volume name differs before deletion"
+                        )
                     volume.delete(0)
                 if self._lookup_optional(pool, name) is not None:
                     raise RuntimeError("remote System volume remained after deletion")

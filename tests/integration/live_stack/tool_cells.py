@@ -1,12 +1,13 @@
 """Tool-cell frame of the live coverage carriers (#2811, ADR-0722).
 
 A tool cell is one contract cell of a registered MCP tool: a configuration (``default`` or
-``recovery``), an exposure (``direct`` or ``gateway``) and a kind (``functional`` or one rejection
-boundary). :func:`run_tool_cell` proves the server's configuration from its operator catalog,
-skips a cell of the other configuration without writing a record, and otherwise runs the cell
-through :func:`~tests.integration.live_stack.scenario.run_cell`. :class:`HttpCaller` reaches a tool
-in the cell's exposure; :func:`prove_functional` and :func:`prove_rejection` prove the cell's
-assertions, with :func:`project_state` as the default protected-state snapshot.
+``recovery``), an exposure (``direct``, ``gateway`` or ``cli``) and a kind (``functional`` or one
+rejection boundary). :func:`run_tool_cell` proves the server's configuration from its operator
+catalog, skips a cell of the other configuration without writing a record, and otherwise runs the
+cell through :func:`~tests.integration.live_stack.scenario.run_cell`. :class:`HttpCaller` reaches a
+tool over HTTP and :class:`CliCaller` through its generated ``kdivectl`` verb (ADR-0795);
+:func:`caller_for` picks the cell's. :func:`prove_functional` and :func:`prove_rejection` prove the
+cell's assertions, with :func:`project_state` as the default protected-state snapshot.
 
 A provider cell runs on its provider's :class:`Lane`: a local-libvirt cell on the catalog lane
 image (:data:`LANE_IMAGES`) of this host's architecture, a remote-libvirt cell on the remote
@@ -15,6 +16,10 @@ operator's ``REMOTE_PROVIDER_SSH`` access. :func:`on_lane_system` is the functio
 provisions the lane image in the cell's project, observes the guest, proves the body's ``effect``
 and the owned ``cleanup``. :func:`lane_target` is the rejection target, one torn-down System per
 stack and provider.
+
+An authority-owned System has a third frame,
+:func:`~tests.integration.live_stack.authority_lane.on_authority_system`, which a carrier selects
+explicitly: it observes the System on the authority's private daemon rather than over SSH.
 
 ``python -m tests.integration.live_stack.tool_cells bindings --candidate SHA --out FILE`` writes
 the expected ``Context`` of every bound service tool cell and every bound local-libvirt tool cell
@@ -28,19 +33,25 @@ import argparse
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import os
 import platform
+import re
 import secrets
+import sys
 import tempfile
+import xml.etree.ElementTree as ET  # noqa: S405 - libvirt XML of the provider  # nosec B405
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, nullcontext
+from contextlib import AbstractAsyncContextManager, nullcontext, redirect_stderr
 from dataclasses import dataclass, field, replace
 from functools import partial
-from pathlib import Path
-from typing import Literal, Protocol, cast, get_args
+from pathlib import Path, PurePosixPath
+from typing import Literal, Protocol, TypeIs, cast, get_args
+from uuid import UUID
 
 import httpx
+import libvirt
 import psycopg
 import pytest
 from fastmcp import Client
@@ -48,6 +59,11 @@ from fastmcp.client.transports import StreamableHttpTransport
 from psycopg import sql
 
 import kdive.config as config
+from kdive.cli.__main__ import build_parser
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.cli.commands.generated_args import assemble_generated_payload
+from kdive.cli.commands.verb_spec import GeneratedVerb
+from kdive.cli.reserved_flags import derive_cli_flag
 from kdive.config.cli_settings import CLI_CLIENT_ID
 from kdive.domain.errors import ErrorCategory
 from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
@@ -60,12 +76,15 @@ from kdive.mcp.dev_harness import (
 )
 from kdive.mcp.exposure import CORE_TOOLS
 from kdive.mcp.responses import ToolResponse
-from scripts.coverage_campaign.contract import Cell, build_contract
+from kdive.providers.ports.traffic import pcap_volume_name
+from kdive.providers.shared.runtime_paths import pcap_dir
+from scripts.coverage_campaign.contract import FILTERED_LIST_BOUNDARIES, Cell, build_contract
 from scripts.coverage_campaign.evidence import Context, InputBindings, Outcome
 from tests.integration.live_stack.cleanup import disk_absent
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.deep_lifecycle import (
     FIXTURE_ROOT_ENV,
+    InstalledKernel,
     bound_kernel,
     file_sha256,
     load_fixture,
@@ -82,6 +101,8 @@ from tests.integration.live_stack.remote_lifecycle import (
     HOST_SSH_ENV,
     REMOTE_REPRESENTATIVES,
     RemoteHost,
+    guest_boot_kernel,
+    observer,
     on_remote_system,
     remote_host,
     remote_profile,
@@ -104,9 +125,12 @@ from tests.integration.live_stack.scenario import (
     run_cell,
     ssh_probe,
 )
+from tests.integration.live_stack.spine import worker_libvirt_uri
 
-Exposure = Literal["direct", "gateway"]
-Boundary = Literal["authentication", "authorization", "project-isolation", "validation"]
+Exposure = Literal["direct", "gateway", "cli"]
+Boundary = Literal[
+    "authentication", "authorization", "project-isolation", "validation", "capability"
+]
 Result = ToolResponse | list[ToolResponse] | LiveStackToolError
 Snapshot = Callable[[], Awaitable[object]]
 Setup = Callable[[], AbstractAsyncContextManager[Mapping[str, object]]]
@@ -220,8 +244,14 @@ class HttpCaller:
     base_url: str
     issuer: OidcIssuer
 
+    def __post_init__(self) -> None:
+        # Over HTTP a `cli` exposure would route through the gateway and record it as `cli`.
+        assert (self.exposure == "cli") == isinstance(self, CliCaller), (
+            f"exposure {self.exposure!r} needs a CliCaller exactly when it is `cli`"
+        )
+
     def token(self, grants: Grants) -> str:
-        """A real-issuer token for ``grants``; ``direct`` carries the ``kdivectl`` client id."""
+        """A real-issuer token for ``grants``; all but ``gateway`` carry the ``kdivectl`` id."""
         return mint_token(
             self.issuer,
             subject=grants.subject,
@@ -229,7 +259,7 @@ class HttpCaller:
             roles=dict(grants.roles),
             platform_roles=list(grants.platform_roles),
             agent_session=f"{grants.subject}-sess",
-            client_id=config.require(CLI_CLIENT_ID) if self.exposure == "direct" else None,
+            client_id=config.require(CLI_CLIENT_ID) if self.exposure != "gateway" else None,
         )
 
     def _route(self, tool: str, args: Mapping[str, object]) -> tuple[str, dict[str, object]]:
@@ -267,6 +297,260 @@ class HttpCaller:
         return response.status_code
 
 
+_EXIT_CODES = {  # ADR-0089: the CLI's exit code per error category; any other category is 1.
+    "configuration_error": 2,
+    "authorization_denied": 3,
+    "not_found": 4,
+    "conflict": 5,
+    "capacity_exhausted": 6,
+}
+_AUTH_FAILED = "error: authentication failed"
+_TIER_REFUSED = "is not positively classified"
+_CLI_TIMEOUT_S = 900.0
+_VERBS = {verb.tool: verb for verb in GENERATED_VERBS}
+
+
+class CliUsageError(LiveStackToolError):
+    """kdivectl refused the command line itself (exit 2, no envelope): no call was made.
+
+    ``kind`` classes argparse's diagnostic (``invalid-value``, ``required``, ``unrecognized``)
+    or is ``handler`` for a verb handler's own refusal; ``refused`` names options, never values.
+    """
+
+    def __init__(self, tool: str, kind: str, refused: str) -> None:
+        self.kind = kind
+        self.refused = refused
+        super().__init__(tool, f"kdivectl refused the command line ({kind}): {refused}")
+
+
+class CliTierRefusal(LiveStackToolError):
+    """kdivectl refused a verb whose tool the caller's catalog hides (exit 3, no call)."""
+
+
+class CliTranslationGap(AssertionError):
+    """The call cannot be expressed as this tool's kdivectl command line."""
+
+
+@dataclass(frozen=True)
+class CliRun:
+    code: int
+    stdout: str
+    stderr: str
+
+
+async def run_kdivectl(argv: list[str], *, token: str, base_url: str) -> CliRun:
+    """Run the real ``kdivectl`` entry point as a subprocess, stdin closed."""
+    env = {**os.environ, "KDIVE_TOKEN": token, "KDIVE_SERVER_URL": base_url}
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "kdive.cli",
+        *argv,
+        env=env,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), _CLI_TIMEOUT_S)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise AssertionError(f"kdivectl {argv[0]} {argv[1]} ran past {_CLI_TIMEOUT_S}s") from None
+    assert proc.returncode is not None
+    return CliRun(proc.returncode, out.decode(), err.decode(errors="replace"))
+
+
+def _auth_failed(done: CliRun) -> bool:
+    return any(line.startswith(_AUTH_FAILED) for line in done.stderr.splitlines())
+
+
+def _refused_flags(done: CliRun) -> str:
+    """The option names argparse's last diagnostic line cites; never their values."""
+    last = done.stderr.strip().splitlines()[-1:] or [""]
+    return " ".join(re.findall(r"--[a-z0-9-]+", last[0])) or "no option named"
+
+
+def _refusal_kind(done: CliRun) -> str:
+    """The class of a usage refusal, from the last diagnostic line argparse or a handler wrote."""
+    last = (done.stderr.strip().splitlines()[-1:] or [""])[0]
+    if "arguments are required" in last:
+        return "required"
+    if "unrecognized arguments" in last:
+        return "unrecognized"
+    if last.startswith("kdivectl") and ": error: argument " in last:
+        return "invalid-value"
+    return "handler"
+
+
+def _text(value: object) -> str:
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def _usage_body(args: Mapping[str, object]) -> dict[str, object]:
+    target = args.get("target")
+    if set(args) == {"target"} and isinstance(target, Mapping):
+        return {str(k): v for k, v in target.items() if k != "kind"}
+    return dict(args)
+
+
+def _report_body(args: Mapping[str, object]) -> dict[str, object]:
+    request = args.get("request")
+    if set(args) != {"request"} or not isinstance(request, Mapping):
+        return dict(args)
+    body = {str(k): v for k, v in request.items()}
+    if isinstance(projects := body.get("projects"), list):
+        body["projects"] = ",".join(str(p) for p in projects)
+    if isinstance(window := body.get("window"), list) and len(window) == 2:
+        del body["window"]
+        body["since"], body["until"] = window
+    return body
+
+
+# These handlers reshape the payload, so their command line is not the payload's.
+_INVERSES = {"accounting.usage": _usage_body, "accounting.report": _report_body}
+
+
+def _body(verb: GeneratedVerb, args: Mapping[str, object]) -> dict[str, object]:
+    request = args.get("request")
+    if verb.unwrap_request and set(args) == {"request"} and isinstance(request, Mapping):
+        return {str(k): v for k, v in request.items()}
+    return dict(args)
+
+
+def _flag(verb: GeneratedVerb, key: str, value: object) -> list[str]:
+    if value is None:
+        return []
+    if key in verb.json_params:
+        return [f"{derive_cli_flag(key)}-json", json.dumps(value)]
+    flag = next((f for f in verb.flags if f.dest == key), None)
+    if flag is None:
+        raise CliTranslationGap(f"kdivectl {verb.group} {verb.sub} has no option for {key!r}")
+    if flag.action == "store_true" and isinstance(value, bool):
+        return [flag.name] if value else []
+    if flag.action == "bool_optional" and isinstance(value, bool):
+        return [flag.name if value else "--no-" + flag.name.removeprefix("--")]
+    if flag.action == "append" and isinstance(value, list):
+        return [token for item in value for token in (flag.name, _text(item))]
+    return [flag.name, _text(value)]
+
+
+def cli_argv(tool: str, args: Mapping[str, object]) -> list[str]:
+    """The ``kdivectl`` command line that makes ``tool``'s call with ``args`` (ADR-0795)."""
+    verb = _VERBS[tool]
+    inverse = _INVERSES.get(tool)
+    body = inverse(args) if inverse else _body(verb, args)
+    argv = [verb.group, verb.sub]
+    argv += [_text(body.pop(name)) for name in verb.positionals if body.get(name) is not None]
+    for key, value in body.items():
+        argv += _flag(verb, key, value)
+    return [*argv, *(["--yes"] if verb.confirm_destructive else []), "--json"]
+
+
+def _check_exact(tool: str, argv: list[str], args: Mapping[str, object]) -> None:
+    """A parsed command line reassembles exactly ``args`` (the two reshaping verbs excepted)."""
+    verb = _VERBS[tool]
+    if tool in _INVERSES:
+        return
+    try:
+        with redirect_stderr(io.StringIO()):
+            namespace = build_parser().parse_args(argv)
+    except SystemExit:
+        return  # The subprocess reports the same refusal as a usage error.
+    bools = {f.dest for f in verb.flags if f.action == "store_true"}
+    body = {
+        k: v
+        for k, v in _body(verb, args).items()
+        if v is not None and not (k in bools and v is False)
+    }
+    expected = ({"request": body} if body else {}) if verb.unwrap_request else body
+    got = assemble_generated_payload(verb, namespace)
+    differs = sorted(k for k in expected.keys() | got.keys() if expected.get(k) != got.get(k))
+    if differs:
+        raise CliTranslationGap(f"kdivectl {verb.group} {verb.sub} cannot carry {differs}")
+
+
+def _result(tool: str, argv: list[str], done: CliRun) -> ToolResponse | list[ToolResponse]:
+    verb = f"kdivectl {argv[0]} {argv[1]}"
+    if done.stdout.strip().startswith("{"):
+        payload = json.loads(done.stdout)
+        category = payload.get("error_category")
+        expected = 0 if category is None else _EXIT_CODES.get(category, 1)
+        assert done.code == expected, f"{verb} exited {done.code} for {category!r}, not {expected}"
+        inner = payload.get("result")
+        if list(payload) == ["result"] and isinstance(inner, list):
+            return [ToolResponse.model_validate(item) for item in inner]
+        return ToolResponse.model_validate(payload)
+    if done.code == 2:
+        raise CliUsageError(tool, _refusal_kind(done), _refused_flags(done))
+    if done.code == 3 and _TIER_REFUSED in done.stdout:
+        raise CliTierRefusal(tool, f"{verb}: the caller's catalog hides {tool}")
+    errors = [line for line in done.stderr.splitlines() if line.startswith("error: ")]
+    if done.code == 1 and errors:
+        raise LiveStackToolError(tool, errors[0].removeprefix("error: "))
+    first = done.stdout.strip().splitlines()[:1]
+    raise AssertionError(f"{verb} exited {done.code} with no envelope: {first}")
+
+
+@dataclass(frozen=True)
+class CliCaller(HttpCaller):
+    """Reach a tool through its generated ``kdivectl`` verb (ADR-0795)."""
+
+    async def call(
+        self, tool: str, args: Mapping[str, object], token: str, *, discover: bool = False
+    ) -> ToolResponse | list[ToolResponse]:
+        argv = cli_argv(tool, args)
+        _check_exact(tool, argv, args)
+        done = await run_kdivectl(argv, token=token, base_url=self.base_url)
+        try:
+            return _result(tool, argv, done)
+        except CliTierRefusal:
+            # UNKNOWN also answers a listed tool with bad annotations; only a hidden one is denied.
+            assert tool not in await _catalog(self.base_url, token), (
+                f"kdivectl refused listed {tool}"
+            )
+            raise
+
+    async def authenticate(
+        self, tool: str, args: Mapping[str, object], genuine: str
+    ) -> dict[str, object]:
+        argv = cli_argv(tool, args)
+        forged = await run_kdivectl(argv, token=forge(genuine), base_url=self.base_url)
+        if forged.code == 2:
+            raise CliTranslationGap(f"kdivectl {argv[0]} {argv[1]}: {_refused_flags(forged)}")
+        assert forged.code == 1 and _auth_failed(forged), (
+            f"forged-token kdivectl {argv[0]} {argv[1]} exited {forged.code} without the diagnostic"
+        )
+        control = await run_kdivectl(argv, token=genuine, base_url=self.base_url)
+        assert not _auth_failed(control), f"the issued token's kdivectl {argv[1]} also failed"
+        return {
+            "exit": 1,
+            "diagnostic": "authentication-failed",
+            "token": "foreign-signature",
+            "issued_token_exit": control.code,
+        }
+
+
+async def _catalog(base_url: str, token: str) -> set[str]:
+    transport = StreamableHttpTransport(url=base_url, headers={"Authorization": f"Bearer {token}"})
+    async with Client(transport) as client:
+        return {tool.name for tool in await client.list_tools()}
+
+
+def caller_for(exposure: str, base_url: str, issuer: OidcIssuer) -> HttpCaller:
+    """The caller of a cell's exposure: ``cli`` drives kdivectl, the others call over HTTP."""
+    if exposure == "cli":
+        return CliCaller("cli", base_url, issuer)
+    return HttpCaller(cast(Exposure, exposure), base_url, issuer)
+
+
+def http_caller(caller: HttpCaller) -> HttpCaller:
+    """``caller``, or a ``direct`` one for a CLI cell's owned-state cleanup."""
+    if isinstance(caller, CliCaller):
+        return HttpCaller("direct", caller.base_url, caller.issuer)
+    return caller
+
+
 async def operator_catalog(base_url: str, issuer: OidcIssuer, grants: Grants) -> dict[str, object]:
     """Each tool's ``inputSchema`` in the operator-direct catalog for ``grants``.
 
@@ -286,11 +570,24 @@ async def operator_catalog(base_url: str, issuer: OidcIssuer, grants: Grants) ->
 
 
 @dataclass(frozen=True)
+class FilteredListControl:
+    """The positive control of a list tool that filters instead of rejecting (ADR-0756).
+
+    ``expected_item`` names, independently of the list call, a real protected item; ``grants``
+    are a viewer's, which must see that item listed by the same arguments and exposure.
+    """
+
+    grants: Grants
+    expected_item: Callable[[], Awaitable[str]]
+
+
+@dataclass(frozen=True)
 class Rejection:
     """One call a boundary must reject: its arguments, grants and accepted categories.
 
-    ``filtered_by`` names the issue that owns a list tool known to answer an empty page instead
-    of rejecting: that answer stops the cell ``blocked``, and a real rejection still qualifies.
+    ``filtered`` is required exactly for a contract-named filtering list boundary
+    (``FILTERED_LIST_BOUNDARIES``): its denied call must answer the canonical empty page after
+    the control proved the protected item visible to a viewer.
     ``absent_twin`` holds arguments naming an owner that does not exist: the rejected answer
     must be indistinguishable from the twin's, so a category shared with an unrelated failure
     cannot pass the cell.
@@ -299,7 +596,7 @@ class Rejection:
     args: Mapping[str, object]
     grants: Grants
     categories: frozenset[str] = frozenset({ErrorCategory.AUTHORIZATION_DENIED.value})
-    filtered_by: str | None = None
+    filtered: FilteredListControl | None = None
     absent_twin: Mapping[str, object] | None = None
 
 
@@ -314,23 +611,46 @@ def rejected_by_validation(exposure: str, result: Result) -> bool:
     (``src/kdive/mcp/tools/gateway.py``). A tool whose binding failure ``BindingErrorMiddleware``
     re-envelopes (``src/kdive/mcp/middleware/binding_errors.py``) never reaches that branch, so
     its ``gateway`` validation cell fails here rather than recording ambiguous evidence.
+    ``cli`` follows ``direct`` and also accepts ``kdivectl`` refusing a declared option's value
+    before any call (ADR-0795).
     """
+    if isinstance(result, CliUsageError):
+        return exposure == "cli"
     if isinstance(result, LiveStackToolError):
-        return exposure == "direct" and "validation error" in result.message.lower()
+        return exposure in ("direct", "cli") and "validation error" in result.message.lower()
     if not (
         isinstance(result, ToolResponse)
         and result.error_category == ErrorCategory.CONFIGURATION_ERROR.value
     ):
         return False
-    if exposure == "direct":
+    if exposure in ("direct", "cli"):
         return True
     return bool(result.data.get("field_errors")) and "failed schema validation" in (
         result.detail or ""
     )
 
 
+def refused_for_capability(result: Result) -> TypeIs[ToolResponse]:
+    """ADR-0209's capability refusal, which a ``capability`` cell requires (ADR-0722, 2026-10-13).
+
+    ``configuration_error`` alone also answers schema and name failures; only the refusal carries
+    ``data.reason`` ``capability_unsupported``. ``tools.invoke`` passes the handler's envelope
+    through, so both exposures carry it.
+    """
+    return (
+        isinstance(result, ToolResponse)
+        and result.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        and result.data.get("reason") == "capability_unsupported"
+    )
+
+
 def _shape(result: Result) -> dict[str, object]:
     """A message-free description of ``result`` for evidence."""
+    if isinstance(result, CliUsageError):
+        # Option names only: which declared option kdivectl refused, never its value.
+        return {"usage_error": result.kind, "refused": result.refused}
+    if isinstance(result, CliTierRefusal):
+        return {"catalog_hidden": True, "error_category": ErrorCategory.AUTHORIZATION_DENIED.value}
     if isinstance(result, LiveStackToolError):
         return {
             "tool_error": True,
@@ -351,9 +671,76 @@ async def _attempt(
         return exc
 
 
-def _filtered(result: Result) -> bool:
-    """A successful envelope listing nothing: a list tool filtering instead of rejecting."""
-    return isinstance(result, ToolResponse) and result.error_category is None and not result.items
+def _empty_page(tool: str, args: Mapping[str, object]) -> ToolResponse:
+    """The page a filtering list tool answers a caller who may see nothing (ADR-0756).
+
+    A named tool whose carrier has not yet added its page fails here rather than borrowing
+    another tool's.
+    """
+    if tool == "investigations.list":
+        object_id, actions = "investigations", ["investigations.get", "investigations.open"]
+    elif tool == "artifacts.list":
+        object_id, actions = str(args["system_id"]), ["artifacts.get"]
+    elif tool == "debug.list_sessions":
+        object_id, actions = "debug_sessions", ["debug.get_session"]
+    elif tool == "runs.list":
+        object_id, actions = "runs", ["runs.get", "runs.create"]
+    elif tool == "systems.list":
+        object_id, actions = "systems", ["systems.get", "runs.create"]
+    elif tool == "jobs.list":
+        object_id, actions = "jobs", ["jobs.wait", "jobs.cancel"]
+    elif tool == "allocations.list":
+        # Names the requested project; its next actions are filtered to the caller's roles there.
+        request = args.get("request")
+        project = request.get("project") if isinstance(request, Mapping) else None
+        assert isinstance(project, str) and project, (
+            "an allocations.list filtered rejection must name a project"
+        )
+        return ToolResponse.collection(
+            "allocations",
+            "ok",
+            [],
+            suggested_next_actions=[],
+            data={"truncated": False, "next_cursor": None, "project": project},
+        )
+    else:
+        raise AssertionError(f"no canonical empty page is configured for {tool}")
+    return ToolResponse.collection(
+        object_id,
+        "ok",
+        [],
+        suggested_next_actions=actions,
+        data={"truncated": False, "next_cursor": None},
+    )
+
+
+async def _observe_filtered(
+    caller: Caller, tool: str, rejection: Rejection, control: FilteredListControl
+) -> dict[str, object]:
+    """A viewer sees the known item, then the denied caller gets exactly the empty page."""
+    empty = _empty_page(tool, rejection.args).model_dump()
+    expected = await control.expected_item()
+    assert expected, f"{tool} has no independently known protected item"
+    seen = await _attempt(caller, tool, replace(rejection, grants=control.grants))
+    assert isinstance(seen, ToolResponse) and seen.status == "ok", (
+        f"{tool} control call failed: {_shape(seen)}"
+    )
+    assert seen.error_category is None and seen.detail is None, (
+        f"{tool} control call failed: {_shape(seen)}"
+    )
+    listed = [i.object_id for i in seen.items if i.error_category is None]
+    assert expected in listed, f"{tool} did not list the known item to a viewer ({len(listed)})"
+    result = await _attempt(caller, tool, rejection)
+    answer = result.model_dump() if isinstance(result, ToolResponse) else _shape(result)
+    differs = sorted(k for k in empty.keys() | answer.keys() if answer.get(k) != empty.get(k))
+    assert not differs, f"{tool} denied answer is not the empty page; differs in {differs}"
+    return {
+        "denied_visibility": {"status": "ok", "canonical_empty_page": True},
+        "viewer_control": {
+            "listed": len(listed),
+            "item_sha256": hashlib.sha256(expected.encode()).hexdigest(),
+        },
+    }
 
 
 def _answer(result: Result, args: Mapping[str, object]) -> dict[str, object]:
@@ -374,8 +761,17 @@ def _answer(result: Result, args: Mapping[str, object]) -> dict[str, object]:
 async def _observe(
     caller: Caller, tool: str, boundary: Boundary, rejection: Rejection
 ) -> dict[str, object]:
+    named = (tool, boundary) in FILTERED_LIST_BOUNDARIES
+    assert named == (rejection.filtered is not None), (
+        f"{tool} {boundary}: a filtering-list control is required exactly for "
+        "the contract's FILTERED_LIST_BOUNDARIES"
+    )
+    if rejection.filtered is not None:
+        return await _observe_filtered(caller, tool, rejection, rejection.filtered)
     if boundary == "authentication":
         genuine = caller.token(rejection.grants)
+        if isinstance(caller, CliCaller):
+            return await caller.authenticate(tool, rejection.args, genuine)
         status = await caller.post(tool, rejection.args, forge(genuine))
         assert status == 401, f"forged-signature call to {tool} answered HTTP {status}, not 401"
         # The same request with the issued token must pass authentication, so the 401 above is
@@ -384,18 +780,24 @@ async def _observe(
         assert control != 401, f"the issued token's call to {tool} was also refused with 401"
         return {"http_status": status, "token": "foreign-signature", "issued_token_status": control}
     result = await _attempt(caller, tool, rejection)
+    if boundary == "capability":
+        assert refused_for_capability(result), (
+            f"{tool} was not refused for capability: {_shape(result)}"
+        )
+        return {"rejected": _shape(result), "capability": result.data.get("capability")}
     if boundary == "validation":
         assert rejected_by_validation(caller.exposure, result), (
             f"{tool} was not rejected by argument validation: {_shape(result)}"
         )
         return {"rejected": _shape(result)}
-    if rejection.filtered_by is not None and _filtered(result):
-        raise ScenarioStop(
-            Outcome.BLOCKED,
-            f"{tool} answered an empty page instead of rejecting the {boundary} call; "
-            f"{rejection.filtered_by} owns the decision",
-        )
-    category = result.error_category if isinstance(result, ToolResponse) else None
+    # kdivectl's refusal of a tool the server hid from the caller's catalog (ADR-0795).
+    category = (
+        ErrorCategory.AUTHORIZATION_DENIED.value
+        if isinstance(result, CliTierRefusal)
+        else result.error_category
+        if isinstance(result, ToolResponse)
+        else None
+    )
     assert category is not None, f"{tool} was not rejected: {_shape(result)}"
     assert category in rejection.categories, (
         f"{tool} rejected with {category}, not one of {sorted(rejection.categories)}"
@@ -436,16 +838,7 @@ async def prove_rejection(
     async with context as overrides:
         effective = replace(rejection, args={**rejection.args, **overrides})
         before = await snapshot()
-        try:
-            observation = await _observe(caller, operation, boundary, effective)
-        except ScenarioStop as stop:
-            # The record's impediment is the generic missing-prerequisite; this artifact names
-            # the owner and what the call answered.
-            blocked = {"cell": run.cell.id, "boundary": boundary, "blocked": str(stop)}
-            run.artifacts.append(
-                run.writer.artifact({**blocked, "filtered_by": rejection.filtered_by})
-            )
-            raise
+        observation = await _observe(caller, operation, boundary, effective)
         run.prove(boundary, {"exposure": caller.exposure, **observation})
         after = await snapshot()
         assert after == before, f"protected state changed across the rejected {operation}"
@@ -455,6 +848,44 @@ async def prove_rejection(
     assert final == start, f"the setup of the rejected {operation} left state behind"
     owned = sorted(str(value) for value in overrides.values())
     run.prove("cleanup", {"owned": owned, "snapshot_sha256": _digest(start)})
+
+
+async def prove_refusal(
+    run: CellRun, caller: Caller, refusal: Rejection, detail: str, snapshot: Snapshot
+) -> None:
+    """Prove an authorized call is refused as ``not_implemented`` and writes nothing (ADR-0759).
+
+    ``effect`` is the exact refusal envelope: not retryable, the requested object, ``detail``, no
+    job reference and no next action. ``cleanup`` is the unchanged snapshot around the call. The
+    request is retained before the call, so a failed proof still names what an operator must
+    clean up.
+    """
+    operation = run.cell.operation
+    before = await snapshot()
+    request = {"cell": run.cell.id, "request": dict(refusal.args), "before": before}
+    run.artifacts.append(run.writer.artifact(request))
+    result = await caller.call(operation, refusal.args, caller.token(refusal.grants), discover=True)
+    assert isinstance(result, ToolResponse), f"expected one envelope, got {len(result)}"
+    refused = {
+        "error_category": result.error_category,
+        "retryable": result.retryable,
+        "object_id": result.object_id == refusal.args.get("name"),
+        "detail": result.detail == detail,
+        "refs": dict(result.refs),
+        "suggested_next_actions": result.suggested_next_actions,
+    }
+    assert refused == {
+        "error_category": ErrorCategory.NOT_IMPLEMENTED.value,
+        "retryable": False,
+        "object_id": True,
+        "detail": True,
+        "refs": {},
+        "suggested_next_actions": [],
+    }, f"{operation} {refusal.args} was not refused at admission: {refused}"
+    after = await snapshot()
+    assert after == before, f"the refused {operation} {refusal.args} changed protected state"
+    run.prove("effect", {"exposure": caller.exposure, "refused": refused})
+    run.prove("cleanup", {"owned": [], "snapshot_sha256": _digest(before)})
 
 
 Functional = Callable[[HttpCaller, Grants], Awaitable[dict[str, object]]]
@@ -476,6 +907,27 @@ async def prove_functional(
     run.prove("cleanup", {"owned": owned, "snapshot_sha256": _digest(before)})
 
 
+async def require_snapshot_read_access(
+    conn: psycopg.AsyncConnection, tables: Sequence[str]
+) -> None:
+    """Fail before the snapshot reads when the DSN cannot SELECT a table, naming each one."""
+    cursor = await conn.execute(
+        "SELECT name FROM unnest(%s::text[]) WITH ORDINALITY AS t(name, position) "
+        "WHERE NOT has_table_privilege(format('public.%%I', name), 'SELECT') ORDER BY position",
+        (list(tables),),
+    )
+    denied = [str(row[0]) for row in await cursor.fetchall()]
+    if denied:
+        raise PermissionError(
+            f"KDIVE_DATABASE_URL cannot SELECT {', '.join(denied)}; the protected-state snapshot "
+            "reads every table with a project column, some of them authority-private. Set "
+            'KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL" (the least-privilege harness '
+            "login); if it is already set, rerun the role bootstrap, which re-grants new tables: "
+            "scripts/live-stack/stack-services.sh, or after `just stack-backends` "
+            "`env -u KDIVE_MIGRATION_DATABASE_URL docker compose run --rm --no-deps role-bootstrap`"
+        )
+
+
 async def project_state(db_url: str, project: str) -> dict[str, list[object]]:
     """Row count and row-text SHA-256 of ``project`` in every public table with a project column.
 
@@ -483,7 +935,7 @@ async def project_state(db_url: str, project: str) -> dict[str, list[object]]:
     table the DSN cannot read fails the snapshot instead of leaving it.
     """
     async with await psycopg.AsyncConnection.connect(db_url) as conn:
-        # The documented DSN is the schema owner's; a read-only session keeps the snapshot a read.
+        # The harness login can write its seeding tables; a read-only session keeps this a read.
         await conn.set_read_only(True)
         cursor = await conn.execute(
             "SELECT c.relname FROM pg_catalog.pg_attribute a "
@@ -495,6 +947,7 @@ async def project_state(db_url: str, project: str) -> dict[str, list[object]]:
         tables = [str(row[0]) for row in await cursor.fetchall()]
         tables = [t for t in tables if t not in _AUDIT_TABLES]
         assert tables, "no table carries a project column; the snapshot would observe nothing"
+        await require_snapshot_read_access(conn, tables)
         state: dict[str, list[object]] = {}
         for table in tables:
             query = sql.SQL(
@@ -513,6 +966,11 @@ def boundary_of(cell: Cell) -> Boundary:
     boundary = cell.scenario_id.rsplit("/", 1)[1]
     assert boundary in get_args(Boundary), f"{cell.scenario_id} names no rejection boundary"
     return cast(Boundary, boundary)
+
+
+def admission_refusal(cell: Cell) -> bool:
+    """A server-only admission refusal (ADR-0759): an unsupported cell observing no guest."""
+    return cell.kind == "unsupported" and cell.guest_arch is None
 
 
 def tool_cells(tools: Sequence[str]) -> list[Cell]:
@@ -536,11 +994,13 @@ ToolScenario = Callable[[CellRun, str, OidcIssuer, str], Awaitable[None]]
 def run_tool_cell(cell: Cell, scenario: ToolScenario) -> None:
     """Prove the configuration, skip another configuration's cell, else run and record it.
 
-    A completed rejection cell records ``rejection``, a functional one ``success``. A local
-    provider cell of another host architecture is skipped before the stack is read; a remote
-    cell's host is the provider host, which its frame observes.
+    A completed rejection cell records ``rejection``, an unsupported one ``unsupported`` and a
+    functional one ``success``. A local provider cell, or a server-only admission refusal, of
+    another host architecture is skipped before the stack is read; any other remote cell's host
+    is the provider host, which its frame observes.
     """
-    if cell.provider != "remote-libvirt" and cell.host_arch not in (None, platform.machine()):
+    on_server = cell.provider != "remote-libvirt" or admission_refusal(cell)
+    if on_server and cell.host_arch not in (None, platform.machine()):
         pytest.skip(f"{cell.id} runs on a {cell.host_arch} host")
     base_url = require_stack()
     try:
@@ -557,9 +1017,8 @@ def run_tool_cell(cell: Cell, scenario: ToolScenario) -> None:
         run.artifacts.append(run.writer.artifact(proof))
         await scenario(run, url, issuer, db_url)
 
-    run_cell(
-        cell, proven, proves=Outcome.REJECTION if cell.kind == "rejection" else Outcome.SUCCESS
-    )
+    proves = {"rejection": Outcome.REJECTION, "unsupported": Outcome.UNSUPPORTED}
+    run_cell(cell, proven, proves=proves.get(cell.kind, Outcome.SUCCESS))
 
 
 def bindings(
@@ -577,13 +1036,17 @@ def bindings(
 ) -> InputBindings:
     """The expected ``Context`` of every bound service, native local and remote tool cell.
 
+    A guest-observing service cell (the contract marks it, and it has a ``guest_arch``) boots the
+    lane image like a native local cell.
+
     A native cell boots ``LANE_IMAGES[host_arch]``: its ``image_sha256`` is the staged bytes'
     digest, null when unstaged. With ``remote``, a remote cell of the provider host's
     architecture boots that architecture's remote representative there: its host is the provider
     host and its ``image_sha256`` the staged base volume's digest, null when unstaged. ``kernel``
     fills only the kernel fields a cell declares. A functional ``images.publish`` cell boots
     ``PUBLISHED_IMAGES[(host_arch, exposure)]``, the image it publishes, with a null
-    ``image_sha256``.
+    ``image_sha256``. An unsupported provider cell without a guest is a server-only admission
+    refusal (ADR-0759): like a service cell it binds this host alone, on its own architecture.
     """
     bound = [c for c in cells if c.scenario_id.startswith("tool/") and c.node_id]
     contexts = {
@@ -591,9 +1054,12 @@ def bindings(
             {"host_os": host_os, "host_arch": host_arch, "accelerator": "none"}
         )
         for c in bound
-        if c.provider == "service"
+        if (c.provider == "service" and c.guest_arch is None)
+        or (admission_refusal(c) and c.host_arch == host_arch)
     }
-    native = [c for c in bound if c.provider == "local-libvirt" and c.guest_arch == host_arch]
+    native = [
+        c for c in bound if c.provider in {"local-libvirt", "service"} and c.guest_arch == host_arch
+    ]
     published = [c for c in native if c.operation == PUBLISH_TOOL and c.kind == "functional"]
     native = [c for c in native if c not in published]
     for cell in published:
@@ -655,6 +1121,57 @@ def lane_image() -> tuple[str, RootfsCatalogEntry]:
     return name, load_rootfs_catalog()[name]
 
 
+Connect = Callable[[], libvirt.virConnect]
+
+
+def worker_connect() -> libvirt.virConnect:
+    """The worker's own libvirt: the local lane's provider."""
+    return libvirt.open(worker_libvirt_uri())
+
+
+def domain_kernel(
+    system_id: str, _endpoint: Endpoint, _key: Path, _release: str
+) -> tuple[str, str]:
+    """The ``<os><kernel>`` file the domain boots (the install's staged kernel) and its digest."""
+    kernel = ET.fromstring(domain_xml(system_id)).findtext("./os/kernel")  # noqa: S314  # nosec B314
+    assert kernel, "the installed domain names no direct kernel"
+    return file_sha256(kernel), kernel
+
+
+def _local_spool(system_id: str) -> Callable[[str], str]:
+    """The System's capture directory, whichever job writes into it."""
+    path = str(pcap_dir(UUID(system_id)))
+    return lambda _job_id: path
+
+
+def pool_target(dest: str, pool: str) -> PurePosixPath:
+    """The target directory of storage pool ``pool``, read through the operator's observer."""
+    conn = observer(dest)
+    try:
+        xml = conn.storagePoolLookupByName(pool).XMLDesc(0)
+    finally:
+        conn.close()
+    target = ET.fromstring(xml).findtext("./target/path")  # noqa: S314  # nosec B314
+    assert target, f"storage pool {pool} has no target path"
+    return PurePosixPath(target)
+
+
+def remote_pcap_spool(dest: str, pool: str, system_id: str) -> Callable[[str], str]:
+    """Name the provider-host pcap volume a capture job of ``system_id`` writes into ``pool``.
+
+    The remote capturer writes a per-job volume into the configured pcap pool (ADR-0432), so
+    the System owns it until the job reclaims it. The pool's target is read here, before any job
+    exists; the returned namer does no I/O.
+    """
+    directory = pool_target(dest, pool)
+    return lambda job_id: str(directory / pcap_volume_name(UUID(system_id), UUID(job_id)))
+
+
+def pool_volume_path(dest: str, pool: str, name: str) -> str:
+    """The provider-host path of volume ``name`` in storage pool ``pool``."""
+    return str(pool_target(dest, pool) / name)
+
+
 class LaneFrame(Protocol):
     """A provider's System frame: provision, run ``body``, then prove owned cleanup."""
 
@@ -677,7 +1194,13 @@ class Lane:
 
     ``profile`` takes the profile's unread ``kernel_source_ref``. ``xml`` and ``absent`` read the
     provider's own libvirt: the worker's for local-libvirt, the provider host's through the
-    operator's observer for remote-libvirt.
+    operator's observer for remote-libvirt. ``connect`` opens that libvirt for a native read.
+    ``spool(system)`` names the provider-host path each capture job of the System writes (the
+    System's directory locally, the job's pool volume remotely), reading any provider state
+    before a job exists. ``installed_kernel`` observes the kernel an install put in place (the
+    domain's direct kernel locally, the guest's own ``/boot`` remotely). ``pool_volume(name)`` is
+    the provider-host path of a named pool volume, ``None`` where the provider has no storage
+    pool.
     """
 
     provider: str
@@ -686,6 +1209,10 @@ class Lane:
     xml: Callable[[str], str]
     absent: Callable[[str], bool]
     frame: LaneFrame
+    connect: Connect
+    spool: Callable[[str], Callable[[str], str]]
+    installed_kernel: InstalledKernel
+    pool_volume: Callable[[str], str] | None
 
 
 def _local_lane() -> Lane:
@@ -697,6 +1224,10 @@ def _local_lane() -> Lane:
         domain_xml,
         disk_absent,
         partial(on_catalog_system, image=name),
+        worker_connect,
+        _local_spool,
+        domain_kernel,
+        None,
     )
 
 
@@ -718,6 +1249,10 @@ def _remote_lane(arch: str) -> Lane:
         partial(remote_xml, host.dest),
         partial(remote_volume_absent, host.dest),
         partial(on_remote_system, family=family),
+        partial(observer, host.dest),
+        partial(remote_pcap_spool, host.dest, host.pcap_pool),
+        partial(guest_boot_kernel, family=family),
+        partial(pool_volume_path, host.dest, host.pool),
     )
 
 

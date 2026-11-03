@@ -116,7 +116,10 @@ install_developer_dependencies() {
   }
   local dev_bin setup_scripts command module shellcheck_digest prometheus_arch prometheus_digest
   local -a packages=()
+  # uv reports $XDG_DATA_HOME/../bin unnormalized. Fold the `..` lexically (-s keeps a
+  # symlinked spelling that PATH may name literally); -m because the directory may not exist.
   dev_bin="$(uv tool dir --bin)"
+  dev_bin="$(realpath -m -s "${dev_bin}")"
   setup_scripts="${BASH_SOURCE[0]%/lib/setup-developer.sh}"
   # Hooks run outside just too: installing to a directory absent from the caller's PATH
   # would make setup appear to work while leaving git commit/push broken.

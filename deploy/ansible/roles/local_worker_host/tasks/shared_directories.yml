@@ -7,3 +7,48 @@
     group: "{{ live_vm_host_worker_libvirt_group }}"
     mode: "2770"
   loop: "{{ live_vm_host_worker_shared_directories }}"
+
+- name: Validate host-dump ACL safety
+  ansible.builtin.command: &host_dump_acl_command
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import os
+        from pathlib import Path
+
+        root = Path('/var/lib/kdive/host-dump')
+        try:
+            for path, forbidden in (
+                (root.parent, {'system.posix_acl_default'}),
+                (root, {'system.posix_acl_access', 'system.posix_acl_default'}),
+            ):
+                try:
+                    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                except FileNotFoundError:
+                    if path == root:
+                        continue
+                    raise
+                try:
+                    if forbidden.intersection(os.listxattr(fd)):
+                        raise SystemExit('host_dump preparation refuses ACLs; inspect and remove '
+                                         'the incompatible ACLs before rerunning host preparation')
+                finally:
+                    os.close(fd)
+        except OSError as exc:
+            raise SystemExit('host_dump ACL safety cannot be established; inspect the real spool '
+                             'path and ACL access before rerunning host preparation') from exc
+  changed_when: false
+
+- name: Prepare the trusted host-dump spool root
+  ansible.builtin.file:
+    path: /var/lib/kdive/host-dump
+    state: directory
+    follow: false
+    owner: root
+    group: "{{ live_vm_host_worker_libvirt_group }}"
+    mode: "3770"
+
+- name: Recheck host-dump ACL safety
+  ansible.builtin.command: *host_dump_acl_command
+  changed_when: false

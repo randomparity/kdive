@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from hashlib import sha256
@@ -98,6 +99,23 @@ def test_enabled_environment_contains_complete_mutation_configuration() -> None:
     assert "KDIVE_EXTERNAL_BOOT_AUTHORITY_REMOTE_MODULE_ARCHITECTURES=x86_64\n" in rendered
     # pragma: allowlist nextline secret -- fixed storage-pool name, not a credential
     assert "KDIVE_REMOTE_LIBVIRT_STORAGE_POOL=authority-systems\n" in rendered
+
+
+def test_authority_environment_pins_the_direct_libguestfs_backend() -> None:
+    template = Environment(undefined=StrictUndefined).from_string(
+        (ROLE / "templates" / "environment.j2").read_text(encoding="utf-8")
+    )
+    rendered = template.render(
+        provider_authority_host_instance="authority-test",
+        provider_authority_host_uid=991,
+        provider_authority_host_gid=992,
+        provider_authority_host_client_gid=993,
+        provider_authority_host_network_address="",
+        provider_authority_host_denied_identities=["operator"],
+        provider_authority_host_fault_proof_enabled=False,
+    )
+
+    assert "LIBGUESTFS_BACKEND=direct" in rendered.splitlines()
 
 
 def test_preflight_rejects_partial_or_invalid_local_mutation_before_sources() -> None:
@@ -203,6 +221,15 @@ def test_preflight_rejects_partial_or_invalid_local_mutation_before_sources() ->
             True,
         ),
         ({"system_manifest": "/protected/manifest.json"}, False),
+        ({"appliance_root": "/private/other"}, True),
+        (
+            {
+                "remote_module": True,
+                "architectures": ["x86_64"],
+                "appliance_root": "/private/other",
+            },
+            False,
+        ),
     ],
 )
 def test_local_mutation_preflight_is_executable_and_fails_closed(
@@ -237,6 +264,7 @@ def test_local_mutation_preflight_is_executable_and_fails_closed(
         "system_local_bases": [],
         "system_remote_bases": [],
         "fault_proof": False,
+        "appliance_root": "/var/lib/kdive/remote-module-appliance/v1",
     }
     values.update(override)
     result = subprocess.run(
@@ -249,6 +277,42 @@ def test_local_mutation_preflight_is_executable_and_fails_closed(
     assert (result.returncode == 0) is accepted
     if not accepted:
         assert result.stderr.strip() == "invalid or incomplete provider authority deployment inputs"
+
+
+def test_selected_appliances_are_checked_as_authority_before_start_and_handlers() -> None:
+    tasks = yaml.safe_load((ROLE / "tasks/install.yml").read_text())
+    probe = _named(
+        tasks, "Verify selected installed appliances as the authority before service start"
+    )
+    assert probe["become"] is True
+    assert probe["become_user"] == "kdive-provider-authority"
+    assert probe["changed_when"] is False
+    assert probe["when"] == "provider_authority_host_remote_module_enabled | bool"
+    assert probe["timeout"] == 60
+    assert probe["loop"] == "{{ provider_authority_host_remote_module_architectures }}"
+    assert (
+        tasks.index(probe)
+        < tasks.index(_named(tasks, "Apply deployed-input restarts before proving readiness"))
+        < tasks.index(
+            _named(
+                tasks, "Start the configured authority after firewall and protected inputs converge"
+            )
+        )
+    )
+
+
+def test_authority_preflight_renders_the_appliance_default_before_other_role_defaults() -> None:
+    tasks = yaml.safe_load((ROLE / "tasks/preflight.yml").read_text())
+    validation = next(t for t in tasks if "closed authority deployment inputs" in t["name"])
+    environment = Environment(undefined=StrictUndefined)
+    environment.filters["to_json"] = json.dumps
+    template = environment.from_string(validation["ansible.builtin.command"]["stdin"])
+    values = _yaml(ROLE / "defaults/main.yml") | {"ansible_facts": {"os_family": "Debian"}}
+    assert json.loads(template.render(values))["appliance_root"] == (
+        "/var/lib/kdive/remote-module-appliance/v1"
+    )
+    values["remote_libvirt_module_appliance_install_dir"] = "/private/other"
+    assert json.loads(template.render(values))["appliance_root"] == "/private/other"
 
 
 def test_system_provisioning_validator_requires_exact_local_manifest_mapping(
@@ -345,9 +409,7 @@ def test_system_provisioning_validator_accepts_supported_accelerators(
     assert (_run_system_provisioning_validator(value).returncode == 0) is accepted
 
 
-def test_system_provisioning_validator_rejects_wrong_kind_and_accepts_remote_mapping(
-    tmp_path: Path,
-) -> None:
+def _remote_validator_input(tmp_path: Path, **entry_fields: object) -> dict[str, object]:
     base = tmp_path / "remote-base.qcow2"
     base.write_bytes(b"remote-base")
     base.chmod(0o600)
@@ -365,7 +427,6 @@ def test_system_provisioning_validator_rejects_wrong_kind_and_accepts_remote_map
                         "root_identity": f"sha256:{digest}",
                         "architecture": "x86_64",
                         "base_volume": "remote-base.qcow2",
-                        "network": "provider-net",
                         "machine": "pc-q35-9.2",
                         "gdb_addr": "127.0.0.1",
                         "gdb_port_min": 31000,
@@ -373,24 +434,50 @@ def test_system_provisioning_validator_rejects_wrong_kind_and_accepts_remote_map
                         "ssh_addr": "127.0.0.1",
                         "ssh_port_min": 32000,
                         "ssh_port_max": 32002,
+                        **entry_fields,
                     }
                 ],
             }
         )
     )
     manifest.chmod(0o600)
-    value: dict[str, object] = {
+    return {
         "manifest": str(manifest),
         "authority_instance": "authority-test",
-        "expected_provider_kind": "local-libvirt",
+        "expected_provider_kind": "remote-libvirt",
         "local_bases": [],
         "remote_bases": [{"source": str(base), "name": "remote-base.qcow2"}],
     }
+
+
+def test_system_provisioning_validator_rejects_wrong_kind_and_accepts_remote_mapping(
+    tmp_path: Path,
+) -> None:
+    value = _remote_validator_input(tmp_path)
+    value["expected_provider_kind"] = "local-libvirt"
 
     assert _run_system_provisioning_validator(value).returncode != 0
 
     value["expected_provider_kind"] = "remote-libvirt"
     assert _run_system_provisioning_validator(value).returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("entry_fields", "accepted"),
+    (
+        ({"guest_egress": True}, True),
+        ({"guest_egress": False}, True),
+        ({"guest_egress": "true"}, False),
+        ({"network": "default"}, False),
+    ),
+    ids=("egress-on", "egress-off", "egress-not-bool", "network"),
+)
+def test_system_provisioning_validator_gates_remote_entry_egress_and_network(
+    tmp_path: Path, entry_fields: dict[str, object], accepted: bool
+) -> None:
+    value = _remote_validator_input(tmp_path, **entry_fields)
+
+    assert (_run_system_provisioning_validator(value).returncode == 0) is accepted
 
 
 def test_local_mutation_installs_owner_only_root_tools_and_s3_credentials() -> None:
@@ -597,6 +684,49 @@ def test_authority_system_installation_is_opt_in_and_keeps_bases_read_only() -> 
     assert "system-provisioning/local/rootfs" not in remote
 
 
+def test_authority_system_bases_carry_a_static_virt_content_label() -> None:
+    defaults = _yaml(ROLE / "defaults" / "main.yml")
+    packages = cast(dict[str, list[str]], defaults["provider_authority_host_packages"])
+    assert "policycoreutils-python-utils" in packages["RedHat"]
+    tasks = yaml.safe_load((ROLE / "tasks" / "install.yml").read_text(encoding="utf-8"))
+    names = [task["name"] for task in tasks]
+    by_name = {task["name"]: task for task in tasks}
+    probe = by_name["Read the SELinux mode for the authority System bases"]
+    rules = by_name["Install the authority System base virt_content_t fcontext rules"]
+    relabel = by_name["Relabel the authority System bases"]
+    destinations = (
+        "{{ provider_authority_host_system_base_destinations.results | default([])\n"
+        "   | map(attribute='item') | list }}"
+    )
+    selinux_enabled = (
+        "provider_authority_host_selinux_mode.stdout | default('') in ['Enforcing', 'Permissive']"
+    )
+
+    assert probe["ansible.builtin.command"]["argv"] == ["getenforce"]
+    assert probe["changed_when"] is False
+    assert probe["failed_when"] is False
+    assert rules["community.general.sefcontext"] == {
+        "target": "{{ item | regex_escape }}",
+        "setype": "virt_content_t",
+        "state": "present",
+    }
+    assert relabel["ansible.builtin.command"]["argv"] == ["restorecon", "-F", "-v", "{{ item }}"]
+    assert "Relabeled" in relabel["changed_when"]
+    assert relabel["notify"] == "Restart provider authority after deployed changes"
+    for task in (rules, relabel):
+        assert task["loop"] == destinations
+        assert selinux_enabled in task["when"]
+    assert (
+        names.index("Inspect authority System base destinations without following links")
+        < names.index(probe["name"])
+        < names.index(rules["name"])
+        < names.index("Install owner-only local authority System bases")
+        < names.index("Install owner-only remote authority System bases")
+        < names.index(relabel["name"])
+        < names.index("Start the configured authority after firewall and protected inputs converge")
+    )
+
+
 def test_remote_module_private_pool_uses_the_authority_session_daemon() -> None:
     tasks = (ROLE / "tasks" / "libvirt.yml").read_text(encoding="utf-8")
     assert "/var/lib/kdive/provider-authority/remote-libvirt-pool" in tasks
@@ -790,7 +920,11 @@ def test_local_fixed_workers_receive_protected_authority_client_files() -> None:
     assert defaults["live_vm_host_worker_authority_server_ca_ref"] == (
         "external-boot-authority/server-ca"
     )
-    tasks = (ROLE.parent / "live_vm_host" / "tasks" / "main.yml").read_text(encoding="utf-8")
+    live_tasks = ROLE.parent / "live_vm_host" / "tasks"
+    assert "ansible.builtin.import_tasks: worker_authority_tls.yml" in (
+        live_tasks / "main.yml"
+    ).read_text(encoding="utf-8")
+    tasks = (live_tasks / "worker_authority_tls.yml").read_text(encoding="utf-8")
     tasks += (ROLE.parent / "local_worker_host" / "tasks" / "worker_accounts.yml").read_text(
         encoding="utf-8"
     )
@@ -806,3 +940,194 @@ def test_local_fixed_workers_receive_protected_authority_client_files() -> None:
     assert "Require protected regular fixed-worker authority client sources" in preflight
     assert "delegate_to: localhost" in preflight
     assert "no_log: true" in preflight
+
+
+@pytest.mark.parametrize("layout", ["dist-packages", "lib64/python3.14/site-packages"])
+def test_authority_discovers_native_guestfs_and_verifies_installed_import(
+    tmp_path: Path, layout: str
+) -> None:
+    tasks = _tasks(ROLE / "tasks" / "install.yml")
+    locate = _named(tasks, "Locate the system libguestfs binding files")
+    command = cast(dict[str, list[str]], locate["ansible.builtin.command"])["argv"]
+    assert command[0] == "{{ provider_authority_host_python }}"
+    native = tmp_path / layout
+    native.mkdir(parents=True)
+    for name in ("guestfs", "libguestfsmod"):
+        (native / (name + ".py")).write_text("", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, *command[1:]],
+        env={**os.environ, "PYTHONPATH": str(native)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        str(native / "guestfs.py"),
+        str(native / "libguestfsmod.py"),
+    ]
+    site = _named(tasks, "Locate the authority venv site-packages")
+    site_argv = cast(dict[str, list[str]], site["ansible.builtin.command"])["argv"]
+    assert site_argv[0] == "/opt/kdive-provider-authority/.venv/bin/python"
+    assert "sysconfig.get_path('platlib')" in site_argv[-1]
+    link = _named(tasks, "Symlink the libguestfs binding into the authority venv")
+    assert "provider_authority_host_venv_site.stdout" in str(link["ansible.builtin.file"])
+    verify = _named(tasks, "Verify the authority venv imports the native libguestfs binding")
+    verify_argv = cast(dict[str, list[str]], verify["ansible.builtin.command"])["argv"]
+    assert verify_argv == [site_argv[0], "-c", "import guestfs, libguestfsmod"]
+    assert tasks.index(locate) < tasks.index(site) < tasks.index(link) < tasks.index(verify)
+    for task in (locate, site, link, verify):
+        assert task["when"] == "provider_authority_host_local_mutation_enabled | bool"
+
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(tmp_path / "venv")], check=True
+    )
+    python = tmp_path / "venv/bin/python"
+    destination = subprocess.check_output([str(python), *site_argv[1:]], text=True).strip()
+    environment = Environment(undefined=StrictUndefined)
+    environment.filters["basename"] = lambda value: Path(value).name
+    link_args = cast(dict[str, str], link["ansible.builtin.file"])
+    for source in json.loads(result.stdout):
+        target = environment.from_string(link_args["dest"]).render(
+            provider_authority_host_venv_site={"stdout": destination}, item=source
+        )
+        Path(target).symlink_to(source)
+    imported = subprocess.run([str(python), *verify_argv[1:]], capture_output=True, check=False)
+    assert imported.returncode == 0, imported.stderr
+    (native / "libguestfsmod.py").write_text("raise ImportError('unusable native binding')\n")
+    broken = subprocess.run([str(python), *verify_argv[1:]], capture_output=True, check=False)
+    assert broken.returncode != 0
+    assert b"unusable native binding" in broken.stderr
+
+
+LIVE_TASKS = ROLE.parent / "live_vm_host" / "tasks"
+CARRIER = ROOT / "scripts" / "operations" / "prove-external-boot-authority-host.sh"
+AUTHORITY_UNITS = (
+    UNIT,
+    ROLE.parent / "live_vm_host" / "templates" / "external-boot-authority.service.j2",
+    ROOT / "deploy" / "systemd" / "system" / "kdive-external-boot-authority.service",
+)
+
+
+def _flattened(tasks: list[dict[str, object]]) -> list[dict[str, object]]:
+    flat: list[dict[str, object]] = []
+    for task in tasks:
+        flat.append(task)
+        for section in ("block", "rescue", "always"):
+            flat.extend(_flattened(cast(list[dict[str, object]], task.get(section, []))))
+    return flat
+
+
+def _expiry_includes(path: Path) -> list[dict[str, object]]:
+    return [
+        task
+        for task in _flattened(_tasks(path))
+        if cast(dict[str, object], task.get("ansible.builtin.include_tasks", {})).get("file")
+        == "tls_expiry.yml"
+    ]
+
+
+def _certificates(task: dict[str, object]) -> list[tuple[str, str]]:
+    variables = cast(dict[str, list[dict[str, str]]], task["vars"])
+    certificates = variables["live_vm_host_tls_expiry_certificates"]
+    return [(item["name"], item["path"]) for item in certificates]
+
+
+def test_tls_expiry_checks_cover_authority_and_worker_certificates() -> None:
+    preflight = _expiry_includes(LIVE_TASKS / "authority_preflight.yml")
+    assert [_certificates(task) for task in preflight] == [
+        [
+            ("server-ca", "{{ live_vm_host_worker_authority_server_ca_source }}"),
+            ("client-certificate", "{{ live_vm_host_worker_authority_client_certificate_source }}"),
+        ],
+        [
+            ("server-certificate", "{{ live_vm_host_authority_server_certificate_source }}"),
+            ("server-ca", "{{ live_vm_host_authority_server_ca_source }}"),
+            ("worker-client-ca", "{{ live_vm_host_authority_worker_client_ca_source }}"),
+            (
+                "health-client-certificate",
+                "{{ live_vm_host_authority_health_client_certificate_source }}",
+            ),
+        ],
+    ]
+    for task in preflight:
+        include = cast(dict[str, object], task["ansible.builtin.include_tasks"])
+        assert include["apply"] == {"delegate_to": "localhost", "become": False}
+    assert preflight[0]["when"] == "live_vm_host_worker_authority_enabled | bool"
+
+    verify_tasks = _tasks(LIVE_TASKS / "verify.yml")
+    verify = _expiry_includes(LIVE_TASKS / "verify.yml")
+    installed = "{{ live_vm_host_authority_credentials_dir }}"
+    worker = "{{ live_vm_host_worker_authority_secrets_root }}"
+    assert [_certificates(task) for task in verify] == [
+        [
+            (name, f"{installed}/{name}")
+            for name in (
+                "server-certificate",
+                "server-ca",
+                "worker-client-ca",
+                "health-client-certificate",
+            )
+        ],
+        [(name, f"{worker}/{name}") for name in ("server-ca", "client-certificate")],
+    ]
+    assert [task["when"] for task in verify] == [
+        "live_vm_host_authority_enabled | bool",
+        "live_vm_host_worker_authority_enabled | bool",
+    ]
+    ready = verify_tasks.index(_named(verify_tasks, "Assert the authority service is ready"))
+    for task in verify:
+        assert "apply" not in cast(dict[str, object], task["ansible.builtin.include_tasks"])
+        assert verify_tasks.index(task) < ready
+    for task in preflight + verify:
+        assert all("key" not in path for _, path in _certificates(task))
+
+    margin = _yaml(ROLE.parent / "live_vm_host" / "defaults" / "main.yml")[
+        "live_vm_host_authority_tls_expiry_margin_seconds"
+    ]
+    assert margin == 43200
+    # The disposable carrier issues one-day certificates and provisions through this role.
+    assert re.findall(r"--days (\S+)", CARRIER.read_text(encoding="utf-8")) == ["1"] * 4
+    assert cast(int, margin) < 86400
+
+
+def _directives(text: str) -> dict[str, str]:
+    return dict(
+        line.split("=", 1)
+        for line in text.splitlines()
+        if "=" in line and not line.startswith(("#", "{"))
+    )
+
+
+def _seconds(value: str) -> int:
+    return int(value.removesuffix("s"))
+
+
+@pytest.mark.parametrize("path", AUTHORITY_UNITS, ids=lambda path: path.name)
+def test_authority_units_bound_their_restart_loop(path: Path) -> None:
+    unit_text, service_text = path.read_text(encoding="utf-8").split("[Service]", 1)
+    unit, service = _directives(unit_text), _directives(service_text)
+    assert unit["StartLimitIntervalSec"] == "600"
+    assert unit["StartLimitBurst"] == "5"
+    assert "StartLimitIntervalSec" not in service
+    assert "StartLimitBurst" not in service
+    interval, burst = int(unit["StartLimitIntervalSec"]), int(unit["StartLimitBurst"])
+    restart, timeout = _seconds(service["RestartSec"]), _seconds(service["TimeoutStartSec"])
+    # Even starts that hang until their timeout must reach the limit inside one interval.
+    assert burst * (timeout + restart) < interval
+
+
+def test_drift_proof_resets_the_start_limit_before_restoring() -> None:
+    proof = _named(
+        _tasks(LIVE_TASKS / "verify.yml"),
+        "Prove authority readiness retracts on credential and ACL drift",
+    )
+    always = cast(list[dict[str, object]], proof["always"])
+    restore = always.index(_named(always, "Restore authority readiness after drift proofs"))
+    reset = always[restore - 1]
+    assert cast(dict[str, object], reset["ansible.builtin.command"])["argv"] == [
+        "systemctl",
+        "reset-failed",
+        "kdive-external-boot-authority.service",
+    ]
+    assert reset["changed_when"] is False

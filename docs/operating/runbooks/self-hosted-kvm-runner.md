@@ -217,8 +217,10 @@ live_vm_host_worker_authority_client_key_source: /protected/worker-client-key.pe
 
 The three sources must be nonempty mode-`0400` or mode-`0600` regular files on the controller.
 Provisioning copies them under `/var/lib/kdive/secrets/external-boot-authority` as root-owned,
-client-group-readable files and publishes only their root-relative references in worker
-environments. Enabling only part of this contract fails before host mutation. The client group may
+client-group-readable files and publishes only their root-relative references, with the instance
+and request socket, in root:root `0644` `/etc/kdive/live-worker-authority.env`. Every
+`worker-lifecycle.sh start` forwards those five values to the fixed workers, so no bring-up needs
+them exported; a contradicting export is refused (ADR-0770). Enabling only part of this contract fails before host mutation. The client group may
 traverse the request directory but still cannot traverse the authority's provider socket, recovery
 root, journal, installation, or credential directories; the control and reconciler identities
 remain outside the client group.

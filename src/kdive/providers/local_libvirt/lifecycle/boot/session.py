@@ -26,6 +26,7 @@ import libvirt
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, resolve_local_timing
+from kdive.domain.platform.arch_traits import rendered_machine_alias
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
     ReadinessResult,
@@ -57,6 +58,7 @@ from kdive.providers.shared.libvirt_external_boot import (
 )
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
+    backing_store_projection,
     recorded_gdb_port_from_root,
     recorded_ssh_port_from_root,
 )
@@ -266,6 +268,7 @@ class LocalSystemTeardownSession(Protocol):
     def undefine(self) -> None: ...
     def remove_overlay(self) -> None: ...
     def remove_baseline(self) -> None: ...
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def close(self) -> None: ...
 
 
@@ -1499,6 +1502,24 @@ class LocalExternalBootSessionFactory:
                 exc.add_note(f"cleanup failed: {error!r}")
             raise
 
+    def open_pinned(
+        self,
+        lease: LocalExternalBootOperationLease,
+        expected: ExpectedOperationOwnership,
+    ) -> LocalExternalBootOperationPin:
+        """Pin the lease and check ownership only: no libvirt connection, domain or overlay."""
+        ownership = self._pin_lease(lease)
+        pin = ownership._pin
+        try:
+            _require_expected_ownership(ownership.ownership, expected)
+        except BaseException as exc:
+            try:
+                pin.close()
+            except BaseException as close_error:
+                exc.add_note(f"cleanup failed: {close_error!r}")
+            raise
+        return pin
+
     def open_teardown(
         self,
         lease: LocalExternalBootOperationLease,
@@ -1523,6 +1544,9 @@ class LocalExternalBootSessionFactory:
             connection=connection,
             overlay=self._teardown_overlay_path(facts.system_id),
             baseline=self._teardown_baseline_path(facts.system_id),
+            binding=facts.binding,
+            open_artifact_root=lambda: self._open_artifact_root(facts),
+            cleanup_payloads=self._cleanup_payloads,
         )
 
 
@@ -1537,12 +1561,18 @@ class _ConcreteSystemTeardownSession:
         connection: _Connection,
         overlay: str,
         baseline: str,
+        binding: ExternalBootActivationBinding | None = None,
+        open_artifact_root: Callable[[], int] | None = None,
+        cleanup_payloads: CleanupPayloads | None = None,
     ) -> None:
         self._system_id = system_id
         self._pin: LocalExternalBootOperationPin | None = pin
         self._connection: _Connection | None = connection
         self._overlay = overlay
         self._baseline = baseline
+        self._binding = binding
+        self._open_artifact_root = open_artifact_root
+        self._cleanup_payloads = cleanup_payloads
 
     def inspect(self) -> LocalSystemTeardownInspection:
         domain = self._lookup_owned()
@@ -1599,6 +1629,18 @@ class _ConcreteSystemTeardownSession:
         if _path_kind(self._baseline, "directory") == "absent":
             return
         shutil.rmtree(self._baseline)
+
+    def cleanup_payloads(self, metadata: LocalRecoveryMetadataV1) -> None:
+        """Remove the activation's payloads without needing its domain (#3341)."""
+        if self._open_artifact_root is None or self._cleanup_payloads is None:
+            raise ValueError("System teardown session has no activation to clean")
+        if metadata.binding != self._binding:
+            raise ValueError("cleanup metadata does not match session ownership")
+        artifact_fd = self._open_artifact_root()
+        try:
+            self._cleanup_payloads(artifact_fd, metadata)
+        finally:
+            os.close(artifact_fd)
 
     def close(self) -> None:
         connection, self._connection = self._connection, None
@@ -1888,7 +1930,7 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
         for interface in root.findall("devices/interface")
     )
     value = {
-        "schema": "kdive-local-authority-domain-semantics-v1",
+        "schema": "kdive-local-authority-domain-semantics-v2",
         "domain_type": root.get("type"),
         "name": root.findtext("name"),
         "uuid": root.findtext("uuid"),
@@ -1898,7 +1940,7 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
         "os": None
         if os_element is None
         else {
-            "type": None if os_type is None else (os_type.text, os_type.attrib),
+            "type": None if os_type is None else (os_type.text, _canonical_os_type_attrib(os_type)),
             "kernel": os_element.findtext("kernel"),
             "initrd": os_element.findtext("initrd"),
             "cmdline": os_element.findtext("cmdline"),
@@ -1915,6 +1957,7 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
             "driver": (driver.get("name"), driver.get("type")),
             "target": (target.get("dev"), target.get("bus")),
             "readonly": disk.find("readonly") is not None,
+            "backing": backing_store_projection(disk),
         },
         "gdb_port": recorded_gdb_port_from_root(root),
         "ssh_port": recorded_ssh_port_from_root(root),
@@ -1929,7 +1972,15 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
         "system_metadata": root.findtext(f"metadata/{{{KDIVE_METADATA_NS}}}system"),
     }
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    return _digest(b"kdive-local-authority-domain-semantics-v1", payload)
+    return _digest(b"kdive-local-authority-domain-semantics-v2", payload)
+
+
+def _canonical_os_type_attrib(os_type: ET.Element) -> dict[str, str]:
+    """Project ``os/type`` attributes with libvirt's versioned machine mapped to the alias."""
+    attrib = dict(os_type.attrib)
+    if "machine" in attrib:
+        attrib["machine"] = rendered_machine_alias(attrib.get("arch"), attrib["machine"])
+    return attrib
 
 
 def _memory_bytes(memory: ET.Element | None) -> int | None:

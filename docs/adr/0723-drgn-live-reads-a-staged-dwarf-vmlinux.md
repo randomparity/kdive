@@ -75,3 +75,10 @@ on an uploaded kernel.
 - **Pass `-s /usr/lib/debug/lib/modules/$(uname -r)/vmlinux` explicitly.** judgment: it repeats
   drgn's own default search and needs a new test-only path override; the guest proof checks the
   default search directly.
+
+### Amendment (2026-11-03): the remote-libvirt authority stages under /lib/modules (#3131)
+
+This qualifies Decision item 5 for one install path. The remote-libvirt external-boot authority
+stages the uploaded `vmlinux` at `/lib/modules/<release>/vmlinux`, not at
+`/usr/lib/debug/lib/modules/<release>/vmlinux`, because its only guest write is the module
+appliance (ADR-0585). drgn searches both paths; ADR-0724 records the mechanism and why.

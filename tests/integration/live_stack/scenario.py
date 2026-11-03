@@ -41,6 +41,7 @@ from tests.integration.live_stack.evidence import (
     build_record,
     evidence_root,
     identity_problems,
+    remote_authority_revision,
     run_identity,
 )
 from tests.integration.live_stack.image_smoke import PROBE, Endpoint, parse_probe, ssh
@@ -58,6 +59,25 @@ from tests.mcp.json_data import data_mapping
 
 ACCELERATORS = {"kvm": "kvm", "qemu": "tcg"}
 _REBOOT_DEADLINE_S = 300.0
+
+
+@dataclass(frozen=True)
+class Sizing:
+    """A System's size; a named ``shape`` requests the Allocation by name instead (ADR-0067)."""
+
+    vcpu: int = 2
+    memory_mb: int = 2048
+    disk_gb: int = LOCAL_ALLOCATION_DISK_GB
+    shape: str | None = None
+
+    def request(self) -> dict[str, object]:
+        """The ``allocations.request`` sizing arguments."""
+        if self.shape is not None:
+            return {"shape": self.shape}
+        return {"vcpus": self.vcpu, "memory_gb": self.memory_mb // 1024, "disk_gb": self.disk_gb}
+
+
+DEFAULT_SIZING = Sizing()
 
 
 class ScenarioStop(Exception):  # noqa: N818 - control flow, not an error type
@@ -104,7 +124,12 @@ def prerequisites() -> tuple[OidcIssuer, str]:
         raise ScenarioStop(Outcome.BLOCKED, str(exc)) from None
     db_url = os.environ.get("KDIVE_DATABASE_URL")
     if not db_url:
-        raise ScenarioStop(Outcome.BLOCKED, "KDIVE_DATABASE_URL unset; export the server DSN")
+        raise ScenarioStop(
+            Outcome.BLOCKED,
+            "KDIVE_DATABASE_URL unset; set it to the least-privilege harness login "
+            '(KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"): the server DSN cannot read '
+            "the authority-private tables the harness snapshots",
+        )
     return issuer, db_url
 
 
@@ -117,7 +142,10 @@ def run_cell(cell: Cell, scenario: Scenario, *, proves: Outcome = Outcome.SUCCES
     base_url = require_stack()
     run = CellRun(cell, EvidenceWriter(evidence_root()))
     started = time.monotonic()
-    identity = run_identity(base_url)
+    # ADR-0788: a remote authority cell is served by the provider host's authority.
+    served_remotely = cell.provider == "remote-libvirt" and "authority" in cell.roles
+    reader = remote_authority_revision if served_remotely else None
+    identity = run_identity(base_url, remote_authority=reader)
     problems = identity_problems(identity, cell.roles)
     try:
         if any(not problem.startswith("missing:") for problem in problems):
@@ -178,7 +206,9 @@ async def acquire_image(op: LiveStackClient, name: str, arch: str) -> dict[str, 
     return {"digest": digest, "arch": described.data.get("arch"), "os": described.data.get("os")}
 
 
-def catalog_profile(entry: RootfsCatalogEntry, name: str, unread_ref: str) -> dict[str, object]:
+def catalog_profile(
+    entry: RootfsCatalogEntry, name: str, unread_ref: str, sizing: Sizing = DEFAULT_SIZING
+) -> dict[str, object]:
     """A direct-kernel provisioning profile booting catalog image ``name``.
 
     ``kernel_source_ref`` is required by the profile schema but never read on provision
@@ -187,9 +217,9 @@ def catalog_profile(entry: RootfsCatalogEntry, name: str, unread_ref: str) -> di
     return {
         "schema_version": 1,
         "arch": entry.arch,
-        "vcpu": 2,
-        "memory_mb": 2048,
-        "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+        "vcpu": sizing.vcpu,
+        "memory_mb": sizing.memory_mb,
+        "disk_gb": sizing.disk_gb,
         "boot_method": "direct-kernel",
         "kernel_source_ref": unread_ref,
         "provider": {
@@ -301,6 +331,7 @@ async def on_catalog_system(
     image: str,
     body: CatalogBody,
     provision: Provision = provision_catalog,
+    sizing: Sizing = DEFAULT_SIZING,
 ) -> None:
     """Acquire ``image``, provision it to ``ready``, run ``body``, then prove ``cleanup``.
 
@@ -325,10 +356,8 @@ async def on_catalog_system(
                 op,
                 "allocations.request",
                 project=project,
-                vcpus=2,
-                memory_gb=2,
-                disk_gb=LOCAL_ALLOCATION_DISK_GB,
                 resource={"mode": "kind"},
+                **sizing.request(),
             ),
             "allocate",
         ).object_id
@@ -337,7 +366,7 @@ async def on_catalog_system(
         cleaned = False
         try:
             system_id = await provision(
-                op, allocation, catalog_profile(entry, image, f"{project}-unread")
+                op, allocation, catalog_profile(entry, image, f"{project}-unread", sizing)
             )
             xml = domain_xml(system_id)
             accelerator = ET.fromstring(xml).get("type", "")  # noqa: S314  # nosec B314

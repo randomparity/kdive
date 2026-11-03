@@ -8,6 +8,7 @@ from typing import Protocol
 
 import libvirt
 
+from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
 from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     RecoveryObjectBinding,
@@ -78,7 +79,9 @@ class RemoteExternalBootRecoveryObjects:
     ) -> _Volume | None:
         recovery = self._store.recovery_for_object(binding.reference)
         if recovery.binding != binding.binding:
-            raise ValueError("remote recovery-object activation differs from durable record")
+            raise ProviderRecoveryRefusal(
+                "remote recovery-object activation differs from durable record"
+            )
         recovery.module_recovery.validate_authority(authority)
         name = binding.reference.ref
         if binding.kind in {"kernel", "initrd"}:
@@ -90,7 +93,7 @@ class RemoteExternalBootRecoveryObjects:
                 or str(parsed.system_id) != binding.binding.system_id
                 or str(parsed.run_id) != binding.binding.run_id
             ):
-                raise ValueError("remote boot-artifact ownership differs")
+                raise ProviderRecoveryRefusal("remote boot-artifact ownership differs")
             pool_name = self._boot_artifact_pool
         elif binding.kind == "modules":
             parsed_module = parse_module_volume_name(name)
@@ -105,10 +108,10 @@ class RemoteExternalBootRecoveryObjects:
                 or parsed_module.run_id != binding.binding.run_id
                 or name not in capacities
             ):
-                raise ValueError("remote module-volume ownership differs")
+                raise ProviderRecoveryRefusal("remote module-volume ownership differs")
             pool_name = module.pool.ref
         else:
-            raise ValueError("remote recovery record is not a libvirt volume")
+            raise ProviderRecoveryRefusal("remote recovery record is not a libvirt volume")
         try:
             pool = self._connection.storagePoolLookupByName(pool_name)
             volume = pool.storageVolLookupByName(name)
@@ -117,12 +120,12 @@ class RemoteExternalBootRecoveryObjects:
                 return None
             raise
         if volume.name() != name:
-            raise ValueError("remote recovery-object readback name differs")
+            raise ProviderRecoveryRefusal("remote recovery-object readback name differs")
         if binding.kind == "modules":
             if volume.info()[1] != capacities[name]:
-                raise ValueError("remote module-volume geometry differs")
+                raise ProviderRecoveryRefusal("remote module-volume geometry differs")
             if not self._inspect_attachments().proves_detached(pool_name, name):
-                raise ValueError("remote module volume remains attached")
+                raise ProviderRecoveryRefusal("remote module volume remains attached")
         return volume
 
     def observe_object(
@@ -140,13 +143,15 @@ class RemoteExternalBootRecoveryObjects:
     ) -> RecoveryObjectObservation:
         observed = self.observe_object(binding, authority)
         if observed.observed_digest != expected_observed_digest:
-            raise ValueError("remote recovery-object observation changed before delete")
+            raise ProviderRecoveryRefusal(
+                "remote recovery-object observation changed before delete"
+            )
         volume = self._volume(binding, authority)
         if volume is not None:
             volume.delete(0)
         result = self.observe_object(binding, authority)
         if result.present:
-            raise ValueError("remote recovery object remained after deletion")
+            raise ProviderRecoveryRefusal("remote recovery object remained after deletion")
         return result
 
     def adopt_object(
@@ -157,5 +162,7 @@ class RemoteExternalBootRecoveryObjects:
     ) -> RecoveryObjectObservation:
         observed = self.observe_object(binding, authority)
         if observed.observed_digest != expected_observed_digest or not observed.present:
-            raise ValueError("remote recovery-object observation changed before adoption")
+            raise ProviderRecoveryRefusal(
+                "remote recovery-object observation changed before adoption"
+            )
         return self._observation(binding, present=True, managed=True)

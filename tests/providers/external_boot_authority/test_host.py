@@ -224,7 +224,6 @@ def _install_remote_system_manifest(config: AuthorityHostConfig) -> None:
                         "root_identity": "sha256:" + hashlib.sha256(b"base").hexdigest(),
                         "architecture": "x86_64",
                         "base_volume": base.name,
-                        "network": "provider-net",
                         "machine": "pc-q35-9.2",
                         "gdb_addr": "127.0.0.1",
                         "gdb_port_min": 31000,
@@ -1214,9 +1213,10 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
         "build_local_external_boot_authority",
         lambda actual_store, socket: (
             captured.append((actual_store, socket))
-            or SimpleNamespace(adapter=object(), provider=object())
+            or SimpleNamespace(adapter=local_adapter, provider=object())
         ),
     )
+    local_adapter = object()
     closed: list[bool] = []
 
     class Pool:
@@ -1281,9 +1281,17 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
     remote_module_host = cast(Any, service._remote_module_host)  # noqa: SLF001
     assert remote_module_host._host._factory._pool_name == "authority-systems"  # noqa: SLF001
     assert cast(Any, service._adapter)._remote_module_host is remote_module_host  # noqa: SLF001
+    # Remote external-boot mutations never route through the local adapter (#3328).
+    assert local_adapter not in vars(service._adapter).values()  # noqa: SLF001
+    # Orphan disposition acts on the remote store, not the local recovery root (#3326).
+    assert cast(Any, service._recovery_orphans)._executor is service._adapter  # noqa: SLF001
     operations = cast(Any, service._adapter)._coordinator._operations  # noqa: SLF001
     assert operations._pool_name == "authority-systems"  # noqa: SLF001
     assert operations._materializer._pool_name == "authority-systems"  # noqa: SLF001
+    # The module host fetches the staged vmlinux; the materializer needs only identities (#3131).
+    module_stager = remote_module_host._host._factory._artifact_stager  # noqa: SLF001
+    materializer_stager = operations._materializer._artifact_stager  # noqa: SLF001
+    assert (module_stager._fetch, materializer_stager._fetch) == (True, False)  # noqa: SLF001
     assert service.system_service is system_service
     assert len(system_inputs) == 1
     assert system_inputs[0][0].__class__ is Connection

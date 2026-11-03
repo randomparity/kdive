@@ -198,6 +198,8 @@ def test_list_exposes_resource_kind(migrated_url: str) -> None:
             resp = await _list_systems(pool, _ctx())
         assert resp.status == "ok" and len(resp.items) == 1
         assert resp.items[0].data["resource_kind"] == "local-libvirt"
+        # Per-System capture methods are systems.get-only: list resolves no runtime (ADR-0757).
+        assert "supported_capture_methods" not in resp.items[0].data
 
     asyncio.run(_run())
 

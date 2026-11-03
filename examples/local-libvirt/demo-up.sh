@@ -5,7 +5,8 @@
 # backends, migrations, runtime-role bootstrap, the operator-owned session libvirt, the
 # server/reconciler daemons, the fixed lifecycle workers, one inventory reconcile), funds the
 # project and mints a token (scripts/live-stack/onboard.sh), and merges the MCP client config into
-# the kernel tree. Run it from anywhere — every path resolves from the repo.
+# the demo workspace (KDIVE_DEMO_WORKSPACE). Run it from anywhere — every path resolves from the
+# repo.
 #
 #   examples/local-libvirt/demo-up.sh
 #
@@ -67,17 +68,18 @@ step "onboard project '${KDIVE_PROJECT}' (scripts/live-stack/onboard.sh)"
 "${repo_root}/scripts/live-stack/onboard.sh"
 
 # 5. Merge the MCP client config into the demo workspace (the directory you open your MCP
-#    client in — KDIVE_DEMO_WORKSPACE, which defaults to the kernel tree but stays independent of
-#    it so a demo bring-up never rewrites a tree a live proof is using as its kernel fixture,
-#    #2760). It references the token via ${KDIVE_TOKEN}, so the file holds no secret. An existing
-#    .mcp.json is preserved: its first version is backed up to .mcp.json.bak (never overwritten
-#    on re-run) and only the `kdive` server entry is replaced — any other servers the user
-#    configured are kept.
+#    client in — KDIVE_DEMO_WORKSPACE, which defaults to KDIVE_KERNEL_SRC when set but stays
+#    independent of it so a demo bring-up never rewrites a tree a live proof is using as its
+#    kernel fixture, #2760). It references the token via ${KDIVE_TOKEN}, so the file holds no
+#    secret. An existing .mcp.json is preserved: its first version is backed up to
+#    .mcp.json.bak (never overwritten on re-run) and only the `kdive` server entry is replaced —
+#    any other servers the user configured are kept.
 step "install MCP config into ${KDIVE_DEMO_WORKSPACE:-<unset>}/.mcp.json"
 if [[ -z "${KDIVE_DEMO_WORKSPACE:-}" ]]; then
-  echo "KDIVE_DEMO_WORKSPACE is unset (KDIVE_KERNEL_SRC is also unset and ~/src/linux does not" >&2
-  echo "exist); export KDIVE_DEMO_WORKSPACE (or KDIVE_KERNEL_SRC), then re-run to install the" >&2
-  echo ".mcp.json (the stack is up)." >&2
+  echo "KDIVE_DEMO_WORKSPACE is unset (it defaults to KDIVE_KERNEL_SRC, which is also unset);" >&2
+  echo "export KDIVE_DEMO_WORKSPACE to the directory you open your MCP client in (any directory" >&2
+  echo "works; a kernel tree is not required), then re-run to install the .mcp.json (the stack" >&2
+  echo "is up)." >&2
   exit 1
 fi
 "${KDIVE_PYTHON}" - "${example_dir}/mcp.json" "${KDIVE_DEMO_WORKSPACE}/.mcp.json" <<'PY'
@@ -123,7 +125,6 @@ cat <<EOF
 local-libvirt stack is up.
   MCP URL   : ${KDIVE_STACK_BASE_URL}
   Project   : ${KDIVE_PROJECT} (admin)
-  Kernel    : ${KDIVE_KERNEL_SRC}
   Workspace : ${KDIVE_DEMO_WORKSPACE} (.mcp.json)
   libvirt   : ${KDIVE_LIBVIRT_URI}
   Logs      : ${KDIVE_STACK_LOG_DIR} (daemons); scripts/live-stack/worker-lifecycle.sh diagnostics (workers)

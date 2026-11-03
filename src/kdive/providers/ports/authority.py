@@ -11,6 +11,10 @@ from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityRequestV1,
     DeviceIdentityResponseV1,
 )
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    ModuleVolumeSweepRequestV1,
+    ModuleVolumeSweepResponseV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
     AuthorityConflictResolutionRequestV1,
@@ -73,6 +77,10 @@ class AuthorityRequestSender(Protocol):
     async def resolve_device_identity(
         self, request: DeviceIdentityRequestV1, *, deadline: float
     ) -> DeviceIdentityResponseV1: ...
+
+    async def sweep_module_volumes(
+        self, request: ModuleVolumeSweepRequestV1, *, deadline: float
+    ) -> ModuleVolumeSweepResponseV1: ...
 
     async def acknowledge_takeover(
         self, request: AuthorityTakeoverRequestV1, *, deadline: float

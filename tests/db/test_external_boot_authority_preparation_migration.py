@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityOperation,
+    AuthorityPreparationMutationRequestV1,
     JournalPhase,
     JournalRecordV1,
     canonical_record_bytes,
     record_digest,
 )
+from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
+from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from kdive.providers.ports.external_boot import (
     DebuginfoSource,
     ExternalBootActivationBinding,
@@ -27,6 +36,22 @@ from tests.db.external_boot_authority_support import (
     _seed_case,
 )
 from tests.support.external_boot_plan import external_boot_materialization, external_boot_plan
+
+
+async def _open_through_repository(
+    dsn: str,
+    worker_id: str,
+    request: AuthorityPreparationMutationRequestV1,
+    ack_digest: str,
+) -> ModuleAttemptPreparationRequestV1 | None:
+    @asynccontextmanager
+    async def connections() -> AsyncIterator[AsyncConnection]:
+        async with await AsyncConnection.connect(dsn, autocommit=True) as conn:
+            yield conn
+
+    return await DatabaseAuthorityRepository(connections).open_remote_module_attempt(
+        AuthenticatedPeer(worker_id), request, 1, ack_digest
+    )
 
 
 def test_preparing_allocation_and_phase_resolution_are_exact(
@@ -353,6 +378,36 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
                 prepared[1],
             ),
         ).fetchone() == (None,)
+    receipt = asyncio.run(
+        _open_through_repository(
+            authority_role_dsns("kdive_provider_authority"),
+            case.worker_id,
+            AuthorityPreparationMutationRequestV1(
+                authority_id=authority_id,
+                generation=generation,
+                system_id=case.system_id,
+                activation_id=case.activation_id,
+                run_id=case.run_id,
+                plan_identity=plan.identity,
+                purpose="activate",
+                operation=AuthorityOperation.PREPARE,
+                provider_kind=case.provider_kind,
+                authority_instance=case.authority_instance,
+                operation_identity=prepared[0],
+                operation_digest=prepared[1],
+                attempt_id=prepare_attempt_id,
+                expected_source_identity="source-a",
+                intended_target_identity="target-a",
+                recovery_objects=(),
+                plan=plan,
+            ),
+            ack_digest,
+        )
+    )
+    assert receipt is not None
+    assert receipt.module_attempt_obligation.system_id == case.system_id
+    assert receipt.module_attempt_obligation.run_id == case.run_id
+    assert receipt.module_attempt_obligation.operation_nonce == prepare_attempt_id.hex
     open_arguments = (
         case.worker_id,
         authority_id,
@@ -370,6 +425,9 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
             "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)",
             open_arguments,
         )
+    _assert_retry_generation_gate(
+        migrated_url, authority_role_dsns, case.system_id, authority_id, open_arguments
+    )
     with psycopg.connect(migrated_url) as admin:
         admin.execute(
             "UPDATE jobs SET lease_expires_at=now()-interval '1 second' WHERE id=%s",
@@ -382,6 +440,60 @@ def test_preparing_allocation_and_phase_resolution_are_exact(
             "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)",
             open_arguments,
         ).fetchone() == (None,)
+
+
+def _assert_retry_generation_gate(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    system_id: UUID,
+    authority_id: UUID,
+    open_arguments: tuple[object, ...],
+) -> None:
+    """A generation above 1 opens the attempt only on an adopted committed preparation (#3370).
+
+    The fixture moves the current authority to generation 2 and leaves the generation-1
+    materialize/result_committed row in place, which is what an adopting retry generation sees.
+    The audit and binding tables are immutable, so the move runs with triggers off.
+    """
+    retry_arguments = (open_arguments[0], authority_id, 2, *open_arguments[3:])
+    open_sql = "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,1,%s,%s,%s,%s)"
+    with psycopg.connect(migrated_url, autocommit=True) as admin:
+        admin.execute("SET session_replication_role = replica")
+        for table, column in (
+            ("external_boot_authorities", "id"),
+            ("external_boot_authority_acknowledgements", "authority_id"),
+            ("external_boot_authority_journal_heads", "authority_id"),
+        ):
+            admin.execute(f"UPDATE {table} SET generation = 2 WHERE {column} = %s", (authority_id,))
+        admin.execute(
+            "UPDATE external_boot_authority_counters SET last_generation = 2 WHERE system_id = %s",
+            (system_id,),
+        )
+        with psycopg.connect(
+            authority_role_dsns("kdive_provider_authority"), autocommit=True
+        ) as provider:
+            adopted = provider.execute(open_sql, retry_arguments).fetchone()
+            assert adopted is not None and adopted[0] is not None
+            original = admin.execute(
+                "SELECT plan_identity, authority_instance, generation "
+                "FROM external_boot_authority_audit "
+                "WHERE authority_id = %s AND operation = 'materialize'",
+                (authority_id,),
+            ).fetchone()
+            assert original is not None
+            for column, value, restored in (
+                ("plan_identity", "sha256:" + "e" * 64, original[0]),
+                ("authority_instance", "other-instance", original[1]),
+                ("generation", 3, original[2]),
+            ):
+                update = (
+                    f"UPDATE external_boot_authority_audit SET {column} = %s "
+                    "WHERE authority_id = %s AND operation = 'materialize'"
+                )
+                admin.execute(update, (value, authority_id))
+                assert provider.execute(open_sql, retry_arguments).fetchone() == (None,)
+                admin.execute(update, (restored, authority_id))
+                assert provider.execute(open_sql, retry_arguments).fetchone() != (None,)
 
 
 def test_sql_plan_identity_matches_python_with_and_without_debuginfo(migrated_url: str) -> None:

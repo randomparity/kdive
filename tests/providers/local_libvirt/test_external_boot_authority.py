@@ -27,6 +27,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
@@ -44,6 +45,7 @@ from kdive.providers.external_boot_authority.service import (
     AuthorityMutationAdapter,
     AuthorityServiceError,
     ExternalBootAuthorityService,
+    ProofBarrierAbort,
 )
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
@@ -237,9 +239,16 @@ class _FakeIO:
         self.partial_abort_result: Literal["removed", "absent", "not-partial"] = "not-partial"
         self.recovery_absent = False
         self.begun_teardown_intent: LocalSystemTeardownIntentV1 | None = None
+        self.acknowledged: LocalObservedState | None = None
+        self.discard_error: BaseException | None = None
 
     # -- LocalExternalBootIO -------------------------------------------------------
     def open(self, authority: OpaqueProviderRef, expected: object) -> _FakeContext:
+        del expected
+        self.actions.append(f"open:{authority.ref}")
+        return _FakeContext(self)
+
+    def open_pinned(self, authority: OpaqueProviderRef, expected: object) -> _FakeContext:
         del expected
         self.actions.append(f"open:{authority.ref}")
         return _FakeContext(self)
@@ -342,11 +351,17 @@ class _FakeIO:
             expected_cmdline=b"root=UUID=x",
         )
 
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def recover_modules(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        self.acknowledged = acknowledged
         self.actions.append("recover-modules")
         self.record_phase(metadata, "module-restored")
 
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def define_source(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        del acknowledged
         self.actions.append("define-source")
         self.record_phase(metadata, "source-restored")
 
@@ -434,6 +449,19 @@ class _FakeIO:
         del intent, authority
         self.actions.append("system-teardown-recovery-absence")
         return self.recovery_absent
+
+    def discard_system_teardown_recovery(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None:
+        del intent
+        self.actions.append("discard-system-teardown-recovery")
+        if self.discard_error is not None:
+            raise self.discard_error
+        self.finalize_tombstone(recovery, proof)
 
     def abort_system_teardown_preparation(
         self,
@@ -567,19 +595,22 @@ async def test_system_teardown_settles_pre_stop_intent_activation() -> None:
     result = await adapter.execute_system_teardown(request, context, _TEARDOWN_RESERVATION)
 
     assert result.complete
-    assert io.actions.index("recover-modules") < io.actions.index("cleanup")
-    assert io.actions.index("cleanup") < io.actions.index("finalize")
-    assert io.actions.index("finalize") < io.actions.index("teardown-system")
+    assert "recover-modules" not in io.actions
+    assert io.actions.index("discard-system-teardown-recovery") < io.actions.index(
+        "teardown-system"
+    )
     adapter.close()
 
 
 @pytest.mark.parametrize(
-    "phase", ["pre-stop-intent", "target-defined", "module-restored", "source-restored"]
+    "phase",
+    ["pre-stop-intent", "target-defined", "new-live", "module-restored", "source-restored"],
 )
-async def test_system_teardown_takeover_recovery_never_restores_power(
+@pytest.mark.anyio
+async def test_system_teardown_discards_retained_recovery_without_recovering_it(
     phase: RecoveryPhase,
 ) -> None:
-    """#2898: a retained activation whose guest ran before is recovered without a start."""
+    """#3341: a conflicted activation cannot be recovered, and teardown destroys it anyway."""
     io = _FakeIO(_metadata(phase))
     adapter = _adapter(io)
 
@@ -588,9 +619,30 @@ async def test_system_teardown_takeover_recovery_never_restores_power(
     )
 
     assert result.complete
-    assert "restore-power" not in io.actions
-    assert io.actions.index("phase:recovered") < io.actions.index("cleanup")
+    recovery_steps = {"recover-modules", "define-source", "restore-power", "phase:recovered"}
+    assert not recovery_steps & set(io.actions)
+    assert "cleanup" not in io.actions
+    assert io.actions.index("discard-system-teardown-recovery") < io.actions.index(
+        "teardown-system"
+    )
     assert io.actions[-1] == "teardown-system"
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_system_teardown_discard_refusal_leaves_the_host_untouched() -> None:
+    io = _FakeIO(_metadata("target-defined"))
+    io.discard_error = ValueError("foreign definition")
+    adapter = _adapter(io)
+
+    with pytest.raises(ValueError, match="foreign definition"):
+        await adapter.execute_system_teardown(
+            _system_teardown_request(),
+            _context(AuthorityOperation.TEARDOWN),
+            _TEARDOWN_RESERVATION,
+        )
+
+    assert "teardown-system" not in io.actions
     adapter.close()
 
 
@@ -1204,6 +1256,63 @@ async def test_recover_drives_the_named_recovery_primitives() -> None:
     assert "recover-modules" in io.actions
     assert "define-source" in io.actions
     assert "restore-power" in io.actions
+
+
+def _resolution_request(composite: str) -> AuthorityConflictResolutionRequestV1:
+    base = _request(purpose="resolve-conflict", operation=AuthorityOperation.RESOLVE_CONFLICT)
+    return AuthorityConflictResolutionRequestV1.model_validate(
+        {**base.model_dump(mode="python", by_alias=True), "expected_observed_composite": composite}
+    )
+
+
+async def test_resolve_conflict_restores_from_the_acknowledged_observation() -> None:
+    third = _observed("sha256:" + "7" * 64, SOURCE_MODULES)
+    io = _FakeIO(_metadata("target-defined"), observed=third)
+    adapter = _adapter(io)
+    acknowledged = (
+        await adapter.observe(_resolution_request("sha256:" + "0" * 64))
+    ).composite_state
+    request = _resolution_request(acknowledged)
+
+    await adapter.commit(request, _context(AuthorityOperation.RESOLVE_CONFLICT))
+
+    assert io.acknowledged == third
+    assert "define-source" in io.actions
+    assert "restore-power" in io.actions
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [_observed(None, SOURCE_MODULES), _observed(SOURCE_IDENTITY, None)],
+    ids=["unreadable-definition", "unreadable-modules"],
+)
+async def test_resolve_conflict_refuses_an_unreadable_state(observed: LocalObservedState) -> None:
+    io = _FakeIO(_metadata("target-defined"), observed=observed)
+    adapter = _adapter(io)
+    composite = (await adapter.observe(_resolution_request("sha256:" + "0" * 64))).composite_state
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await adapter.commit(
+            _resolution_request(composite), _context(AuthorityOperation.RESOLVE_CONFLICT)
+        )
+
+    assert caught.value.category == "provider_conflict"
+    assert "recover-modules" not in io.actions
+
+
+async def test_resolve_conflict_refuses_a_state_other_than_the_acknowledged_one() -> None:
+    io = _FakeIO(
+        _metadata("target-defined"), observed=_observed("sha256:" + "7" * 64, SOURCE_MODULES)
+    )
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await _adapter(io).commit(
+            _resolution_request("sha256:" + "0" * 64),
+            _context(AuthorityOperation.RESOLVE_CONFLICT),
+        )
+
+    assert caught.value.category == "provider_conflict"
+    assert not {"recover-modules", "define-source", "restore-power"} & set(io.actions)
 
 
 async def test_bookkeeping_operations_mutate_nothing() -> None:
@@ -1941,6 +2050,117 @@ async def test_cleanup_finalization_failure_publishes_reopened_private_receipt(
     assert len(observations) == 1
     assert isinstance(observations[0], RecoveryObjectObservation)
     assert observations[0].binding.operation_identity == mutation.operation_identity
+
+
+async def test_cleanup_inventory_follows_the_adopted_proof_on_a_retry() -> None:
+    """A retry that adopted the earlier cleanup inventories the receipt it left (#3471)."""
+    io = _FakeIO(_metadata("recovered"))
+    io.finalize_error = OSError("private receipt finalization interrupted")
+    adapter = _adapter(io)
+    ran = _cleanup_mutation("cleanup-1")
+    await adapter.commit(ran, _context(AuthorityOperation.CLEANUP, operation_identity="cleanup-1"))
+    retry = _cleanup_mutation("cleanup-2")
+
+    (observed,) = await adapter.cleanup_quarantine_inventory(
+        retry, _context(AuthorityOperation.CLEANUP, operation_identity="cleanup-1")
+    )
+
+    assert observed.binding.operation_identity == "cleanup-1"
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await adapter.cleanup_quarantine_inventory(
+            retry, _context(AuthorityOperation.CLEANUP, operation_identity="cleanup-2")
+        )
+    other_attempt = _context(AuthorityOperation.CLEANUP, operation_identity="cleanup-1")
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await adapter.cleanup_quarantine_inventory(
+            retry, other_attempt.model_copy(update={"attempt_id": uuid4()})
+        )
+
+
+class _FinalizeFault:
+    """Aborts the next `before-finalize` checkpoint, as an operator abort does."""
+
+    def __init__(self) -> None:
+        self.armed = False
+
+    async def checkpoint(
+        self, system_id: UUID, run_id: UUID, operation: AuthorityOperation, checkpoint: str
+    ) -> None:
+        del system_id, run_id, operation
+        if checkpoint == "before-finalize" and self.armed:
+            self.armed = False
+            raise ProofBarrierAbort("aborted")
+
+
+@pytest.mark.parametrize("interrupted_retries", [0, 1])
+async def test_an_adopted_release_cleanup_finalizes_once_and_leaves_no_pending_point(
+    tmp_path: Path, interrupted_retries: int
+) -> None:
+    """The pending point is keyed by the identity that ran, so an adopted retry pops it (#3490)."""
+    io = _FakeIO(_metadata("recovered"))
+    peer = AuthenticatedPeer(uuid4())
+    root = _cleanup_takeover().model_copy(update={"operation": AuthorityOperation.RELEASE})
+    repository = _Repository(peer, root)
+    adapter = _adapter(io)
+    fault = _FinalizeFault()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+        proof_checkpoint=fault,
+    )
+    await service.acknowledge_takeover(peer, root)
+    repository.current = True
+    first = _cleanup_mutation("release-cleanup-1")
+    fault.armed = True
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, first)
+    assert len(adapter._pending_cleanup_finalization) == 1
+
+    last_generation = root.generation + 1 + interrupted_retries
+    for generation in range(root.generation + 1, last_generation + 1):
+        successor = root.model_copy(
+            update={
+                "authority_id": uuid4(),
+                "generation": generation,
+                "operation_identity": f"takeover-{generation}",
+            }
+        )
+        repository.allocating_request = successor
+        repository.current = False
+        await service.acknowledge_takeover(peer, successor)
+        repository.request = successor
+        repository.current = True
+        retry = first.model_copy(
+            update={
+                "authority_id": successor.authority_id,
+                "generation": generation,
+                "attempt_id": uuid4(),
+                "operation_identity": f"release-cleanup-{generation}",
+            }
+        )
+        fault.armed = generation < last_generation
+        if fault.armed:
+            with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+                await service.execute_mutation(peer, retry)
+        else:
+            await service.execute_mutation(peer, retry)
+
+    assert io.actions.count("cleanup") == 1
+    assert io.actions.count("finalize") == 1
+    assert io.finalized_proof is not None
+    assert io.finalized_proof.operation_id == first.operation_identity
+    assert adapter._pending_cleanup_finalization == {}
+
+
+def test_pending_cleanup_points_are_bounded() -> None:
+    adapter = _adapter(_FakeIO(_metadata("recovered")))
+    point = _point(_metadata("recovered"))
+    for index in range(adapter_module._MAX_ADMITTED_LANES + 5):
+        adapter._remember_cleanup_point(f"cleanup-{index}", point)
+
+    assert len(adapter._pending_cleanup_finalization) == adapter_module._MAX_ADMITTED_LANES
+    assert "cleanup-0" not in adapter._pending_cleanup_finalization
 
 
 async def test_a_teardown_commit_finalizes_the_tombstone(tmp_path: Path) -> None:

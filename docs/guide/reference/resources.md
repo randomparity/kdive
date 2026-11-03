@@ -55,6 +55,10 @@ section. Pin a portable ``x86-64-vN`` rung for a deterministic reproducer. A pin
 non-booting System — admission validates only that the host can deliver the model, not that
 the image can run on it.
 
+``data.supported_capture_methods`` is the provider-wide set across every guest
+architecture the provider can host; it is not a given System's set or a readiness claim.
+Read ``systems.get``'s ``data.supported_capture_methods`` for a System's own architecture.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `resource_id` | string | yes | The Resource UUID to describe. |

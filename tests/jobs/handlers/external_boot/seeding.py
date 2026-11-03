@@ -19,6 +19,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from kdive.domain.external_boot_activation import ExternalBootReleaseEvidenceV1
 from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
@@ -210,6 +211,72 @@ async def seed_case(  # noqa: PLR0913 - a row set, not a behaviour; every argume
     return case
 
 
+async def insert_release_authority(
+    seed: psycopg.AsyncConnection,
+    vehicle: Vehicle,
+    case: SeededCase,
+    *,
+    generation: int,
+    state: str,
+    acknowledged: bool = True,
+    provider_kind: str = PROVIDER_KIND,
+    authority_instance: str = AUTHORITY_INSTANCE,
+) -> tuple[UUID, str, str]:
+    """Insert one release authority generation; return its id and derived cleanup binding."""
+    authority_id = uuid4()
+    root_identity = "sha256:" + str(generation) * 64
+    root_digest = "sha256:" + "b" * 64
+    superseded = "now()" if state == "superseded" else "NULL"
+    acknowledged_at = "now()" if acknowledged else "NULL"
+    await seed.execute(
+        "INSERT INTO external_boot_authorities "
+        "(id, system_id, allocation_id, activation_id, run_id, plan_identity, job_id, "
+        "job_attempt, purpose, provider_kind, authority_instance, worker_incarnation, "
+        "operation, operation_identity, operation_digest, generation, state, "
+        f"acknowledged_at, superseded_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,1,'release',%s,%s,"
+        f"%s,'release',%s,%s,%s,%s,{acknowledged_at},{superseded})",
+        (
+            authority_id,
+            vehicle.system_id,
+            case.allocation_id,
+            vehicle.activation_id,
+            vehicle.run_id,
+            vehicle.plan_identity,
+            case.job_id,
+            provider_kind,
+            authority_instance,
+            case.worker_incarnation,
+            root_identity,
+            root_digest,
+            generation,
+            state,
+        ),
+    )
+    root = {
+        "authority_id": str(authority_id),
+        "generation": generation,
+        "system_id": str(vehicle.system_id),
+        "activation_id": str(vehicle.activation_id),
+        "run_id": str(vehicle.run_id),
+        "plan_identity": vehicle.plan_identity,
+        "provider_kind": provider_kind,
+        "authority_instance": authority_instance,
+        "worker_incarnation": case.worker_incarnation,
+        "root_operation_identity": root_identity,
+        "root_operation_digest": root_digest,
+    }
+    row = await (
+        await seed.execute(
+            "SELECT operation_identity, operation_digest "
+            "FROM derive_external_boot_release_phase_binding(%s, 'cleanup')",
+            (Jsonb(root),),
+        )
+    ).fetchone()
+    assert row is not None
+    return authority_id, row[0], row[1]
+
+
 RESERVED_BYTES = 4096
 
 
@@ -275,7 +342,7 @@ async def _seed_store_rows(
                 store_identity(vehicle),
                 owner_key(vehicle),
                 RESERVED_BYTES,
-                _digest(f"release/{vehicle.activation_id}"),
+                ExternalBootReleaseEvidenceV1.model_validate(evidence).identity,
                 Jsonb(evidence),
             ),
         )

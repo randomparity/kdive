@@ -27,7 +27,7 @@ from kdive.cli.commands.generated_args import (
     required_generated_arg,
 )
 from kdive.cli.commands.mutations import run_mutating_tool
-from kdive.cli.commands.reads import collection_rows, fetch_collection_envelope
+from kdive.cli.commands.reads import collection_rows, fetch_collection_envelope, list_request
 from kdive.cli.errors import exit_code_for_envelope
 from kdive.cli.render import emit, render
 
@@ -35,12 +35,13 @@ from kdive.cli.render import emit, render
 async def images_list(args: argparse.Namespace) -> int:
     """List catalog images; ``--scope public_baseline`` narrows to the baseline set (ADR-0465).
 
-    An omitted ``--scope`` sends no ``request`` at all, leaving the server's ``visible`` default
-    authoritative rather than restating it here. An unrecognized value is refused by argument
-    parsing: the flag's ``choices`` are the tool schema's own enum (ADR-0469).
+    With no ``--scope``, ``--limit`` or ``--cursor`` the call sends no ``request`` at all, leaving
+    the server's defaults (``visible``, its page size) authoritative rather than restating them.
+    An unrecognized value is refused by argument parsing: the flag's ``choices`` are the tool
+    schema's own enum (ADR-0469).
     """
-    scope = optional_generated_arg(args, "scope", str)
-    arguments: dict[str, object] = {} if scope is None else {"request": {"scope": scope}}
+    request = list_request(args, "scope")
+    arguments: dict[str, object] = {"request": request} if request else {}
     envelope = await fetch_collection_envelope("images.list", arguments)
     columns = ["id", "name", "arch", "visibility", "owner", "state"]
     emit(envelope, lambda: render(collection_rows(envelope), columns=columns), as_json=args.json)

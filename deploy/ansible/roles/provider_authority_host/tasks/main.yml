@@ -27,6 +27,15 @@
       ansible.builtin.include_tasks: install.yml
       when: provider_authority_host_enabled | bool
 
+    - name: Converge the proof-only inventory observer
+      ansible.builtin.include_tasks: inventory_observer.yml
+      vars:
+        inventory_observer_enabled: "{{ provider_authority_host_inventory_observer_enabled }}"
+        inventory_observer_source_root: "{{ provider_authority_host_source_root }}"
+        inventory_observer_uv_bin: "{{ provider_authority_host_uv_bin }}"
+        inventory_observer_authority_enabled: "{{ provider_authority_host_enabled }}"
+        inventory_observer_local_mutation_enabled: "{{ provider_authority_host_local_mutation_enabled }}"
+
     - name: Remove disabled production authority execution material
       ansible.builtin.include_tasks: disable.yml
       when: not provider_authority_host_enabled | bool

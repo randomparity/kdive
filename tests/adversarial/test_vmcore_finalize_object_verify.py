@@ -26,6 +26,7 @@ from kdive.artifacts.storage import (
     VersionBatch,
     VersionPage,
 )
+from kdive.artifacts.vmcore_retention import capture_metadata, published_vmcore
 from kdive.db.repositories import RUNS
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -38,9 +39,18 @@ from kdive.providers.ports.retrieve import CaptureOutput
 from kdive.reconciler.cleanup.uploads.upload_orphans import repair_leaked_upload_objects
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.systems_support import provider_resolver
+from tests.support.worker_fence import dequeue_as_current_worker
 
 _AUTH = Authorizing(principal="alice", agent_session="s", project="proj")
 _METHOD = CaptureMethod.HOST_DUMP
+_EXECUTION = UUID(int=1)
+
+
+@pytest.fixture(autouse=True)
+def fixed_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("kdive.artifacts.vmcore_retention.uuid4", lambda: _EXECUTION)
+
+
 _GRACE = timedelta(hours=1)
 _NO_TTL = timedelta(0)
 _RAW_ETAG = "etag-of-the-captured-core"
@@ -99,6 +109,10 @@ class _VerifyStore:
             etag=etag,
             last_modified=datetime.now(UTC) - age,
             version_id="test-version",
+            metadata=capture_metadata(_EXECUTION),
+            sensitivity=Sensitivity.REDACTED
+            if key.endswith("-redacted")
+            else Sensitivity.SENSITIVE,
         )
 
     def list_prefix(self, prefix: str) -> list[str]:
@@ -198,13 +212,16 @@ class _FakeRetriever:
         self._run_id = run_id
         self.calls = 0
 
-    def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
+    def capture(
+        self, system_id: UUID, run_id: UUID, method: CaptureMethod, *, execution_id: UUID
+    ) -> CaptureOutput:
+        assert execution_id == _EXECUTION
         self.calls += 1
         return _capture_output(self._run_id, method)
 
 
 def _raw_key(run_id: str, method: CaptureMethod = _METHOD) -> str:
-    return f"local/runs/{run_id}/vmcore-{method.value}"
+    return f"local/runs/{run_id}/vmcore-{method.value}-{_EXECUTION}"
 
 
 def _redacted_key(run_id: str, method: CaptureMethod = _METHOD) -> str:
@@ -271,6 +288,19 @@ async def _audit_count(pool: AsyncConnectionPool, run_id: str) -> int:
     return int(row["n"])
 
 
+async def _claim(conn, job: Job) -> Job:
+    from kdive.db.repositories import JOBS
+
+    async with conn.transaction():
+        current = await JOBS.get(conn, job.id)
+        assert current is not None
+        if current.attempt:
+            return current
+        claimed = await dequeue_as_current_worker(conn, "verify-worker")
+        assert claimed is not None and claimed.id == job.id
+        return claimed
+
+
 async def _seeded_capture_job(pool: AsyncConnectionPool) -> tuple[str, Job]:
     sys_id = await seed_crashed_system(pool)
     run_id = await seed_run_on_system(pool, sys_id, debuginfo_ref=None, build_id=None)
@@ -330,7 +360,7 @@ def test_a_capture_whose_peer_version_survives_can_finalize(migrated_url: str) -
             async with pool.connection() as conn:
                 result = await vmcore_plane.capture_handler(
                     conn,
-                    job,
+                    await _claim(conn, job),
                     resolver=provider_resolver(retriever=retriever),
                     artifact_store=store,
                 )
@@ -359,7 +389,7 @@ def test_an_object_replaced_since_the_capture_commits_no_row(migrated_url: str) 
                 with pytest.raises(CategorizedError) as caught:
                     await vmcore_plane.capture_handler(
                         conn,
-                        job,
+                        await _claim(conn, job),
                         resolver=provider_resolver(retriever=_FakeRetriever(run_id)),
                         artifact_store=store,
                     )
@@ -389,7 +419,7 @@ def test_the_redacted_sibling_is_verified_too(migrated_url: str) -> None:
                 with pytest.raises(CategorizedError) as caught:
                     await vmcore_plane.capture_handler(
                         conn,
-                        job,
+                        await _claim(conn, job),
                         resolver=provider_resolver(retriever=_FakeRetriever(run_id)),
                         artifact_store=store,
                     )
@@ -413,7 +443,7 @@ def test_a_capture_whose_objects_are_intact_still_commits(migrated_url: str) -> 
             async with pool.connection() as conn:
                 ref = await vmcore_plane.capture_handler(
                     conn,
-                    job,
+                    await _claim(conn, job),
                     resolver=provider_resolver(retriever=_FakeRetriever(run_id)),
                     artifact_store=store,
                 )
@@ -444,14 +474,14 @@ def test_the_idempotent_replay_needs_no_verify(migrated_url: str) -> None:
             resolver = provider_resolver(retriever=_FakeRetriever(run_id))
             async with pool.connection() as conn:
                 first = await vmcore_plane.capture_handler(
-                    conn, job, resolver=resolver, artifact_store=store
+                    conn, await _claim(conn, job), resolver=resolver, artifact_store=store
                 )
             store.headed_keys.clear()
             # Simulate out-of-band loss: the object is gone while the row still references it.
             store.remove_object_for_test(_raw_key(run_id))
             async with pool.connection() as conn:
                 replay = await vmcore_plane.capture_handler(
-                    conn, job, resolver=resolver, artifact_store=store
+                    conn, await _claim(conn, job), resolver=resolver, artifact_store=store
                 )
             assert replay == first
             assert store.headed_keys == []
@@ -478,7 +508,7 @@ def test_finalize_s_own_replay_arm_verifies_nothing_either(migrated_url: str) ->
             async with pool.connection() as conn:
                 expected = await vmcore_plane.capture_handler(
                     conn,
-                    job,
+                    await _claim(conn, job),
                     resolver=provider_resolver(retriever=_FakeRetriever(run_id)),
                     artifact_store=store,
                 )
@@ -486,13 +516,16 @@ def test_finalize_s_own_replay_arm_verifies_nothing_either(migrated_url: str) ->
             async with pool.connection() as conn:
                 run = await RUNS.get(conn, UUID(run_id))
                 assert run is not None
+                execution = await published_vmcore(conn, run.id)
+                assert execution is not None
                 replay = await vmcore_plane.finalize_capture(
                     conn,
-                    job,
+                    await _claim(conn, job),
                     run,
                     _METHOD,
                     _capture_output(run_id),
                     artifact_store=empty,
+                    execution=execution,
                 )
             assert replay == expected
             assert empty.headed_keys == []

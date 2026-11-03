@@ -1,41 +1,35 @@
-"""The ``kdive stage-volume`` operator command (ADR-0336).
+"""Exact-byte inspected remote staging (ADR-0336, ADR-0776).
 
-Places a locally-built qcow2 onto a remote-libvirt host as a base-image volume **and** captures the
-image's ``/boot/config-<ver>`` in the same step, so a remote ``staged`` image can offer its kernel
-config just like a published one. It is the remote counterpart to the local staged-path capture:
-remote has no build hook and kdive reaches the host only over ``qemu+tls``, so the operator running
-this command — while the built qcow2 is still local — is the only controllable capture moment.
-
-Order and failure semantics:
-
-1. Resolve the target ``[[image]]`` catalog row (a ``staged`` volume row). **Fail fast** if it is
-   absent — you cannot stage a volume for an image the catalog does not know; declare and reconcile
-   the ``[[image]]`` first.
-2. Probe ``/boot/config`` locally on the qcow2 (advisory — a probe miss just means no offer).
-3. Upload the qcow2 into the host's storage pool. **Fatal** — the volume must land.
-4. When a config was captured, upload it to the object store and set the row's
-   ``kernel_config_key`` (advisory — the volume already landed, so a capture/attach miss leaves the
-   image staged with no offer).
+Root inspection and digest persistence are mandatory after a fresh upload. Kernel-config
+capture/attachment remains advisory. A private self-contained qcow2 snapshot binds inspection,
+hash and upload to the same bytes; catalog facts describe stage-time identity only.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import shutil
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.provenance_probes import (
     DEFAULT_BOOT_ENTRIES_PROBE,
     DEFAULT_KERNEL_CONFIG_PROBE,
     BootEntriesProbeSeam,
     KernelConfigProbeSeam,
+    RootBootProbeSeam,
 )
 from kdive.images.rootfs.baseline import VMLINUZ_PREFIX, baseline_kernel_names
 
 _log = logging.getLogger(__name__)
+_CHUNK_BYTES = 1 << 20
+# Dirty, corrupt, compression and extended-L2 bits do not introduce external bytes.
+_SELF_CONTAINED_FEATURES = 0b11011
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +38,8 @@ class _TargetRow:
 
     row_id: UUID
     volume: str
+    state: str = "registered"
+    publication_attempt_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +50,8 @@ class StageVolumeDeps:
     capture_config: Callable[[Path], bytes | None]
     upload_volume: Callable[[str, Path], None]
     attach_config: Callable[[str, str, str, UUID, bytes], None]
+    inspect_root: RootBootProbeSeam
+    persist_root: Callable[[str, str, str, _TargetRow, str, dict[str, object]], None]
 
 
 def capture_kernel_config(
@@ -86,15 +84,76 @@ def capture_kernel_config(
         return None
 
 
-def stage_volume(provider: str, name: str, arch: str, qcow2: Path, deps: StageVolumeDeps) -> None:
-    """Resolve the row (fail-fast), capture the config, upload the volume, attach the config.
+def _snapshot_digest(source: Path, snapshot: Path) -> str:
+    """Copy with bounded memory and refuse external qcow2 bytes before inspection.
 
-    See the module docstring for the ordering and failure semantics. The volume upload is the only
-    fatal step; the config capture and attach are advisory.
+    Header offsets/features follow https://www.qemu.org/docs/master/interop/qcow2.html.
+    The inspector owns the remaining qcow2/filesystem validity checks.
+    """
+    try:
+        with source.open("rb") as incoming, snapshot.open("xb") as outgoing:
+            shutil.copyfileobj(incoming, outgoing, length=_CHUNK_BYTES)
+        snapshot.chmod(0o400)
+        with snapshot.open("rb") as handle:
+            header = handle.read(104)
+            version = int.from_bytes(header[4:8], "big")
+            features = int.from_bytes(header[72:80], "big") if version == 3 else 0
+            if (
+                header[:4] != b"QFI\xfb"
+                or version not in (2, 3)
+                or len(header) < (72 if version == 2 else 104)
+                or int.from_bytes(header[8:16], "big") != 0
+                or features & ~_SELF_CONTAINED_FEATURES
+            ):
+                raise CategorizedError(
+                    "stage-volume requires a self-contained qcow2 v2/v3 without backing or "
+                    "external data files; flatten the image locally and retry with a fresh volume",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                )
+            handle.seek(0)
+            digest = hashlib.sha256()
+            while chunk := handle.read(_CHUNK_BYTES):
+                digest.update(chunk)
+        return "sha256:" + digest.hexdigest()
+    except OSError as exc:
+        raise CategorizedError(
+            "stage-volume could not snapshot/hash the image; check source access and temporary "
+            "disk space for one qcow2 copy, then retry",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        ) from exc
+
+
+def stage_volume(provider: str, name: str, arch: str, qcow2: Path, deps: StageVolumeDeps) -> None:
+    """Inspect a private snapshot, fresh-upload it, then commit matching root facts.
+
+    Inspection/upload/root persistence failures are fatal; config remains advisory.
+    A post-upload persistence failure requires operator cleanup or a fresh target.
     """
     target = deps.find_row(provider, name, arch)
-    config = deps.capture_config(qcow2)
-    deps.upload_volume(target.volume, qcow2)
+    if arch != "x86_64" and arch != "ppc64le":
+        raise CategorizedError(
+            "stage-volume architecture must be x86_64 or ppc64le",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    with tempfile.TemporaryDirectory(prefix="kdive-stage-volume-") as directory:
+        snapshot = Path(directory) / "image.qcow2"
+        digest = _snapshot_digest(qcow2, snapshot)
+        root = deps.inspect_root(snapshot, arch, digest)
+        if (
+            root.architecture != arch
+            or root.authority != "stage-inspection"
+            or root.source.kind != "staged-image"
+            or root.source.identity != digest
+        ):
+            raise CategorizedError(
+                "stage-volume root inspection does not match the snapshot; rebuild and retry",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        config = deps.capture_config(snapshot)
+        deps.upload_volume(target.volume, snapshot)
+        deps.persist_root(
+            provider, name, arch, target, digest, root.model_dump(mode="json", by_alias=True)
+        )
     if config is None:
         _log.info("stage-volume: no kernel config captured for %s/%s; volume staged", name, arch)
         return

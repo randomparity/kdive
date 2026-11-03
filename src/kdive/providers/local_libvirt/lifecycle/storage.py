@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import os
+import secrets
 import shutil
 import stat
 import subprocess  # noqa: S404 - qemu-img uses fixed argv, no shell  # nosec B404
@@ -26,7 +28,11 @@ from kdive.providers.local_libvirt.lifecycle.host_tool_search import (
 # ``kdive.providers.local_libvirt`` (the provider-boundary guard).
 from kdive.providers.shared.runtime_paths import ROOTFS_DIR as ROOTFS_DIR
 from kdive.providers.shared.runtime_paths import UPLOADS_DIR as UPLOADS_DIR
-from kdive.providers.shared.runtime_paths import console_log_path, system_id_from_domain_name
+from kdive.providers.shared.runtime_paths import (
+    console_boot_marker_path,
+    console_log_path,
+    system_id_from_domain_name,
+)
 from kdive.providers.shared.runtime_paths import overlay_name as overlay_name
 from kdive.providers.shared.runtime_paths import overlay_path as overlay_path
 
@@ -35,6 +41,7 @@ _QEMU_IMG = "qemu-img"
 _QEMU_IMG_ERROR_TAIL_CHARS = 2000
 _BYTES_PER_GB = 1024**3
 _SHARED_LIBVIRT_FILE_MODE = 0o664
+_BOOT_MARKER_MODE = 0o644
 
 
 def ensure_shared_artifact_directory(path: Path) -> None:
@@ -375,6 +382,48 @@ def _prepare_console_log(path: Path) -> None:
         raise _console_identity_failure(path, type(io_err).__name__) from io_err
     finally:
         os.close(fd)
+    record_console_boot(path)
+
+
+def record_console_boot(log_path: Path) -> None:
+    """Write a fresh per-start nonce beside the just-truncated console log (#3254).
+
+    The log keeps one inode across boots (ADR-0576), so its ``os.stat`` identity cannot tell
+    one boot from the next; console rotation reads this nonce instead (ADR-0273 decision 4).
+    Every truncating start path calls this after its truncate, so a rotation that sees the
+    empty log under the old nonce resets on the shrink check with no prior-boot bytes. The
+    write is atomic (exclusive temp file, then rename) so a reader never sees a partial nonce.
+
+    Starts of one System are not serialized: a Run's boot power-cycles the domain without a
+    System fence (``jobs/handlers/runs/boot.py`` ``boot_handler``) while control power holds
+    the SYSTEM session lock (``jobs/handlers/control/control.py`` ``_run_fenced_power``), so
+    two starts can reach this together. Each call therefore writes its own uniquely named temp
+    file and both succeed; the marker is last-writer-wins. A worker that dies between create
+    and rename leaves one ``<id>.boot.<hex>.tmp`` behind, which nothing reads.
+
+    Raises:
+        CategorizedError: ``PROVISIONING_FAILURE`` naming the marker when it cannot be written.
+    """
+    marker = console_boot_marker_path(log_path)
+    temp = marker.with_name(f"{marker.name}.{secrets.token_hex(4)}.tmp")
+    nonce = secrets.token_hex(16).encode("ascii")
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, _BOOT_MARKER_MODE)
+        try:
+            os.fchmod(fd, _BOOT_MARKER_MODE)
+            if os.write(fd, nonce) != len(nonce):
+                raise OSError("short write")
+        finally:
+            os.close(fd)
+        os.replace(temp, marker)
+    except OSError as io_err:
+        with contextlib.suppress(OSError):
+            temp.unlink(missing_ok=True)
+        raise CategorizedError(
+            "cannot record the console boot marker the domain start requires",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={"path": str(marker), "reason": type(io_err).__name__},
+        ) from io_err
 
 
 def prepare_console_for_domain(domain_name: str) -> None:

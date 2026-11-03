@@ -34,6 +34,9 @@ from kdive.providers.external_boot_authority.host import (
     HostReadinessError,
     check_tls_health,
 )
+from kdive.providers.external_boot_authority.module_volume_sweep import (
+    ModuleVolumeSweepResponseV1,
+)
 from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
     AuthorityServiceError,
@@ -232,8 +235,9 @@ def _certificate(
     dns_name: str | None = None,
     valid: bool = True,
     valid_seconds: float = 300,
+    not_yet_valid: bool = False,
 ) -> x509.Certificate:
-    now = datetime.now(UTC)
+    now = datetime.now(UTC) + timedelta(minutes=5 if not_yet_valid else 0)
     builder = (
         x509.CertificateBuilder()
         .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, subject)]))
@@ -285,6 +289,8 @@ def _tls_material(
     client_valid: bool = True,
     ca_valid: bool = True,
     client_valid_seconds: float = 300,
+    server_not_yet_valid: bool = False,
+    client_not_yet_valid: bool = False,
 ) -> dict[str, Path]:
     ca_key = ec.generate_private_key(ec.SECP256R1())
     ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "authority test CA")])
@@ -356,6 +362,7 @@ def _tls_material(
         eku=server_eku,
         dns_name=server_name or authority_server_name(instance),
         valid=server_valid,
+        not_yet_valid=server_not_yet_valid,
     )
     client_key = ec.generate_private_key(ec.SECP256R1())
     client_ca_name = ca_name if trusted_client else foreign_name
@@ -368,6 +375,7 @@ def _tls_material(
         eku=client_eku,
         valid=client_valid,
         valid_seconds=client_valid_seconds,
+        not_yet_valid=client_not_yet_valid,
     )
 
     paths = {
@@ -885,7 +893,7 @@ def test_tls_health_rechecks_unchanged_client_certificate_expiry(tmp_path: Path)
             await check_tls_health(listener, config)
             fingerprint = hashlib.sha256(config.health_client_certificate.read_bytes()).digest()
             await asyncio.sleep(2.25)
-            with pytest.raises(HostReadinessError, match="tls-health: handshake-failed"):
+            with pytest.raises(HostReadinessError, match="tls-health: certificate-expired"):
                 await check_tls_health(listener, config)
             current = hashlib.sha256(config.health_client_certificate.read_bytes()).digest()
             assert current == fingerprint
@@ -1136,6 +1144,107 @@ def test_tls_health_redacts_unreadable_material(tmp_path: Path, network: bool) -
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("network", [False, True])
+@pytest.mark.parametrize(
+    ("material_options", "reason"),
+    [
+        ({"server_valid": False}, "certificate-expired"),
+        ({"server_not_yet_valid": True}, "certificate-not-yet-valid"),
+        ({"client_valid": False}, "certificate-expired"),
+        ({"client_not_yet_valid": True}, "certificate-not-yet-valid"),
+        ({"ca_valid": False}, "certificate-expired"),
+        ({"trusted_client": False}, "handshake-failed"),
+    ],
+)
+def test_tls_health_names_certificate_validity_failure(
+    tmp_path: Path, network: bool, material_options: dict[str, Any], reason: str
+) -> None:
+    async def run() -> None:
+        material = _tls_material(tmp_path, "authority-a", **material_options)
+        config = _config(tmp_path, material)
+
+        async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+            pytest.fail("TLS health never authenticates a worker")
+
+        listener = (
+            await _network_listener(config, authenticate)
+            if network
+            else await serve_authority_transport(config, authenticate)
+        )
+        await listener.start_serving()
+        try:
+            with pytest.raises(HostReadinessError) as raised:
+                await check_tls_health(listener, config)
+        finally:
+            await listener.close()
+        assert str(raised.value) == f"tls-health: {reason}"
+        assert raised.value.details == {"component": "tls-health", "reason": reason}
+        assert raised.value.__cause__ is None
+        assert raised.value.__suppress_context__ is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("verify_code", "reason"),
+    [
+        (9, "certificate-not-yet-valid"),
+        (10, "certificate-expired"),
+        (20, "handshake-failed"),
+    ],
+)
+def test_tls_failure_reason_maps_peer_verification_codes(
+    tmp_path: Path, verify_code: int, reason: str
+) -> None:
+    config = _config(tmp_path, _tls_material(tmp_path, "authority-a", client_valid=False))
+    error = ssl.SSLCertVerificationError()
+    error.verify_code = verify_code
+
+    assert host._tls_failure_reason(config, error) == reason
+
+
+def test_tls_failure_reason_ignores_unreadable_local_certificate(tmp_path: Path) -> None:
+    config = _config(tmp_path, _tls_material(tmp_path, "authority-a"))
+    config.health_client_certificate.unlink()
+
+    assert host._tls_failure_reason(config, OSError()) == "handshake-failed"
+
+    _write(config.health_client_certificate, b"not a certificate", 0o400)
+
+    assert host._tls_failure_reason(config, OSError()) == "handshake-failed"
+
+
+@pytest.mark.parametrize(
+    "material_options", [{"trusted_client": False}, {"server_name": "wrong.example"}]
+)
+def test_tls_health_ignores_expired_certificate_in_ca_bundle(
+    tmp_path: Path, material_options: dict[str, Any]
+) -> None:
+    async def run() -> None:
+        retired = tmp_path / "retired"
+        retired.mkdir()
+        retired_ca = _tls_material(retired, "authority-a", ca_valid=False)["server_ca"]
+        material = _tls_material(tmp_path, "authority-a", **material_options)
+        for name in ("server_ca", "worker_client_ca"):
+            bundle = material[name].read_bytes() + retired_ca.read_bytes()
+            material[name].unlink()
+            _write(material[name], bundle, 0o400)
+        config = _config(tmp_path, material)
+
+        async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+            pytest.fail("TLS health never authenticates a worker")
+
+        listener = await serve_authority_transport(config, authenticate)
+        await listener.start_serving()
+        try:
+            with pytest.raises(HostReadinessError, match="^tls-health: handshake-failed$"):
+                await check_tls_health(listener, config)
+        finally:
+            await listener.close()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("operation", ["acknowledge-takeover", "execute-mutation"])
 def test_existing_operation_envelopes_keep_canonical_bytes(operation: Any) -> None:
     request = _request()
@@ -1221,3 +1330,121 @@ def test_session_still_bounds_a_peer_that_never_sends_a_frame(
 
     assert writer.written == bytearray()
     assert writer.closed
+
+
+@pytest.mark.parametrize(
+    ("category", "wire"),
+    [("system_held", "system-held"), ("provider_conflict", "provider-conflict")],
+)
+def test_service_categories_cross_the_wire_as_closed_reasons(category: str, wire: str) -> None:
+    assert transport._service_category(category) == wire
+
+
+def _sweep_envelope(retained: list[dict[str, str]] | None = None) -> bytes:
+    return encode_request_envelope(
+        "sweep-module-volumes",
+        {
+            "candidates": [],
+            "phase": "sweep",
+            "retained": retained or [],
+            "version": "module-volume-sweep-v1",
+        },
+        "credential",
+    )
+
+
+def test_sweep_dispatch_authenticates_before_the_sweep_runs() -> None:
+    called = False
+
+    async def reject(_credential: SecretStr) -> AuthenticatedPeer:
+        raise ValueError
+
+    class Sweeper:
+        async def sweep_module_volumes(self, peer: object, request: object) -> object:
+            nonlocal called
+            called = True
+            raise AssertionError
+
+    async def exercise() -> None:
+        response = await transport._dispatch(
+            _sweep_envelope(), reject, None, None, cast(Any, Sweeper())
+        )
+        assert json.loads(response) == {"category": "unauthenticated", "status": "error"}
+
+    asyncio.run(exercise())
+    assert called is False
+
+
+def test_sweep_dispatch_hands_the_closed_request_to_the_sweeper() -> None:
+    seen: list[Any] = []
+
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class Sweeper:
+        async def sweep_module_volumes(self, peer: AuthenticatedPeer, request: Any) -> Any:
+            seen.append((peer, request))
+            return ModuleVolumeSweepResponseV1(removed=4)
+
+    key = {
+        "kind": "source.ext4",
+        "operation_nonce": "3" * 32,
+        "run_id": "00000000-0000-4000-8000-000000000002",
+        "system_id": "00000000-0000-4000-8000-000000000001",
+    }
+
+    async def exercise() -> bytes:
+        return await transport._dispatch(
+            _sweep_envelope([key]), authenticate, None, None, cast(Any, Sweeper())
+        )
+
+    response = asyncio.run(exercise())
+
+    assert json.loads(response) == {
+        "status": "ok",
+        "value": {"owned": [], "removed": 4, "version": "module-volume-sweep-v1"},
+    }
+    assert [item.model_dump(mode="json") for item in seen[0][1].retained] == [key]
+
+
+def test_sweep_dispatch_without_a_sweeper_is_not_configured() -> None:
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class NotASweeper:
+        pass
+
+    async def exercise() -> list[bytes]:
+        return [
+            await transport._dispatch(_sweep_envelope(), authenticate, None, None, None),
+            await transport._dispatch(
+                _sweep_envelope(), authenticate, None, None, cast(Any, NotASweeper())
+            ),
+        ]
+
+    for response in asyncio.run(exercise()):
+        assert json.loads(response) == {"category": "provider-not-configured", "status": "error"}
+
+
+def test_sweep_dispatch_hides_provider_failure_details() -> None:
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class Sweeper:
+        async def sweep_module_volumes(self, peer: object, request: object) -> object:
+            raise RuntimeError("/private/path leaked")
+
+    async def exercise() -> bytes:
+        return await transport._dispatch(
+            _sweep_envelope(), authenticate, None, None, cast(Any, Sweeper())
+        )
+
+    response = asyncio.run(exercise())
+
+    assert json.loads(response) == {"category": "provider-failure", "status": "error"}
+    assert b"private" not in response
+
+
+def test_sweep_envelope_rejects_a_malformed_request() -> None:
+    with pytest.raises(ValueError):
+        encode_request_envelope("sweep-module-volumes", {"retained": "x"}, "credential")

@@ -86,6 +86,9 @@ class _ContractIO:
         del authority, expected
         return _ContractContext(self)
 
+    def open_pinned(self, authority: OpaqueProviderRef, expected: object) -> _ContractContext:
+        return self.open(authority, expected)
+
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: object) -> None:
         del recovery, proof
 
@@ -157,10 +160,16 @@ class _ContractIO:
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation:
         return _OBSERVATION
 
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def recover_modules(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        del acknowledged
         self.record_phase(metadata, "module-restored")
 
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def define_source(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        del acknowledged
         self.record_phase(metadata, "source-restored")
 
     def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None:

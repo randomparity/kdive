@@ -159,6 +159,21 @@ def kernel_inputs(tree: Path, manifest: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def uploaded_kernel_inputs(tree: Path, manifest: dict[str, Any], upload: Path) -> dict[str, str]:
+    """The five kernel ``Context`` fields of a fixture upload whose evidence is ``upload``.
+
+    The build ID and effective config come from what the upload recorded, not the manifest.
+    """
+    record = json.loads((upload / "upload.json").read_text(encoding="utf-8"))
+    return {
+        "kernel_sha256": boot_kernel_sha256(tree, manifest["arch"]),
+        "kernel_build_id": record["build_id"],
+        "kernel_source_sha": manifest["source"]["commit"],
+        "kernel_config_sha256": file_sha256(upload / "effective_config"),
+        "compiler_id": identity(manifest["toolchain"]),
+    }
+
+
 def gnu_build_id(notes: bytes) -> str | None:
     """The GNU build ID in a little-endian ELF note section such as ``/sys/kernel/notes``."""
     offset = 0
@@ -242,8 +257,10 @@ async def deep_body(
     tmp: Path,
     installed_kernel: InstalledKernel,
     step: StepCall | None = None,
-) -> None:
+) -> str:
     """Upload → install and boot → installed kernel → reconnect → build identity → module load.
+
+    Returns the id of the Run it booted; its investigation is closed on return.
 
     Provider-neutral: ``installed_kernel`` observes the kernel the install put in place, after the
     reboot into it; a host path it returns joins ``owned``, which the caller's cleanup proves
@@ -259,6 +276,7 @@ async def deep_body(
     investigation = ok(
         await scalar(op, "investigations.open", project=project, title="deep lifecycle"), "open"
     ).object_id
+    run_id = ""
     try:
         upload = tmp / "upload"
         run_id = ok(
@@ -295,6 +313,7 @@ async def deep_body(
             summary="deep lifecycle finished",
         )
         assert closed.status == "closed", f"investigation not closed: {closed.status}"
+    return run_id
 
 
 async def _upload(

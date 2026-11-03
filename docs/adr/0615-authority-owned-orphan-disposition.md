@@ -47,3 +47,29 @@ does not grant direct provider authority to the worker.
   be outside the authority boundary.
 - **Hold a database transaction around provider I/O.** Provider work may block and must not retain
   database locks.
+
+## Amendment (2026-10-29, #3437): server admission routes remote-libvirt by the fixed authority route
+
+`ops.resolve_recovery_orphan` admits a row when the server runtime composes a recovery-object port
+or when the row's `authority_instance` equals the server's fixed authority route, the rule release
+and conflict admission already apply, with the row's `provider_kind` matching the bound runtime.
+The rule is provider-agnostic: the remote-libvirt authority host builds the same
+`RecoveryOrphanAuthorityService`, so it owns remote disposition exactly as for local-libvirt. No
+remote recovery-object port is composed on the server; that is the restricted provider port this
+record rejects. Before the amendment a remote orphan was refused with
+`recovery_provider_not_configured` because only local-libvirt and fault-inject composed a port.
+
+## Amendment (2026-10-30, #3439): the disposition job routes by the System's binding
+
+Admission (#3437) accepts a remote-libvirt row, but the worker sent every disposition job through
+one fixed local authority route, so the remote authority never saw the request. The job now
+resolves the System's provider binding from the payload's `system_id` and sends through that
+binding's authority sender, the per-binding selection release, conflict and install jobs already
+use. A binding with no worker route, or a sender-less one, is a terminal configuration error. The
+local-libvirt route is the same sender as before.
+
+The worker cannot read the rows (it holds no table access, by design), so it cannot compare the
+route to the rows' `authority_instance`. The serving authority host does: when it resolves the
+selection, and before any provider I/O, it refuses the whole request with `configuration_error`
+if any selected row's `authority_instance` is not the host's own configured instance. The refusal
+has no side effects, and covers both local and remote hosts. No payload, wire or schema change.

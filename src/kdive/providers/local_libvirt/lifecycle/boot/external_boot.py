@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -1020,8 +1021,12 @@ class LocalExternalBootOperation(Protocol):
     def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def observe_running(self, metadata: LocalRecoveryMetadataV1) -> RunningKernelObservation: ...
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None: ...
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None: ...
+    def recover_modules(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None: ...
+    def define_source(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None: ...
     def restore_power(self, metadata: LocalRecoveryMetadataV1) -> None: ...
     def record_phase(
         self, metadata: LocalRecoveryMetadataV1, phase: RecoveryPhase
@@ -1058,6 +1063,12 @@ class LocalExternalBootIO(Protocol):
         *,
         local_timing: LocalExternalBootTimingV1 | None = None,
     ) -> AbstractContextManager[LocalExternalBootOperation]: ...
+    def open_pinned(
+        self, authority: OpaqueProviderRef, expected: ExpectedOperationOwnership
+    ) -> AbstractContextManager[None]:
+        """Hold the operation lease for a store-only call: no domain, overlay or connection."""
+        ...
+
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None: ...
     def record_cleanup_quarantine(
         self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
@@ -1101,6 +1112,13 @@ class LocalSystemTeardownIO(Protocol):
     def system_teardown_recovery_is_absent(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
     ) -> bool: ...
+    def discard_system_teardown_recovery(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None: ...
 
 
 class LocalExternalBootMaterializer(Protocol):
@@ -1710,6 +1728,22 @@ class RealLocalExternalBootIO:
         else:
             session.close()
 
+    @contextmanager
+    def open_pinned(
+        self, authority: OpaqueProviderRef, expected: ExpectedOperationOwnership
+    ) -> Iterator[None]:
+        pin = self._session_factory.open_pinned(self._resolve_operation_lease(authority), expected)
+        try:
+            yield
+        except BaseException as primary:
+            try:
+                pin.close()
+            except BaseException as close_error:
+                primary.add_note(f"cleanup failed: {close_error!r}")
+            raise
+        else:
+            pin.close()
+
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: FinalizeCleanupProof) -> None:
         with RecoveryMetadataStore(self._recovery_root) as store:
             store.finalize_tombstone(recovery.recovery_ref, recovery, proof)
@@ -1764,7 +1798,9 @@ class RealLocalExternalBootIO:
             inspection = session.inspect()
             with RecoveryMetadataStore(self._recovery_root) as store:
                 store.begin_system_teardown(intent, inspection)
-                recovery_absent = store.exact_recovery_absence(intent.binding)
+                recovery_absent = store.exact_recovery_absence(
+                    intent.binding, adopted_receipt_absent=True
+                )
             return _system_teardown_facts(
                 intent, inspection, recovery_absent, None, intent.reservation
             )
@@ -1789,7 +1825,9 @@ class RealLocalExternalBootIO:
                     # ADR-0620 (#2921): this generation never reached `begin`; the earlier
                     # generation's record is not its own, so it observes as if absent.
                     retained = None
-                recovery_absent = store.exact_recovery_absence(anchor.binding)
+                recovery_absent = store.exact_recovery_absence(
+                    anchor.binding, adopted_receipt_absent=True
+                )
             completed_at = (
                 retained.completed_at
                 if retained is not None and retained.phase == "complete"
@@ -1839,7 +1877,57 @@ class RealLocalExternalBootIO:
             self._open_system_teardown(intent, authority),
             RecoveryMetadataStore(self._recovery_root) as store,
         ):
-            return store.exact_recovery_absence(intent.binding)
+            return store.exact_recovery_absence(intent.binding, adopted_receipt_absent=True)
+
+    def discard_system_teardown_recovery(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None:
+        """Settle a retained recovery point without recovering it (#3341).
+
+        The domain is destroyed next, so restoring the guest is pointless, and a conflicted
+        activation cannot be restored: its definition matches neither source nor target. This
+        needs the pinned teardown lane (so a foreign definition still refuses in the ownership
+        check) but not a domain, and it accepts any recovery phase.
+        """
+        with (
+            self._open_system_teardown(intent, authority) as session,
+            RecoveryMetadataStore(self._recovery_root) as store,
+        ):
+            session.inspect()
+            reference = recovery.recovery_ref
+            if (
+                proof.binding != recovery.binding
+                or proof.point_digest != LocalLibvirtExternalBoot.point_digest(recovery)
+            ):
+                raise ValueError("external-boot cleanup proof does not match recovery point")
+            standing = store.read_cleanup_quarantine(recovery.binding)
+            if standing is not None and standing.managed:
+                # An adopted receipt is the operator's; teardown keeps it (ADR-0787, #3467).
+                if standing.tombstone.recovery_point != recovery:
+                    raise ValueError("adopted cleanup receipt does not match recovery point")
+                store.drop_tombstone_residue(recovery)
+                return
+            if not store.cleanup_complete(reference, recovery):
+                metadata = store.reopen(reference, recovery.binding)
+                if _recovery_point_of(metadata, reference) != recovery:
+                    raise ValueError(
+                        "external-boot recovery metadata does not match recovery point"
+                    )
+                session.cleanup_payloads(metadata)
+                store.publish_tombstone(
+                    reference,
+                    recovery.binding,
+                    metadata,
+                    LocalLibvirtExternalBoot.point_digest(recovery),
+                    require_recovered=False,
+                )
+            if standing is None:
+                store.record_cleanup_quarantine(recovery, proof)
+            store.finalize_tombstone(reference, recovery, proof)
 
     def teardown_system(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
@@ -1848,7 +1936,7 @@ class RealLocalExternalBootIO:
             inspection = session.inspect()
             with RecoveryMetadataStore(self._recovery_root) as store:
                 record = store.begin_system_teardown(intent, inspection)
-                if not store.exact_recovery_absence(intent.binding):
+                if not store.exact_recovery_absence(intent.binding, adopted_receipt_absent=True):
                     return _system_teardown_facts(
                         intent, inspection, False, None, intent.reservation
                     )
@@ -1865,7 +1953,9 @@ class RealLocalExternalBootIO:
                     record = store.record_system_teardown_phase(record, phase)
             final = session.inspect()
             with RecoveryMetadataStore(self._recovery_root) as store:
-                recovery_absent = store.exact_recovery_absence(intent.binding)
+                recovery_absent = store.exact_recovery_absence(
+                    intent.binding, adopted_receipt_absent=True
+                )
                 physically_absent = (
                     final.domain_absent
                     and final.overlay_absent
@@ -1901,6 +1991,19 @@ class RealLocalExternalBootIO:
             raise
         else:
             session.close()
+
+
+def _recovery_point_of(
+    metadata: LocalRecoveryMetadataV1, reference: OpaqueProviderRef
+) -> RecoveryPoint:
+    return RecoveryPoint(
+        binding=metadata.binding,
+        plan_identity=metadata.plan_identity,
+        materialization_identity=metadata.materialization_identity,
+        recovery_ref=reference,
+        source_state=metadata.source_state,
+        target_state=metadata.target_state,
+    )
 
 
 def _system_teardown_facts(
@@ -2162,12 +2265,24 @@ class _RealLocalExternalBootOperation:
             raise ValueError("external-boot running kernel does not match recovery metadata")
         return observed
 
-    def recover_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def recover_modules(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
         if metadata.phase == "pre-stop-intent":
             self._settle_unpublished_modules(metadata)
             return
-        self._stop_for_recovery(metadata)
-        target = _present_component(metadata.target_state.modules, "target module state")
+        self._stop_for_recovery(metadata, acknowledged)
+        # The tree being replaced is the recorded target, or the acknowledged third tree: its
+        # manifest is the compare-and-swap expectation the live layout is checked against.
+        replaced = (
+            metadata.target_state.modules
+            if acknowledged is None or acknowledged.modules is None
+            else acknowledged.modules
+        )
+        if acknowledged is not None and replaced == metadata.source_state.modules:
+            self._confirm_modules_restored(metadata, replaced)
+            return
+        target = _layout_component(replaced)
         desired = _layout_component(metadata.source_state.modules)
         with self._session.guest() as opened_guest:
             guest = cast(_GuestfsTreeHandle, opened_guest)
@@ -2221,13 +2336,25 @@ class _RealLocalExternalBootOperation:
                     publication.guest_sync()
                     publication.record_phase(PublicationPhase.MOVE_READY)
             if isinstance(metadata.capture, AbsentModuleCapture):
-                self._finish_absence_publication(publication, prior=target)
+                self._finish_absence_publication(
+                    publication, prior=_present_component(replaced, "replaced module state")
+                )
             else:
                 assert desired is not None
                 self._finish_present_publication(publication, prior=target, desired=desired)
             completed = publication.metadata
             observed = self._observe_modules(opened_guest, completed)
         self.record_phase(completed, "module-restored", inactive_modules=observed)
+
+    def _confirm_modules_restored(
+        self, metadata: LocalRecoveryMetadataV1, expected: ComponentState
+    ) -> None:
+        """Record the module tree as restored when the live tree is already the source."""
+        with self._session.guest() as opened_guest:
+            observed = self._observe_modules(opened_guest, metadata)
+        if observed != expected:
+            raise ValueError("external-boot module tree changed since the acknowledged observation")
+        self.record_phase(metadata, "module-restored", inactive_modules=observed)
 
     def _settle_unpublished_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
         """ADR-0707: an activation that never published keeps only its own staging name."""
@@ -2252,10 +2379,12 @@ class _RealLocalExternalBootOperation:
             observed = self._observe_modules(opened_guest, metadata)
         self.record_phase(metadata, "module-restored", inactive_modules=observed)
 
-    def define_source(self, metadata: LocalRecoveryMetadataV1) -> None:
+    def define_source(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
         while metadata.phase == "module-restored":
-            xml, active = self._host_state(metadata)
-            if xml == "target" and not active:
+            xml, active = self._host_state(metadata, acknowledged)
+            if xml in {"target", "acknowledged"} and not active:
                 self._session.define_xml(metadata.source_xml)
                 continue
             if xml == "source" and not active:
@@ -2448,31 +2577,39 @@ class _RealLocalExternalBootOperation:
             raise ValueError("external-boot completed module absence layout conflicts")
 
     def _host_state(
-        self, metadata: LocalRecoveryMetadataV1
-    ) -> tuple[Literal["source", "target"], bool]:
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> tuple[Literal["source", "target", "acknowledged"], bool]:
+        """Classify the domain definition; a third one only when it is the acknowledged one."""
         inspection = self._session.inspect_closed(projected=True)
         if inspection.xml == metadata.source_xml.encode():
             return "source", inspection.active
         if _same_domain_definition(inspection.xml.decode(), metadata.target_xml):
             return "target", inspection.active
+        if acknowledged is not None and acknowledged.definition == inspection.source_boot_identity:
+            return "acknowledged", inspection.active
         raise ValueError("external-boot observed domain XML does not match recovery metadata")
 
-    def _stop_for_recovery(self, metadata: LocalRecoveryMetadataV1) -> None:
-        xml, active = self._host_state(metadata)
-        if metadata.phase == "target-defined" and xml != "target":
+    def _stop_for_recovery(
+        self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
+    ) -> None:
+        xml, active = self._host_state(metadata, acknowledged)
+        if metadata.phase == "target-defined" and xml == "source":
             raise ValueError("external-boot recovery expected the target domain XML")
-        if active and xml != "target":
+        if active and xml == "source":
             raise ValueError("external-boot refuses to stop an unexpected running domain")
         if not active:
             self._session.require_inactive()
             return
         # ADR-0681: only a target that reached `target-defined` stops cleanly, and only on KVM.
-        mode: StopMode = "clean-on-kvm" if metadata.phase == "target-defined" else "destroy"
+        # An acknowledged third definition is not that target, so it is destroyed.
+        mode: StopMode = (
+            "clean-on-kvm" if metadata.phase == "target-defined" and xml == "target" else "destroy"
+        )
         try:
             self._session.stop_and_require_inactive(mode=mode)
         except Exception as primary:
             try:
-                after = self._host_state(metadata)
+                after = self._host_state(metadata, acknowledged)
             except Exception as observation_error:
                 primary.add_note(f"post-stop host-state observation failed: {observation_error!r}")
                 raise primary from None
@@ -2480,7 +2617,7 @@ class _RealLocalExternalBootOperation:
                 self._session.require_inactive()
                 return
             raise
-        if self._host_state(metadata) != (xml, False):
+        if self._host_state(metadata, acknowledged) != (xml, False):
             raise ValueError("external-boot stop did not preserve exact XML and inactivity")
 
     def _require_readiness(self) -> None:
@@ -2683,6 +2820,17 @@ class LocalLibvirtExternalBoot:
             intent, authority
         )
 
+    def discard_system_teardown_recovery(
+        self,
+        intent: LocalSystemTeardownIntentV1,
+        recovery: RecoveryPoint,
+        proof: FinalizeCleanupProof,
+        authority: OpaqueProviderRef,
+    ) -> None:
+        cast(LocalSystemTeardownIO, self._io).discard_system_teardown_recovery(
+            intent, recovery, proof, authority
+        )
+
     @staticmethod
     def point_digest(recovery: RecoveryPoint) -> str:
         return (
@@ -2832,8 +2980,14 @@ class LocalLibvirtExternalBoot:
         *,
         local_timing: LocalExternalBootTimingV1 | None = None,
         restore_power: bool = True,
+        acknowledged: LocalObservedState | None = None,
     ) -> None:
         """Resume recovery to ``recovered``, restoring prior power unless told not to.
+
+        ``acknowledged`` is the conflict observation an administrator acknowledged
+        (ADR-0583): a third definition or module tree is replaced by the recorded source only
+        when it is exactly that observation, and each write re-checks its own component. Without
+        it a third identity is refused.
 
         System teardown passes ``restore_power=False`` (#2898): it destroys the domain next,
         so a start would only boot a guest it is about to kill. ``define_source`` records
@@ -2868,10 +3022,16 @@ class LocalLibvirtExternalBoot:
             }:
                 raise ProviderRecoveryRefusal("external-boot recovery phase is not resumable")
             if metadata.phase not in {"source-restored"}:
-                operation.recover_modules(metadata)
+                if acknowledged is None:
+                    operation.recover_modules(metadata)
+                else:
+                    operation.recover_modules(metadata, acknowledged)
                 metadata = self._reopen(operation, recovery)
             if metadata.phase == "module-restored":
-                operation.define_source(metadata)
+                if acknowledged is None:
+                    operation.define_source(metadata)
+                else:
+                    operation.define_source(metadata, acknowledged)
                 metadata = self._reopen(operation, recovery)
             if metadata.phase == "source-restored":
                 if restore_power:
@@ -2947,7 +3107,7 @@ class LocalLibvirtExternalBoot:
         binding: ExternalBootActivationBinding,
         authority: OpaqueProviderRef,
     ) -> tuple[RecoveryObjectObservation, ...]:
-        with self._io.open(authority, _expected_binding(binding)):
+        with self._io.open_pinned(authority, _expected_binding(binding)):
             receipt = self._io.read_cleanup_quarantine(binding)
         if receipt is None or receipt.managed:
             return ()
@@ -2969,7 +3129,7 @@ class LocalLibvirtExternalBoot:
     def observe_object(
         self, binding: RecoveryObjectBinding, authority: OpaqueProviderRef
     ) -> RecoveryObjectObservation:
-        with self._io.open(authority, _expected_binding(binding.binding)):
+        with self._io.open_pinned(authority, _expected_binding(binding.binding)):
             receipt = self._io.read_cleanup_quarantine(binding.binding)
         if receipt is None:
             return RecoveryObjectObservation(
@@ -2993,7 +3153,7 @@ class LocalLibvirtExternalBoot:
         if observed.observed_digest != expected_observed_digest:
             raise ValueError("cleanup quarantine observation changed before delete")
         # The re-read and delete run under the pinned session (ADR-0710 amendment, 2026-10-01).
-        with self._io.open(authority, _expected_binding(binding.binding)):
+        with self._io.open_pinned(authority, _expected_binding(binding.binding)):
             receipt = self._io.read_cleanup_quarantine(binding.binding)
             if receipt is not None:
                 current = self._quarantine_observation(receipt)
@@ -3012,7 +3172,7 @@ class LocalLibvirtExternalBoot:
         if observed.observed_digest != expected_observed_digest or not observed.present:
             raise ValueError("cleanup quarantine observation changed before adopt")
         # Pinned like delete_recovery_object (ADR-0710 amendment, 2026-10-01).
-        with self._io.open(authority, _expected_binding(binding.binding)):
+        with self._io.open_pinned(authority, _expected_binding(binding.binding)):
             receipt = self._io.read_cleanup_quarantine(binding.binding)
             if receipt is None:
                 raise ValueError("cleanup quarantine disappeared before adopt")
@@ -3111,6 +3271,10 @@ class LocalLibvirtExternalBoot:
         # post-delete absence idempotently. The delete runs under the pinned session, as
         # ``record_cleanup_quarantine`` does (ADR-0710 amendment, 2026-09-30).
         with self._io.open(authority, _expected_binding(recovery.binding)):
+            receipt = self._io.read_cleanup_quarantine(recovery.binding)
+            if receipt is not None and receipt.managed:
+                # An adopted receipt is the operator's; finalize leaves it in place (ADR-0787).
+                return
             self._io.finalize_tombstone(recovery, proof)
 
     def _reopen(
@@ -3767,8 +3931,14 @@ class RecoveryMetadataStore:
         binding: ExternalBootActivationBinding,
         expected: LocalRecoveryMetadataV1,
         point_digest: Digest,
+        *,
+        require_recovered: bool = True,
     ) -> CleanupTombstoneV1:
-        """Atomically replace recovered metadata with accounted cleanup evidence."""
+        """Atomically replace recovered metadata with accounted cleanup evidence.
+
+        System teardown discards a conflicted activation unrecovered (#3341), so it passes
+        ``require_recovered=False``.
+        """
         self._require_open()
         name = recovery_directory_name(reference, binding)
         directory_fd = _open_private_directory(self._root_fd, name)
@@ -3788,7 +3958,7 @@ class RecoveryMetadataStore:
         try:
             if expected.binding != binding or self._read(directory_fd) != expected:
                 raise ValueError("recovery metadata changed before cleanup")
-            if expected.phase != "recovered":
+            if require_recovered and expected.phase != "recovered":
                 raise ValueError("recovery must complete before cleanup")
             temporary = ".tombstone.next"
             _replace_private_file(
@@ -3852,23 +4022,25 @@ class RecoveryMetadataStore:
             raise ValueError("cleanup tombstone does not match recovery point")
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
-            entries = set(os.listdir(directory_fd))
-            allowed = {_TOMBSTONE_NAME, _INTENT_NAME, _PREPARATION_NAME, _QUARANTINE_NAME}
-            if entries - allowed:
-                raise ValueError("cleanup tombstone directory contains unexpected payload")
-            if self._read_tombstone(directory_fd) != expected:
-                raise ValueError("cleanup tombstone changed before finalization")
-            self._validate_tombstone_residue(directory_fd, entries, expected)
-            with suppress(FileNotFoundError):
-                os.unlink(_QUARANTINE_NAME, dir_fd=directory_fd)
-            for residual in (_INTENT_NAME, _PREPARATION_NAME):
-                if residual in entries:
-                    os.unlink(residual, dir_fd=directory_fd)
-                    os.fsync(directory_fd)
-            os.unlink(_TOMBSTONE_NAME, dir_fd=directory_fd)
-            os.fsync(directory_fd)
+            # The receipt is re-read under the lock adoption takes, so an adoption that lands
+            # after a caller's own read is kept rather than deleted (ADR-0787, #3467).
+            fcntl.flock(directory_fd, fcntl.LOCK_EX)
+            entries = self._checked_tombstone_entries(directory_fd, expected)
+            receipt = self._read_cleanup_quarantine_at(directory_fd, recovery.binding)
+            adopted = receipt is not None and receipt.managed
+            if receipt is not None and adopted and receipt.tombstone != expected:
+                raise ValueError("adopted cleanup receipt does not match recovery point")
+            _drop_residue(directory_fd, entries)
+            if not adopted:
+                with suppress(FileNotFoundError):
+                    os.unlink(_QUARANTINE_NAME, dir_fd=directory_fd)
+                os.unlink(_TOMBSTONE_NAME, dir_fd=directory_fd)
+                os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+        if adopted:
+            self.prune_empty_activation_parents(recovery.binding)
+            return
         os.rmdir(name, dir_fd=self._root_fd)
         os.fsync(self._root_fd)
         try:
@@ -3878,6 +4050,26 @@ class RecoveryMetadataStore:
             self.prune_empty_activation_parents(recovery.binding)
             return
         raise ValueError("cleanup tombstone remained after finalization")
+
+    def drop_tombstone_residue(self, recovery: RecoveryPoint) -> None:
+        """Drop residue beside an exact tombstone, keeping it and the receipt; prune parents.
+
+        System teardown keeps an adopted receipt and its tombstone (ADR-0787, #3467), but a
+        crash inside ``publish_tombstone`` can leave the intent beside them.
+        """
+        self._require_open()
+        name = recovery_directory_name(recovery.recovery_ref, recovery.binding)
+        expected = CleanupTombstoneV1(
+            binding=recovery.binding,
+            recovery_point=recovery,
+            point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
+        )
+        directory_fd = _open_private_directory(self._root_fd, name)
+        try:
+            _drop_residue(directory_fd, self._checked_tombstone_entries(directory_fd, expected))
+        finally:
+            os.close(directory_fd)
+        self.prune_empty_activation_parents(recovery.binding)
 
     def record_cleanup_quarantine(
         self, recovery: RecoveryPoint, proof: FinalizeCleanupProof
@@ -3896,6 +4088,11 @@ class RecoveryMetadataStore:
         receipt = CleanupQuarantineReceiptV1(tombstone=tombstone, proof=proof)
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
+            # Held across the managed check and the replace, as adoption and finalize hold it.
+            fcntl.flock(directory_fd, fcntl.LOCK_EX)
+            standing = self._read_cleanup_quarantine_at(directory_fd, recovery.binding)
+            if standing is not None and standing.managed:
+                return  # an adopted receipt is kept as is: no path un-adopts it (ADR-0787)
             temporary = ".cleanup-quarantine.next"
             _replace_private_file(
                 directory_fd,
@@ -3904,10 +4101,10 @@ class RecoveryMetadataStore:
                 _cleanup_quarantine_bytes(receipt),
             )
             os.fsync(directory_fd)
+            if self._read_cleanup_quarantine_at(directory_fd, recovery.binding) != receipt:
+                raise ValueError("cleanup quarantine receipt failed exact reopen")
         finally:
             os.close(directory_fd)
-        if self.read_cleanup_quarantine(recovery.binding) != receipt:
-            raise ValueError("cleanup quarantine receipt failed exact reopen")
 
     def read_cleanup_quarantine(
         self, binding: ExternalBootActivationBinding
@@ -3919,30 +4116,41 @@ class RecoveryMetadataStore:
         except FileNotFoundError:
             return None
         try:
-            try:
-                data = _read_private_file(directory_fd, _QUARANTINE_NAME)
-            except FileNotFoundError:
-                return None
-            receipt = CleanupQuarantineReceiptV1.model_validate_json(data)
-            if _cleanup_quarantine_bytes(receipt) != data:
-                raise ValueError("cleanup quarantine receipt is not canonical JSON")
-            if receipt.tombstone.binding != binding:
-                raise ValueError("cleanup quarantine receipt ownership changed")
-            return receipt
+            return self._read_cleanup_quarantine_at(directory_fd, binding)
         finally:
             os.close(directory_fd)
 
+    @staticmethod
+    def _read_cleanup_quarantine_at(
+        directory_fd: int, binding: ExternalBootActivationBinding
+    ) -> CleanupQuarantineReceiptV1 | None:
+        try:
+            data = _read_private_file(directory_fd, _QUARANTINE_NAME)
+        except FileNotFoundError:
+            return None
+        receipt = CleanupQuarantineReceiptV1.model_validate_json(data)
+        if _cleanup_quarantine_bytes(receipt) != data:
+            raise ValueError("cleanup quarantine receipt is not canonical JSON")
+        if receipt.tombstone.binding != binding:
+            raise ValueError("cleanup quarantine receipt ownership changed")
+        return receipt
+
     def adopt_cleanup_quarantine(self, receipt: CleanupQuarantineReceiptV1) -> None:
         self._require_open()
-        current = self.read_cleanup_quarantine(receipt.tombstone.binding)
-        if current != receipt:
-            raise ValueError("cleanup quarantine receipt changed before adoption")
+        binding = receipt.tombstone.binding
+        changed = ValueError("cleanup quarantine receipt changed before adoption")
         adopted = receipt.model_copy(update={"managed": True})
-        name = recovery_directory_name(
-            receipt.tombstone.recovery_point.recovery_ref, receipt.tombstone.binding
-        )
-        directory_fd = _open_private_directory(self._root_fd, name)
         try:
+            directory_fd = _open_private_directory(
+                self._root_fd, recovery_directory_name(_recovery_ref(binding), binding)
+            )
+        except FileNotFoundError:
+            raise changed from None
+        try:
+            # Held across the compare and the replace; finalize_tombstone takes it too (#3467).
+            fcntl.flock(directory_fd, fcntl.LOCK_EX)
+            if self._read_cleanup_quarantine_at(directory_fd, binding) != receipt:
+                raise changed
             _replace_private_file(
                 directory_fd,
                 ".cleanup-quarantine.next",
@@ -3952,6 +4160,19 @@ class RecoveryMetadataStore:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+
+    def _checked_tombstone_entries(
+        self, directory_fd: int, expected: CleanupTombstoneV1
+    ) -> set[str]:
+        """The directory's entries, after proving the tombstone and every residue file exact."""
+        entries = set(os.listdir(directory_fd))
+        allowed = {_TOMBSTONE_NAME, _INTENT_NAME, _PREPARATION_NAME, _QUARANTINE_NAME}
+        if entries - allowed:
+            raise ValueError("cleanup tombstone directory contains unexpected payload")
+        if self._read_tombstone(directory_fd) != expected:
+            raise ValueError("cleanup tombstone changed before finalization")
+        self._validate_tombstone_residue(directory_fd, entries, expected)
+        return entries
 
     def _validate_tombstone_residue(
         self,
@@ -3970,7 +4191,9 @@ class RecoveryMetadataStore:
                 source_state=metadata.source_state,
                 target_state=metadata.target_state,
             )
-            if metadata.phase != "recovered" or recovered != point:
+            # System teardown publishes the tombstone from any phase (#3341), so a crash between
+            # the publish and the intent unlink leaves the intent at that phase.
+            if recovered != point:
                 raise ValueError("cleanup intent does not match tombstone recovery point")
         if _PREPARATION_NAME not in entries:
             return
@@ -4223,6 +4446,18 @@ class RecoveryMetadataStore:
             for descriptor in descriptors[1:]:
                 os.close(descriptor)
 
+    def _holds_only_adopted_receipt(
+        self, directory_fd: int, binding: ExternalBootActivationBinding
+    ) -> bool:
+        if set(os.listdir(directory_fd)) != {_TOMBSTONE_NAME, _QUARANTINE_NAME}:
+            return False
+        receipt = self.read_cleanup_quarantine(binding)
+        return (
+            receipt is not None
+            and receipt.managed
+            and self._read_tombstone(directory_fd) == receipt.tombstone
+        )
+
     def _read_optional_abort_receipt(self, name: str) -> LocalPartialAbortReceiptV1 | None:
         try:
             data = _read_private_file(self._root_fd, name)
@@ -4235,16 +4470,30 @@ class RecoveryMetadataStore:
             raise ValueError("partial abort receipt is not canonical")
         return receipt
 
-    def exact_recovery_absence(self, binding: ExternalBootActivationBinding) -> bool:
-        """Read-only proof that every exact activation-owned storage location is absent."""
+    def exact_recovery_absence(
+        self, binding: ExternalBootActivationBinding, *, adopted_receipt_absent: bool = False
+    ) -> bool:
+        """Read-only proof that every exact activation-owned storage location is absent.
+
+        System teardown passes ``adopted_receipt_absent``: a recovery directory holding only its
+        tombstone and an adopted receipt is the operator's, not the activation's (ADR-0787,
+        #3467).
+        """
         name = recovery_directory_name(_recovery_ref(binding), binding)
         for candidate in (name, f".{name}.partial"):
             try:
                 descriptor = _open_private_directory(self._root_fd, candidate)
             except FileNotFoundError:
                 continue
-            else:
+            try:
+                adopted = (
+                    adopted_receipt_absent
+                    and candidate == name
+                    and self._holds_only_adopted_receipt(descriptor, binding)
+                )
+            finally:
                 os.close(descriptor)
+            if not adopted:
                 return False
         if self._read_optional_abort_receipt(f".{name}.abort.json") is not None:
             return False
@@ -4404,6 +4653,13 @@ def _require_private_owned_directory(fd: int, label: str) -> None:
         or opened.st_uid != os.geteuid()
     ):
         raise ValueError(f"{label} must be an owner-only service-owned directory")
+
+
+def _drop_residue(directory_fd: int, entries: set[str]) -> None:
+    for residual in (_INTENT_NAME, _PREPARATION_NAME):
+        if residual in entries:
+            os.unlink(residual, dir_fd=directory_fd)
+            os.fsync(directory_fd)
 
 
 def _open_private_directory(parent_fd: int, name: str) -> int:

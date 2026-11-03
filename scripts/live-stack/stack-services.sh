@@ -269,7 +269,7 @@ banner "inventory reconcile (register images + upload kernel-config siblings to 
 # no path is recomputed here — a fresh host with no systems.toml is a clean exit-0 pass. Runs with
 # only the reconciler's own authority in the environment (#1929 per-daemon pattern).
 KDIVE_DATABASE_URL="${KDIVE_RECONCILER_DATABASE_URL}" \
-  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
+  env -u KDIVE_HARNESS_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_SERVER_DATABASE_URL \
   -u KDIVE_WORKER_DATABASE_URL \
   "$py" -m kdive reconcile-systems || {
   echo "inventory reconcile failed; the catalog may be missing images or kernel configs" >&2

@@ -17,7 +17,9 @@ from kdive.db.external_boot_authority_journal import (
     AdvanceStatus,
     AuthorityBinding,
     JournalHead,
+    PrestopHolders,
     advance_journal_head,
+    external_boot_prestop_system_holders,
     read_journal_head,
     resolve_allocating_authority_binding,
     resolve_current_authority_binding,
@@ -132,6 +134,23 @@ class DatabaseAuthorityRepository:
                 operation=operation,
             )
 
+    async def prestop_system_holders(
+        self,
+        peer: AuthenticatedPeer,
+        request: AuthorityPreparationMutationRequestV1,
+        acknowledgement_sequence: int,
+        acknowledgement_digest: str,
+    ) -> PrestopHolders | None:
+        async with self._connections() as conn, conn.transaction():
+            return await external_boot_prestop_system_holders(
+                conn,
+                peer_incarnation_id=str(peer.incarnation_id),
+                authority_id=request.authority_id,
+                generation=request.generation,
+                acknowledgement_sequence=acknowledgement_sequence,
+                acknowledgement_digest=acknowledgement_digest,
+            )
+
     async def open_remote_module_attempt(
         self,
         peer: AuthenticatedPeer,
@@ -142,7 +161,7 @@ class DatabaseAuthorityRepository:
         """Open/replay the authority-only 0146 receipt after PREPARE is journal-started."""
         async with self._connections() as conn, conn.transaction():
             row = await conn.execute(
-                "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,%s,%s,%s,%s,%s)",
+                "SELECT open_external_boot_remote_module_attempt(%s,%s,%s,%s,%s,%s,%s,%s)::text",
                 (
                     str(peer.incarnation_id),
                     request.authority_id,
@@ -157,7 +176,8 @@ class DatabaseAuthorityRepository:
             result = await row.fetchone()
             if result is None or result[0] is None:
                 return None
-            return ModuleAttemptPreparationRequestV1.model_validate(result[0])
+            # The closed model is strict: UUIDs parse only from JSON text, not from a dict.
+            return ModuleAttemptPreparationRequestV1.model_validate_json(result[0])
 
     async def resolve_current_release_phase(
         self,
@@ -365,7 +385,12 @@ class DatabaseAuthorityRepository:
                 or object_binding.binding.system_id != str(binding.system_id)
                 or object_binding.binding.activation_id != str(binding.activation_id)
                 or object_binding.binding.run_id != str(binding.run_id)
-                or object_binding.operation_identity != binding.operation_identity
+                or (
+                    # A release retry publishes the adopted cleanup's receipt; migration 0186
+                    # admits that identity only from this activation's own release lineage.
+                    object_binding.operation_identity != binding.operation_identity
+                    and binding.purpose != "release"
+                )
             ):
                 raise ValueError("cleanup quarantine receipt does not match current authority")
             identity = (
@@ -386,6 +411,7 @@ class DatabaseAuthorityRepository:
                     "object_reference": object_binding.reference.ref,
                     "ownership_digest": object_binding.ownership_digest,
                     "observed_digest": observation.observed_digest,
+                    "operation_identity": object_binding.operation_identity,
                     "attempt_id": str(object_binding.attempt_id),
                     "mutation_journal_sequence": object_binding.mutation_journal_sequence,
                     "mutation_journal_digest": object_binding.mutation_journal_digest,

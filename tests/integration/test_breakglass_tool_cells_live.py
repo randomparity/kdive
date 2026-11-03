@@ -7,11 +7,12 @@ x86_64 remote-libvirt contract cell of ``ops.force_release``, ``ops.force_teardo
 cell provisions its provider's lane image in a fresh ``cov-<hex>`` project through
 :func:`~tests.integration.live_stack.tool_cells.on_lane_system`, tears it down as a platform admin
 outside that project, and proves the owned domain and disks gone while the provider's other
-domains and the lane's staged base stay. The other functional cells stop ``blocked`` (operator
-decisions of 2026-10-07): the resolve tools need an installed provider authority, an
-authority-owned System and a constructed orphan or conflict, and the ``force_release`` ordering
-exists only for an authority-owned System with external-boot history. A rejection cell aims at
-the stack's :func:`~tests.integration.live_stack.tool_cells.lane_target` for its provider.
+domains and the lane's staged base stay. The other functional cells run on the installed
+authority lanes through :func:`~tests.integration.live_stack.authority_cells.run_authority_cell`
+(#3186): ``force_release`` and ``resolve_recovery_orphan`` run their #3185 fault arm, called by an
+outside platform admin through the cell's exposure; ``resolve_external_boot_conflict`` runs its
+conflict arm on the frame's own client. A rejection cell aims at the stack's
+:func:`~tests.integration.live_stack.tool_cells.lane_target` for its provider.
 ``docs/operating/runbooks/live-testing.md`` covers both lanes.
 """
 
@@ -20,9 +21,10 @@ from __future__ import annotations
 import asyncio
 import platform
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from functools import partial
-from typing import NoReturn, cast
+from pathlib import Path
+from typing import cast
 from uuid import UUID, uuid4
 
 import libvirt
@@ -34,17 +36,23 @@ from kdive.mcp.dev_harness import OidcIssuer
 from kdive.mcp.responses import ToolResponse
 from kdive.providers.shared.runtime_paths import domain_name_for
 from scripts.coverage_campaign.contract import Cell
-from scripts.coverage_campaign.evidence import Outcome
+from tests.integration.live_stack import authority_faults
+from tests.integration.live_stack.authority_cells import (
+    exposed,
+    platform_admin_grants,
+    run_authority_cell,
+)
+from tests.integration.live_stack.authority_faults import ToolCall
+from tests.integration.live_stack.authority_lane import AuthoritySystem
 from tests.integration.live_stack.image_smoke import staged_image
 from tests.integration.live_stack.remote_lifecycle import (
     REMOTE_REPRESENTATIVES,
-    observe_host,
     observer,
     remote_host,
     remote_kdive_domains,
     staged_base_volume,
 )
-from tests.integration.live_stack.scenario import CellRun, ScenarioStop
+from tests.integration.live_stack.scenario import CellRun
 from tests.integration.live_stack.spine import await_system_state, drain_job, worker_libvirt_uri
 from tests.integration.live_stack.tool_cells import (
     LANE_IMAGES,
@@ -79,22 +87,20 @@ _TEARDOWN = "ops.force_teardown"
 _CONFLICT = "systems.resolve_external_boot_conflict"
 _REMOTE = "remote-libvirt"
 _REASON = "coverage #3112"
-_NO_ORDERING = (
-    "ops.force_release's observed ordering (terminal only after protected provider effects are "
-    "quiescent) exists only for an authority-owned System with external-boot history; no lane "
-    "frames one"
-)
-_NO_AUTHORITY = (
-    "{tool} needs an installed provider authority, an authority-lane System frame and a harness "
-    "that constructs a quarantined recovery orphan or a recovery conflict; the demo-up lane has "
-    "none of them"
-)
-_NO_REMOTE_AUTHORITY = (
-    "{tool} needs a remote provider authority (provider_authority_host and the [[remote_libvirt]] "
-    "authority tuple), an authority-lane System frame and a harness that constructs a "
-    "quarantined recovery orphan or a recovery conflict; an authority would route every remote "
-    "install and boot through external boot"
-)
+
+
+async def _conflict_arm(
+    system: AuthoritySystem, db_url: str, _call: ToolCall, *, kernel_tree: Path
+) -> dict[str, object]:
+    return await authority_faults.recorded_conflict(system, db_url, kernel_tree=kernel_tree)
+
+
+# The #3185 fault arm that constructs each tool's state.
+_ARMS: dict[str, Callable[..., Awaitable[dict[str, object]]]] = {
+    _RELEASE: authority_faults.held_teardown_release,
+    "ops.resolve_recovery_orphan": authority_faults.quarantined_orphan,
+    _CONFLICT: _conflict_arm,
+}
 
 
 def _platform(role: str) -> Grants:
@@ -210,15 +216,20 @@ async def _force_teardown(
     }
 
 
-def _blocked(run: CellRun) -> NoReturn:
+async def _authority(
+    run: CellRun, caller: HttpCaller, base_url: str, issuer: OidcIssuer, db_url: str
+) -> None:
+    """Run the tool's fault arm on an authority-owned System; an outside platform admin calls."""
+    call = exposed(caller, caller.token(platform_admin_grants()))
     tool = run.cell.operation
-    reason = _NO_ORDERING if tool == _RELEASE else _NO_AUTHORITY.format(tool=tool)
-    if run.cell.provider == _REMOTE:
-        # A read-only probe, so the blocked record carries the provider host like the rest.
-        observe_host(run, remote_host())
-        if tool != _RELEASE:
-            reason = _NO_REMOTE_AUTHORITY.format(tool=tool)
-    raise ScenarioStop(Outcome.BLOCKED, reason)
+
+    async def body(system: AuthoritySystem, tree: Path, _manifest: object) -> dict[str, object]:
+        arm = _ARMS.get(tool)
+        assert arm is not None, f"no fault arm constructs {tool}'s state"
+        return await arm(system, db_url, call, kernel_tree=tree)
+
+    project = f"cov-{secrets.token_hex(4)}"
+    await run_authority_cell(run, base_url, issuer, db_url, body, project=project)
 
 
 def _args(tool: str, system_id: str, allocation_id: str) -> dict[str, object]:
@@ -266,7 +277,8 @@ async def _scenario(run: CellRun, base_url: str, issuer: OidcIssuer, db_url: str
     tool = run.cell.operation
     if run.cell.kind == "functional":
         if tool != _TEARDOWN:
-            _blocked(run)
+            await _authority(run, caller, base_url, issuer, db_url)
+            return
         project = f"cov-{secrets.token_hex(4)}"
         body = partial(_force_teardown, run, caller, db_url)
         await on_lane_system(run, base_url, issuer, db_url, project=project, body=body)

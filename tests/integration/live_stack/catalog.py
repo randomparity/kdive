@@ -1,17 +1,30 @@
-"""Catalog carrier support: independent SQL evidence and owned availability fixtures."""
+"""Catalog carrier support: independent SQL evidence, owned availability fixtures, and the
+private-image uploads the catalog and mutating operator carriers share."""
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import os
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import Any, LiteralString, cast
 
+import boto3
 import psycopg
 from psycopg.rows import dict_row
 
+from kdive.domain.catalog.images import ImageVisibility
+from kdive.images.rootfs.staged_provenance import config_sibling_path, sidecar_path
+from kdive.inventory.loader import load_inventory_optional
+from kdive.inventory.model import ImageEntry, StagedPathSource
+from kdive.inventory.path import systems_toml_path
+from kdive.mcp.dev_harness import OidcIssuer
 from kdive.mcp.responses import ToolResponse
 from scripts.coverage_campaign.evidence import Outcome
 from tests.integration.live_stack.scenario import ScenarioStop
@@ -341,3 +354,161 @@ async def _availability(caller: HttpCaller, grants: Grants, *, db_url: str) -> d
         "quota_restored": True,
         "owned": owned,
     }
+
+
+_UPLOAD_NAME = "cov-upload"
+# What the ADR-0048 upload reassembly stamps on its object
+# (src/kdive/artifacts/uploads/reassembly.py); the upload service refuses an object without it.
+_UPLOAD_METADATA = {"sensitivity": "sensitive", "retention-class": "build"}
+
+
+def _operator(project: str) -> Grants:
+    return Grants(f"{project}-operator", (project,), {project: "operator"})
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class _Image:
+    """The precondition: a public staged-path image with its build-fs siblings."""
+
+    entry: ImageEntry
+    qcow2: Path
+
+    @property
+    def provenance(self) -> dict[str, object]:
+        doc = json.loads(sidecar_path(self.qcow2).read_text(encoding="utf-8"))
+        return cast(dict[str, object], doc["provenance"])
+
+
+def _staged_image() -> _Image:
+    """The first public local-libvirt staged-path image of ``systems.toml``; blocked if none."""
+    doc = load_inventory_optional(systems_toml_path())
+    for entry in doc.image if doc is not None else []:
+        source = entry.source
+        if (
+            entry.provider == "local-libvirt"
+            and entry.visibility is ImageVisibility.PUBLIC
+            and isinstance(source, StagedPathSource)
+        ):
+            qcow2 = Path(source.path)
+            siblings = (qcow2, sidecar_path(qcow2), config_sibling_path(qcow2))
+            if all(path.is_file() for path in siblings):
+                return _Image(entry, qcow2)
+    raise ScenarioStop(
+        Outcome.BLOCKED,
+        "the exported KDIVE_SYSTEMS_TOML declares no public local-libvirt staged-path image with "
+        "its build-fs siblings (a live tier reads only an exported path); stage one with "
+        "examples/local-libvirt/build-image.sh fedora-kdive-ready-44",
+    )
+
+
+def _s3() -> Any:
+    return boto3.client(
+        "s3",
+        endpoint_url=os.environ["KDIVE_S3_ENDPOINT_URL"],
+        region_name=os.environ.get("KDIVE_S3_REGION", "us-east-1"),
+    )
+
+
+def _put_quarantined(source: Path, key: str) -> None:
+    extra = {"Metadata": _UPLOAD_METADATA}
+    _s3().upload_file(str(source), os.environ["KDIVE_S3_BUCKET"], key, ExtraArgs=extra)
+
+
+def _versions(key: str) -> list[str]:
+    """The version ids, delete markers included, stored under exactly ``key``."""
+    listing = _s3().list_object_versions(Bucket=os.environ["KDIVE_S3_BUCKET"], Prefix=key)
+    items = [*listing.get("Versions", []), *listing.get("DeleteMarkers", [])]
+    return [str(item["VersionId"]) for item in items if item["Key"] == key]
+
+
+def _purge(key: str) -> bool:
+    """Delete every version of ``key``; whether none is left."""
+    client, bucket = _s3(), os.environ["KDIVE_S3_BUCKET"]
+    for version in _versions(key):
+        client.delete_object(Bucket=bucket, Key=key, VersionId=version)
+    return not _versions(key)
+
+
+@dataclass
+class _Upload:
+    """A quarantined object for ``project`` and the object keys a cell must remove."""
+
+    project: str
+    arch: str
+    quarantine_key: str
+    object_keys: set[str]
+    name: str = _UPLOAD_NAME
+
+
+@asynccontextmanager
+async def _uploading(
+    base_url: str, issuer: OidcIssuer, db_url: str, project: str, *, name: str = _UPLOAD_NAME
+) -> AsyncIterator[_Upload]:
+    """Quarantine the staged image's bytes for ``project``; on exit remove its images, objects."""
+    image = _staged_image()
+    key = f"uploads/q/{project}/{name}.qcow2"
+    await asyncio.to_thread(_put_quarantined, image.qcow2, key)
+    upload = _Upload(project, image.entry.arch, key, {key}, name)
+    remove = partial(_remove_upload, base_url, issuer, db_url, upload)
+    async with _cleaning(remove, f"{project}'s upload"):
+        yield upload
+
+
+async def _remove_upload(
+    base_url: str, issuer: OidcIssuer, db_url: str, upload: _Upload
+) -> list[str]:
+    """Delete ``upload.project``'s images, then purge every owned object; what could not go."""
+    problems: list[str] = []
+    rows = await _rows(
+        db_url, "SELECT id, object_key FROM image_catalog WHERE owner = %s", (upload.project,)
+    )
+    operator = HttpCaller("direct", base_url, issuer)
+    token = operator.token(_operator(upload.project))
+    for row in rows:
+        upload.object_keys.add(str(row["object_key"]))
+        result = await operator.call("images.delete", {"image_id": str(row["id"])}, token)
+        if not isinstance(result, ToolResponse) or result.error_category is not None:
+            problems.append(f"images.delete {row['id']}: {getattr(result, 'detail', result)}")
+    for object_key in sorted(upload.object_keys):
+        if not await asyncio.to_thread(_purge, object_key):
+            problems.append(f"object {object_key} still has versions")
+    return problems
+
+
+async def _register(
+    caller: HttpCaller,
+    token: str,
+    upload: _Upload,
+    db_url: str,
+    *,
+    discover: bool = False,
+    lifetime_s: int | None = None,
+) -> str:
+    """``images.upload`` ``upload``'s object; return the image id and track its object key.
+
+    ``lifetime_s`` sets the private image's lifetime; omitted, the server's default applies.
+    """
+    args: dict[str, object] = {
+        "project": upload.project,
+        "name": upload.name,
+        "arch": upload.arch,
+        "quarantine_key": upload.quarantine_key,
+    }
+    if lifetime_s is not None:
+        args["lifetime_seconds"] = lifetime_s
+    env = one(await caller.call("images.upload", args, token, discover=discover))
+    rows = await _rows(
+        db_url, "SELECT object_key FROM image_catalog WHERE id = %s", (env.object_id,)
+    )
+    upload.object_keys.update(str(row["object_key"]) for row in rows)
+    expected = {"name": upload.name, "visibility": "private", "owner": upload.project}
+    assert {k: env.data.get(k) for k in expected} == expected, f"upload answered {env.data}"
+    return env.object_id

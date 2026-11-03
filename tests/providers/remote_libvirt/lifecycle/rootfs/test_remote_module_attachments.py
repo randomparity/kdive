@@ -190,7 +190,10 @@ def appliance_xml(state: ExpectedAttachmentState, **metadata: str) -> str:
     }
     attrs = " ".join(f"{key}='{value}'" for key, value in values.items())
     disks = "".join(
-        f"<disk type='volume' device='disk'><source pool='{state.pool}' volume='{volume}'/>"
+        f"<disk type='volume' device='disk'>"
+        f"<driver name='qemu' type='{'qcow2' if alias == 'vda' else 'raw'}' "
+        "cache='none' io='native'/>"
+        f"<source pool='{state.pool}' volume='{volume}'/>"
         f"<target dev='{alias}' bus='virtio'/>"
         f"{'<readonly/>' if alias == 'vdb' else ''}</disk>"
         for volume, alias in (
@@ -203,7 +206,9 @@ def appliance_xml(state: ExpectedAttachmentState, **metadata: str) -> str:
         f"<domain><name>{state.appliance.name}</name><os><type "
         f"arch='{state.appliance.architecture}'>hvm</type></os><metadata>"
         f"<remote-module-appliance {attrs}/></metadata><devices>{disks}"
-        "<console type='pty'/></devices></domain>"
+        "<console type='pty'><target type='virtio' port='0'/></console>"
+        "<rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>"
+        "</devices></domain>"
     )
 
 
@@ -318,7 +323,7 @@ def test_resumed_appliance_requires_exact_aliases_and_readonly_source(old: str, 
     "mutation",
     [
         "<auth username='secret'/>",
-        "<backingStore/>",
+        "<backingStore type='file'><source file='/etc/shadow'/></backingStore>",
         "<source pool='extra' volume='extra'/>",
         "<serial>unexpected</serial>",
     ],
@@ -365,6 +370,76 @@ def test_inactive_owner_definition_still_observes_active_domain() -> None:
 
     with pytest.raises(CategorizedError, match="owning System is active"):
         inspect_module_attachments(Conn([domain]), state)
+
+
+def test_active_owner_is_refused_unless_a_cleanup_allows_it() -> None:
+    state = expected()
+    conn = Conn([Domain(system_xml(state.system_id), active=True)])
+
+    with pytest.raises(CategorizedError, match="owning System is active"):
+        _inspect_module_attachments(conn, IdentityPort(), state)
+
+
+def test_cleanup_admits_an_active_owner_that_references_no_attempt_volume() -> None:
+    state = expected()
+    conn = Conn([Domain(system_xml(state.system_id), active=True)])
+
+    result = _inspect_module_attachments(conn, IdentityPort(), state, allow_active_system=True)
+
+    assert not result.system_shut_off
+    assert result.exclusive and not result.appliance_present
+    assert result.proves_unattached(state.pool, state.source_volume)
+    assert result.proves_unattached(state.pool, state.scratch_volume)
+    assert not result.proves_detached(state.pool, state.source_volume)
+
+
+@pytest.mark.parametrize("volume", ["source", "scratch"])
+@pytest.mark.parametrize("attribute", ["file", "dev"])
+def test_cleanup_still_refuses_an_active_owner_that_references_an_attempt_volume(
+    attribute: str, volume: str
+) -> None:
+    state = expected()
+    xml = system_xml(state.system_id).replace(
+        "</devices>",
+        f"<disk type='file'><source {attribute}='/pool/{volume}'/></disk></devices>",
+    )
+
+    with pytest.raises(CategorizedError, match="attempt-scoped"):
+        _inspect_module_attachments(
+            Conn([Domain(xml, active=True)]), IdentityPort(), state, allow_active_system=True
+        )
+
+
+def test_cleanup_with_an_active_owner_still_refuses_a_different_root() -> None:
+    state = expected()
+    xml = system_xml(state.system_id).replace(
+        "<disk><source pool='systems' volume='root'/></disk>",
+        "<disk type='file'><source file='/overlay'/>"
+        "<backingStore type='volume'><source pool='systems' volume='root'/>"
+        "<format type='raw'/><backingStore/></backingStore></disk>",
+    )
+
+    with pytest.raises(CategorizedError, match="different root volume"):
+        _inspect_module_attachments(
+            Conn([Domain(xml, active=True)]), IdentityPort(), state, allow_active_system=True
+        )
+
+
+def test_cleanup_with_an_active_owner_cannot_prove_a_volume_detached_while_the_appliance_runs() -> (
+    None
+):
+    state = expected()
+    domains = [
+        Domain(system_xml(state.system_id), active=True),
+        Domain(appliance_xml(state), active=True),
+    ]
+
+    result = _inspect_module_attachments(
+        Conn(domains), IdentityPort(), state, allow_active_system=True
+    )
+
+    assert result.appliance_present
+    assert not result.proves_unattached(state.pool, state.source_volume)
 
 
 def test_active_appliance_rejects_identical_persistent_definition() -> None:
@@ -828,3 +903,72 @@ def test_nested_root_volume_does_not_satisfy_owning_root_identity(nested: str) -
 
     with pytest.raises(CategorizedError, match="different root volume"):
         inspect_module_attachments(Conn([Domain(xml)]), state)
+
+
+def provisioned_system_xml(system: str, disks: str) -> str:
+    """The shape the remote provider defines: file-backed overlay plus kdive storage metadata."""
+    return f"""<domain><name>kdive-{system}</name><os><type arch='x86_64'>hvm</type></os>
+      <metadata><domain xmlns='{KDIVE_METADATA_NS}'><system>{system}</system>
+      <storage pool='systems' volume='root'/></domain></metadata>
+      <devices>{disks}</devices></domain>"""
+
+
+FILE_ROOT = (
+    "<disk type='file' device='disk'><driver name='qemu' type='qcow2'/>"
+    "<source file='/pool/root'/><backingStore type='file'><source file='/base'/></backingStore>"
+    "<target dev='vda' bus='virtio'/></disk>"
+)
+
+
+def test_file_backed_owning_root_satisfies_the_root_proof() -> None:
+    state = expected()
+    xml = provisioned_system_xml(state.system_id, FILE_ROOT)
+
+    result = inspect_module_attachments(Conn([Domain(xml)]), state)
+
+    assert result.system_shut_off
+    assert result.exclusive
+
+
+def test_block_backed_owning_root_satisfies_the_root_proof() -> None:
+    state = expected()
+    disk = "<disk type='block' device='disk'><source dev='/pool/root'/></disk>"
+
+    result = inspect_module_attachments(
+        Conn([Domain(provisioned_system_xml(state.system_id, disk))]), state
+    )
+
+    assert result.exclusive
+
+
+@pytest.mark.parametrize(
+    ("disks", "message"),
+    [
+        (FILE_ROOT + FILE_ROOT, "root volume"),
+        (FILE_ROOT + "<disk><source pool='systems' volume='root'/></disk>", "root volume"),
+        ("<disk type='file'><source file='/srv/other.qcow2'/></disk>", "root volume"),
+        (
+            FILE_ROOT + "<disk type='file'><source file='/pool/root-alias'/></disk>",
+            "root volume",
+        ),
+        (
+            "<disk type='file'><source file='/pool/root'/><backingStore type='file'>"
+            "<source file='/pool/root-alias'/></backingStore></disk>",
+            "duplicate root volume",
+        ),
+        (
+            "<disk type='file'><source file='/pool/root'/><backingStore type='file'>"
+            "<source file='/pool/root'/></backingStore></disk>",
+            "duplicate root volume",
+        ),
+    ],
+)
+def test_file_backed_root_keeps_foreign_and_extra_references_refused(
+    disks: str, message: str
+) -> None:
+    state = expected()
+    xml = provisioned_system_xml(state.system_id, disks)
+    port = IdentityPort(aliases={"/pool/root-alias": "/pool/root"})
+
+    with pytest.raises(CategorizedError, match=message):
+        inspect_module_attachments(Conn([Domain(xml)]), state, port)

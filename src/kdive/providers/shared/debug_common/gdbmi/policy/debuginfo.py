@@ -19,6 +19,7 @@ import struct
 import tarfile
 import tempfile
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -34,7 +35,7 @@ from kdive.artifacts.catalog.read_model import (
 )
 from kdive.config.core_settings import DATABASE_URL
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports.debug import AttachSeam, GdbMiAttachment
+from kdive.providers.ports.debug import AttachSeam, GdbMiAttachFailure, GdbMiAttachment
 from kdive.store.objectstore import ObjectStore
 
 type _ReadDebuginfoRef = Callable[[str], ArtifactReadRef | None]
@@ -44,7 +45,7 @@ type _Attach = Callable[[Path], GdbMiAttachment]
 type _GdbMiEngineFactory = Callable[[], _GdbMiAttachEngine]
 type _ReadKernelRef = Callable[[str], ArtifactReadRef | None]
 type _ReadModuleIdentity = Callable[[Path], tuple[str | None, str | None]]
-type ModuleDebuginfoResolverSeam = Callable[[str, str], "ModuleDebuginfo"]
+type ModuleDebuginfoResolverSeam = Callable[[GdbMiAttachment, str], "ModuleDebuginfo"]
 
 
 class _GdbMiAttachEngine(Protocol):
@@ -121,11 +122,21 @@ class ModuleDebuginfo:
     build_id: str | None
 
 
+def close_attachment(attachment: GdbMiAttachment) -> None:
+    attachment.cleanup_pending = True
+    if not attachment.controller_exited:
+        attachment.controller.exit()
+        attachment.controller_exited = True
+    if attachment.staging_dir is not None:
+        with suppress(FileNotFoundError):
+            shutil.rmtree(attachment.staging_dir)
+    attachment.cleanup_pending = False
+
+
 class ModuleDebuginfoResolver:
     """Resolve a Run's module ``.ko`` (path + identity) from the combined ``kernel_ref`` tar.
 
-    Lazy and run-id-keyed: the tar is fetched/extracted once per ``run_id`` on the first
-    ``resolve`` and cached, so a debug session that never loads module symbols pays nothing. The
+    Lazy and attachment-owned: extract once per attachment, on first module-symbol use. The
     DB read, object fetch, and `.ko` ELF identity parse are injected seams (only the real ones are
     ``live_vm``), mirroring :class:`DebuginfoResolver`.
     """
@@ -142,40 +153,39 @@ class ModuleDebuginfoResolver:
         self._fetch_object = fetch_object
         self._fetch_versioned_object = fetch_versioned_object
         self._read_identity = read_identity
-        self._staged: dict[str, Path] = {}
 
-    def resolve(self, run_id: str, module: str) -> ModuleDebuginfo:
-        """Stage the modules tree (cached) and return the ``<module>.ko`` path + identity.
-
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` (``reason=no_module_debuginfo``) when the Run
-                has no ``kernel_ref`` or the tree holds no matching ``.ko``.
-        """
-        root = self._stage(run_id, module)
+    def resolve(self, attachment: GdbMiAttachment, module: str) -> ModuleDebuginfo:
+        root = self._stage(attachment, module)
         ko = self._locate_ko(root, module)
         if ko is None:
-            raise self._missing(run_id, module)
+            raise self._missing(attachment.run_id, module)
         srcversion, build_id = self._read_identity(ko)
         return ModuleDebuginfo(path=ko, srcversion=srcversion, build_id=build_id)
 
-    def _stage(self, run_id: str, module: str) -> Path:
-        cached = self._staged.get(run_id)
-        if cached is not None:
-            return cached
-        ref = self._read_kernel_ref(run_id)
+    def _stage(self, attachment: GdbMiAttachment, module: str) -> Path:
+        owner = attachment.staging_dir
+        if owner is None:
+            raise CategorizedError(
+                "module symbols require an owned attachment root",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        root = owner / "modules"
+        if root.is_dir():
+            return root
+        ref = self._read_kernel_ref(attachment.run_id)
         if ref is None:
-            raise self._missing(run_id, module)
-        root = Path(tempfile.mkdtemp(prefix="kdive-modules-"))
-        if ref.version_id is None:
-            data = self._fetch_object(ref.key)
-        elif self._fetch_versioned_object is not None:
-            data = self._fetch_versioned_object(ref.key, ref.version_id)
-        else:
-            raise RuntimeError("versioned module fetch seam is not configured")
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
-            members = [m for m in tar.getmembers() if _is_modules_member(m.name)]
-            tar.extractall(root, members=members, filter="data")
-        self._staged[run_id] = root
+            raise self._missing(attachment.run_id, module)
+        with tempfile.TemporaryDirectory(prefix="modules-partial-", dir=owner) as partial:
+            if ref.version_id is None:
+                data = self._fetch_object(ref.key)
+            elif self._fetch_versioned_object is not None:
+                data = self._fetch_versioned_object(ref.key, ref.version_id)
+            else:
+                raise RuntimeError("versioned module fetch seam is not configured")
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tar:
+                members = [m for m in tar.getmembers() if _is_modules_member(m.name)]
+                tar.extractall(partial, members=members, filter="data")
+            Path(partial).rename(root)
         return root
 
     def _locate_ko(self, root: Path, module: str) -> Path | None:
@@ -208,8 +218,8 @@ def real_module_debuginfo_resolver(
 ) -> ModuleDebuginfoResolverSeam:  # pragma: no cover - live_vm
     """The production module-debuginfo resolver seam wired to the live DB/object-store/ELF seams.
 
-    Returns the bound ``resolve`` so the engine seam stays a plain ``(run_id, module)`` callable;
-    the closed-over resolver instance keeps its per-run staging cache alive across calls.
+    Returns the bound ``resolve`` as an ``(attachment, module)`` callable;
+    the attachment supplies the private staging owner for each call.
     """
 
     def _fetch_object(ref: str) -> bytes:
@@ -290,12 +300,10 @@ def stage_and_attach(
 ) -> GdbMiAttachment:
     """Resolve+materialize the Run's debuginfo into a private dir, then ``attach`` against it.
 
-    The vmlinux is staged into a private, owner-only directory (``mkdtemp`` defaults to mode
-    ``0o700``), not a fixed/predictable name, so a local user cannot pre-create the path (symlink
-    attack) and concurrent attaches cannot collide. The directory is removed on **any** failure of
-    the resolve or attach; on a successful attach the staged vmlinux outlives this call because the
-    live gdb reads symbols from it for the session's lifetime (reclaiming it at session reap is a
-    follow-up, not wired here to avoid a shared-dataclass edit).
+    The vmlinux is staged in a private, owner-only mkdtemp directory (mode 0o700), preventing
+    pre-created paths and collisions. Failure cleanup waits for controller exit; if cleanup
+    fails, the runtime retains ownership for retry. Successful attachments retain the root until
+    confirmed exit and runtime cleanup (ADR-0799).
 
     ``attach`` is the provider's seam that spawns gdb and connects the RSP against the staged
     vmlinux path with its own host-policy'd engine (loopback for local, ACL-remote for remote).
@@ -314,10 +322,25 @@ def stage_and_attach(
     staging_dir = Path(tempfile.mkdtemp(prefix="kdive-debuginfo-"))
     try:
         vmlinux_path = resolver.resolve(run_id, staging_dir / "vmlinux")
-        return attach(vmlinux_path)
-    except BaseException:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        attachment = attach(vmlinux_path)
+    except GdbMiAttachFailure as failure:
+        assert failure.attachment is not None
+        failure.attachment.staging_dir = staging_dir
+        try:
+            close_attachment(failure.attachment)
+        except Exception as cleanup_error:
+            raise failure from cleanup_error
+        raise failure.cause from failure
+    except BaseException as cause:
+        try:
+            shutil.rmtree(staging_dir)
+        except OSError:
+            failure = GdbMiAttachFailure(None, cause)
+            failure.staging_dir = staging_dir
+            raise failure from cause
         raise
+    attachment.staging_dir = staging_dir
+    return attachment
 
 
 def gdb_attach_seam(*, engine_factory: _GdbMiEngineFactory) -> AttachSeam:

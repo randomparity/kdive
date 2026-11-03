@@ -35,6 +35,7 @@ from kdive.domain.operations.jobs import (
     dispatch_lane_for_kind,
 )
 from kdive.jobs.models import (
+    ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthorityResultV1,
     ExternalBootAuthoritySuccessV1,
@@ -394,6 +395,35 @@ async def fail_external_boot(
     return await commit_external_boot_authority_result(
         conn, job, result, incarnation_credential=incarnation_credential
     )
+
+
+async def record_external_boot_conflict(
+    conn: AsyncConnection,
+    job: Job,
+    result: ExternalBootAuthorityConflictV1,
+    *,
+    incarnation_credential: SecretStr,
+) -> Job | ExternalBootCommitStatus:
+    """Record ``recovery_conflict`` only from the authority's terminal conflict head (ADR-0805)."""
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT public.record_external_boot_conflict_from_head("
+            "sha256(convert_to(%s, 'UTF8')), %s, %s, %s, %s, %s) AS status",
+            (
+                incarnation_credential.get_secret_value(),
+                job.id,
+                job.attempt,
+                result.authority_id,
+                result.generation,
+                Jsonb(result.result.model_dump(mode="json", by_alias=True)["evidence"]),
+            ),
+        )
+        status_row = await cur.fetchone()
+        if status_row is None or status_row["status"] != "applied":
+            return ExternalBootCommitStatus.SUPERSEDED
+        await cur.execute("SELECT * FROM jobs WHERE id = %s", (job.id,))
+        row = await cur.fetchone()
+    return ExternalBootCommitStatus.SUPERSEDED if row is None else Job.model_validate(row)
 
 
 async def external_boot_attempt_is_running(conn: AsyncConnection, job: Job) -> bool:

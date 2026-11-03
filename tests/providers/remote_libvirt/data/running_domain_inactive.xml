@@ -1,0 +1,78 @@
+<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
+  <name>kdive-00000000-0000-4000-8000-000000000001</name>
+  <uuid>00000000-0000-4000-8000-000000000001</uuid>
+  <metadata xmlns:kdive="https://kdive.dev/libvirt/1">
+    <kdive:domain>
+      <kdive:system>00000000-0000-4000-8000-000000000001</kdive:system>
+      <kdive:storage pool="default" volume="kdive-00000000-0000-4000-8000-000000000001-overlay.qcow2"/>
+    </kdive:domain>
+  </metadata>
+  <memory unit='KiB'>2097152</memory>
+  <currentMemory unit='KiB'>2097152</currentMemory>
+  <vcpu placement='static'>2</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-i440fx-10.2'>hvm</type>
+    <kernel>/pool/kdive-boot-v1-kernel-00000000-0000-4000-8000-000000000001-00000000-0000-4000-8000-000000000002-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-final</kernel>
+    <initrd>/pool/kdive-boot-v1-initrd-00000000-0000-4000-8000-000000000001-00000000-0000-4000-8000-000000000002-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-final</initrd>
+    <cmdline>console=ttyS0 root=UUID=00000000-0000-4000-8000-0000000000aa rootfstype=btrfs nokaslr</cmdline>
+    <boot dev='hd'/>
+  </os>
+  <features>
+    <acpi/>
+    <vmcoreinfo state='on'/>
+  </features>
+  <cpu mode='host-model' check='partial'/>
+  <clock offset='utc'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='/pool/kdive-00000000-0000-4000-8000-000000000001-overlay.qcow2'/>
+      <backingStore type='file'>
+        <format type='qcow2'/>
+        <source file='/pool/base.qcow2'>
+          <seclabel model='selinux' relabel='no'/>
+        </source>
+        <backingStore/>
+      </backingStore>
+      <target dev='vda' bus='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+    </disk>
+    <controller type='usb' index='0' model='piix3-uhci'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x01' function='0x2'/>
+    </controller>
+    <controller type='pci' index='0' model='pci-root'/>
+    <controller type='virtio-serial' index='0'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x02' function='0x0'/>
+    </controller>
+    <serial type='pty'>
+      <target type='isa-serial' port='0'>
+        <model name='isa-serial'/>
+      </target>
+    </serial>
+    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+      <address type='virtio-serial' controller='0' bus='0' port='1'/>
+    </channel>
+    <input type='mouse' bus='ps2'/>
+    <input type='keyboard' bus='ps2'/>
+    <audio id='1' type='none'/>
+    <memballoon model='virtio'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x04' function='0x0'/>
+    </memballoon>
+  </devices>
+  <qemu:commandline>
+    <qemu:arg value='-gdb'/>
+    <qemu:arg value='tcp:192.0.2.1:47001'/>
+    <qemu:arg value='-netdev'/>
+    <qemu:arg value='user,id=kdivessh,restrict=on,hostfwd=tcp:192.0.2.1:48000-:22'/>
+    <qemu:arg value='-device'/>
+    <qemu:arg value='virtio-net-pci,netdev=kdivessh,addr=0x10'/>
+  </qemu:commandline>
+</domain>

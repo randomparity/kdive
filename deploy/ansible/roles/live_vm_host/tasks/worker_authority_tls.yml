@@ -1,0 +1,41 @@
+---
+# Install the fixed worker's authority TLS files. main.yml and renew-local-authority-tls.yml
+# import these same tasks (ADR-0803).
+- name: Inspect the fixed-worker authority secrets root without following links
+  ansible.builtin.stat:
+    path: "{{ live_vm_host_worker_authority_secrets_root }}"
+    follow: false
+  register: live_vm_host_worker_authority_secrets_before
+  when: live_vm_host_worker_authority_enabled | bool
+
+- name: Refuse a substituted fixed-worker authority secrets root
+  ansible.builtin.assert:
+    that: >-
+      not live_vm_host_worker_authority_secrets_before.stat.exists or
+      (live_vm_host_worker_authority_secrets_before.stat.isdir and
+       not live_vm_host_worker_authority_secrets_before.stat.islnk)
+  when: live_vm_host_worker_authority_enabled | bool
+
+- name: Create the protected fixed-worker authority secrets root
+  ansible.builtin.file:
+    path: "{{ live_vm_host_worker_authority_secrets_root }}"
+    state: directory
+    owner: root
+    group: "{{ live_vm_host_authority_client_group }}"
+    mode: "0750"
+    follow: false
+  when: live_vm_host_worker_authority_enabled | bool
+
+- name: Install protected fixed-worker authority TLS files
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ live_vm_host_worker_authority_secrets_root }}/{{ item.name }}"
+    owner: root
+    group: "{{ live_vm_host_authority_client_group }}"
+    mode: "0440"
+  loop:
+    - {name: server-ca, source: "{{ live_vm_host_worker_authority_server_ca_source }}"}
+    - {name: client-certificate, source: "{{ live_vm_host_worker_authority_client_certificate_source }}"}
+    - {name: client-key, source: "{{ live_vm_host_worker_authority_client_key_source }}"}
+  when: live_vm_host_worker_authority_enabled | bool
+  no_log: true

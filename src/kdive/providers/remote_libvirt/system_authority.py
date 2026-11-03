@@ -55,6 +55,7 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     volume_backing_path,
 )
 from kdive.providers.shared.libvirt_xml import (
+    backing_store_projection,
     remote_metadata_storage_identity,
     remote_metadata_system_id,
 )
@@ -78,6 +79,7 @@ _MAX_STATE_ENTRIES = 4096
 _MAX_STATE_BYTES = 1_048_576
 _MAX_DOMAIN_DOCUMENTS = 4096
 _MAX_STORAGE_PATH_BYTES = 4096
+_SERIAL_TARGET_DEFAULTS = {"x86_64": "isa-serial", "ppc64le": "spapr-vio-serial"}
 _PHASES = {
     "planned": 0,
     "overlay-ready": 1,
@@ -133,7 +135,6 @@ class RemoteAuthoritySystemManifestEntry:
     root_identity: str
     architecture: Literal["x86_64", "ppc64le"]
     base_volume: str
-    network: str
     machine: str
     gdb_addr: str
     gdb_port_min: int
@@ -141,12 +142,15 @@ class RemoteAuthoritySystemManifestEntry:
     ssh_addr: str
     ssh_port_min: int
     ssh_port_max: int
+    guest_egress: bool
 
     def __post_init__(self) -> None:
         for value in (self.resource_name, self.authority_instance):
             _bounded_binding(value)
-        for value in (self.base_volume, self.network, self.machine):
+        for value in (self.base_volume, self.machine):
             _bounded_name(value)
+        if type(self.guest_egress) is not bool:
+            raise ValueError("authority guest egress must be a boolean")
         _concrete_machine(self.architecture, self.machine)
         if _DIGEST.fullmatch(self.root_identity) is None:
             raise ValueError("authority base volume identity must be a lowercase SHA-256 digest")
@@ -201,7 +205,7 @@ class _ProvisionIntentV1(_ClosedValue):
     base_path: str
     overlay_volume: str
     overlay_path: str
-    network: str
+    guest_egress: bool
     machine: str
     gdb_addr: str
     gdb_port: Annotated[int, Field(ge=1, le=65535)]
@@ -227,7 +231,7 @@ class _ProvisionIntentV1(_ClosedValue):
     def _bindings_are_bounded(cls, value: str) -> str:
         return _bounded_binding(value)
 
-    @field_validator("pool", "base_volume", "network", "machine")
+    @field_validator("pool", "base_volume", "machine")
     @classmethod
     def _topology_names_are_safe(cls, value: str) -> str:
         return _bounded_name(value)
@@ -367,7 +371,7 @@ def _intent_identity(intent: _ProvisionIntentV1) -> str:
             "base_path": intent.base_path,
             "overlay_volume": intent.overlay_volume,
             "overlay_path": intent.overlay_path,
-            "network": intent.network,
+            "guest_egress": intent.guest_egress,
             "machine": intent.machine,
             "gdb_addr": intent.gdb_addr,
             "gdb_port": intent.gdb_port,
@@ -433,14 +437,17 @@ def _one(root: ET.Element, path: str, what: str) -> ET.Element:
     return values[0]
 
 
-def _target_devices(root: ET.Element, tag: str) -> list[tuple[str | None, str | None, str | None]]:
+def _target_devices(
+    root: ET.Element, tag: str, *, default_type: str | None = None
+) -> list[tuple[str | None, str | None, str | None]]:
     values = []
     for device in root.findall(f"./devices/{tag}"):
         target = device.find("./target")
+        target_type = target.get("type") if target is not None else None
         values.append(
             (
                 device.get("type"),
-                target.get("type") if target is not None else None,
+                None if target_type == default_type else target_type,
                 target.get("name")
                 if tag == "channel" and target is not None
                 else (target.get("port") if target is not None else None),
@@ -449,7 +456,23 @@ def _target_devices(root: ET.Element, tag: str) -> list[tuple[str | None, str | 
     return values
 
 
-def _domain_projection(domain_xml: str) -> dict[str, object]:
+def _cpu_mode(cpu: ET.Element, *, live: bool) -> str | None:
+    mode = cpu.get("mode")
+    expanded = mode == "custom" and cpu.get("match") == "exact" and cpu.get("check") == "full"
+    return "host-model" if live and expanded else mode
+
+
+def _domain_projection(domain_xml: str, *, live: bool = False) -> dict[str, object]:
+    """Project the configuration KDIVE renders, ignoring only what libvirt fills in (#3296).
+
+    libvirt stores the architecture's default serial target type the intent omits, so that
+    default projects as omitted. A ``live`` document also reports runtime state in place of
+    configuration: a started ``host-model`` CPU reads back expanded to ``custom`` with
+    ``match='exact' check='full'``. The inactive document is always compared without that
+    allowance. The live CPU model is not compared: a running CPU defined as ``custom`` with those
+    attributes and then redefined back to ``host-model`` is not detected until the next start
+    applies the inactive definition.
+    """
     root = parse_domain_xml(domain_xml)
     os_element = _one(root, "./os", "operating system")
     os_type = _one(os_element, "./type", "machine type")
@@ -487,7 +510,7 @@ def _domain_projection(domain_xml: str) -> dict[str, object]:
         "uuid": root.findtext("./uuid"),
         "memory_bytes": _memory_bytes(memory),
         "vcpus": (vcpu.text or "").strip(),
-        "cpu_mode": _one(root, "./cpu", "CPU").get("mode"),
+        "cpu_mode": _cpu_mode(_one(root, "./cpu", "CPU"), live=live),
         "architecture": os_type.get("arch"),
         "machine": os_type.get("machine"),
         "boots": [element.get("dev") for element in os_element.findall("./boot")],
@@ -502,10 +525,13 @@ def _domain_projection(domain_xml: str) -> dict[str, object]:
             "source": source.get("file"),
             "target": (target.get("dev"), target.get("bus")),
             "backing": (backing_source.get("file"), backing_format.get("type")),
+            "backing_store": backing_store_projection(disk),
         },
         "networks": networks,
         "channels": _target_devices(root, "channel"),
-        "serials": _target_devices(root, "serial"),
+        "serials": _target_devices(
+            root, "serial", default_type=_SERIAL_TARGET_DEFAULTS.get(os_type.get("arch") or "")
+        ),
         "consoles": _target_devices(root, "console"),
         "filesystems": len(root.findall("./devices/filesystem")),
         "hostdevs": len(root.findall("./devices/hostdev")),
@@ -534,7 +560,7 @@ def _domain_projection(domain_xml: str) -> dict[str, object]:
 
 
 def _projection_identity(domain_xml: str) -> str:
-    return _digest(b"kdive-remote-authority-system-domain-v1", _domain_projection(domain_xml))
+    return _digest(b"kdive-remote-authority-system-domain-v2", _domain_projection(domain_xml))
 
 
 class _PrivateState:
@@ -972,10 +998,12 @@ class RemoteAuthoritySystemProvider:
             backing_path=base_path,
             gdb_addr=entry.gdb_addr,
             gdb_port=gdb,
-            network=entry.network,
+            network=None,
             machine=entry.machine,
             ssh_addr=entry.ssh_addr,
             ssh_port=ssh,
+            guest_egress=entry.guest_egress,
+            relabel_base=False,
         )
         values: dict[str, Any] = {
             "system_id": request.system_id,
@@ -994,7 +1022,7 @@ class RemoteAuthoritySystemProvider:
             "base_path": base_path,
             "overlay_volume": overlay,
             "overlay_path": overlay_path,
-            "network": entry.network,
+            "guest_egress": entry.guest_egress,
             "machine": entry.machine,
             "gdb_addr": entry.gdb_addr,
             "gdb_port": gdb,
@@ -1029,7 +1057,7 @@ class RemoteAuthoritySystemProvider:
             and intent.architecture == entry.architecture
             and intent.pool == self._pool_name
             and intent.base_volume == entry.base_volume
-            and intent.network == entry.network
+            and intent.guest_egress == entry.guest_egress
             and intent.machine == entry.machine
             and intent.gdb_addr == entry.gdb_addr
             and entry.gdb_port_min < intent.gdb_port <= entry.gdb_port_max
@@ -1087,7 +1115,8 @@ class RemoteAuthoritySystemProvider:
     def _validate_domain(domain: _Domain, intent: _ProvisionIntentV1) -> bool:
         expected = _domain_projection(intent.domain_xml)
         try:
-            documents = [domain.XMLDesc(0), domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)]
+            live_document = domain.XMLDesc(0)
+            inactive = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
             active = bool(domain.isActive())
         except libvirt.libvirtError as exc:
             raise CategorizedError(
@@ -1095,8 +1124,8 @@ class RemoteAuthoritySystemProvider:
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             ) from exc
         try:
-            for document in documents:
-                if _domain_projection(document) != expected:
+            for document, live in ((live_document, True), (inactive, False)):
+                if _domain_projection(document, live=live) != expected:
                     raise CategorizedError(
                         "remote authority System domain differs from private intent",
                         category=ErrorCategory.CONFLICT,
@@ -1112,7 +1141,6 @@ class RemoteAuthoritySystemProvider:
                 "remote authority System domain projection is invalid",
                 category=ErrorCategory.CONFLICT,
             ) from exc
-        inactive = documents[1]
         normalized = preserved_definition_identity(inactive)
         if intent.normalized_definition is not None and normalized != intent.normalized_definition:
             raise CategorizedError(

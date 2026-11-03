@@ -174,6 +174,21 @@ project membership + contributor on the asset's owning project, not by redaction
 own several pcaps (one per capture job); pass `artifact_id` to pick one, or omit it for the
 newest.
 
+Vmcore reads return data.vmcore_retention with server_time, policy_enabled, eligible_at,
+protected_until, retired_at and protection_reason. Timestamps are absolute UTC on the
+PostgreSQL reference clock, per Run raw/redacted pair. eligible_at is earliest possible
+reclamation, not a cleanup completion deadline; open Investigations remain protected.
+A retired authorized Run returns not_found with reason vmcore_retired; use runs.get.
+Original retired bytes cannot be restored by recapture. Reads remain protected while
+their database session holds the Run lock; session loss returns infrastructure_failure
+and requires retrying the read.
+
+For a vmcore URL, data.download_expires_at is the issued URL's absolute validity deadline,
+with server_time as reference. The per-request TTL is seconds; the service protects the
+evidence through the signed validity interval. This does not guarantee that an external
+transfer finishes after expiration. Request a new URL through this same tool while evidence
+remains available; after retirement use runs.get.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `artifact_id` | string (nullable) | no | Select a specific pcap by id (from the capture job's refs.result); only meaningful when asset='pcap'. Omit to fetch the newest pcap. |
@@ -206,6 +221,21 @@ one cannot be searched at all and returns configuration_error with
 `data.reason=artifact_too_large`, not an empty match. When the response sets
 `data.content_unavailable`, callers must handle the degraded result without a
 `download_uri`. Requires viewer; sensitive ids are not-found.
+
+Vmcore reads return data.vmcore_retention with server_time, policy_enabled, eligible_at,
+protected_until, retired_at and protection_reason. Timestamps are absolute UTC on the
+PostgreSQL reference clock, per Run raw/redacted pair. eligible_at is earliest possible
+reclamation, not a cleanup completion deadline; open Investigations remain protected.
+A retired authorized Run returns not_found with reason vmcore_retired; use runs.get.
+Original retired bytes cannot be restored by recapture. Reads remain protected while
+their database session holds the Run lock; session loss returns infrastructure_failure
+and requires retrying the read.
+
+For a vmcore URL, data.download_expires_at is the issued URL's absolute validity deadline,
+with server_time as reference. The per-request TTL is seconds; the service protects the
+evidence through the signed validity interval. This does not guarantee that an external
+transfer finishes after expiration. Request a new URL through this same tool while evidence
+remains available; after retirement use runs.get.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

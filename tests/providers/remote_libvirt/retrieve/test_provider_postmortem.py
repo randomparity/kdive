@@ -28,7 +28,8 @@ class _Capturer:
         self.label = label
         self.calls: list[tuple[UUID, UUID]] = []
 
-    def capture(self, system_id: UUID, run_id: UUID) -> CaptureOutput:
+    def capture(self, system_id: UUID, run_id: UUID, *, execution_id: UUID) -> CaptureOutput:
+        assert execution_id == UUID(int=1)
         self.calls.append((system_id, run_id))
         artifact = StoredArtifact(
             f"{self.label}/{run_id}",
@@ -53,8 +54,18 @@ def test_retrieve_dispatches_supported_capture_methods() -> None:
     )
 
     run_id = UUID("00000000-0000-0000-0000-00000000facd")
-    assert retrieve.capture(system_id, run_id, CaptureMethod.KDUMP).vmcore_build_id == "kdump"
-    assert retrieve.capture(system_id, run_id, CaptureMethod.HOST_DUMP).vmcore_build_id == "host"
+    assert (
+        retrieve.capture(
+            system_id, run_id, CaptureMethod.KDUMP, execution_id=UUID(int=1)
+        ).vmcore_build_id
+        == "kdump"
+    )
+    assert (
+        retrieve.capture(
+            system_id, run_id, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        ).vmcore_build_id
+        == "host"
+    )
     assert kdump.calls == [(system_id, run_id)]
     assert host_dump.calls == [(system_id, run_id)]
 
@@ -71,6 +82,7 @@ def test_retrieve_rejects_unsupported_capture_method() -> None:
             UUID("00000000-0000-0000-0000-00000000facb"),
             UUID("00000000-0000-0000-0000-00000000face"),
             CaptureMethod.CONSOLE,
+            execution_id=UUID(int=1),
         )
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR

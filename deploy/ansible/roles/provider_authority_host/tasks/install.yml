@@ -1,4 +1,15 @@
 ---
+- name: Require fixed local inventory authority paths
+  ansible.builtin.assert:
+    that:
+      - provider_authority_host_account == 'kdive-provider-authority'
+      - provider_authority_host_rootfs_root == '/var/lib/kdive/provider-authority/rootfs'
+      - provider_authority_host_console_root == '/var/lib/kdive/provider-authority/console'
+    fail_msg: Inventory observer opt-in requires the fixed authority identity and private roots.
+  when:
+    - provider_authority_host_inventory_observer_enabled | bool
+    - provider_authority_host_enabled | bool
+
 - name: Install native authority build prerequisites for the selected distribution
   ansible.builtin.package:
     name: "{{ provider_authority_host_packages[ansible_facts['os_family']] }}"
@@ -231,11 +242,11 @@
   loop: >-
     {{ (provider_authority_host_system_local_bases
         | map(attribute='digest')
-        | map('regex_replace', '^(.*)$', '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases/\\1.qcow2')
+        | map('regex_replace', '^(.*)$', '/var/lib/kdive/provider-authority/system-provisioning/local/rootfs/bases/\1.qcow2')
         | list)
        + (provider_authority_host_system_remote_bases
           | map(attribute='name')
-          | map('regex_replace', '^(.*)$', '/var/lib/kdive/provider-authority/remote-libvirt-pool/\\1')
+          | map('regex_replace', '^(.*)$', '/var/lib/kdive/provider-authority/remote-libvirt-pool/\1')
           | list) }}
   register: provider_authority_host_system_base_destinations
   when: provider_authority_host_system_manifest_source | length > 0
@@ -247,6 +258,34 @@
     quiet: true
   loop: "{{ provider_authority_host_system_base_destinations.results | default([]) }}"
   when: provider_authority_host_system_manifest_source | length > 0
+
+# ADR-0623 amendment: the authority domain renders its staged base with a relabel='no' seclabel,
+# because libvirt's sVirt relabel at every start changes the base's ctime and the authority's
+# staged-base check treats that as tampering. The base must therefore already carry
+# virt_content_t, which a confined svirt_t domain may read and map but not write. getenforce,
+# not the selinux fact, decides, as in local_worker_host (ADR-0640). Unlike that role, a
+# permissive host also gets the label, so a later switch to enforcing does not strand its bases.
+- name: Read the SELinux mode for the authority System bases
+  ansible.builtin.command:
+    argv: [getenforce]
+  register: provider_authority_host_selinux_mode
+  changed_when: false
+  failed_when: false
+  when: provider_authority_host_system_manifest_source | length > 0
+
+# Written before the copies, so a newly copied base already takes its default context from the
+# rule. A rule per exact base path leaves the overlays beside the remote bases to libvirt.
+- name: Install the authority System base virt_content_t fcontext rules
+  community.general.sefcontext:
+    target: "{{ item | regex_escape }}"
+    setype: virt_content_t
+    state: present
+  loop: >-
+    {{ provider_authority_host_system_base_destinations.results | default([])
+       | map(attribute='item') | list }}
+  when:
+    - provider_authority_host_system_manifest_source | length > 0
+    - provider_authority_host_selinux_mode.stdout | default('') in ['Enforcing', 'Permissive']
 
 - name: Install owner-only local authority System bases
   ansible.builtin.copy:
@@ -273,6 +312,23 @@
   loop: "{{ provider_authority_host_system_remote_bases }}"
   no_log: true
   when: provider_authority_host_system_manifest_source | length > 0
+  notify: Restart provider authority after deployed changes
+
+# -F, unlike local_worker_host: virt_content_t and other types a base might carry are
+# customizable, which a plain restorecon leaves alone, and a base wants its exact context, not a
+# running domain's MCS categories. A relabel changes the base's ctime, which the running authority
+# recorded at startup, so it restarts the authority like any other deployed base change.
+- name: Relabel the authority System bases
+  ansible.builtin.command:
+    argv: [restorecon, -F, -v, "{{ item }}"]
+  loop: >-
+    {{ provider_authority_host_system_base_destinations.results | default([])
+       | map(attribute='item') | list }}
+  register: provider_authority_host_system_base_relabel
+  changed_when: "'Relabeled' in provider_authority_host_system_base_relabel.stdout"
+  when:
+    - provider_authority_host_system_manifest_source | length > 0
+    - provider_authority_host_selinux_mode.stdout | default('') in ['Enforcing', 'Permissive']
   notify: Restart provider authority after deployed changes
 
 - name: Install the canonical authority System manifest
@@ -406,27 +462,43 @@
     mode: "0440"
 
 - name: Locate the system libguestfs binding files
-  ansible.builtin.find:
-    paths: /usr/lib/python3/dist-packages
-    patterns: [guestfs.py, "libguestfsmod*.so"]
+  ansible.builtin.command:
+    argv:
+      - "{{ provider_authority_host_python }}"
+      - -c
+      - >-
+        import json, guestfs, libguestfsmod;
+        print(json.dumps([guestfs.__file__, libguestfsmod.__file__]))
   register: provider_authority_host_libguestfs_files
+  changed_when: false
   when: provider_authority_host_local_mutation_enabled | bool
 
-- name: Require the local authority libguestfs binding
-  ansible.builtin.assert:
-    that: provider_authority_host_libguestfs_files.matched > 0
-    fail_msg: The target-native libguestfs Python binding is missing.
+- name: Locate the authority venv site-packages
+  ansible.builtin.command:
+    argv:
+      - /opt/kdive-provider-authority/.venv/bin/python
+      - -c
+      - "import sysconfig; print(sysconfig.get_path('platlib'))"
+  register: provider_authority_host_venv_site
+  changed_when: false
   when: provider_authority_host_local_mutation_enabled | bool
 
 - name: Symlink the libguestfs binding into the authority venv
   ansible.builtin.file:
-    src: "{{ item.path }}"
-    dest: >-
-      /opt/kdive-provider-authority/.venv/lib/python{{ ansible_python.version.major }}.{{
-      ansible_python.version.minor }}/site-packages/{{ item.path | basename }}
+    src: "{{ item }}"
+    dest: "{{ provider_authority_host_venv_site.stdout }}/{{ item | basename }}"
     state: link
     force: true
-  loop: "{{ provider_authority_host_libguestfs_files.files | default([]) }}"
+  loop: "{{ provider_authority_host_libguestfs_files.stdout | from_json }}"
+  when: provider_authority_host_local_mutation_enabled | bool
+
+- name: Verify the authority venv imports the native libguestfs binding
+  ansible.builtin.command:
+    argv:
+      - /opt/kdive-provider-authority/.venv/bin/python
+      - -c
+      - import guestfs, libguestfsmod
+  changed_when: false
   when: provider_authority_host_local_mutation_enabled | bool
 
 - name: Inspect the authority recovery root without following links
@@ -532,15 +604,33 @@
 - name: Consume the shared private authority libvirt endpoint tasks
   ansible.builtin.import_tasks: libvirt.yml
 
+- name: Verify selected installed appliances as the authority before service start
+  ansible.builtin.command:
+    argv:
+      - /opt/kdive-provider-authority/.venv/bin/python
+      - -c
+      - |
+        import sys
+        from kdive.providers.external_boot_authority.host import _REMOTE_MODULE_APPLIANCE_ROOT
+        from kdive.providers.remote_libvirt.remote_module_authority_host import load_installed_remote_module_appliance
+        load_installed_remote_module_appliance(_REMOTE_MODULE_APPLIANCE_ROOT, sys.argv[1])
+      - "{{ item }}"
+  become: true
+  become_user: kdive-provider-authority
+  changed_when: false
+  timeout: 60
+  loop: "{{ provider_authority_host_remote_module_architectures }}"
+  when: provider_authority_host_remote_module_enabled | bool
+
+- name: Apply deployed-input restarts before proving readiness
+  ansible.builtin.meta: flush_handlers
+
 - name: Start the configured authority after firewall and protected inputs converge
   ansible.builtin.systemd_service:
     name: kdive-external-boot-authority.service
     enabled: true
     daemon_reload: true
     state: started
-
-- name: Apply deployed-input restarts before proving readiness
-  ansible.builtin.meta: flush_handlers
 
 - name: Verify the restarted authority session libvirtd limits
   ansible.builtin.import_tasks: libvirt_verify.yml

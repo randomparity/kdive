@@ -28,8 +28,10 @@ is benign: the early-boot handler has already consumed the option.
 
 ## Run control
 
-- `debug.continue` — resume a halted kernel and wait for a stop event.
-- `debug.interrupt` — halt a running kernel to inspect it.
+- `debug.continue` — resume a halted kernel and wait for a stop event; with `wait=false` it
+  returns `running` at once and leaves the kernel running between calls. While it runs, other
+  debug tools refuse with `inferior_running` until `debug.interrupt` or `debug.continue`.
+- `debug.interrupt` — halt a running kernel to inspect it; `halted_by` says what halted it.
 - `debug.advance` — advance a stopped kernel by one step; `mode` picks the unit:
   - `into` — one source line, into called functions.
   - `over` — one source line, over called functions.
@@ -45,7 +47,7 @@ halted. Use `out`, or a breakpoint and `debug.continue`, there. End the session 
 ## Breakpoints and watchpoints
 
 - `debug.set_breakpoint` — set a breakpoint at a symbol (a bare C function or variable name; not an address).
-- `debug.list_breakpoints` — list the current breakpoints.
+- `debug.list_breakpoints` — list each breakpoint and watchpoint with its number, kind and location.
 - `debug.clear_breakpoint` — remove a breakpoint.
 - `debug.set_watchpoint` — trap a write to a data address. A ppc64le guest under KVM cannot
   insert one; the call returns `not_implemented` with `watchpoint_unsupported` and arms
@@ -64,7 +66,7 @@ halted. Use `out`, or a breakpoint and `debug.continue`, there. End the session 
 - `debug.read_memory` — read kernel memory at an address.
 - `debug.resolve_symbol` — resolve a symbol name to an address.
 - `debug.backtrace` — unwind the call stack at the halt.
-- `debug.read_frame` — select and read a single stack frame.
+- `debug.read_frame` — read one stack frame with its arguments and locals.
 - `debug.disassemble` — disassemble instructions around an address.
 
 `debug.resolve_symbol` yields an address; it does not evaluate member, array, or type-aware

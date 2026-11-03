@@ -62,7 +62,28 @@ memory_mb = 65536
 ```
 
 The libvirt storage pool / network / machine knobs that the inventory model does not carry stay
-operational env settings (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, `_NETWORK`, `_MACHINE`).
+operational env settings (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`, `_NETWORK`, `_MACHINE`,
+`_PCAP_POOL`).
+
+`control.capture_traffic` writes into a dedicated `kdive-pcap` dir pool at
+`/var/lib/libvirt/kdive-pcap`, which `site.yml` provisions
+([ADR-0432](../../adr/0432-remote-libvirt-traffic-capturer.md) amendment): `root:root 0711`,
+labelled `svirt_image_t` on an SELinux-enforcing host, and allowed through a write-only
+`libvirt-qemu.d` drop-in on an AppArmor host. The provider pre-creates each capture file, owned by
+the domain's DAC seclabel uid with mode `0600`, so QEMU can write its own capture but never create,
+unlink or link anything in the directory. A domain whose live XML lacks a usable DAC seclabel fails
+`dac_seclabel_unusable`. On an AppArmor host, and under SELinux at `s0`, a compromised QEMU that
+guesses a capture's name could still open another System's in-flight capture. The remote data NIC renders without
+vhost-net, because QEMU refuses a capture filter on a vhost netdev. After upgrading, rerun
+`site.yml` on each provider host and reprovision existing remote Systems: a capture on an
+unprovisioned host fails `pcap_pool_missing`, and one on a System defined with vhost fails
+`capture_netdev_vhost`. A pool directory that is not root-owned, or that another account can
+write, fails `pcap_pool_unsafe` (rerun `site.yml`). The storage daemon must be allowed to `chown`
+the pre-created file: under SELinux a denial fails `pcap_volume_create_denied`, so check
+`ausearch -m AVC -c virtstoraged` and allow `chown` and `fowner` with a local policy module.
+Drain capture jobs before upgrading; afterwards
+`virsh vol-list <storage_pool>` should show no `kdive-pcap-` volume, because the reaper now looks
+only in the pcap pool.
 
 ### Delivering the inventory and TLS refs to the fixed workers
 
@@ -395,7 +416,7 @@ Prerequisites, in addition to §7's topology, observer access and SSH-forward ru
 - `fedora-kdive-remote-base-43` is staged on the provider and declared as an `[[image]]`. The
   Rocky representative is not needed.
 - The control-plane stack runs the tool-cell lanes of the live-testing runbook: the sourced
-  `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_MIGRATION_DATABASE_URL"`, an exported
+  `env.sh`, `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`, an exported
   `KDIVE_SYSTEMS_TOML` that declares the `[[remote_libvirt]]` instance, and the `default` and
   `KDIVE_WORKER_DEATH_VERIFIER=docker` (`recovery`) bring-ups.
 
@@ -453,10 +474,17 @@ them. The bodies and rejection boundaries are the local cells' of the
 - The four `runs.release_external_boot` functional cells stop `blocked`: no runbook provisions a
   remote provider authority, and an authority on the instance would route every remote install
   and boot through external boot.
-- The four `images.publish` functional cells stop `blocked`: the `IMAGE_BUILD` handler builds
-  catalog images for local-libvirt only. Remote base images are staged with
-  `deploy/ansible/playbooks/image.yml`.
-- Both blocked kinds first probe the provider host, so their records carry it as their host.
+- The four `images.publish` functional cells record `unsupported`: `images.publish` refuses
+  remote-libvirt at admission with `not_implemented`
+  ([ADR-0759](../../adr/0759-remote-image-publication-admission.md)), and remote base images are
+  staged with `deploy/ansible/playbooks/image.yml`. Each cell calls the tool as a platform operator
+  through its exposure with a fresh image name. It requires the exact refusal envelope, with no
+  job reference or next action, and an unchanged catalog, build-job count and `platform` snapshot.
+  The cell observes the server alone: its record carries the control plane as its host, with no
+  guest, image or accelerator. Plain `bindings` without `--remote` binds it, and a run on any
+  candidate stack of its architecture proves it; it needs no provider host.
+- The blocked release cells first probe the provider host, so their records carry it as their
+  host.
 - `runs.*` rejection cells aim at one unbound `remote-libvirt` Run in the stack's remote System
   target project. `images.publish` rejection cells aim at `fedora-kdive-remote-base-43` with
   provider `remote-libvirt`; their snapshot holds that name's catalog rows and build jobs.
@@ -486,9 +514,9 @@ uv run python -m tests.integration.live_stack.evidence assemble \
 uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
 ```
 
-Each configuration records 48 cells: 6 `success`, 38 `rejection` and 4 `blocked`, and skips the
-other configuration's 48. `qualify` then qualifies 88 of the 96 and lists the 8 blocked cells,
-so it exits non-zero by design. After an interrupted run, release the leftover allocation as §7
+Each configuration records 48 cells: 6 `success`, 38 `rejection`, 2 `unsupported` and 2
+`blocked`, and skips the other configuration's 48. `qualify` then qualifies 92 of the 96 and lists
+the 4 blocked release cells, so it exits non-zero by design. After an interrupted run, release the leftover allocation as §7
 says before the wipe. After the run, `demo-down.sh --wipe --yes` clears the stack. Then check the
 provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no `kdive-` overlay
 volume.
@@ -518,6 +546,18 @@ stack after its cells, enqueued an `IMAGE_BUILD` job that failed on its first at
 `remote-libvirt`. No record or artifact carried a host name or address. After each configuration
 and after the final `demo-down.sh --wipe --yes`, the provider defined no `kdive-` domain and its
 pool held only the base volume.
+
+Last refusal run (#3151): candidate `4b5eb9bd7` (later commits change only this record), on a
+Fedora 44 x86_64 host with no provider host. That host had no fixed worker lifecycle, so
+`demo-up.sh` could not run there. The stack was `just stack-backends`, the runtime-role
+bootstrap and the server process at the candidate. It ran without a worker or reconciler, which
+the server-only refusal cells do not require. The run used the default configuration, then the
+server restarted with `KDIVE_WORKER_DEATH_VERIFIER=docker` for `recovery`. Bindings came from
+plain `bindings` without `--remote`, and `KDIVE_DATABASE_URL` was the migration-owner DSN. All
+four x86_64 remote `images.publish` functional cells recorded `unsupported`, and `qualify`
+qualified each one. Each record carried the control plane as its host, accelerator `none`, no
+guest and only the `server` role. The catalog rows, build-job count and `platform` snapshot of
+each fresh image name were unchanged across the call.
 
 ### Accepted-operation quiescence proof
 
@@ -552,6 +592,328 @@ The x86 cell is `remote-quiescence/remote-libvirt/x86_64`. The original fault an
 resource-limit cells remain required under #3117 and #3118; POWER evidence remains
 under #2818. This finite ordering observation does not establish those separate
 obligations or durable capture finalization.
+
+## 10. Remote resource-boundary cells (#3118)
+
+`tests/integration/test_resource_limits_live.py::test_remote_resource_boundary` has one
+parameter per `failure-resource/remote-libvirt/x86_64/*` cell. They use the enterprise remote
+base (`rocky-10-kdive-remote-base`) and the longterm fixture kernel, with the observer access
+of section 7 (`REMOTE_PROVIDER_SSH`). Each proves its resource outcome, no duplicate owned
+System, domain or volume, a held Allocation and charged capacity throughout, and cleanup.
+
+- `minimum-cpu-ram` provisions the seeded `small` shape and requires 1 vCPU, 1024 MiB and a
+  10 GiB overlay (remote overlays take the base's capacity), then boots the fixture kernel.
+- `slow-boot` arms the guest delay unit before the guest agent. A delay inside half the 300 s
+  remote boot window must succeed; one past it must end every attempt `boot_timeout`.
+- `insufficient-disk` needs the provider host's `default` pool on a test-owned filesystem.
+  The fixed workers only use that pool. Before `site.yml`, on a provider host assigned to this
+  run alone, create a loop-backed ext4 filesystem (`mkfs.ext4 -m 0`) and set
+  `storage_pool_target` to its mount point in the private inventory. On SELinux, label it with
+  `semanage fcontext -a -t virt_image_t '<mount>(/.*)?'` and `restorecon -R <mount>`, not a
+  `context=` mount option: the image playbook sets per-file labels, which such a mount refuses. Export `RESOURCE_LIMIT_POOL_IMAGE` as the loop's backing
+  file. The cell refuses any other pool. It fills the filesystem with one ballast file, expects
+  the overlay creation to fail `provisioning_failure`, then removes the ballast and checks the
+  pool's volumes are unchanged.
+
+```bash
+uv run python -m tests.integration.live_stack.resource_limits bindings --remote \
+  --candidate "$(git rev-parse HEAD)" --out inputs.json
+uv run python -m pytest -m live_stack tests/integration/test_resource_limits_live.py \
+  -k test_remote_resource_boundary
+```
+
+Last run: candidate `3a0081d02`, an openSUSE Leap 16 x86_64 provider host (KVM) behind a Rocky
+10.2 control plane, with the bounded default pool on an 8 GiB loop filesystem. All three cells
+qualified. `slow-boot` measured a 16 s baseline boot; a 75 s delay reached ready, and a 420 s
+delay ended all three attempts `boot_timeout`, each retry waiting out the still-booting guest
+before its baseline read. `insufficient-disk` left 60 KiB available; the worker logged the
+overlay-create refusal and the job failed `provisioning_failure` with no partial volume.
+
+## 11. Remote orchestration-fault cells (#3117)
+
+`tests/integration/test_orchestration_faults_live.py::test_remote_orchestration_fault` has one
+parameter for each `failure-resource/remote-libvirt/x86_64/*` cell that #3117 owns. The cells
+run the same faults as the
+[local cells](live-testing.md#local-orchestration-fault-cells-3117) against the enterprise remote
+base, with the observer access of section 7 (`REMOTE_PROVIDER_SSH`):
+
+- a worker pause;
+- a lost provision response;
+- a Postgres outage.
+
+The fault window is the 180 s guest-agent wait of the remote provision. The worker, Postgres
+and the preconditions are on the control-plane host; domains and volumes are checked on the
+provider host.
+
+```bash
+uv run python -m tests.integration.live_stack.resource_limits bindings --remote --owner 3117 \
+  --candidate "$(git rev-parse HEAD)" --out inputs.json
+uv run python -m pytest -m live_stack tests/integration/test_orchestration_faults_live.py \
+  -k test_remote_orchestration_fault
+```
+
+After the run, the provider host must define no `kdive-` domain the run added, and its pool must
+hold the same volumes as before.
+
+## 12. Remote power, snapshot and control tool cells (#3116)
+
+`tests/integration/test_power_snapshot_tool_cells_live.py::test_power_snapshot_tool_cell` and
+`tests/integration/test_control_tool_cells_live.py::test_control_tool_cell` also carry the 160
+x86_64 remote-libvirt cells of `control.power`, `systems.snapshot`, `systems.restore`,
+`systems.list_snapshots`, `systems.delete_snapshot`, `control.capture_traffic`,
+`control.diagnostic_sysrq` and `control.watch_for_crash`: two configurations, two exposures, one
+functional and four rejection cells each. Remote-libvirt supports every gated capability, so no
+capability cell exists ([ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md),
+2026-10-13). Their parameter ids contain `remote-libvirt`, so `-k remote-libvirt` selects them.
+The bodies and rejection boundaries are the local cells' of the
+[live-testing runbook](live-testing.md), on §8's remote lane; the
+[design](../../workflow/specs/2026-10-20-remote-power-snapshot-control-cells-design.md) lists
+what differs:
+
+- Every functional cell provisions `fedora-kdive-remote-base-43`, installs and boots the
+  `longterm` fixture in the guest (the installed kernel is the digest of the guest's
+  `/boot/vmlinuz-<release>`), then runs its tool's sequence.
+- Domain state, native checkpoints, the QMP capture-filter list and domain definedness are read
+  on the provider host through §7's observer. The QMP read is a monitor command, so the observer
+  account needs read-write libvirt access, not a read-only connection.
+- A remote capture writes `kdive-pcap-<system>-<job>.pcap` into the provider's pcap pool;
+  the cell owns that volume and the cleanup proves it absent. The cell derives the name from the
+  job id the way the capturer does and never sees the volume present, so a capturer that named
+  it differently would pass that check vacuously: the provider check after the run is the
+  backstop. The synthetic flow goes to the
+  guest's libvirt-network default gateway, the NIC a remote capture taps; the user-mode SSH NIC
+  is not captured.
+- Disk-only snapshots and their restore may create overlay volumes beside the System's overlay;
+  the cell owns each one it sees in the domain XML.
+- Power and snapshot rejection cells aim at §8's remote System target. Control rejection cells
+  aim at one torn-down remote System per stack whose Run booted the fixture; its protected state
+  is the project's rows, the jobs naming the System or Run and the domain's definedness on the
+  provider host.
+
+Prerequisites are §9's: §8's lane, a verified `longterm` fixture under `KDIVE_FIXTURE_ROOT`,
+and `KDIVE_S3_ENDPOINT_URL` set to an object-store address the remote guests reach (§3), with
+§7's `DOCKER-USER` rule if the provider host runs Docker.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix REMOTE_PROVIDER_SSH=<user>@<provider-host>
+export KDIVE_SYSTEMS_TOML=<the stack's systems.toml> KDIVE_S3_ENDPOINT_URL=<guest-reachable URL>
+uv run python -m tests.integration.live_stack.tool_cells bindings --remote --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both lanes
+examples/local-libvirt/demo-up.sh             # default configuration, on a wiped stack
+uv run python -m pytest -m live_stack -k remote-libvirt \
+  tests/integration/test_power_snapshot_tool_cells_live.py \
+  tests/integration/test_control_tool_cells_live.py
+examples/local-libvirt/demo-down.sh --wipe --yes
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery configuration
+uv run python -m pytest -m live_stack -k remote-libvirt \
+  tests/integration/test_power_snapshot_tool_cells_live.py \
+  tests/integration/test_control_tool_cells_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+Each configuration records 80 cells, 16 functional and 64 rejection, and skips the other
+configuration's 80. A remote disk-only revert, memory-snapshot or pcap fetch-back failure is a
+failing cell, not a skipped one. After the run, `demo-down.sh --wipe --yes` clears the stack.
+Then check the provider: `virsh list --all` shows no `kdive-` domain, the storage pool holds no
+`kdive-` overlay or snapshot overlay, and the `kdive-pcap` pool holds no `kdive-pcap-` volume.
+
+Last run: candidate `88b339b16` (server, worker and reconciler at that SHA in both configurations;
+later commits change only this record). The control plane was a disposable Fedora 44 x86_64 lab
+guest with the verified `longterm` fixture (6.18.54). The provider was a separate disposable Rocky
+Linux 10.2 x86_64 host, itself a KVM guest whose domains ran with the `kvm` accelerator (nested),
+prepared with `site.yml` (a fresh PKI from `playbooks/pki.yml`), firewalld enabled (#3083) and §7's
+`DOCKER-USER` rule. Its staged `fedora-kdive-remote-base-43` predated the ADR-0721 return route, so
+`site.yml` kept it: every System then refused SSH through its forward and every functional cell
+failed `authorize_ssh_key`. A first attempt of the default configuration stopped there after 22
+failing cells and is not coverage. `image.yml -e force_image_rebuild=true` rebuilt the base, and
+the image then carried the return route. One attempt per configuration followed, on one deployment:
+the default configuration, a plain `demo-down.sh`, then `KDIVE_WORKER_DEATH_VERIFIER=docker`
+(`recovery`). Each recorded its 80 cells in about 40 minutes and skipped the other 80.
+
+`qualify` qualified 152 of the 160 cells: 24 `success` and all 128 `rejection`, each record
+carrying the provider host as `rocky:10.2` and the guest as `fedora:43`. All 20 power and snapshot
+functional cells passed (power, snapshot, running, paused and disk-only restore, list, delete), and
+so did the 4 crash-watch functional cells. The 8 others recorded `failure` and are not coverage:
+
+- the 4 `control.capture_traffic` functional cells (both configurations, both exposures): the
+  capture job fails `infrastructure_failure` with `provider_execution_failed`, exception type
+  `AttributeError`, and produces no pcap (#3294);
+- the 4 `control.diagnostic_sysrq` functional cells: the job fails `configuration_error`,
+  "no console output after SysRq injection" (#3295).
+
+No record or artifact carried a host name or address. After the run, `demo-down.sh --wipe --yes`
+cleared the stack, the provider defined no `kdive-` domain and its pool held only the base volumes.
+
+A later run of the 2 default-configuration `control.capture_traffic` functional cells, at candidate
+`89067afb1` (#3294) on the same kind of hosts with the base image rebuilt, no longer failed with an
+`AttributeError`. Both failed `control_failure` with `capture_filter_rejected` on `object_add`:
+QEMU refuses the `filter-dump` with "Vhost is not supported", because libvirt enables vhost-net on
+the provider NIC that the capture taps. With vhost disabled by hand, QEMU then could not create the
+pcap in the storage pool (SELinux enforcing): "Permission denied". Both are #3316's, which owns
+these cells' success; the recovery configuration was not run.
+
+## 13. Remote GDB debug tool cells (#3113)
+
+`tests/integration/test_debug_tool_cells_live.py::test_debug_tool_cell` also carries the 440
+x86_64 remote-libvirt cells of the 21 `debug.*` tools. Each tool has functional, authentication,
+authorization, project-isolation and validation cells in both configurations and both exposures,
+and `debug.start_session` has a `gdbstub` and a `drgn-live` variant. Their parameter ids contain
+`remote-libvirt`, so `-k remote-libvirt` selects them. The bodies, ground truth and rejection
+boundaries are the local cells' of the
+[live-testing runbook](live-testing.md#gdb-debug-tool-cells-2813), on §8's remote lane; the
+[design](../../workflow/specs/2026-10-20-remote-debug-tool-cells-design.md) lists what differs:
+
+- Every functional cell provisions `fedora-kdive-remote-base-43` and installs and boots the
+  `longterm` fixture in the guest. Remote-libvirt gives every System a gdbstub and pins
+  `nokaslr`, so the guest's `vfs_read` must equal the fixture's `System.map`.
+- After the body, the cell checks the gdb connection to the domain's `-gdb tcp:<addr>:<port>`
+  endpoint. It counts ESTABLISHED sockets on the provider host (`ss` over
+  `REMOTE_PROVIDER_SSH`) and on the control plane, whose MCP server holds the gdb session. Both
+  counts must reach 0, and every session row of the Run must read `detached`. A fresh attach must
+  then show one socket at each end, and none after it ends, so an observer that cannot see the
+  connection fails the cell. Run the tests on the control-plane host.
+- The `drgn-live` start cells stop `blocked` when the start's `missing_debuginfo` warning gives
+  the reason `debuginfo_unloadable`. That is the symptom of remote guests never receiving the
+  uploaded vmlinux (#3124); any other warning fails the cell.
+- Rejection cells aim at one torn-down remote System per stack whose Run booted the fixture and
+  whose gdbstub session ended. That target proves its own connection released the same way. Its
+  protected state is the project's rows, the jobs naming the System or Run, and the domain's
+  definedness on the provider host.
+
+Prerequisites are §9's, plus §2's gdbstub ACL admitting the control plane to `gdbstub_range`.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix REMOTE_PROVIDER_SSH=<user>@<provider-host>
+export KDIVE_SYSTEMS_TOML=<the stack's systems.toml> KDIVE_S3_ENDPOINT_URL=<guest-reachable URL>
+uv run python -m tests.integration.live_stack.tool_cells bindings --remote --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both lanes
+examples/local-libvirt/demo-up.sh             # default configuration, on a wiped stack
+uv run python -m pytest -m live_stack -k remote-libvirt tests/integration/test_debug_tool_cells_live.py
+examples/local-libvirt/demo-down.sh --wipe --yes
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery configuration
+uv run python -m pytest -m live_stack -k remote-libvirt tests/integration/test_debug_tool_cells_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+Each configuration records 220 cells, 44 functional and 176 rejection, and skips the other
+configuration's 220. While #3124 is open, expect 42 `success` and 2 `blocked` functional cells
+per configuration. `qualify` then qualifies 436 of the 440 and lists the 4 `drgn-live` cells,
+so it exits non-zero by design. After the run, `demo-down.sh --wipe --yes` clears the stack.
+Then check the provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no
+`kdive-` overlay.
+
+Last run: candidate `43aa59e96` (server, worker and reconciler at that SHA in both
+configurations; later commits change only this record). The control plane was a disposable
+Fedora 44 x86_64 lab guest with the verified `longterm` fixture (6.18.54). The provider was a
+separate disposable Rocky Linux 10.2 x86_64 host, itself a KVM guest whose domains ran with the
+`kvm` accelerator (nested). It was prepared with `site.yml` (a fresh PKI from
+`playbooks/pki.yml`), §7's `DOCKER-USER` rule, and `image.yml -e force_image_rebuild=true`, so
+the staged `fedora-kdive-remote-base-43` carried the ADR-0721 return route. One attempt per
+configuration ran: the default configuration, `demo-down.sh --wipe --yes`, then
+`KDIVE_WORKER_DEATH_VERIFIER=docker` (`recovery`). Each recorded its 220 cells in about 95
+minutes and skipped the other 220.
+
+`qualify` qualified 436 of the 440 cells: 84 `success` and all 352 `rejection`, each record
+carrying the provider host as `rocky:10.2` and the guest as `fedora:43`. Every `success` record
+carries the transport proof: no socket at either end after the body, one at each end for the
+calibration attach, and no open session row. Both rejection targets carried the same proof. The
+4 `drgn-live` start cells recorded `blocked` on `debuginfo_unloadable` (#3124) after the
+fixture boot, so `qualify` lists them as `missing-prerequisite`. No record or artifact carried
+a host name or address. After the run, `demo-down.sh --wipe --yes` cleared the stack, the
+provider defined no `kdive-` domain, and its pool held only the base volumes.
+
+## 14. Remote capture and introspection tool cells (#3114)
+
+`tests/integration/test_capture_tool_cells_live.py::test_capture_tool_cell` also carries the 180
+x86_64 remote-libvirt cells of `control.force_crash`, `vmcore.fetch`, `introspect.from_vmcore`,
+`introspect.run`, `introspect.script` and `postmortem.crash`. That is 28 functional, 8
+unsupported and 144 rejection cells over two configurations and two exposures; `-k remote-libvirt`
+selects them. The bodies and rejection boundaries are the local cells' of the
+[live-testing runbook](live-testing.md), on the remote lane of "Remote System tool cells (#3080)".
+The [design](../../workflow/specs/2026-10-20-remote-capture-tool-cells-design.md) lists what
+differs:
+
+- The crash options edit the profile's `remote-libvirt` section: `kdump` reserves `crashkernel`,
+  `host_dump` sets `host_dump: true`, and every crashing cell opts into `force_crash`.
+- `vmcore.fetch` with `console` or `gdbstub` produces no core, so those 8 cells are `unsupported`
+  ([ADR-0722](../../adr/0722-tool-cell-exposure-configuration-and-rejection-evidence.md),
+  2026-10-20). Each crashes its own fixture System and proves the handler's refusal through the
+  cell's exposure: `configuration_error`, "method does not produce a vmcore", no job, and the
+  System still `crashed`.
+- A remote `host_dump` capture owns `kdive-host-dump-<system>.kdump` in the provider's pool before
+  the capture starts, and proves it absent right after the capture and again after release.
+- The `introspect.run` and `introspect.script` functional cells record `blocked` on #3124 before
+  provisioning: remote guests do not receive the uploaded `vmlinux`, so drgn-live in the guest
+  cannot resolve kernel symbols. Their rejection cells run.
+- Rejection cells aim at one torn-down remote fixture System per stack, whose Run opened and ended a
+  drgn-live session. Its protected state is the project's rows, the jobs naming the System or Run
+  and the domain's definedness on the provider host.
+
+Prerequisites are those of "Remote power, snapshot and control tool cells (#3116)". In addition,
+`control.force_crash` reads the panic from the serial console. The image role writes the serial
+GRUB console into `fedora-kdive-remote-base-43` only since #3236, and it skips a base that is
+already staged. Rebuild an older one with `deploy/ansible/playbooks/image.yml -e
+force_image_rebuild=true`.
+
+```bash
+sha=$(git rev-parse HEAD)
+export KDIVE_FIXTURE_ROOT=$HOME/kfix REMOTE_PROVIDER_SSH=<user>@<provider-host>
+export KDIVE_SYSTEMS_TOML=<the stack's systems.toml> KDIVE_S3_ENDPOINT_URL=<guest-reachable URL>
+uv run python -m tests.integration.live_stack.tool_cells bindings --remote --candidate "$sha" \
+  --out inputs.json --kernel-baseline longterm
+export KDIVE_ARTIFACT_DIR=$(mktemp -d)        # one evidence root for both lanes
+examples/local-libvirt/demo-up.sh             # default configuration, on a wiped stack
+uv run python -m pytest -m live_stack -k remote-libvirt \
+  tests/integration/test_capture_tool_cells_live.py
+examples/local-libvirt/demo-down.sh --wipe --yes
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery configuration
+uv run python -m pytest -m live_stack -k remote-libvirt \
+  tests/integration/test_capture_tool_cells_live.py
+uv run python -m tests.integration.live_stack.evidence assemble \
+  "$KDIVE_ARTIFACT_DIR/coverage-evidence" --candidate "$sha" --out results.json
+uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
+```
+
+Each configuration records 90 cells and skips the other configuration's 90. While #3124 is open,
+expect 14 `success`, 4 `unsupported` and 4 `blocked` System cells per configuration. `qualify`
+then qualifies 172 of the 180 and lists the 8 `introspect.run` and `introspect.script` cells, so it
+exits non-zero by design. A remote kdump, console or dump-volume failure is a failing cell, not a
+skipped one. After the run, `demo-down.sh --wipe --yes` clears the stack. Then check the provider:
+`virsh list --all` shows no `kdive-` domain, and the pool holds no `kdive-` overlay or
+`kdive-host-dump-` volume.
+
+Deploy a new candidate with `deploy.sh` or its full equivalent: `uv sync --locked --group live` in
+the checkout and `just prepare-local-libvirt-host`, then rebuild the bootstrap manifest. A bare
+`uv sync --locked` drops `drgn`, and the worker lifecycle venv keeps the previous build while
+`/readyz` already reports the new commit. Check that both venvs import `drgn` before a run.
+
+Last run: candidate `350d3ae2b` (server, worker and reconciler at that SHA in both configurations;
+later commits change only this record and merge `main`). The control plane was a disposable
+Fedora 44 x86_64 lab guest with the verified `longterm` fixture (6.18.54). The provider was a
+separate disposable Rocky Linux 10.2 x86_64 host, itself a KVM guest whose domains ran with the
+`kvm` accelerator (nested). It was prepared with `site.yml` (a fresh PKI from `playbooks/pki.yml`),
+§7's `DOCKER-USER` rule, and `image.yml -e force_image_rebuild=true`, so the staged
+`fedora-kdive-remote-base-43` carried the ADR-0721 return route and the serial console. The
+default configuration's first attempt was stopped and is not coverage: a bare `uv sync` had left
+the stack without `drgn` and the worker on the previous build. Its second attempt and one
+`recovery` attempt each recorded 90 cells in about 36 minutes.
+
+`qualify` qualified 172 of the 180 cells: 20 `success`, all 144 `rejection` and 8 `unsupported`,
+each record carrying the provider host as `rocky:10.2` and the guest as `fedora:43`. The
+`success` cells are both exposures and configurations of `control.force_crash` (console panic or
+crash-kernel boot), `introspect.from_vmcore`, `postmortem.crash`, and `vmcore.fetch` with
+`host_dump` and `kdump`. The `unsupported` cells are the `console` and `gdbstub` refusals. The 8
+`introspect.run` and `introspect.script` cells recorded `blocked` on #3124. No record or artifact
+carried a host name or address. After the run, `demo-down.sh --wipe --yes` cleared the stack, the
+provider defined no `kdive-` domain, and its pool held only the base volumes.
 
 ## SUSE native image proof
 

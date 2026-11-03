@@ -5,16 +5,16 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import Protocol, cast
+from typing import Protocol
 from uuid import UUID
 
 import libvirt
-import libvirt_qemu
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.traffic import (
     QuiescenceEvidence,
 )
+from kdive.providers.remote_libvirt.connection.monitor import Monitor, qemu_monitor_command
 
 
 class _ProbeConnection(Protocol):
@@ -23,11 +23,6 @@ class _ProbeConnection(Protocol):
 
 
 type ConnectionFactory = Callable[[], AbstractContextManager[_ProbeConnection]]
-type Monitor = Callable[[object, str, int], str]
-
-
-def _native_monitor(domain: object, raw: str, flags: int) -> str:
-    return libvirt_qemu.qemuMonitorCommand(cast(libvirt.virDomain, domain), raw, flags)
 
 
 def _ordered_reply(raw: str, *, absent_object: str | None = None) -> object:
@@ -72,7 +67,7 @@ class RemoteLibvirtCaptureQuiescence:
         *,
         resource_id: UUID,
         connection: ConnectionFactory,
-        monitor: Monitor = _native_monitor,
+        monitor: Monitor = qemu_monitor_command,
     ) -> None:
         self._resource_id = resource_id
         self._connection = connection

@@ -269,6 +269,249 @@ def test_spine_upload_requires_the_contract_to_accept_effective_config(
         asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1"))
 
 
+def _kernel_tree(tmp_path: Path, config: bytes = _BOOT_CONFIG) -> Path:
+    tree = tmp_path / "tree"
+    (tree / "include/config").mkdir(parents=True)
+    (tree / ".config").write_bytes(config)
+    (tree / "include/config/kernel.release").write_text("7.1.0-spine\n")
+    return tree
+
+
+def test_spine_initrd_runs_dracut_without_host_etc_config_or_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tree = _kernel_tree(tmp_path)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setenv("DRACUT_INSTALL", "wrong")
+    monkeypatch.setattr(spine.shutil, "which", lambda name: f"/usr/bin/{name}")
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def record(command: list[str], *, check: bool, env: dict[str, str] | None = None) -> None:
+        assert check
+        assert not any((scratch / "dracut.conf.d").iterdir())
+        calls.append((command, env))
+
+    monkeypatch.setattr(spine.subprocess, "run", record)
+
+    initrd = spine.spine_initrd(tree, scratch, "upload-build")
+
+    assert initrd == scratch / "initrd"
+    assert "DRACUT_INSTALL" not in cast(dict[str, str], calls[0][1])
+    assert calls == [
+        (
+            [
+                "dracut",
+                "--conf",
+                "/dev/null",
+                "--confdir",
+                str(scratch / "dracut.conf.d"),
+                "--no-kernel",
+                "--no-hostonly",
+                "--no-hostonly-cmdline",
+                "--no-early-microcode",
+                "--kver",
+                "7.1.0-spine",
+                "--modules",
+                "base rootfs-block udev-rules systemd systemd-initrd dracut-systemd fs-lib",
+                "--gzip",
+                "--force",
+                "--tmpdir",
+                str(scratch),
+                str(scratch / "initrd"),
+            ],
+            {
+                name: value
+                for name, value in os.environ.items()
+                if name in {"PATH", "HOME", "LANG", "LANGUAGE"} or name.startswith("LC_")
+            },
+        )
+    ]
+
+
+def test_spine_initrd_requires_dracut(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(spine.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(spine.subprocess, "run", Mock(side_effect=AssertionError("ran")))
+    with pytest.raises(SpinePhaseError, match="install the dracut package"):
+        spine.spine_initrd(_kernel_tree(tmp_path), tmp_path, "upload-build")
+
+
+def test_spine_initrd_names_the_phase_when_dracut_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(spine.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        spine.subprocess,
+        "run",
+        Mock(side_effect=spine.subprocess.CalledProcessError(1, ["dracut"])),
+    )
+    with pytest.raises(SpinePhaseError, match="phase 'upload-build' failed: dracut exited 1"):
+        spine.spine_initrd(_kernel_tree(tmp_path), tmp_path, "upload-build")
+
+
+def test_spine_initrd_requires_the_kernel_release(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tree = _kernel_tree(tmp_path)
+    (tree / "include/config/kernel.release").unlink()
+    monkeypatch.setattr(spine.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(spine.subprocess, "run", Mock(side_effect=AssertionError("ran")))
+    with pytest.raises(SpinePhaseError, match=r"include/config/kernel\.release"):
+        spine.spine_initrd(tree, tmp_path, "upload-build")
+
+
+@pytest.mark.parametrize("missing", ["BLK_DEV_INITRD", "RD_GZIP"])
+def test_spine_config_initrd_requires_gzip_initramfs_support(tmp_path: Path, missing: str) -> None:
+    present = {"BLK_DEV_INITRD", "RD_GZIP"} - {missing}
+    (tmp_path / ".config").write_bytes(
+        _BOOT_CONFIG + b"".join(f"CONFIG_{symbol}=y\n".encode() for symbol in present)
+    )
+    assert spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build")
+    with pytest.raises(SpinePhaseError, match=f"CONFIG_{missing}=y"):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", require_initrd=True)
+
+
+_INITRD_CONFIG = _BOOT_CONFIG + b"CONFIG_BLK_DEV_INITRD=y\nCONFIG_RD_GZIP=y\n"
+
+
+def _fake_upload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    accepted: tuple[str, ...] = ("kernel", "effective_config", "initrd"),
+    returned: tuple[str, ...] = ("kernel", "effective_config", "initrd"),
+) -> tuple[list[tuple[str, dict[str, object]]], dict[str, bytes], Mock]:
+    kernel_tar = tmp_path / "kernel.tar"
+    kernel_tar.write_bytes(b"tar")
+
+    def initrd(_tree: Path, dest_dir: Path, _phase: str) -> Path:
+        built = dest_dir / "initrd"
+        built.write_bytes(b"\x1f\x8binitrd")
+        return built
+
+    build_initrd = Mock(side_effect=initrd)
+    monkeypatch.setattr(spine, "accepted_run_upload_names", lambda _c: list(accepted))
+    monkeypatch.setattr(spine, "combined_kernel_tar", lambda *_a, **_k: kernel_tar)
+    monkeypatch.setattr(spine, "spine_initrd", build_initrd)
+    monkeypatch.setattr(spine.platform, "machine", lambda: "x86_64")
+    calls: list[tuple[str, dict[str, object]]] = []
+    put: dict[str, bytes] = {}
+
+    async def _scalar(client: object, name: str, **args: object) -> ToolResponse:
+        calls.append((name, args))
+        if name == "artifacts.create_run_upload":
+            return ToolResponse.collection(
+                "run-1", "pending", [_upload_item(item) for item in returned]
+            )
+        return ToolResponse.success("run-1", "succeeded")
+
+    async def _put(item: ToolResponse, path: Path) -> None:
+        put[str(item.data["name"])] = path.read_bytes()
+
+    monkeypatch.setattr(spine, "scalar", _scalar)
+    monkeypatch.setattr(spine, "put_presigned", _put)
+    return calls, put, build_initrd
+
+
+def test_spine_upload_with_initrd_declares_and_puts_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tree = _kernel_tree(tmp_path, _INITRD_CONFIG)
+    calls, put, build_initrd = _fake_upload(monkeypatch, tmp_path)
+    client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+
+    asyncio.run(
+        spine.build_and_upload_kernel(
+            cast(Any, client),
+            run_id="run-1",
+            kernel_tree=tree,
+            evidence_dir=tmp_path / "evidence",
+            with_initrd=True,
+        )
+    )
+
+    build_initrd.assert_called_once_with(tree, tmp_path / "evidence", "upload-build")
+    decls = cast(list[dict[str, object]], calls[0][1]["artifacts"])
+    initrd = next(decl for decl in decls if decl["name"] == "initrd")
+    assert initrd["size_bytes"] == len(b"\x1f\x8binitrd")
+    assert initrd["sha256"] == spine.sha256_b64(tmp_path / "evidence/initrd")
+    assert put["initrd"] == b"\x1f\x8binitrd"
+    assert calls[-1] == ("runs.complete_build", {"run_id": "run-1"})
+    evidence = json.loads((tmp_path / "evidence/upload.json").read_text())
+    assert "initrd" in {artifact["name"] for artifact in evidence["artifacts"]}
+
+
+def test_spine_upload_without_initrd_builds_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tree = _kernel_tree(tmp_path)
+    calls, put, build_initrd = _fake_upload(monkeypatch, tmp_path)
+    client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+
+    asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1", kernel_tree=tree))
+
+    build_initrd.assert_not_called()
+    decls = cast(list[dict[str, object]], calls[0][1]["artifacts"])
+    assert [decl["name"] for decl in decls] == ["kernel", "effective_config"]
+    assert "initrd" not in put
+
+
+@pytest.mark.parametrize(
+    ("accepted", "returned", "arch", "config", "message"),
+    [
+        (
+            ("kernel", "effective_config"),
+            ("kernel", "effective_config"),
+            "x86_64",
+            _INITRD_CONFIG,
+            "accepts no 'initrd'",
+        ),
+        (
+            ("kernel", "effective_config", "initrd"),
+            ("kernel", "effective_config"),
+            "x86_64",
+            _INITRD_CONFIG,
+            "returned no 'initrd' item",
+        ),
+        (
+            ("kernel", "effective_config", "initrd"),
+            ("kernel", "effective_config", "initrd"),
+            "ppc64le",
+            _INITRD_CONFIG,
+            "build the ppc64le initrd on a ppc64le host",
+        ),
+        (
+            ("kernel", "effective_config", "initrd"),
+            ("kernel", "effective_config", "initrd"),
+            "x86_64",
+            _BOOT_CONFIG,
+            "CONFIG_BLK_DEV_INITRD=y",
+        ),
+    ],
+    ids=["contract", "upload-item", "foreign-arch", "config"],
+)
+def test_spine_upload_with_initrd_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    accepted: tuple[str, ...],
+    returned: tuple[str, ...],
+    arch: str,
+    config: bytes,
+    message: str,
+) -> None:
+    tree = _kernel_tree(tmp_path, config)
+    calls, _put, _build = _fake_upload(monkeypatch, tmp_path, accepted=accepted, returned=returned)
+    client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+
+    with pytest.raises(SpinePhaseError, match=message):
+        asyncio.run(
+            spine.build_and_upload_kernel(
+                cast(Any, client), run_id="run-1", arch=arch, kernel_tree=tree, with_initrd=True
+            )
+        )
+    assert "runs.complete_build" not in [name for name, _ in calls]
+
+
 def _job(status: str, *, category: ErrorCategory | None = None) -> ToolResponse:
     return ToolResponse(
         object_id="job-1",
@@ -373,7 +616,7 @@ def _artifact_content(artifact_id: str, content: str) -> ToolResponse:
     return ToolResponse.success(
         artifact_id,
         "ready",
-        data={"content": content, "content_truncated": False},
+        data={"content": content, "content_truncated": False, "size_bytes": len(content.encode())},
     )
 
 
@@ -1055,3 +1298,416 @@ def test_spine_upload_can_leave_the_build_open(
     )
     assert calls == ["artifacts.create_run_upload"]
     assert json.loads((tmp_path / "evidence/upload.json").read_text())["result"] is None
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        ("Kernel pan", "ic - not syncing\nCPU: 0 PID: 1 6.18.54-kdive #1\n"),
+        ("Kernel panic - not syncing\n", "CPU: 0 PID: 1 6.18.54-kdive #1\n"),
+        ("Kernel panic - not syncing\nCPU: 0 PID: 1 6.18.54-kdive", " #1\n"),
+    ],
+)
+def test_poll_complete_panic_stream(first: str, second: str) -> None:
+    from tests.integration.live_stack.capture_cells import panic_seen
+
+    client = _client(
+        [
+            _artifact_listing(_console_part("old", 8)),
+            _artifact_listing(_console_part("10", 10), _console_part("9", 9)),
+            _artifact_content("9", first),
+            _artifact_content("10", second),
+        ]
+    )
+
+    async def observe() -> tuple[str, str]:
+        observation = spine.ConsoleObservation()
+        initial = await observation.snapshot(_live_client(client), "system-1")
+        return await spine.poll_for_new_console_part(
+            _live_client(client),
+            "system-1",
+            initial,
+            "Kernel panic - not syncing",
+            deadline_s=1,
+            interval_s=0,
+            observation=observation,
+            predicate=lambda text: panic_seen(text, "6.18.54-kdive"),
+        )
+
+    identifier, text = asyncio.run(observe())
+    assert identifier == "10"
+    assert panic_seen(text, "6.18.54-kdive")
+
+
+def _strict_poll(client: _FakeClient, observation: spine.ConsoleObservation) -> tuple[str, str]:
+    from tests.integration.live_stack.capture_cells import panic_seen
+
+    observation.baseline = {(1, 8): _console_part("old", 8)}
+    return asyncio.run(
+        spine.poll_for_new_console_part(
+            _live_client(client),
+            "system-1",
+            {"old"},
+            "Kernel panic - not syncing",
+            deadline_s=1,
+            interval_s=0,
+            observation=observation,
+            predicate=lambda text: panic_seen(text, "6.18.54-kdive"),
+        )
+    )
+
+
+def test_console_snapshot_and_observation_drain_pages() -> None:
+    first = ToolResponse.collection(
+        "system-1", "ready", [], data={"truncated": True, "next_cursor": "baseline"}
+    )
+    newest = ToolResponse.collection(
+        "system-1",
+        "ready",
+        [_console_part("10", 10)],
+        data={"truncated": True, "next_cursor": "older"},
+    )
+    text = "Kernel panic - not syncing\nCPU: 0 PID: 1 6.18.54-kdive #1\n"
+    client = _client(
+        [
+            first,
+            _artifact_listing(_console_part("old", 8)),
+            newest,
+            _artifact_listing(_console_part("9", 9)),
+            _artifact_content("9", text[:5]),
+            _artifact_content("10", text[5:]),
+        ]
+    )
+    observation = spine.ConsoleObservation()
+    assert asyncio.run(observation.snapshot(_live_client(client), "system-1")) == {"old"}
+    assert _strict_poll(client, observation) == ("10", text)
+    assert [args.get("cursor") for name, args in client.calls if name == "artifacts.list"] == [
+        None,
+        "baseline",
+        None,
+        "older",
+    ]
+
+
+def test_crash_kernel_evidence_binds_to_parts_sealed_after_this_crash() -> None:
+    # #3254: a crash-kernel banner plus elfcorehdr= that predates this crash — in the pre-crash
+    # baseline, or an earlier attempt's part listed below the baseline high-water mark — must
+    # never satisfy the observation. Only parts sealed after the crash are read and matched.
+    from tests.integration.live_stack.capture_cells import crash_evidence
+
+    release = "6.18.54-g1b357ecb3213"
+    stale = (
+        f"[    0.000000] Linux version {release} (builder@kernel-fixture) #1\r\n"
+        "[    0.000000] Command line: elfcorehdr=0x6f000000 console=ttyS0 reset_devices\r\n"
+    )
+    assert crash_evidence(stale, release) == "crash_kernel"
+    earlier, pre_crash, fresh = (
+        _console_part("earlier", 7),
+        _console_part("old", 8),
+        _console_part("new", 9),
+    )
+    client = _client(
+        [
+            _artifact_listing(earlier, pre_crash, fresh),
+            _artifact_content("new", "kdive login: \r\n"),
+        ]
+    )
+    observation = spine.ConsoleObservation(baseline={(1, 8): pre_crash})
+
+    with pytest.raises(SpinePhaseError, match="deadline"):
+        asyncio.run(
+            spine.poll_for_new_console_part(
+                _live_client(client),
+                "system-1",
+                {"old"},
+                "Kernel panic - not syncing",
+                deadline_s=0.05,
+                interval_s=1,
+                observation=observation,
+                predicate=lambda text: crash_evidence(text, release) is not None,
+            )
+        )
+    read = [args["request"] for name, args in client.calls if name == "artifacts.get"]
+    assert [cast(dict[str, object], request)["artifact_id"] for request in read] == ["new"]
+
+
+@pytest.mark.parametrize(
+    "kind,reason",
+    [
+        ("duplicate", "duplicate_part"),
+        ("missing-cursor", "invalid_list_continuation"),
+        ("cursor-cycle", "invalid_list_continuation"),
+        ("malformed", "invalid_part_key"),
+        ("gap", "part_gap"),
+        ("generation", "generation_change"),
+    ],
+)
+def test_poll_rejects_incomplete_manifest(kind: str, reason: str) -> None:
+    part = _console_part("new", 9)
+    pages = [_artifact_listing(part)]
+    if kind == "duplicate":
+        pages = [_artifact_listing(part, part)]
+    elif kind in {"missing-cursor", "cursor-cycle"}:
+        page = ToolResponse.collection("system-1", "ready", [], data={"truncated": True})
+        if kind == "cursor-cycle":
+            page.data["next_cursor"] = "again"
+        pages = [page, page]
+    elif kind == "malformed":
+        part.refs["object"] = "local/systems/system-1/console-part-bad"
+    elif kind == "gap":
+        pages = [_artifact_listing(_console_part("new", 10))]
+    elif kind == "generation":
+        part.refs["object"] = "local/systems/system-1/console-part-2-000000"
+    client = _client(pages)
+    observation = spine.ConsoleObservation()
+    with pytest.raises(SpinePhaseError, match=reason):
+        _strict_poll(client, observation)
+    assert observation.incomplete == reason
+    assert not any(name == "artifacts.get" for name, _ in client.calls)
+
+
+@pytest.mark.parametrize("kind", ["wrong-release", "split-suffix", "stale", "no-marker"])
+def test_poll_never_certifies_unqualified_stream(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(spine, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    text = "Kernel panic - not syncing\nCPU: 0 PID: 1 6.18.54-kdive"
+    index = 7 if kind == "stale" else 9
+    responses = [_artifact_listing(_console_part("new", index))]
+    if kind != "stale":
+        if kind == "split-suffix":
+            responses[0] = _artifact_listing(_console_part("new", 9), _console_part("suffix", 10))
+            responses += [
+                _artifact_content("new", text),
+                _artifact_content("suffix", "-wrong #1\n"),
+            ]
+        else:
+            content = "boot only\n" if kind == "no-marker" else text + "-wrong #1\n"
+            responses.append(_artifact_content("new", content))
+    responses.append(_artifact_listing())
+    client = _client(responses)
+    original_call = client.call_tool
+
+    async def call(name: str, **args: object) -> ToolResponse:
+        response = await original_call(name, **args)
+        if not client._responses:
+            clock.now = 2.0
+        return response
+
+    monkeypatch.setattr(client, "call_tool", call)
+    with pytest.raises(SpinePhaseError, match="deadline"):
+        _strict_poll(client, spine.ConsoleObservation())
+    if kind == "stale":
+        assert not any(name == "artifacts.get" for name, _ in client.calls)
+
+
+@pytest.mark.parametrize(
+    "data,reason",
+    [
+        (
+            {"content": "x", "size_bytes": 10, "content_truncated": True},
+            "invalid_content_continuation",
+        ),
+        (
+            {"content": "x", "size_bytes": 10, "content_truncated": True, "next_offset": 0},
+            "invalid_content_continuation",
+        ),
+        (
+            {"content": "x", "size_bytes": 10, "content_truncated": True, "next_offset": 9},
+            "invalid_content_continuation",
+        ),
+        (
+            {"content": "x", "size_bytes": 10, "content_truncated": False},
+            "incomplete_terminal_content",
+        ),
+        ({"content": "\ufffd", "size_bytes": 1}, "unverifiable_content_size"),
+        ({"content_unavailable": "store_error"}, "unavailable_content"),
+        ({"content_omitted": True}, "unavailable_content"),
+    ],
+)
+def test_console_rejects_incomplete_windows(data: dict[str, JsonValue], reason: str) -> None:
+    response = ToolResponse.success("new", "ready", data=data)
+    observation = spine.ConsoleObservation(expires_at=spine.time.monotonic() + 1)
+    with pytest.raises(SpinePhaseError, match=reason):
+        asyncio.run(observation.text(_live_client(_client([response])), _console_part("new", 9)))
+    assert observation.incomplete == reason
+    assert len(observation.records) == 1
+
+
+@pytest.mark.parametrize("second_size", [3, 4])
+def test_console_content_windows_use_utf8_bytes(second_size: int) -> None:
+    first = ToolResponse.success(
+        "new",
+        "ready",
+        data={"content": "é", "size_bytes": 3, "content_truncated": True, "next_offset": 2},
+    )
+    second = ToolResponse.success(
+        "new", "ready", data={"content": "x", "size_bytes": second_size, "content_truncated": False}
+    )
+    observation = spine.ConsoleObservation(expires_at=spine.time.monotonic() + 1)
+    client = _client([first, second])
+    if second_size == 3:
+        assert asyncio.run(observation.text(_live_client(client), _console_part("new", 9))) == "éx"
+    else:
+        with pytest.raises(SpinePhaseError, match="unverifiable_content_size"):
+            asyncio.run(observation.text(_live_client(client), _console_part("new", 9)))
+    assert client.calls[-1][1] == {"request": {"artifact_id": "new", "byte_offset": 2}}
+
+
+@pytest.mark.parametrize("category", [ErrorCategory.NOT_FOUND, ErrorCategory.CONFIGURATION_ERROR])
+def test_console_preserves_second_window_error_metadata(category: ErrorCategory) -> None:
+    first = ToolResponse.success(
+        "new",
+        "ready",
+        data={"content": "first", "size_bytes": 10, "content_truncated": True, "next_offset": 5},
+    )
+    error = ToolResponse.failure("new", category, detail="private detail must not persist")
+    error.refs["download_uri"] = "https://example.invalid/private"
+    observation = spine.ConsoleObservation(expires_at=spine.time.monotonic() + 1)
+    with pytest.raises(SpinePhaseError) as failure:
+        asyncio.run(
+            observation.text(_live_client(_client([first, error])), _console_part("new", 9))
+        )
+    assert failure.value.error_category == category.value
+    assert observation.records[-1]["error_category"] == category.value
+    assert observation.records[-1]["request"] == {"artifact_id": "new", "byte_offset": 5}
+    assert observation.incomplete == "acquisition_failure"
+    assert "private" not in json.dumps(observation.records)
+
+
+def test_console_retention_boundaries() -> None:
+    observation = spine.ConsoleObservation(expires_at=spine.time.monotonic() + 1)
+    response = _artifact_content("new", "x")
+    asyncio.run(observation.call(_live_client(_client([response])), "artifacts.get"))
+    size = observation.used_bytes
+    observation.used_bytes = (16 << 20) - size
+    asyncio.run(observation.call(_live_client(_client([response])), "artifacts.get"))
+    assert observation.used_bytes == 16 << 20
+    with pytest.raises(SpinePhaseError, match="diagnostic_byte_bound"):
+        asyncio.run(observation.call(_live_client(_client([response])), "artifacts.get"))
+    assert len(observation.records) == 2
+    observation.inspected = {str(i) for i in range(128)}
+    with pytest.raises(SpinePhaseError, match="part_bound"):
+        asyncio.run(observation.text(_live_client(_client([])), _console_part("new", 129)))
+
+
+def test_poll_generic_preserves_129_parts_and_replacement_content() -> None:
+    responses = [_artifact_listing(*[_console_part(str(i), i) for i in range(100)])]
+    responses += [_artifact_content(str(i), "boot") for i in range(100)]
+    responses += [_artifact_listing(*[_console_part(str(i), i) for i in range(100, 129)])]
+    responses += [
+        _artifact_content(str(i), "\ufffd marker" if i == 128 else "boot") for i in range(100, 129)
+    ]
+    result = asyncio.run(
+        spine.poll_for_new_console_part(
+            _live_client(_client(responses)),
+            "system-1",
+            set(),
+            "marker",
+            deadline_s=1,
+            interval_s=0,
+        )
+    )
+    assert result == ("128", "\ufffd marker")
+
+
+def test_console_deadline_covers_pending_call_and_cancellation() -> None:
+    async def run(cancel: bool) -> None:
+        observation = spine.ConsoleObservation(expires_at=spine.time.monotonic() + 0.01)
+        entered = asyncio.Event()
+
+        async def pending(name: str, **args: object) -> ToolResponse:
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        client = SimpleNamespace(call_tool=pending)
+        task = asyncio.create_task(observation.call(cast(Any, client), "artifacts.list"))
+        if cancel:
+            await entered.wait()
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError if cancel else SpinePhaseError):
+            await asyncio.wait_for(task, timeout=1.0)
+        assert observation.incomplete == (None if cancel else "deadline")
+
+    asyncio.run(run(False))
+    asyncio.run(run(True))
+
+
+@pytest.mark.parametrize("expiry_stage", ["response", "predicate"])
+def test_console_rejects_qualified_result_after_deadline(
+    monkeypatch: pytest.MonkeyPatch, expiry_stage: str
+) -> None:
+    from tests.integration.live_stack.capture_cells import panic_seen
+
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(spine, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    text = "Kernel panic - not syncing\nCPU: 0 PID: 1 6.18.54-kdive #1\n"
+    assert panic_seen(text, "6.18.54-kdive")
+    client = _client(
+        [
+            _artifact_listing(_console_part("new", 9)),
+            _artifact_content("new", text),
+        ]
+    )
+    original_call = client.call_tool
+    predicate_calls: list[str] = []
+
+    async def call(name: str, **args: object) -> ToolResponse:
+        response = await original_call(name, **args)
+        if name == "artifacts.get" and expiry_stage == "response":
+            clock.now = 2.0
+        return response
+
+    def qualified(value: str) -> bool:
+        predicate_calls.append(value)
+        clock.now = 2.0
+        return panic_seen(value, "6.18.54-kdive")
+
+    monkeypatch.setattr(client, "call_tool", call)
+    observation = spine.ConsoleObservation(baseline={(1, 8): _console_part("old", 8)})
+    with pytest.raises(SpinePhaseError, match="deadline"):
+        asyncio.run(
+            spine.poll_for_new_console_part(
+                _live_client(client),
+                "system-1",
+                {"old"},
+                "Kernel panic - not syncing",
+                deadline_s=1,
+                interval_s=0,
+                predicate=qualified,
+                observation=observation,
+            )
+        )
+    assert observation.incomplete == "deadline"
+    assert observation.records[-1]["data"] == _artifact_content("new", text).data
+    assert predicate_calls == ([] if expiry_stage == "response" else [text])
+
+
+@pytest.mark.parametrize("provider", ["local", "remote-libvirt"])
+def test_console_parts_accept_each_provider_key(provider: str) -> None:
+    # A remote System's console parts are keyed under its provider (#3114).
+    part = ToolResponse.success(
+        "p", "ready", refs={"object": f"{provider}/systems/system-1/console-part-1-000003"}
+    )
+    observation = spine.ConsoleObservation(expires_at=float("inf"))
+    parts = asyncio.run(
+        observation.parts(_live_client(_client([_artifact_listing(part)])), "system-1")
+    )
+    assert list(parts) == [(1, 3)]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "fault-inject/systems/system-1/console-part-1-000003",
+        "remote-libvirt/systems/system-2/console-part-1-000003",
+        "x/remote-libvirt/systems/system-1/console-part-1-000003",
+    ],
+)
+def test_console_parts_refuse_another_provider_or_system(key: str) -> None:
+    part = ToolResponse.success("p", "ready", refs={"object": key})
+    observation = spine.ConsoleObservation(expires_at=float("inf"))
+    with pytest.raises(SpinePhaseError, match="invalid_part_key"):
+        asyncio.run(observation.parts(_live_client(_client([_artifact_listing(part)])), "system-1"))

@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import stat
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
@@ -22,7 +25,7 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import ConsoleRotatePayload
-from kdive.providers.shared.runtime_paths import console_log_path
+from kdive.providers.shared.runtime_paths import console_boot_marker_path, console_log_path
 from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL
 
 _log = logging.getLogger(__name__)
@@ -53,21 +56,53 @@ _IN_FLIGHT_ROTATION_SQL = (
 )
 
 
+# The worker's per-start nonce (storage.record_console_boot): 128 bits, lowercase hex.
+_BOOT_NONCE = re.compile(r"[0-9a-f]{32}")
+_BOOT_MARKER_READ_LIMIT = 64
+
+
 def _boot_id(system_id: UUID) -> str:
     """Return a per-boot identity for ``system_id``'s console log, or ``""`` if it cannot stat.
 
-    Uses the console file's ``os.stat`` identity ``dev:ino:mtime`` — independent of the log's
-    size, so a power-cycle (which truncates/recreates the log, ADR-0258) changes it even when the
-    new boot has already grown past the prior cursor offset. The reconciler may not be co-located
-    with the worker that owns the file, so any stat failure (not co-located / unreadable / absent)
+    The identity is the log's ``dev:ino`` plus the nonce the worker records beside it on every
+    start (#3254). The log keeps one inode across boots (ADR-0576) and its mtime advances on
+    every append, so neither can separate boots; the nonce changes exactly once per start, so a
+    power-cycle whose new boot has already grown past the prior cursor still reads as a new
+    boot (ADR-0258, ADR-0273 decision 4) while ordinary growth keeps its generation. The
+    reconciler may not be co-located with the worker that owns the file, so a log stat failure
     degrades to ``""``: the handler treats ``""`` as a reset-forcing identity and still sees the
     real file on the worker, where its own shrink check catches the common truncation case.
     """
+    path = console_log_path(system_id)
     try:
-        st = os.stat(console_log_path(system_id))
+        st = os.stat(path)
     except OSError:
         return ""
-    return f"{st.st_dev}:{st.st_ino}:{int(st.st_mtime)}"
+    return f"{st.st_dev}:{st.st_ino}:{_boot_nonce(console_boot_marker_path(path), st.st_uid)}"
+
+
+def _boot_nonce(marker: Path, owner_uid: int) -> str:
+    """Read the worker's boot nonce, or ``""`` for anything but a well-formed owned marker.
+
+    The value lands in a persisted job payload, so only a regular file owned by the log's owner
+    holding exactly one nonce is trusted. ``O_NONBLOCK`` keeps a planted FIFO from stalling the
+    serial sweep. A missing marker (a System started before #3254) yields a stable empty nonce.
+    """
+    try:
+        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return ""
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != owner_uid:
+            return ""
+        raw = os.read(fd, _BOOT_MARKER_READ_LIMIT)
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+    nonce = raw.decode("ascii", errors="replace")
+    return nonce if _BOOT_NONCE.fullmatch(nonce) else ""
 
 
 async def _has_in_flight_rotation(conn: AsyncConnection, system_id: UUID) -> bool:

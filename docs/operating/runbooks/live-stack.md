@@ -59,6 +59,18 @@ workers on the host so they can access KVM and libvirt.
 
   This root installation is part of disposable-host provisioning, before the operator runs the
   stack. The live-stack commands themselves remain non-root socket clients.
+
+  Local `host_dump` also requires `/var/lib/kdive/host-dump`, root:kdive-live-libvirt
+  mode `3770`, below real root-owned ancestors without group/world write access. Both
+  preparation paths reject symlinks and incompatible extended/default ACLs before
+  changing this root. Workers create group-inherited `2710` capture directories and
+  exclusively precreated worker-owned `0660` cores. The daemon/worker group is trusted
+  to read core contents; this is not tenant isolation. Missing or unsafe setup returns
+  `configuration_error`: inspect the path/ACLs, correct the host configuration and rerun
+  host preparation; there is no temporary-directory fallback. On SELinux-enforcing
+  hosts, preparation installs an `svirt_image_t` fcontext rule and relabels the spool.
+  The standalone installer requires `semanage` and `restorecon`
+  (`policycoreutils-python-utils` on Fedora) for this step.
   On a **reused hosted runner** (the `live_vm_tcg` gate's ephemeral VM image), an earlier job can
   leave `/run/kdive/live-libvirt` behind: an operator-owned session daemon plus its socket/pid
   residue. A self-contradictory scene makes the installer exit 1 by design
@@ -188,7 +200,7 @@ the child, exactly as `onboard.sh` does for its `verify-project` step (#2046):
 ```bash
 source scripts/live-stack/env.sh
 KDIVE_DATABASE_URL="${KDIVE_SERVER_DATABASE_URL}" \
-  env -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
+  env -u KDIVE_HARNESS_DATABASE_URL -u KDIVE_MIGRATION_DATABASE_URL -u KDIVE_WORKER_DATABASE_URL \
       -u KDIVE_RECONCILER_DATABASE_URL \
   uv run python -m kdive verify-profile-kinds
 ```
@@ -218,7 +230,8 @@ The `KDIVE_S3_*` vars carry only the endpoint, bucket, and region.
 
 | var | value | consumed by |
 |-----|-------|-------------|
-| `KDIVE_MIGRATION_DATABASE_URL` | migration-owner member DSN | migration and role bootstrap; the [installed local authority carrier tests](live-testing.md#installed-local-authority-carrier) as `KDIVE_DATABASE_URL` |
+| `KDIVE_MIGRATION_DATABASE_URL` | migration-owner member DSN | migration and role bootstrap |
+| `KDIVE_HARNESS_DATABASE_URL` | harness login DSN, development-only: `SELECT` on every table plus the seeding writes (ADR-0769) | the live-tier harness (`live_stack` cells and the [installed local authority carrier tests](live-testing.md#installed-local-authority-carrier)) as `KDIVE_DATABASE_URL`; scrubbed from every daemon |
 | `KDIVE_SERVER_DATABASE_URL` | server-member DSN, member only of `kdive_server` | server |
 | `KDIVE_WORKER_DATABASE_URL` | worker-member DSN, member only of `kdive_worker` | fixed workers |
 | `KDIVE_RECONCILER_DATABASE_URL` | reconciler-member DSN, member only of `kdive_reconciler` | reconciler |

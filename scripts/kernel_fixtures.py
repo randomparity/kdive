@@ -40,11 +40,24 @@ def command(argv: list[str], **kwargs: Any) -> str:
     return (result.stdout or "").strip()
 
 
+def selections() -> dict[str, dict[str, str]]:
+    """Every pinned source selection: the two baselines and the #2817 corpus revisions."""
+    result: dict[str, dict[str, str]] = {}
+    for name in ("baselines.toml", "corpus.toml"):
+        data = tomllib.loads((ROOT / "fixtures/kernel" / name).read_text())
+        result |= {
+            key: {"repository": data["repository"], **value}
+            for key, value in data.items()
+            if isinstance(value, dict)
+        }
+    return result
+
+
 def baseline_selection(baseline: str) -> dict[str, str]:
-    data = tomllib.loads((ROOT / "fixtures/kernel/baselines.toml").read_text())
-    if baseline not in ("longterm", "stable"):
-        raise ValueError("select baseline longterm or stable")
-    return {"repository": data["repository"], **data[baseline]}
+    selected = selections()
+    if baseline not in selected:
+        raise ValueError(f"select a pinned source: {', '.join(selected)}")
+    return selected[baseline]
 
 
 def digest(path: Path) -> str:
@@ -235,12 +248,9 @@ def build(
     if output.exists() or source == output or source in output.parents or output in source.parents:
         raise ValueError("choose a fresh output directory separate from source")
     fragment = config.read_text()
-    # x86 capture needs fw_cfg; RHEL dracut also needs erofs and overlay to arm kdump.
+    # x86 capture reads the host-provided vmcoreinfo through fw_cfg.
     if arch == "x86_64" and config == CONFIG.resolve():
-        fragment += (
-            "CONFIG_FW_CFG_SYSFS=y\nCONFIG_EROFS_FS=y\n"
-            "CONFIG_EROFS_FS_ZIP_LZMA=y\nCONFIG_OVERLAY_FS=y\n"
-        )
+        fragment += "CONFIG_FW_CFG_SYSFS=y\n"
     toolchain = toolchain_identity()
     env = {
         k: v
@@ -289,7 +299,7 @@ def build(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build", "verify"))
-    parser.add_argument("--baseline", choices=("longterm", "stable"), required=True)
+    parser.add_argument("--baseline", choices=tuple(selections()), required=True)
     parser.add_argument("--arch", choices=tuple(ARCH), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--source", type=Path)

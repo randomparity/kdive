@@ -42,6 +42,48 @@ identity of every stored plan.
    lands, that authority ignores the member: the ADR-0723 probe reports `debuginfo_unloadable`
    on local and SSH-forward attaches, and a remote guest-agent attach stays silent.
 
+### Amendment (2026-11-03): remote-libvirt stages the vmlinux in the module tree (#3131)
+
+Item 5 left the remote write and recovery mechanism to #3131 and named two routes: amend
+[ADR-0585](0585-remote-offline-module-restoration-appliance.md), or stage inside
+`lib/modules/<release>/`. This amendment takes the second, on the operator's decision of
+2026-11-03. It does not change items 1 to 4.
+
+The remote authority adds the `vmlinux` to the module source tree as the regular file `vmlinux`,
+so the appliance installs it at `/lib/modules/<release>/vmlinux` and its capture, replace and
+restore cover it. drgn 0.2.0 searches that path by default (`strings` on
+`_drgn.cpython-314-x86_64-linux-gnu.so` from `drgn-0.2.0-1.fc44` lists `/boot/vmlinux-%s`,
+`/lib/modules/%s/vmlinux` and `/lib/modules/%s/vmlinux.debug`, 2026-11-03), so the file resolves symbols although it is not at
+the `/usr/lib/debug/lib/modules/<release>/vmlinux` path that
+[ADR-0723](0723-drgn-live-reads-a-staged-dwarf-vmlinux.md) item 5 names for the other paths. The
+appliance protocol, schemas and image are unchanged.
+
+The module source manifest is a hash of the whole tree, so the plan gains an optional
+`staged_module_source_manifest` on the `debuginfo` member: the manifest of the module tree plus
+the file, computed at build completion from the same entries and file digest. Remote derivation
+of the operation, the source volume and the appliance's own check use it when present, and the
+module-only manifest otherwise. It is omitted from the canonical bytes when absent. A member
+without it (a Run completed before #3131) is ignored by the remote authority, as before.
+
+Consequences: an authority host from before #3131 rejects a plan that carries the new key
+(`extra="forbid"`); upgrade authority hosts before workers and the server, as under Consequences
+below. The tree's 8 GiB and 200,000-entry bounds count the file; a module tree near the bound
+fails the source build. Each prepare or restore reads the object once more.
+
+Considered & rejected:
+
+- **A second appliance destination at `/usr/lib/debug/lib/modules/<release>/`.** judgment: a new
+  operation field, a second capture and restore state machine and a rebuilt operator-provisioned
+  image per architecture, for a path drgn also finds under `/lib/modules/<release>/`.
+- **Hash the extra file into the operation only.** judgment: the appliance and the source volume
+  hash the whole tree, so the tree manifest must change; a side digest would leave them unbound.
+- **Leave the remote member ignored.** judgment: ADR-0723 item 5 requires every install path to
+  stage it; drgn-live on a remote guest-agent attach stays silent and unusable.
+- **Fetch the `vmlinux` at materialization too.** judgment: the materializer publishes only
+  the kernel and initrd, so the fetch there reads 1.5 GiB it does not use.
+- **Compute the combined manifest at derivation time.** judgment: it needs the multi-gigabyte
+  bundle before the attempt exists; the build already holds the entries.
+
 ## Consequences
 
 - Every plan stored before this change parses and keeps its identity. No migration is needed.

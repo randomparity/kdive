@@ -80,7 +80,6 @@ class WorkerSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, str_max_length=4096)
 
     python: str
-    source_root: str
     rootfs_dir: str
     build_workspace: str
     build_component_roots: str
@@ -112,7 +111,6 @@ class WorkerSettings(BaseModel):
 
     @field_validator(
         "python",
-        "source_root",
         "rootfs_dir",
         "build_workspace",
         "build_component_roots",
@@ -146,7 +144,6 @@ class WorkerSettings(BaseModel):
 
     @field_validator(
         "python",
-        "source_root",
         "rootfs_dir",
         "build_workspace",
         "build_component_roots",

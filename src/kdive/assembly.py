@@ -25,6 +25,7 @@ class ProcessAssembly:
 
 
 def _durable_worker_death_verifier() -> WorkerDeathVerifier | None:
+    """Keep the existing durable-mode registration gate; witnesses own death evidence."""
     verifier = worker_death_verifier_from_env()
     if isinstance(verifier, (DockerWorkerDeathVerifier, KubernetesWorkerDeathVerifier)):
         return verifier

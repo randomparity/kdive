@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
+
+from pydantic import Field
 
 from kdive.providers.ports._common import ProviderModel
 
@@ -19,14 +21,43 @@ class GdbFrame(ProviderModel):
     line: int | None = None
 
 
+class GdbVariable(ProviderModel):
+    """One frame argument or local from gdb/MI ``-stack-list-variables --simple-values``."""
+
+    name: str
+    type: str | None = None
+    value: str | None = None
+
+
+class GdbFrameDetail(GdbFrame):
+    """A selected frame with its arguments and locals, bounded (ADR-0781)."""
+
+    args: list[GdbVariable] = Field(default_factory=list)
+    locals: list[GdbVariable] = Field(default_factory=list)
+    truncated: bool = False
+
+
 class GdbStopRecord(ProviderModel):
     """A parsed gdb/MI stop record."""
 
     reason: str | None = None
+    signal_name: str | None = None
     bkptno: str | None = None
     stopped_thread: str | None = None
     frame: GdbFrame | None = None
     timed_out: bool = False
+
+
+# What halted the guest, as debug.interrupt reports it (#3244): its own SIGINT stop, any other
+# stop observed during a run, the first gdb attachment, or nothing because the guest was halted.
+type HaltCause = Literal["interrupt", "stop_event", "attach", "already_halted"]
+
+
+class GdbHalt(ProviderModel):
+    """The outcome of ``GdbMiEngine.interrupt``: the cause and the stop when one was observed."""
+
+    halted_by: HaltCause
+    stop: GdbStopRecord | None = None
 
 
 class GdbBacktrace(ProviderModel):
@@ -129,7 +160,7 @@ class GdbController(Protocol):
         ...
 
     def exit(self) -> None:
-        """Terminate the underlying gdb/MI controller.
+        """Confirm the underlying gdb process has exited before returning.
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` if the controller cannot be
@@ -138,9 +169,18 @@ class GdbController(Protocol):
         ...
 
 
+# The guest's execution state as the engine last observed it (#3244). ``running`` means "not
+# known to be halted": it is set before any resume is written and cleared only by a stop.
+type GdbExecution = Literal["attach_halted", "halted", "running"]
+
+
 @dataclass
 class GdbMiAttachment:
-    """A live gdb/MI attachment plus endpoint and transcript metadata."""
+    """A live gdb/MI attachment plus endpoint and transcript metadata.
+
+    ``execution`` is written only by the engine, inside engine calls that the Debug-plane runtime
+    serializes per session.
+    """
 
     controller: GdbController
     rsp_host: str
@@ -150,6 +190,21 @@ class GdbMiAttachment:
     run_id: str = ""
     loaded_modules: set[str] = field(default_factory=set)
     guest_arch: str | None = None
+    execution: GdbExecution = "halted"
+
+    staging_dir: Path | None = None
+    cleanup_pending: bool = False
+    controller_exited: bool = False
+
+
+class GdbMiAttachFailure(Exception):
+    """An attach failure whose partial resources still require owned cleanup (ADR-0799)."""
+
+    def __init__(self, attachment: GdbMiAttachment | None, cause: BaseException) -> None:
+        super().__init__("GDB attachment setup failed")
+        self.attachment = attachment
+        self.cause = cause
+        self.staging_dir: Path | None = None
 
 
 class GdbMiEngine(Protocol):
@@ -221,7 +276,8 @@ class GdbMiEngine(Protocol):
 
         If the requested wait times out, the provider interrupts execution and returns the
         resulting stop with ``timed_out=True``. If no stop arrives after the interrupt, the
-        provider raises instead of returning ``None``.
+        provider raises instead of returning ``None``. On a guest already running from
+        ``continue_background`` it sends no resume and waits for that run's stop.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for invalid timeout values,
@@ -282,12 +338,26 @@ class GdbMiEngine(Protocol):
         """
         ...
 
-    def interrupt(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
-        """Interrupt execution and return the stop record when one is reported.
+    def continue_background(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
+        """Resume without waiting; return a stop the resume reply already carried, else None.
+
+        ``None`` leaves the guest running. On a guest already running it sends nothing.
 
         Raises:
             CategorizedError: ``DEBUG_ATTACH_FAILURE`` for gdb/MI command failures or
                 ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
+    def interrupt(self, attachment: GdbMiAttachment) -> GdbHalt:
+        """Halt a running guest and report what halted it.
+
+        A halted guest returns ``attach`` or ``already_halted`` without sending a command.
+
+        Raises:
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` / ``transport_stall`` when a running
+                guest reports no stop after the interrupt; ``DEBUG_ATTACH_FAILURE`` /
+                ``interrupt_refused`` when gdb answers the interrupt with ``^error``.
         """
         ...
 
@@ -303,14 +373,16 @@ class GdbMiEngine(Protocol):
         """
         ...
 
-    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrame:
-        """Inspect one selected stack frame by ``level`` through gdb/MI.
+    def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrameDetail:
+        """Inspect one selected stack frame by ``level``, with its arguments and locals.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_frame_level`` for a negative or
                 non-integer ``level`` (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
                 ``inferior_running`` when the target is running, ``no_frame_at_level`` when no
-                frame exists at ``level``, or for other gdb/MI command failures;
+                frame exists at ``level``, ``no_current_thread`` when gdb reports no current
+                thread, ``no_frame_variables`` when gdb returns no variable list, or for other
+                gdb/MI command failures;
                 ``INFRASTRUCTURE_FAILURE`` for command timeouts.
         """
         ...

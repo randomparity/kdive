@@ -35,6 +35,19 @@ host-setup runbook owns inventory examples and secret mounting instructions.
 - **Object store:** the guest must reach the endpoint used in presigned kernel-download and
   vmcore-upload URLs. Worker-only reachability is insufficient.
 
+## Uploaded `vmlinux` and the work directory
+
+When the Run's build uploaded a DWARF `vmlinux`, the external-boot authority installs it with the
+modules at `/lib/modules/<release>/vmlinux`, so drgn-live finds symbols without a guest-side
+step. The file travels in the module source tree: each module prepare and restore streams it
+(at most 1.5 GiB) into `remote_module_work_dir` and builds a source image that holds a second
+copy, so size that directory for about 3 GiB more than the module tree needs. The tree's existing
+limits (200,000 entries, 8 GiB) count the file; a bundle whose combined tree would exceed them, or
+that already has `lib/modules/<release>/vmlinux`, is installed without it. Keep the uploaded
+`vmlinux` object version for as long as the kernel bundle: a restore reads it again, and a missing
+version fails the restore before the System is stopped. Upgrade authority hosts before workers
+and the server, and do not roll a host back while staged plans are stored.
+
 ## Preflight and CPU expectations
 
 From a checkout on the connecting host, run `just check-remote-libvirt HOST USER URI`. It checks

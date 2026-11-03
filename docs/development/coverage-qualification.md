@@ -75,6 +75,11 @@ input names override that optionality.
 | `kernel_config_sha256`, `compiler_id` | SHA-256 identities of configuration and compiler/toolchain. |
 | `kernel_build_id` | Lowercase hexadecimal ELF build ID, 16–128 characters. |
 
+A service tool marked `guest_observing` in `scripts/coverage_campaign/obligations.toml` boots a
+lane System in its functional scenario. Its functional cells are per architecture and bind the
+lane's `host_arch`, `guest_os`, `guest_arch`, `accelerator` and `image_sha256`; its rejection cells
+stay host-only.
+
 OS names are restricted to `ubuntu`, `debian`, `fedora`, `rhel`, `rocky`, `almalinux`,
 `centos-stream`, `opensuse-leap`, `opensuse-tumbleweed` and `sles`, followed by a numeric dotted version. Use a public platform
 identity, never a host name, address or private path. This schema does not declare new VM targets.
@@ -138,8 +143,8 @@ skips unless the runner supplies its phase inputs.
    ```
 
    The runner checks that the host is clean and that its distribution and architecture match the
-   cell. It then runs the documented entry points in separate login sessions: bootstrap, the
-   example's kernel tree (`scripts/fetch-kernel-tree.sh`), `just setup`, `just prepare-local-libvirt-host`, `just check-local-libvirt`,
+   cell. It then runs the documented entry points in separate login sessions: bootstrap,
+   `just setup`, `just prepare-local-libvirt-host`, `just check-local-libvirt`,
    `examples/local-libvirt/demo-up.sh` and `examples/local-libvirt/build-image.sh`. After that it
    runs the node, repeats the setup steps, and runs the node again. The optional prerequisites
    file holds only operator duties the installation docs assign, such as a Docker engine where

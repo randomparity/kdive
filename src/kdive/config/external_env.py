@@ -87,6 +87,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "unset → the live_stack suite skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_KERNEL_SRC",
+        "test",
+        "~/src/linux when that directory exists",
+        "Built kernel tree the live proofs, `scripts/live-vm/preflight-env.sh`, and "
+        "`scripts/operations/live_debug_build.py` read; `scripts/live-stack/env.sh` supplies the "
+        "default. Workers never read it (ADR-0316).",
+    ),
+    ExternalEnvVar(
         "KDIVE_GUEST_IMAGE_DEBIAN",
         "test",
         None,
@@ -237,6 +245,13 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "test",
         None,
         "System id of a pre-provisioned live VM for the gated local-libvirt install test.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_3097_EXCLUSIVE_QUEUE",
+        "test",
+        None,
+        "Set to `approved` to let the run/system/job service-cell proof (#3097) pause and own an "
+        "idle job queue for its queued-install cells; any other value records them as blocked.",
     ),
     ExternalEnvVar(
         "KDIVE_LIVE_VM_BZIMAGE",
@@ -788,25 +803,11 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "start; it is empty for non-start operations.",
     ),
     ExternalEnvVar(
-        "KDIVE_SOURCE_ROOT",
-        "script",
-        None,
-        "Internal request-construction handoff from KDIVE_KERNEL_SRC to the worker source-root "
-        "setting; start fails when it is not an existing absolute directory.",
-    ),
-    ExternalEnvVar(
         "KDIVE_EXPECTED_SLOTS",
         "script",
         None,
         "Internal status-response assertion handoff copied from KDIVE_LIFECYCLE_EXPECTED_SLOTS; "
         "unset or empty disables the assertion.",
-    ),
-    ExternalEnvVar(
-        "KDIVE_WORKER_SOURCE_ROOT",
-        "script",
-        None,
-        "Lifecycle-generated worker environment value carrying the validated absolute kernel "
-        "source root from the current start request; operators set KDIVE_KERNEL_SRC instead.",
     ),
     ExternalEnvVar(
         "KDIVE_PREFLIGHT_KDUMP",
@@ -846,6 +847,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "reference reconciler service); external deployments override the local development "
         "member.",
     ),
+    ExternalEnvVar(
+        "KDIVE_HARNESS_DATABASE_URL",
+        "script",
+        "local Compose harness DSN",
+        "Least-privilege login DSN for the live-tier harness (ADR-0769): live_stack cells and the "
+        "installed authority carriers take it as KDIVE_DATABASE_URL. The local role bootstrap "
+        "creates the login; no runtime process receives it.",
+    ),
     # Host-published ports for the compose backends. Each is read by BOTH `docker-compose.yml`
     # (the publish side) and `scripts/live-stack/env.sh` (the client-facing DSN/endpoint), so an
     # override relocates the host mapping and the URL that reaches it together. Container-internal
@@ -855,21 +864,31 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "script",
         "5432",
         "Host port the compose `postgres` service publishes; `scripts/live-stack/env.sh` folds it "
-        "into the default role database DSNs (#1929).",
+        "into the default role database DSNs (#1929). Accepts `PORT` or `ADDR:PORT`; a loopback "
+        "or wildcard address keeps `localhost` in the derived URL.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_SEAWEEDFS_IMAGE",
+        "script",
+        "kdive-seaweedfs:dev",
+        "Image tag for the Compose seaweedfs service built from the bundled source. The isolated "
+        "volume-persistence proof ignores inherited overrides and uses its own invocation tag.",
     ),
     ExternalEnvVar(
         "KDIVE_SEAWEEDFS_PORT",
         "script",
         "8333",
         "Host port the compose `seaweedfs` S3 API publishes; `scripts/live-stack/env.sh` folds "
-        "it into the default `KDIVE_S3_ENDPOINT_URL`.",
+        "it into the default `KDIVE_S3_ENDPOINT_URL`. Accepts `PORT` or `ADDR:PORT`; a loopback "
+        "or wildcard address keeps `localhost` in the derived URL.",
     ),
     ExternalEnvVar(
         "KDIVE_OIDC_PORT",
         "script",
         "8090",
         "Host port the compose `oidc` mock issuer publishes; `scripts/live-stack/env.sh` folds it "
-        "into the default `KDIVE_OIDC_ISSUER` and `KDIVE_OIDC_JWKS_URI`.",
+        "into the default `KDIVE_OIDC_ISSUER` and `KDIVE_OIDC_JWKS_URI`. Accepts `PORT` or "
+        "`ADDR:PORT`; a loopback or wildcard address keeps `localhost` in the derived URL.",
     ),
     ExternalEnvVar(
         "KDIVE_PROMETHEUS_PORT",

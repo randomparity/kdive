@@ -40,6 +40,9 @@ _NOT_ENV: frozenset[str] = frozenset(
     {
         # Non-env constants in product code.
         "KDIVE_METADATA_NS",  # object-store metadata namespace prefix
+        # Private Compose-proof dictionary carriers, removed before child env construction.
+        "KDIVE_PROOF_DEADLINE",
+        "KDIVE_PROOF_IMAGE_ID",
         # Guestfish output delimiters in the pinned Leap image growth task, not env reads.
         "KDIVE_METADATA",
         "KDIVE_SPACE",

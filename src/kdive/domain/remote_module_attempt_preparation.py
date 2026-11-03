@@ -60,3 +60,14 @@ class ModuleAttemptPreparationRequestV1(_ClosedCanonicalValue):
         "module-attempt-preparation-request-v1", alias="schema"
     )
     module_attempt_obligation: ModuleAttemptObligationReceiptV1
+
+    @classmethod
+    def from_payload(cls, raw: object) -> Self:
+        """Parse the receipt a durable job payload carries.
+
+        The model is strict about UUIDs, which parse from JSON text but not from a dict of
+        strings, and a job payload read back from jsonb is such a dict.
+        """
+        if isinstance(raw, cls):
+            return raw
+        return cls.model_validate_json(json.dumps(raw))

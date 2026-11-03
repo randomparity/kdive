@@ -26,8 +26,9 @@ class GeneratedFlag:
 
     * ``arg_type`` — ``"str"`` | ``"int"`` | ``"float"`` for a typed single value.
     * ``action`` — ``"store_true"`` for an optional boolean flag, ``"bool_optional"`` for a
-      required one (argparse ``BooleanOptionalAction``: ``--flag`` / ``--no-flag``, because a
-      required boolean must be able to express false), or ``"append"`` for an
+      required one or an optional one that defaults to true (argparse
+      ``BooleanOptionalAction``: ``--flag`` / ``--no-flag``, because both must be able to
+      express false; an unset optional one is omitted), or ``"append"`` for an
       array-of-string parameter (repeat the flag once per element).
 
     ``choices`` is the enum's allowed values (argparse ``choices=``) when the parameter
@@ -69,6 +70,11 @@ class GeneratedVerb:
     object arrays, typeless/tuple arrays, or scalar unions). This generator emits no flag
     for them; the ``--<param>-json`` escape that surfaces them is a separate entry (#1449).
 
+    ``json_scalars`` pairs a ``json_params`` name with the JSON scalar types (``string``,
+    ``number``, ``integer``, ``boolean``) its schema also accepts, e.g. a ``Decimal`` that the
+    tool takes as ``number | string``. The escape accepts those scalars as well as containers
+    (#3299); a parameter absent here stays container-only.
+
     ``confirm_destructive`` controls whether this path exposes the generic ``--yes`` ceremony.
     Every descriptor supplies this explicit boolean, so parser behavior never falls back to an
     inferred value.
@@ -83,6 +89,7 @@ class GeneratedVerb:
     unwrap_request: bool = False
     flags: tuple[GeneratedFlag, ...] = ()
     json_params: tuple[str, ...] = field(default_factory=tuple)
+    json_scalars: tuple[tuple[str, tuple[str, ...]], ...] = ()
     positionals: tuple[str, ...] = ()
     local_flags: tuple[GeneratedLocalFlag, ...] = ()
     confirm_destructive: bool = field(kw_only=True)

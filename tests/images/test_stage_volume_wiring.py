@@ -139,7 +139,9 @@ def test_find_staged_row_absent_row_is_configuration_error(
 
 def test_find_staged_row_present_row_returns_target_row(monkeypatch: pytest.MonkeyPatch) -> None:
     row_id = uuid4()
-    _patch_db(monkeypatch, _FakeConn(_FakeCursor(row=(row_id, "fedora-44.qcow2"))))
+    _patch_db(
+        monkeypatch, _FakeConn(_FakeCursor(row=(row_id, "fedora-44.qcow2", "registered", None)))
+    )
     assert _find_staged_row("remote-libvirt", "fedora-44", "x86_64") == _TargetRow(
         row_id=row_id, volume="fedora-44.qcow2"
     )
@@ -199,3 +201,17 @@ def test_attach_config_success_puts_then_commits_the_key(
         ("UPDATE image_catalog SET kernel_config_key = %s WHERE id = %s", (key, row_id))
     ]
     assert conn.committed is True
+
+
+def test_persist_root_db_error_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_db(monkeypatch, _FakeConn(_FakeCursor(raises=psycopg.OperationalError("db offline"))))
+    with pytest.raises(CategorizedError, match="unverified") as failure:
+        wiring._persist_root(
+            "remote-libvirt",
+            "base",
+            "x86_64",
+            _TargetRow(uuid4(), "base.qcow2"),
+            "sha256:" + "a" * 64,
+            {},
+        )
+    assert failure.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE

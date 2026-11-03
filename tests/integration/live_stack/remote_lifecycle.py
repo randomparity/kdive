@@ -91,6 +91,7 @@ class RemoteHost:
     host_os: str
     host_arch: str
     virt: str
+    pcap_pool: str = "kdive-pcap"
 
 
 # One remote base image per family; Fedora and Enterprise Linux stay distinct (#2803 req 7).
@@ -123,7 +124,7 @@ def destination() -> str | None:
     return value
 
 
-def _host_ssh(dest: str, command: str, timeout: float) -> subprocess.CompletedProcess[str]:
+def host_ssh(dest: str, command: str, timeout: float) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603,S607 - fixed argv, validated destination  # nosec B603 B607
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", dest, command],
         capture_output=True,
@@ -135,7 +136,7 @@ def _host_ssh(dest: str, command: str, timeout: float) -> subprocess.CompletedPr
 
 def host_probe(dest: str) -> dict[str, str]:
     """The provider host's ``ID:VERSION_ID``, ``uname -m`` and ``systemd-detect-virt``."""
-    result = _host_ssh(dest, HOST_PROBE, 60.0)
+    result = host_ssh(dest, HOST_PROBE, 60.0)
     assert result.returncode == 0, f"provider-host probe exited {result.returncode}"
     fields = key_values(result.stdout)
     return {
@@ -187,7 +188,7 @@ def volume_sha256(dest: str, pool: str, volume: str) -> str:
         "set -o pipefail; virsh -q -c qemu:///system vol-download "
         f"--pool {shlex.quote(pool)} {shlex.quote(volume)} /dev/stdout | sha256sum"
     )
-    result = _host_ssh(dest, command, 1800.0)
+    result = host_ssh(dest, command, 1800.0)
     assert result.returncode == 0, f"volume digest exited {result.returncode}"
     digest = result.stdout.split()[0]
     assert re.fullmatch(r"[0-9a-f]{64}", digest), "volume digest is not a SHA-256"
@@ -241,7 +242,8 @@ def remote_host() -> RemoteHost:
         raise ScenarioStop(
             Outcome.BLOCKED, f"provider-host probe failed: {type(exc).__name__}"
         ) from None
-    return RemoteHost(dest, remote_config_for_resource(names[0]).storage_pool, **probe)
+    configuration = remote_config_for_resource(names[0])
+    return RemoteHost(dest, configuration.storage_pool, **probe, pcap_pool=configuration.pcap_pool)
 
 
 def observe_host(run: CellRun, host: RemoteHost) -> None:

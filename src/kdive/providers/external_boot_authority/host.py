@@ -10,17 +10,20 @@ import os
 import pwd
 import re
 import socket
+import ssl
 import stat
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote
 from uuid import UUID
 
+from cryptography import x509
 from psycopg import AsyncConnection
 from pydantic import SecretStr
 
@@ -102,9 +105,11 @@ _DATABASE_CONNECTION_OPTIONS = (
 _AUTHORITY_INSTALL_DIR = Path("/opt/kdive-provider-authority")
 _AUTHORITY_CREDENTIALS_SOURCE_DIR = Path("/etc/kdive/credentials/provider-authority")
 _AUTHORITY_STATE_DIR = Path("/var/lib/kdive/provider-authority")
-_REMOTE_MODULE_APPLIANCE_ROOT = Path("/var/lib/libvirt/kdive/module-appliance/v1")
+_REMOTE_MODULE_APPLIANCE_ROOT = Path("/var/lib/kdive/remote-module-appliance/v1")
 _POSIX_ACL_XATTRS = frozenset({"system.posix_acl_access", "system.posix_acl_default"})
 _UNPINNED_SYSTEM_INSTALLATION = object()
+# OpenSSL X509_V_ERR_CERT_NOT_YET_VALID and X509_V_ERR_CERT_HAS_EXPIRED.
+_CERTIFICATE_VERIFY_REASONS = {9: "certificate-not-yet-valid", 10: "certificate-expired"}
 
 
 class HostReadinessError(CategorizedError):
@@ -765,6 +770,8 @@ async def check_database_role(connection: Any) -> None:
                     ::regprocedure,
                 'public.resolve_current_external_boot_preparation_authority(text,uuid,bigint,'
                     'bigint,text,text)'::regprocedure,
+                'public.external_boot_prestop_system_holders(text,uuid,bigint,bigint,text)'
+                    ::regprocedure,
                 'public.open_external_boot_remote_module_attempt(text,uuid,bigint,bigint,'
                     'text,uuid,text,text)'::regprocedure,
                 'public.read_authorized_remote_module_cleanup_evidence(text,uuid,bigint,bigint,'
@@ -1424,15 +1431,31 @@ async def _check_tls_connection(
             result = None
         if result is not None:
             raise HostReadinessError("tls-health", "handshake-failed")
-    except Exception:
-        raise HostReadinessError("tls-health", "handshake-failed") from None
+    except Exception as error:
+        raise HostReadinessError("tls-health", _tls_failure_reason(config, error)) from None
     finally:
         if writer is not None:
             writer.close()
             try:
                 await asyncio.wait_for(writer.wait_closed(), timeout=5)
-            except Exception:
-                raise HostReadinessError("tls-health", "handshake-failed") from None
+            except Exception as error:
+                raise HostReadinessError("tls-health", _tls_failure_reason(config, error)) from None
+
+
+def _tls_failure_reason(config: AuthorityHostConfig, error: Exception) -> str:
+    """Name certificate expiry; a peer rejecting our client certificate shows only an EOF."""
+    if isinstance(error, ssl.SSLCertVerificationError):
+        return _CERTIFICATE_VERIFY_REASONS.get(error.verify_code, "handshake-failed")
+    try:
+        leaf = x509.load_pem_x509_certificate(config.health_client_certificate.read_bytes())
+    except OSError, ValueError:
+        return "handshake-failed"
+    now = datetime.now(UTC)
+    if now > leaf.not_valid_after_utc:
+        return "certificate-expired"
+    if now < leaf.not_valid_before_utc:
+        return "certificate-not-yet-valid"
+    return "handshake-failed"
 
 
 def _notify_systemd(message: str) -> None:
@@ -1683,10 +1706,13 @@ def _build_mutation_service(
             config.journal_dir, f"{system_id}.jsonl", owner_uid=config.authority_uid
         )
 
-    recovery_orphans = RecoveryOrphanAuthorityService(
-        connections, binding.provider, executor=binding.adapter
-    )
     if not config.remote_module_enabled:
+        recovery_orphans = RecoveryOrphanAuthorityService(
+            connections,
+            binding.provider,
+            executor=binding.adapter,
+            authority_instance=config.authority_instance,
+        )
         if isinstance(system_manifest, RemoteAuthoritySystemManifestV1):
             raise HostReadinessError("system-provider", "remote-binding-missing")
         system_service = (
@@ -1703,6 +1729,7 @@ def _build_mutation_service(
             system_service=system_service,
         )
 
+    from kdive.providers.remote_libvirt.debuginfo_module_tree import DebuginfoModuleTreeStager
     from kdive.providers.remote_libvirt.external_boot_authority import (
         DurableRemoteModuleVolumePreparationHost,
         RemoteExternalBootAuthorityAdapter,
@@ -1717,8 +1744,14 @@ def _build_mutation_service(
         ConcreteRemoteExternalBootOperations,
     )
     from kdive.providers.remote_libvirt.lifecycle.external_boot import OBSERVATION_PROGRAMS
+    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+        HostStatDeviceIdentity,
+    )
     from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
         RemoteModulePreparationExecutor,
+    )
+    from kdive.providers.remote_libvirt.reaping.module_volume_sweep import (
+        ModuleVolumeSweepService,
     )
     from kdive.providers.remote_libvirt.remote_module_authority_host import (
         FactoryRemoteModuleAuthorityHost,
@@ -1742,7 +1775,8 @@ def _build_mutation_service(
     def provider_connection() -> Iterator[Any]:
         yield connection
 
-    artifact_stager = build_authority_artifact_stager(object_store)
+    base_stager = build_authority_artifact_stager(object_store)
+    artifact_stager = DebuginfoModuleTreeStager(base_stager, object_store, fetch=True)
     module_factory = RemoteModuleAuthorityHostFactory(
         connection=connection,
         pool_name=config.remote_libvirt_storage_pool,
@@ -1765,7 +1799,7 @@ def _build_mutation_service(
         pool_name=config.remote_libvirt_storage_pool,
         capacity_bytes=REMOTE_MATERIALIZATION_CAPACITY_BYTES,
         monotonic=monotonic,
-        artifact_stager=artifact_stager,
+        artifact_stager=DebuginfoModuleTreeStager(base_stager, object_store, fetch=False),
     )
     operations = ConcreteRemoteExternalBootOperations(
         materializer,
@@ -1789,11 +1823,16 @@ def _build_mutation_service(
         connection.close()
 
     adapter = RemoteExternalBootAuthorityAdapter(
-        binding.adapter,
         coordinator,
         module_executor,
         remote_module_host=remote_module_host,
         close=close_remote,
+    )
+    recovery_orphans = RecoveryOrphanAuthorityService(
+        connections,
+        binding.provider,
+        executor=adapter,
+        authority_instance=config.authority_instance,
     )
 
     try:
@@ -1820,6 +1859,12 @@ def _build_mutation_service(
         recovery_orphans=recovery_orphans,
         proof_checkpoint=proof_checkpoint,
         system_service=system_service,
+        module_volume_sweeper=ModuleVolumeSweepService(
+            connection,
+            config.remote_libvirt_storage_pool,
+            module_executor,
+            HostStatDeviceIdentity(),
+        ),
     )
 
 

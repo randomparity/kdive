@@ -6,8 +6,9 @@ connection (ADR-0079). It self-selects: only a ``gdbstub`` transport whose handl
 the operator ``gdb_addr`` and that carries a domain name is re-armed; everything else is a
 no-op. The re-arm is the explicit stop-then-rearm (``gdbserver none`` then
 ``gdbserver tcp::<port>``) over the ``qemu+tls`` monitor, closing the holding connection
-deterministically (ADR-0083 host policy; ADR-0077 connection lifecycle). The monitor call runs
-only under the ``live_vm`` gate; orchestration + self-selection are unit-tested with fakes.
+deterministically (ADR-0083 host policy; ADR-0077 connection lifecycle). Orchestration and
+self-selection are unit-tested with fakes; the monitor call is the ``libvirt_qemu`` module
+function (#3294), unit-tested against libvirt's ``test:///default`` driver.
 """
 
 from __future__ import annotations
@@ -20,10 +21,12 @@ from pathlib import Path
 from typing import Protocol
 
 import libvirt
+import libvirt_qemu
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, all_remote_configs
+from kdive.providers.remote_libvirt.connection.monitor import qemu_monitor_command
 from kdive.providers.remote_libvirt.connection.transport import (
     open_libvirt_protocol,
     remote_connection,
@@ -35,12 +38,8 @@ _log = logging.getLogger(__name__)
 _GDBSTUB = "gdbstub"
 
 
-class _Domain(Protocol):
-    def qemuMonitorCommand(self, cmd: str, flags: int) -> str: ...  # noqa: N802 - libvirt name
-
-
 class _ResetConn(Protocol):
-    def lookupByName(self, name: str) -> _Domain: ...  # noqa: N802 - libvirt binding name
+    def lookupByName(self, name: str) -> object: ...  # noqa: N802 - libvirt binding name
     def close(self) -> None: ...
 
 
@@ -52,13 +51,11 @@ def open_libvirt_reset(uri: str) -> _ResetConn:
     return open_libvirt_protocol(uri)
 
 
-def _real_rearm(domain: _Domain, port: int) -> None:  # pragma: no cover - live_vm
+def _real_rearm(domain: object, port: int) -> None:
     """Stop-then-rearm the gdbstub over the QEMU monitor (HMP), dropping the stale client."""
-    import libvirt_qemu
-
     hmp = libvirt_qemu.VIR_DOMAIN_QEMU_MONITOR_COMMAND_HMP
-    domain.qemuMonitorCommand("gdbserver none", hmp)
-    domain.qemuMonitorCommand(f"gdbserver tcp::{port}", hmp)
+    qemu_monitor_command(domain, "gdbserver none", hmp)
+    qemu_monitor_command(domain, f"gdbserver tcp::{port}", hmp)
 
 
 class RemoteLibvirtTransportResetter:
@@ -71,7 +68,7 @@ class RemoteLibvirtTransportResetter:
         configs_factory: Callable[[], list[RemoteLibvirtConfig]] = all_remote_configs,
         open_connection: OpenResetConnection = open_libvirt_reset,
         secret_backend_factory: Callable[[], SecretBackend] | None = None,
-        rearm: Callable[[_Domain, int], None] = _real_rearm,
+        rearm: Callable[[object, int], None] = _real_rearm,
         pki_base_dir: Path | None = None,
     ) -> None:
         self._configs_factory = configs_factory

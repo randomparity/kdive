@@ -24,7 +24,7 @@ from psycopg import AsyncConnection
 from kdive.artifacts.uploads.upload_manifest import UploadOwnerKind
 from kdive.artifacts.uploads.write_lease import LIVE_HOLDER_SQL
 
-#: The three reasons a key under an upload owner's prefix must not be deleted, correlated to a
+#: The four reasons a key under an upload owner's prefix must not be deleted, correlated to a
 #: candidate alias ``c`` exposing ``key``, ``owner_kind`` and ``owner_id``. Every one is a committed
 #: row read in Postgres ``now()``, never a Python clock:
 #:
@@ -39,11 +39,20 @@ from kdive.artifacts.uploads.write_lease import LIVE_HOLDER_SQL
 #:     (:data:`~kdive.artifacts.uploads.write_lease.LIVE_HOLDER_SQL`), read from that module so
 #:     the passes that honour a lease and the pass that collects one cannot disagree.
 #:
+#:   * a capture publication journal owns this exact key while publishing, canceling, or
+#:     discarded. A discarded tombstone still fences a late conditional PUT (ADR-0559);
+#:     published objects are owned through their artifact row.
+#:
 #: Written as the *negation* — the conditions under which a candidate survives — because that is
 #: the form both callers need: the sweep selects the reclaimable subset of a page, and the reaper
 #: selects whether its one key survived.
 _OWNER_FENCE_SQL = f"""
       NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.object_key = c.key)
+  AND NOT EXISTS (SELECT 1 FROM vmcore_capture_executions v
+                  WHERE v.raw_key = c.key OR v.redacted_key = c.key)
+  AND NOT EXISTS (SELECT 1 FROM capture_operations o
+                  WHERE o.publication_object_key = c.key
+                    AND o.publication_state IN ('publishing', 'canceling', 'discarded'))
   AND NOT EXISTS (SELECT 1 FROM upload_manifests m
                   WHERE m.owner_kind = c.owner_kind AND m.owner_id = c.owner_id)
   AND NOT EXISTS (SELECT 1 FROM object_write_leases l
@@ -93,8 +102,8 @@ async def reclaimable_upload_keys(
     A candidate is reclaimable only when it passes every fence in :data:`_OWNER_FENCE_SQL` and its
     store mtime is older than ``grace`` measured against Postgres ``now()``.
 
-    Deliberately usable for one key as well as for a listing page: the orphan sweep calls it once
-    per page to classify and again per key immediately before deleting.
+    Deliberately usable for one key as well as for a listing page. The orphan sweep calls it
+    under the owner lock after capturing the exact versions, immediately before deleting.
 
     Args:
         conn: An async connection. One round trip is issued, whatever ``candidates``' length.
@@ -145,8 +154,8 @@ async def owner_key_is_fenced(
         key: The object key about to be deleted.
 
     Returns:
-        ``True`` when an ``artifacts`` row, an ``upload_manifests`` row or a live write lease now
-        protects ``key`` — the writers the reaper's phase 1 could not have seen.
+        ``True`` when an artifact, manifest, live write lease, or durable capture publication
+        protects ``key``. Publication ownership includes retained cancellation tombstones.
     """
     async with conn.cursor() as cur:
         await cur.execute(_KEY_SURVIVES_SQL, (key, owner_kind, owner_id))

@@ -45,6 +45,18 @@ and [provider guide](providers/local-libvirt.md#family-differences-that-matter) 
 build route and its prerequisites. Guest image architecture and the available live proofs are
 detailed below.
 
+### Remote-libvirt provider hosts
+
+The [Ansible provider-host play](../../deploy/ansible/README.md) targets Ubuntu 26.04, Fedora 44
+and RHEL/Rocky 10 (x86_64 or ppc64le) and openSUSE Leap 16 (x86_64). A provider host needs no
+guestfs binding for a worker, so the worker-host column above does not apply to it: openSUSE
+Leap is rejected as a worker host but admitted as a provider host. On Leap 16 the play serves
+libvirt TLS through the modular `virtproxyd`, keeps the QEMU emulator and `qemu-img` at the
+build of the QEMU modules, and builds `rocky-10-kdive-remote-base` with GRUB on the serial
+console. The three remote-libvirt x86_64 resource-boundary cells (#3118) passed with a Leap 16
+x86_64 provider host and a Rocky 10.2 control plane; see the
+[remote resource-boundary cells](runbooks/remote-live-stack.md#10-remote-resource-boundary-cells-3118).
+
 ### EL10 binding proof (2026-09-27)
 
 The tested builder source is recorded in commit `edfd3e4e9b1735d114482f51333fc3a7e2bf7b5a`.

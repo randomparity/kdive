@@ -1,0 +1,41 @@
+---
+- name: Prepare an installed local authority validation lane
+  hosts: live_vm_runners
+  become: true
+  gather_facts: true
+  vars:
+    live_vm_host_operator_user: "{{ installed_authority_operator_user }}"
+  pre_tasks:
+    - name: Require the explicit operator and exact candidate for this lane
+      ansible.builtin.assert:
+        that:
+          - installed_authority_operator_user is defined
+          - installed_authority_operator_user | length > 0
+          - live_vm_repo_version is match('^[0-9a-f]{40}$')
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['distribution_version'] == '26.04'
+          - ansible_facts['architecture'] == 'x86_64'
+        fail_msg: >-
+          Supply an explicit installed_authority_operator_user and full candidate SHA in
+          live_vm_repo_version for the assigned Ubuntu 26.04 x86_64 authority lane.
+
+    - name: Require an authority-owned System lane with fixed worker clients
+      ansible.builtin.assert:
+        that:
+          - live_vm_host_authority_enabled | bool
+          - live_vm_host_worker_authority_enabled | bool
+          - live_vm_host_authority_local_mutation_enabled | bool
+          - live_vm_host_authority_system_manifest_source | length > 0
+        fail_msg: >-
+          Enable authority, fixed worker clients and mutation, and supply the canonical
+          System manifest through the protected lane vars file before provisioning.
+      no_log: true
+
+    - name: Validate protected authority inputs before host mutation
+      ansible.builtin.include_role:
+        name: live_vm_host
+        tasks_from: authority_preflight.yml
+  roles:
+    - libvirt_stack
+    - libvirt_pool_net
+    - live_vm_host
