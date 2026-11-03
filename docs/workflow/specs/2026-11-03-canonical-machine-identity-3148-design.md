@@ -25,9 +25,12 @@ still match and `schema` stays `kdive-local-authority-domain-semantics-v2`.
 - The identity projects `os/type` as `(text, attrib)` with `attrib["machine"]` passed through
   `rendered_machine_alias(attrib.get("arch"), ...)`.
 
-A different machine type (`pc-i440fx-10.2`, `pseries`'s sibling families, a different arch) is
-not collapsed, so it still changes the identity. A versioned machine kdive itself pinned would
-collapse to the alias; kdive renders aliases only, so this is accepted below.
+A different machine type (`pc-i440fx-10.2`, another family, another arch) is not collapsed, so
+it still changes the identity. A profile may pin a versioned machine through
+`domain_xml_params["machine"]`; pins of one family now share one identity, and the digest of an
+intent rendered from a pin changes. Comparing the stored machine against the intent's instead
+would keep pins distinct but needs the intent inside the projection; rejected as more surface
+than the fence needs (name, uuid and overlay stay in the digest).
 
 ## Success
 
@@ -55,8 +58,8 @@ collapse to the alias; kdive renders aliases only, so this is accepted below.
   guests, KVM and TCG.
 - Invariants at stake: ownership fence (a foreign domain must not be adopted as owned); stored
   intent digests remain valid.
-- Accepted: a kdive-pinned versioned machine is indistinguishable from the alias (kdive renders
-  aliases only); an unknown libvirt machine family on these arches is not collapsed and fails
+- Accepted: a profile-pinned versioned machine is indistinguishable from the alias and from other
+  versions of its family; an unknown libvirt machine family on these arches is not collapsed and fails
   closed as not owned.
 - Covered elsewhere: remote authority machine handling (`remote_libvirt/system_authority.py`
   keeps a concrete machine in its intent); lapsed job recovery #3143.
