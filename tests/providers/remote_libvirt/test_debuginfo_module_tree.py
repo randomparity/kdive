@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from uuid import UUID
 
 import pytest
 
@@ -21,7 +22,7 @@ from kdive.providers.remote_libvirt.debuginfo_module_tree import (
     installed_tree_identity,
 )
 from kdive.store.objectstore import ObjectStore
-from tests.providers.ports.test_external_boot import _plan_data
+from tests.support.external_boot_plan import external_boot_plan
 
 _VMLINUX = b"dwarf vmlinux bytes " * 64
 _SHA = "sha256:" + hashlib.sha256(_VMLINUX).hexdigest()
@@ -31,6 +32,8 @@ _INNER_EVIDENCE: dict[str, object] = {
     "release": "6",
 }
 _INNER_INSTALLED = "sha256:" + "1" * 64
+_SYSTEM_ID = "00000000-0000-0000-0000-000000000003"
+_RUN_ID = "00000000-0000-0000-0000-000000000002"
 
 
 class _Inner:
@@ -64,7 +67,10 @@ def _plan(*, staged: bool = True, sha: str = _SHA, size: int = len(_VMLINUX)) ->
     member["size_bytes"] = size
     if staged:
         member["staged_module_source_manifest"] = _STAGED_MANIFEST
-    return ExternalBootPlan.model_validate(_plan_data() | {"debuginfo": member})
+    base = external_boot_plan(UUID(_SYSTEM_ID), UUID(_RUN_ID))
+    return ExternalBootPlan.model_validate(
+        base.model_dump(mode="json", by_alias=True) | {"debuginfo": member}
+    )
 
 
 def _stage(
