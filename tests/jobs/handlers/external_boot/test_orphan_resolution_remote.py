@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding
 from kdive.domain.catalog.resources import ResourceKind
@@ -31,11 +32,17 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityRecoveryOrphanDispositionRequestV1,
+    AuthorityRecoveryOrphanDispositionResponseV1,
     JournalPhase,
     JournalRecordV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+from kdive.providers.external_boot_authority.service import (
+    AuthenticatedPeer,
+    AuthorityServiceError,
+)
+from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
+from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 from tests.jobs.handlers.external_boot.seeding import insert_release_authority, seed_case
@@ -84,22 +91,66 @@ class _UnusedPorts:
         raise AssertionError(f"the host executor owns provider I/O, not the port: {name}")
 
 
-@pytest.mark.parametrize("disposition", ["delete", "adopt"])
-def test_admin_resolves_a_remote_row_published_under_an_adopted_identity(
-    migrated_url: str,
-    authority_role_dsns: Callable[[str], str],
-    tmp_path: Path,
-    disposition: str,
-) -> None:
-    asyncio.run(_run(migrated_url, authority_role_dsns, tmp_path, disposition))
+@dataclass(frozen=True)
+class _Chain:
+    """A remote quarantine row published under the adopted generation-1 identity."""
+
+    conn: psycopg.AsyncConnection
+    adapter: Any
+    vehicle: Any
+    case: Any
+    retry: AuthorityMutationRequestV1
+    ran_context: Any
+    observation: Any
+    adopted_identity: str
+    row: tuple[Any, ...]
+
+    @property
+    def authority(self) -> OpaqueProviderRef:
+        return OpaqueProviderRef(ref=_AUTHORITY_INSTANCE)
+
+    async def quarantine_status(self) -> tuple[Any, ...] | None:
+        return await (
+            await self.conn.execute(
+                "SELECT status FROM external_boot_recovery_quarantine WHERE id = %s",
+                (self.row[0],),
+            )
+        ).fetchone()
+
+    async def resolve(
+        self,
+        migrated_url: str,
+        authority_role_dsns: Callable[[str], str],
+        disposition: str,
+    ) -> AuthorityRecoveryOrphanDispositionResponseV1:
+        async with pool(migrated_url) as conn_pool:
+            admitted = await resolve_recovery_orphan(
+                conn_pool,
+                _admin(),
+                resolver=cast(Any, _RemoteResolver()),
+                system_id=str(self.vehicle.system_id),
+                object_identities=[self.row[1]],
+                disposition=disposition,
+            )
+        assert admitted.status == "queued"
+        request = await _claim_orphan_job(
+            self.conn, self.case.worker_incarnation, UUID(admitted.object_id)
+        )
+        service = RecoveryOrphanAuthorityService(
+            lambda: _authority_connection(authority_role_dsns("kdive_provider_authority")),
+            cast(Any, _UnusedPorts()),
+            self.adapter,
+            authority_instance=_AUTHORITY_INSTANCE,
+        )
+        return await service.resolve_recovery_orphan(
+            AuthenticatedPeer(self.case.worker_incarnation), request
+        )
 
 
-async def _run(
-    migrated_url: str,
-    authority_role_dsns: Callable[[str], str],
-    tmp_path: Path,
-    disposition: str,
-) -> None:
+@asynccontextmanager
+async def _published_chain(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
+) -> AsyncIterator[_Chain]:
     vehicle = build_vehicle()
     seed_record = _record(
         system_id=str(vehicle.system_id),
@@ -188,47 +239,116 @@ async def _run(
         ).fetchone()
         assert row is not None
         assert row[2:] == (adopted_identity, _AUTHORITY_INSTANCE, _PROVIDER_KIND)
-
-        async with pool(migrated_url) as conn_pool:
-            admitted = await resolve_recovery_orphan(
-                conn_pool,
-                _admin(),
-                resolver=cast(Any, _RemoteResolver()),
-                system_id=str(vehicle.system_id),
-                object_identities=[row[1]],
-                disposition=disposition,
-            )
-        assert admitted.status == "queued"
-        request = await _claim_orphan_job(conn, case.worker_incarnation, UUID(admitted.object_id))
-
-        service = RecoveryOrphanAuthorityService(
-            lambda: _authority_connection(authority_role_dsns("kdive_provider_authority")),
-            cast(Any, _UnusedPorts()),
-            adapter,
-            authority_instance=_AUTHORITY_INSTANCE,
+        yield _Chain(
+            conn, adapter, vehicle, case, retry, ran_context, observation, adopted_identity, row
         )
-        response = await service.resolve_recovery_orphan(
-            AuthenticatedPeer(case.worker_incarnation), request
-        )
-
-        assert (response.disposition, response.objects) == (disposition, 1)
-        status = await (
-            await conn.execute(
-                "SELECT status FROM external_boot_recovery_quarantine WHERE id = %s", (row[0],)
-            )
-        ).fetchone()
-        assert status == ("deleted" if disposition == "delete" else "adopted",)
-        receipt = adapter._coordinator.cleanup_quarantine(  # noqa: SLF001
-            record.binding, record.plan_identity
-        )
-        if disposition == "delete":
-            assert receipt is None
-        else:
-            assert receipt is not None and receipt.managed
-        assert await adapter.cleanup_quarantine_inventory(retry, ran_context) == ()
     finally:
         adapter.close()
         await conn.close()
+
+
+@pytest.mark.parametrize("disposition", ["delete", "adopt"])
+def test_admin_resolves_a_remote_row_published_under_an_adopted_identity(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    tmp_path: Path,
+    disposition: str,
+) -> None:
+    async def scenario() -> None:
+        async with _published_chain(migrated_url, authority_role_dsns, tmp_path) as chain:
+            response = await chain.resolve(migrated_url, authority_role_dsns, disposition)
+
+            assert (response.disposition, response.objects) == (disposition, 1)
+            assert await chain.quarantine_status() == (
+                "deleted" if disposition == "delete" else "adopted",
+            )
+            receipt = await chain.adapter.observe_recovery_object(
+                chain.observation.binding, chain.authority
+            )
+            assert receipt.present is (disposition == "adopt")
+            assert receipt.managed is (disposition == "adopt")
+            inventory = await chain.adapter.cleanup_quarantine_inventory(
+                chain.retry, chain.ran_context
+            )
+            assert inventory == ()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "context_update",
+    [
+        pytest.param({"operation_identity": "retry-own-identity"}, id="retry-identity"),
+        pytest.param({"attempt_id": uuid4()}, id="other-attempt"),
+    ],
+)
+def test_inventory_refuses_a_context_that_is_not_the_adopted_proof(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    tmp_path: Path,
+    context_update: dict[str, Any],
+) -> None:
+    async def scenario() -> None:
+        async with _published_chain(migrated_url, authority_role_dsns, tmp_path) as chain:
+            before = await chain.adapter.observe_recovery_object(
+                chain.observation.binding, chain.authority
+            )
+            wrong = chain.ran_context.model_copy(update=context_update)
+
+            with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+                await chain.adapter.cleanup_quarantine_inventory(chain.retry, wrong)
+
+            assert await chain.quarantine_status() == ("quarantined",)
+            assert (
+                await chain.adapter.observe_recovery_object(
+                    chain.observation.binding, chain.authority
+                )
+                == before
+            )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("disposition", ["delete", "adopt"])
+@pytest.mark.parametrize(
+    ("column", "forged"),
+    [
+        pytest.param("operation_identity", "forged-operation", id="operation-identity"),
+        pytest.param("attempt_id", str(uuid4()), id="attempt-id"),
+    ],
+)
+def test_admin_disposition_refuses_a_row_whose_ownership_differs_from_the_receipt(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    tmp_path: Path,
+    disposition: str,
+    column: str,
+    forged: str,
+) -> None:
+    async def scenario() -> None:
+        async with _published_chain(migrated_url, authority_role_dsns, tmp_path) as chain:
+            before = await chain.adapter.observe_recovery_object(
+                chain.observation.binding, chain.authority
+            )
+            await chain.conn.execute(
+                sql.SQL(
+                    "UPDATE external_boot_recovery_quarantine SET {} = %s WHERE id = %s"
+                ).format(sql.Identifier(column)),
+                (forged, chain.row[0]),
+            )
+
+            with pytest.raises(ProviderRecoveryRefusal, match="ownership conflicts"):
+                await chain.resolve(migrated_url, authority_role_dsns, disposition)
+
+            assert await chain.quarantine_status() == ("quarantined",)
+            assert (
+                await chain.adapter.observe_recovery_object(
+                    chain.observation.binding, chain.authority
+                )
+                == before
+            )
+
+    asyncio.run(scenario())
 
 
 async def _publish(
