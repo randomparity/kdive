@@ -474,17 +474,26 @@ def _assert_retry_generation_gate(
         ) as provider:
             adopted = provider.execute(open_sql, retry_arguments).fetchone()
             assert adopted is not None and adopted[0] is not None
-            for column, value in (
-                ("plan_identity", "sha256:" + "e" * 64),
-                ("authority_instance", "other-instance"),
-                ("generation", 3),
+            original = admin.execute(
+                "SELECT plan_identity, authority_instance, generation "
+                "FROM external_boot_authority_audit "
+                "WHERE authority_id = %s AND operation = 'materialize'",
+                (authority_id,),
+            ).fetchone()
+            assert original is not None
+            for column, value, restored in (
+                ("plan_identity", "sha256:" + "e" * 64, original[0]),
+                ("authority_instance", "other-instance", original[1]),
+                ("generation", 3, original[2]),
             ):
-                admin.execute(
+                update = (
                     f"UPDATE external_boot_authority_audit SET {column} = %s "
-                    "WHERE authority_id = %s AND operation = 'materialize'",
-                    (value, authority_id),
+                    "WHERE authority_id = %s AND operation = 'materialize'"
                 )
+                admin.execute(update, (value, authority_id))
                 assert provider.execute(open_sql, retry_arguments).fetchone() == (None,)
+                admin.execute(update, (restored, authority_id))
+                assert provider.execute(open_sql, retry_arguments).fetchone() != (None,)
 
 
 def test_sql_plan_identity_matches_python_with_and_without_debuginfo(migrated_url: str) -> None:
