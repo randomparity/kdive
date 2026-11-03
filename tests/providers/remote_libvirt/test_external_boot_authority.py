@@ -4368,7 +4368,38 @@ async def _observe_teardown(
 
 
 def _teardown_name(store: RemoteModuleVolumePreparationStore) -> str:
-    return f"{store._system_teardown_key(_record().binding)}.teardown"
+    return f"{store._system_teardown_key(_record().binding.system_id)}.teardown"
+
+
+def _sibling(
+    record: RemoteExternalBootRecoveryRecord, activation_id: str
+) -> RemoteExternalBootRecoveryRecord:
+    """A valid record of another activation of the same Run and plan (#3486)."""
+    binding = record.binding.model_copy(update={"activation_id": activation_id})
+    definition = record.definition.model_copy(update={"binding": binding})
+    return RemoteExternalBootRecoveryRecord.model_validate(
+        record.model_copy(update={"binding": binding, "definition": definition}).model_dump(
+            mode="python", by_alias=True
+        )
+    )
+
+
+class _ProvingTeardownOperations(_CollectingTeardownOperations):
+    """Collecting teardown host whose pool still holds the volumes of ``keep`` (#3486).
+
+    Every fixture activation renders the same module volume names, so presence is keyed by
+    activation id; the concrete name-based proof has its own test.
+    """
+
+    def __init__(self, *, keep: frozenset[str] = frozenset()) -> None:
+        super().__init__()
+        self.keep = keep
+        self.proved: list[str] = []
+
+    def activation_volumes_absent(self, binding: Any, refs: Any) -> bool:
+        assert refs.module_volumes
+        self.proved.append(binding.activation_id)
+        return binding.activation_id not in self.keep
 
 
 @pytest.mark.anyio
@@ -4448,6 +4479,31 @@ async def test_remote_stage_after_system_teardown_is_refused(tmp_path: Path) -> 
         store.stage(terminal.request, 1.0)
     with pytest.raises(finalized_error):
         store.stage_lifecycle(lifecycle, 1.0)
+    assert _store_names(store) == names
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_stage_of_a_sibling_after_system_teardown_is_refused(
+    tmp_path: Path,
+) -> None:
+    """#3486: the refusal covers every activation of the torn-down System."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    sibling = _sibling(record, "00000000-0000-4000-8000-0000000000aa")
+    _publish_terminal(store, sibling)
+    staged = store.reopen_terminal(sibling.binding, sibling.plan_identity).request
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    sibling_receipt = receipt.model_copy(
+        update={"binding": sibling.binding, "operation_identity": "cleanup-sibling"}
+    )
+    assert await _system_teardown(store, _ProvingTeardownOperations())
+    names = _store_names(store)
+
+    with pytest.raises(external_boot_authority.RemoteCleanupFinalizedError):
+        store.stage(staged, 1.0)
+    assert store.cleanup_finalized(sibling.binding, sibling.plan_identity)
+    store.finalize_cleanup_quarantine(sibling_receipt)
     assert _store_names(store) == names
     adapter.close()
 

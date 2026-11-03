@@ -1056,14 +1056,14 @@ class RemoteModuleVolumePreparationStore:
                 os.unlink(temporary, dir_fd=self._root_fd)
 
     @staticmethod
-    def _system_teardown_key(binding: ExternalBootActivationBinding) -> str:
-        bound = binding.system_id.encode()
+    def _system_teardown_key(system_id: str) -> str:
+        bound = system_id.encode()
         return hashlib.sha256(b"kdive-remote-system-teardown-v1\0" + bound).hexdigest()
 
     def begin_system_teardown(
         self, intent: RemoteSystemTeardownIntentV1
     ) -> RemoteSystemTeardownRecordV1:
-        name = f"{self._system_teardown_key(intent.binding)}.teardown"
+        name = f"{self._system_teardown_key(intent.binding.system_id)}.teardown"
         data = self._read(name)
         if data is None:
             record = RemoteSystemTeardownRecordV1(
@@ -1088,7 +1088,7 @@ class RemoteModuleVolumePreparationStore:
         ADR-0620 (#2921): an earlier generation's record of the same subject is not this
         anchor's, so it reopens as absent; a later generation's means this one is superseded.
         """
-        name = f"{self._system_teardown_key(anchor.binding)}.teardown"
+        name = f"{self._system_teardown_key(anchor.binding.system_id)}.teardown"
         data = self._read(name)
         if data is None:
             return None
@@ -1138,7 +1138,7 @@ class RemoteModuleVolumePreparationStore:
             }
         )
         updated = RemoteSystemTeardownRecordV1.from_canonical_json(updated.to_canonical_json())
-        key = self._system_teardown_key(record.intent.binding)
+        key = self._system_teardown_key(record.intent.binding.system_id)
         name = f"{key}.teardown"
         self._replace(name, record.to_canonical_json(), updated.to_canonical_json())
         return updated
@@ -1780,22 +1780,21 @@ class RemoteModuleVolumePreparationStore:
             )
         return receipt
 
-    def torn_down(self, binding: ExternalBootActivationBinding, plan_identity: str) -> bool:
-        """Whether this System's teardown completed for exactly this activation (#3472)."""
-        data = self._read(f"{self._system_teardown_key(binding)}.teardown")
+    def system_torn_down(self, system_id: str) -> bool:
+        """Whether this System's teardown completed; it covers every activation (#3486).
+
+        A System id is never re-activated: ``systems.id`` is generated per row and ``torn_down``
+        has no outgoing edge, so refusing every activation refuses nothing live.
+        """
+        data = self._read(f"{self._system_teardown_key(system_id)}.teardown")
         if data is None:
             return False
-        record = RemoteSystemTeardownRecordV1.from_canonical_json(data)
-        return (
-            record.phase == "complete"
-            and record.intent.binding == binding
-            and record.intent.plan_identity == plan_identity
-        )
+        return RemoteSystemTeardownRecordV1.from_canonical_json(data).phase == "complete"
 
     def cleanup_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> bool:
-        """Whether finalize or a completed System teardown removed, or is removing, its records."""
+        """Whether finalize removed (or is removing) its records, or its System was torn down."""
         return self._read(self._finalized_name(binding, plan_identity)) is not None or (
-            self.torn_down(binding, plan_identity)
+            self.system_torn_down(binding.system_id)
         )
 
     def refuse_finalized(self, binding: ExternalBootActivationBinding, plan_identity: str) -> None:
@@ -2062,11 +2061,11 @@ class RemoteModuleVolumePreparationStore:
         keeps a finalized cleanup distinguishable from a record that never existed. An index is
         removed only while it names this record, whether or not the record is still present.
         The ordering against a concurrent stage rests on the System lane (``refuse_finalized``).
-        It runs under the store lock and writes nothing once System teardown completed for the
-        activation, so it cannot publish a marker after collection (#3472).
+        It runs under the store lock and writes nothing for any activation of a torn-down System,
+        so it cannot publish a marker after collection (#3472, #3486).
         """
         with self._exclusive():
-            if not self.torn_down(receipt.binding, receipt.plan_identity):
+            if not self.system_torn_down(receipt.binding.system_id):
                 self._finalize_cleanup_quarantine(receipt)
 
     def _finalize_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
@@ -2910,7 +2909,7 @@ class RemoteExternalBootCoordinator:
     def system_teardown_state(
         self, binding: ExternalBootActivationBinding, plan_identity: str
     ) -> RemoteSystemTeardownState:
-        if self._store.torn_down(binding, plan_identity):
+        if self._store.system_torn_down(binding.system_id):
             # A complete teardown proved its volumes absent; a half-collected store's records
             # are neither read nor trusted (ADR-0787, #3472).
             return RemoteSystemTeardownState(
