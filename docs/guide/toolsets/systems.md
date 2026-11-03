@@ -56,9 +56,8 @@ After login, use the guest package manager as root to install tools within guest
 network limits. Local-libvirt has
 no outbound egress by default: the operator must enable `guest_egress = true` on the resource
 for direct mirror access. Enabling it also lets the guest reach services that listen only on the
-host's loopback interface, which the network-zone firewall does not cover (see
-[image lifecycle](../../operating/runbooks/image-lifecycle.md)). Remote networking is also
-operator configured. Use a prepared image
+host's loopback interface, which the network-zone firewall does not cover; the image lifecycle
+runbook has the detail. Remote networking is also operator configured. Use a prepared image
 when package mirrors are unavailable.
 
 ## Rebuild and finish
