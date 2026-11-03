@@ -465,3 +465,31 @@ removed the adopted receipt, its recovery record and the indexes.
   `remote cleanup proof differs from the quarantine receipt`.
 - The System lane still orders these calls in one authority process; the store no longer
   depends on that.
+
+### Amendment (2026-11-03): remote finalize keeps a plan's materialization pair another activation needs (#3494)
+
+Remote `finalize` removed the plan's `<identity>.materialization` record and plan index with the
+rest of the activation's files, though every activation of a Run shares that pair. Finalizing
+one activation then made the prepare or recovery of another fail with `remote materialization
+plan index is absent` or `remote materialization record is absent`. Teardown collection already
+protects the pair through `keep_plan` (#3486); finalize had no equivalent.
+
+- `_finalize_cleanup_quarantine` decides `keep_plan` under the store lock, after its `managed`
+  re-check (#3493). It keeps the pair while `system_activations` names another activation with
+  the same `run_id` and plan identity that has no `cleanup-finalized` marker.
+- A finalized sibling keeps its marker and so no longer counts. The last activation of the Run
+  to finalize removes the pair, either at its own finalize or through teardown collection.
+- The scan reads the same anchors teardown collection reads. It adds no refusal; its cost is
+  linear in the store's files, after the existing 4096-name refusal.
+- An activation with no anchor file yet is not found, so its plan pair is not kept for it.
+- A sibling whose anchor files are unparseable is not found, so its plan pair is not kept for
+  it. Such a file is left in place with a warning (#3486) and nothing proves whose it is.
+
+Considered & rejected:
+
+- **Reference-count the pair.** judgment: a new persisted counter that a crash between its
+  update and the unlink would leave wrong, for a fact the anchors already carry.
+- **Never remove the pair at finalize; leave it to teardown collection.** judgment: a Run
+  released and finalized without a System teardown would leak the pair indefinitely. The chosen
+  rule also keeps the pair while a sibling stays unfinalized, until that sibling finalizes or
+  teardown collection removes it (#3486).
