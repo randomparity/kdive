@@ -124,7 +124,11 @@ async def test_remote_finalize_refuses_past_the_scan_bound_and_names_the_remedy(
 async def test_remote_finalize_at_the_scan_bound_and_after_collection_frees_names(
     tmp_path: Path, collect: bool
 ) -> None:
-    """#3475: 4096 counted names finalize; past it, collection frees names for the retry."""
+    """#3475: 4096 counted names finalize; past it, collection frees names for the retry.
+
+    The padding shares the released activation's System, so this proves only that unlinked
+    files lower the count; teardown over the bound has its own test.
+    """
     adapter, record, request, context, store = await _finalized_release_store(tmp_path)
     _pad_requests(store, record, _PADDING_ACTIVATION, 4097 if collect else 4096)
     if collect:
@@ -157,8 +161,9 @@ async def test_remote_system_teardown_collects_over_the_scan_bound(tmp_path: Pat
 
 2. Change the marker test's docstring to `"""Markers are never counted, so neither finalize nor
    teardown refuses on them (#3419, #3475)."""`; keep its body.
-3. Run the green command. Expect the refusal test, both parametrizations of the second test
-   with `collect=True`, and the teardown test to FAIL; `collect=False` and the marker test pass.
+3. Run the green command. Expect 3 failed, 2 passed: the refusal test and the `collect=True`
+   case fail with `DID NOT RAISE`, the teardown test fails with `remote preparation store
+   exceeds teardown scan bound`; `collect=False` and the marker test pass.
 4. In `teardown.py`, replace the member `"remote preparation store exceeds teardown scan bound",`
    with the `_REMEDY` text as one implicitly concatenated literal inside the `Literal[...]`.
 5. In `external_boot_authority.py`, after `_MAX_PREPARATION_BYTES`, add:
@@ -198,7 +203,8 @@ _FINALIZE_SCAN_BOUND = 4096
 9. Run the green command: all pass. Run `just lint`, `just type`, `just test-changed`: exit 0.
 10. Commit `fix(remote-libvirt): bound release finalize, not System teardown (#3475)`.
 11. Controlled faults, each reverted with `git checkout -- src/` and observed red with the green
-    command: (a) delete the `raise` → refusal test red; (b) `>` to `>=` → `collect=False` red;
+    command: (a) replace the `raise ...` statement with `pass` → refusal test and
+    `collect=True` red with `DID NOT RAISE`; (b) `>` to `>=` → `collect=False` red;
     (c) add `".cleanup-finalized"` to `_FINALIZE_COUNTED_SUFFIXES` → marker test red;
     (d) restore the teardown `4096` check → teardown test red. Record results in the ledger.
 
@@ -224,7 +230,8 @@ Steps:
    "What is counted, and why"); the refusal names both remedies and writes nothing; a refused
    release publishes the quarantine as any finalize failure does; teardown and collection stay
    unbounded because they are the remedy and a teardown bound strands the host; cost of an
-   unbounded teardown. Considered & rejected, each tagged: bound teardown above release
+   unbounded teardown, about (activations of the System) x (counted files) parses; the three
+   kinds of counted file only the runbook clears. Considered & rejected, each tagged: bound teardown above release
    (judgment: the trap moves further out, and the only true remedy text is hand deletion);
    bound both at one value (judgment: no true remedy text for a host with a live non-finalized
    activation, per the attempt-1 park note); do nothing (judgment: the issue requires a bound
@@ -232,8 +239,10 @@ Steps:
 2. In the runbook section "Clear store files of torn-down Systems", after its first paragraph,
    add: "Release and orphan delete refuse with `remote preparation store holds more than 4096
    ...` once the store holds more than 4096 `.request`, `.lifecycle-request` and
-   `.preparation` files. Tear down Systems on the host first: a completed teardown collects
-   their files. When kept activations alone hold the store over the limit, drain the host and
-   use this procedure."
+   `.preparation` files. A completed teardown collects its provable activations' files, so
+   tearing down Systems lowers the count. It does not remove files of activations kept at
+   teardown, of Systems torn down before #3472, or files that do not parse (the authority logs
+   `unreadable and left in place`); when those hold the store over the limit, tearing down
+   live Systems does not help: drain the host and use this procedure."
 3. Run `just lint` and `git fetch origin main && just records` and `just docs-links`: exit 0.
 4. Commit `docs(adr): amend ADR-0787 for the release scan bound (#3475)`.

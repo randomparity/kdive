@@ -34,8 +34,12 @@ Refusal text (one literal, under the 512-character ADR-0707 bound, no interpolat
 > store files of torn-down Systems, then retry
 
 Both remedies are true: a completed teardown removes its provable activations' counted files
-(#3486), and the runbook procedure removes every counted file. An activation whose volumes were
-present at teardown keeps its files; only the second remedy clears it, which the text states.
+(#3486), and the runbook procedure removes every counted file. Three kinds of counted file no
+teardown removes, and only the second remedy clears: an activation whose volumes were present at
+teardown; a System torn down before #3472; and a counted file that does not parse (collection
+leaves it with a warning, and the strict scans in `activation_claims` then fail, so
+`_prove_siblings` keeps every never-finalized sibling activation on the host). The runbook paragraph says so, so an operator whose
+count is held by these does not tear down live Systems for nothing.
 
 A refused release finalize follows the existing failure path: the authority publishes the
 cleanup quarantine (ADR-0615) and a later release attempt or orphan delete retries finalize.
@@ -81,9 +85,14 @@ unbounded. The runbook section names the release refusal as a trigger for its pr
    teardown is never refused by store size; the refusal text is a fixed literal under the
    ADR-0707 allowlist and names only actions that exist.
 3. Accepted failure classes:
-   - Teardown and `os.listdir` cost grows with the store: accepted, the alternative is the trap.
-   - A host whose kept activations (volumes present at teardown) exceed the bound refuses
-     release until it is drained and the runbook applied: accepted, the text names that path.
+   - Teardown and `os.listdir` cost grows with the store: teardown collection parses about
+     (activations of the System) x (counted files), since each sibling proof rescans; nothing
+     bounds it, and it runs after `complete` and logs instead of raising. Accepted: the
+     alternative is the trap.
+   - A host whose uncollectable counted files (kept activations, Systems torn down before
+     #3472, unparseable files) exceed the bound refuses every release and orphan delete,
+     possibly from the first deploy, until it is drained and the runbook applied; each refusal
+     publishes a cleanup quarantine. Accepted: the text and the runbook name that path.
    - A stage of another System between the count and the scans can add names: accepted, the
      bound is a cost bound, not a correctness invariant.
 4. Covered elsewhere: logging policy for interpolated refusals (#3476); F2 managed re-check, F3
@@ -94,12 +103,15 @@ unbounded. The runbook section names the release refusal as a trigger for its pr
 - Refusal: a store holding 4097 counted names refuses `adapter.finalize` with the literal text;
   no marker is written and the activation's files remain.
 - Boundary: exactly 4096 counted names finalizes.
-- Remedy: after `collect_torn_down_activation` removes the padding activation's `.request`
-  files, the same release finalizes.
+- Remedy: after `collect_torn_down_activation` (the store call teardown makes) removes the
+  padding activation's `.request` files, the same release finalizes. This proves the count drops
+  when collection unlinks files; the padding shares the released activation's System, so the
+  sequence is not one production reaches, and teardown-then-collect over the bound rests on the
+  Teardown test below and the #3486 collection tests.
 - Teardown: `_system_teardown` completes and collects on a store holding more than 4096 counted
   names.
 - Markers: the existing 4097-marker test keeps passing (markers are uncounted).
 - Literal set: `test_remote_refusal_reasons_are_never_raised_as_plain_value_errors` and pyright
   accept the new literal.
-- Controlled faults (after commit): drop the count; count markers; restore the teardown bound;
-  use `>=`. Each turns its test red.
+- Controlled faults (after commit): replace the `raise` with `pass`; count markers; restore the
+  teardown bound; use `>=`. Each turns its named test red by assertion, not by import error.
