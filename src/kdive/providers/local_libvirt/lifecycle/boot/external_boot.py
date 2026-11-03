@@ -4063,12 +4063,14 @@ class RecoveryMetadataStore:
         )
         if tombstone != expected or proof.point_digest != expected.point_digest:
             raise ValueError("cleanup tombstone does not match recovery point")
-        standing = self.read_cleanup_quarantine(recovery.binding)
-        if standing is not None and standing.managed:
-            return  # an adopted receipt is kept as is: no path un-adopts it (ADR-0787)
         receipt = CleanupQuarantineReceiptV1(tombstone=tombstone, proof=proof)
         directory_fd = _open_private_directory(self._root_fd, name)
         try:
+            # Held across the managed check and the replace, as adoption and finalize hold it.
+            fcntl.flock(directory_fd, fcntl.LOCK_EX)
+            standing = self._read_cleanup_quarantine_at(directory_fd, recovery.binding)
+            if standing is not None and standing.managed:
+                return  # an adopted receipt is kept as is: no path un-adopts it (ADR-0787)
             temporary = ".cleanup-quarantine.next"
             _replace_private_file(
                 directory_fd,
@@ -4077,10 +4079,10 @@ class RecoveryMetadataStore:
                 _cleanup_quarantine_bytes(receipt),
             )
             os.fsync(directory_fd)
+            if self._read_cleanup_quarantine_at(directory_fd, recovery.binding) != receipt:
+                raise ValueError("cleanup quarantine receipt failed exact reopen")
         finally:
             os.close(directory_fd)
-        if self.read_cleanup_quarantine(recovery.binding) != receipt:
-            raise ValueError("cleanup quarantine receipt failed exact reopen")
 
     def read_cleanup_quarantine(
         self, binding: ExternalBootActivationBinding
