@@ -61,5 +61,7 @@ than the fence needs (name, uuid and overlay stay in the digest).
 - Accepted: a profile-pinned versioned machine is indistinguishable from the alias and from other
   versions of its family; an unknown libvirt machine family on these arches is not collapsed and fails
   closed as not owned.
+- Accepted: an in-flight System whose intent digest was computed from a pinned versioned machine
+  before this fix reads as not owned and retains its quarantine (fails closed; recreate it).
 - Covered elsewhere: remote authority machine handling (`remote_libvirt/system_authority.py`
   keeps a concrete machine in its intent); lapsed job recovery #3143.
