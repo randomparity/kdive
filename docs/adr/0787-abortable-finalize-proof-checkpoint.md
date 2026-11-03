@@ -339,3 +339,59 @@ Considered & rejected:
   (`src/kdive/providers/remote_libvirt/external_boot_authority.py`), so an adoption can land
   between any re-check and the unlink.
 - **Do nothing.** judgment: the store grows without bound and #3475 has no remedy to restore.
+
+### Amendment (2026-11-02): System teardown collects every activation it can prove (#3486)
+
+This amendment replaces the #3472 bullet "Other activations of the same System, and stores torn
+down before this change, keep their files." The rest of the #3472 amendment stands.
+
+- Collection on a `complete` teardown record covers every activation whose file content names the
+  System's `system_id`, found in `.lifecycle-request`, `.request`, `.preparation`, `.terminal`,
+  `.recovery`, `.cleanup-quarantine` and `.cleanup-finalized` files. The activation the record
+  names is collected as before. Any other activation is collected only when its
+  `cleanup-finalized` marker exists, or when every pool volume its records name (module source and
+  scratch volumes, the volumes its operation nonce renders, and its kernel and initrd) reads
+  absent. Otherwise its files stay and a warning names it: those records are the only pointer to
+  volumes that may remain.
+- The proof is read outside the store lock. Under the lock the activation's claims are read again,
+  and a change keeps the files. A kept activation's plan keeps its materialization record, which
+  every activation of the same Run shares.
+- Every non-anchor file of an activation goes before its anchors (the suffixes listed above), so
+  an interrupted collection leaves each remaining activation findable by the next. The recovery
+  index now goes before the recovery record, replacing the #3472 order: collection finds the
+  record's identity from the activation's own `.recovery` and `.cleanup-quarantine` content as
+  well as from the index and marker, and an index left last would be stranded once the records
+  it names are gone.
+- Consequences: a kept activation's files stay for the life of the host, with a warning on every
+  teardown call that re-proves it; an adopted activation's trio is re-proven the same way. Each
+  proof costs one libvirt connection. Only the runbook remedy clears a kept activation.
+- `cleanup_finalized`, `refuse_finalized`, finalize's no-write check and the
+  `system_teardown_state` short-circuit hold for every activation of a System whose `.teardown`
+  record is `complete`. A `system_id` is never re-activated: `systems.id` is generated per row
+  (`src/kdive/db/schema/0001_init.sql`) and `torn_down` has no outgoing System or activation
+  edge (`src/kdive/domain/capacity/state.py`).
+- Stores torn down before #3472 have a manual remedy, not a sweep:
+  [remote-libvirt host setup](../operating/runbooks/remote-libvirt-host-setup.md#clear-store-files-of-torn-down-systems).
+  The operator who removes an adopted receipt after teardown still removes the three files the
+  #3472 amendment names.
+
+Considered & rejected:
+
+- **Do nothing.** judgment: every re-activated or adopted activation of a torn-down System keeps
+  its `.request`, `.lifecycle-request` and `.preparation` files, which #3475's bounded scans
+  count, so that bound's refusal would tell the operator to tear down Systems that are already
+  torn down.
+- **Collect only the named and the finalized activations.** judgment: needs no pool proof, but
+  leaves every never-finalized sibling, the case #3486 reports, in place.
+- **Collect every activation of the System unconditionally.** judgment: deletes the only record
+  of a sibling's volumes when teardown proved only the named activation's volumes absent
+  (`_protected_teardown_volumes` in
+  `src/kdive/providers/remote_libvirt/external_boot_operations.py`).
+- **Prove sibling volumes absent at teardown, before `complete`.** judgment: by construction a
+  sibling's leftover volume, which teardown does not remove (a #3486 operator exclusion), would
+  then keep the System's teardown from reaching `complete`.
+- **Hold the store lock across the libvirt proof.** judgment: blocks every adoption and finalize
+  on that host for the duration of libvirt calls; re-reading the claims under the lock fails
+  closed instead.
+- **Ship a one-time sweep for pre-#3472 stores.** judgment: a new entry point that deletes
+  persisted state on hosts nobody is watching, for a backlog a drained-host procedure clears once.

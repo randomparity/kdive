@@ -86,10 +86,13 @@ from kdive.providers.remote_libvirt.authority_client import module_operation as 
 from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
     DurableRemoteModuleVolumePreparationHost,
+    RemoteCleanupQuarantineV1,
     RemoteExternalBootAuthorityAdapter,
     RemoteExternalBootCoordinator,
     RemoteExternalBootOperations,
     RemoteExternalBootRecoveryRecord,
+    RemoteFinalizedBootArtifactV1,
+    RemoteFinalizedTeardownRefsV1,
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
     RemoteModuleTerminalPreparationResponseV1,
@@ -4368,7 +4371,38 @@ async def _observe_teardown(
 
 
 def _teardown_name(store: RemoteModuleVolumePreparationStore) -> str:
-    return f"{store._system_teardown_key(_record().binding)}.teardown"
+    return f"{store._system_teardown_key(_record().binding.system_id)}.teardown"
+
+
+def _sibling(
+    record: RemoteExternalBootRecoveryRecord, activation_id: str
+) -> RemoteExternalBootRecoveryRecord:
+    """A valid record of another activation of the same Run and plan (#3486)."""
+    binding = record.binding.model_copy(update={"activation_id": activation_id})
+    definition = record.definition.model_copy(update={"binding": binding})
+    return RemoteExternalBootRecoveryRecord.model_validate(
+        record.model_copy(update={"binding": binding, "definition": definition}).model_dump(
+            mode="python", by_alias=True
+        )
+    )
+
+
+class _ProvingTeardownOperations(_CollectingTeardownOperations):
+    """Collecting teardown host whose pool still holds the volumes of ``keep`` (#3486).
+
+    Every fixture activation renders the same module volume names, so presence is keyed by
+    activation id; the concrete name-based proof has its own test.
+    """
+
+    def __init__(self, *, keep: frozenset[str] = frozenset()) -> None:
+        super().__init__()
+        self.keep = keep
+        self.proved: list[str] = []
+
+    def activation_volumes_absent(self, binding: Any, refs: Any) -> bool:
+        del refs
+        self.proved.append(binding.activation_id)
+        return binding.activation_id not in self.keep
 
 
 @pytest.mark.anyio
@@ -4388,10 +4422,10 @@ async def test_remote_system_teardown_collects_a_never_finalized_activation(
     _seed_activation_residue(store, other)
     before = _store_names(store)
 
-    assert await _system_teardown(store)
+    assert await _system_teardown(store, _ProvingTeardownOperations())
 
     after = _store_names(store)
-    assert after - before == {_teardown_name(store)}
+    assert after == {_teardown_name(store)}
     assert {name.rsplit(".", 1)[1] for name in before - after} == {
         "terminal",
         "restored",
@@ -4410,14 +4444,6 @@ async def test_remote_system_teardown_collects_a_never_finalized_activation(
         "object-index",
         "cleanup-quarantine",
     }
-    other_key = store._terminal_key(
-        other.binding.system_id,
-        other.binding.activation_id,
-        other.binding.run_id,
-        other.plan_identity,
-    )
-    assert f"{other_key}.terminal" in after
-    assert sum(name.endswith((".request", ".result", ".completion")) for name in after) == 3
     adapter.close()
 
 
@@ -4453,6 +4479,275 @@ async def test_remote_stage_after_system_teardown_is_refused(tmp_path: Path) -> 
 
 
 @pytest.mark.anyio
+async def test_remote_stage_of_a_sibling_after_system_teardown_is_refused(
+    tmp_path: Path,
+) -> None:
+    """#3486: the refusal covers every activation of the torn-down System."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    sibling = _sibling(record, "00000000-0000-4000-8000-0000000000aa")
+    _publish_terminal(store, sibling)
+    staged = store.reopen_terminal(sibling.binding, sibling.plan_identity).request
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    sibling_receipt = receipt.model_copy(
+        update={"binding": sibling.binding, "operation_identity": "cleanup-sibling"}
+    )
+    assert await _system_teardown(store, _ProvingTeardownOperations())
+    names = _store_names(store)
+
+    with pytest.raises(external_boot_authority.RemoteCleanupFinalizedError):
+        store.stage(staged, 1.0)
+    assert store.cleanup_finalized(sibling.binding, sibling.plan_identity)
+    store.finalize_cleanup_quarantine(sibling_receipt)
+    assert _store_names(store) == names
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_system_activations_find_every_activation_by_content(
+    tmp_path: Path,
+) -> None:
+    """#3486: discovery reads each anchor's content and skips another System's files."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    sibling = _sibling(record, "00000000-0000-4000-8000-0000000000aa")
+    _publish_terminal(store, sibling)
+    foreign = record.binding.model_copy(
+        update={"system_id": "00000000-0000-4000-8000-0000000000bb"}
+    )
+    store.record_cleanup_quarantine(
+        RemoteCleanupQuarantineV1(
+            binding=foreign,
+            plan_identity=record.plan_identity,
+            recovery_ref=OpaqueProviderRef(ref="remote-external-boot/" + "c" * 64),
+            operation_identity="cleanup-foreign",
+            attempt_id=uuid4(),
+            journal_sequence=3,
+            journal_digest="sha256:" + "d" * 64,
+        )
+    )
+
+    found = store.system_activations(record.binding.system_id)
+
+    assert found == sorted(
+        [(record.binding, record.plan_identity), (sibling.binding, sibling.plan_identity)],
+        key=lambda item: (item[0].run_id, item[0].activation_id, item[1]),
+    )
+    assert store.system_activations(foreign.system_id) == [(foreign, record.plan_identity)]
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_activation_claims_name_every_volume_and_none_once_finalized(
+    tmp_path: Path,
+) -> None:
+    """#3486: claims carry the module volumes, nonce and boot artifacts the records name."""
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    claims = store.activation_claims(record.binding, record.plan_identity)
+    module = store.reopen_terminal(record.binding, record.plan_identity).response.recovery
+    recovery = record.module_recovery
+
+    assert claims is not None
+    assert set(claims.module_volumes) == {
+        (module.pool.ref, module.source_volume.ref),
+        (module.pool.ref, module.scratch_volume.ref),
+        (recovery.pool.ref, recovery.source_volume.ref),
+        (recovery.pool.ref, recovery.scratch_volume.ref),
+    }
+    assert claims.operation_nonce is not None
+    assert record.materialization.artifacts.kernel.ref in {
+        item.ref for item in claims.boot_artifacts
+    }
+    await adapter.finalize(request, context)
+    assert store.activation_claims(record.binding, record.plan_identity) is None
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_proven_activation_is_kept_when_its_claims_grew(tmp_path: Path) -> None:
+    """#3486: a record written after the proof keeps every file of that activation."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    sibling = _sibling(record, "00000000-0000-4000-8000-0000000000aa")
+    proven = RemoteFinalizedTeardownRefsV1(
+        module_volumes=(), operation_nonce=None, boot_artifacts=()
+    )
+    _publish_terminal(store, sibling)
+    before = _store_names(store)
+
+    assert not store.collect_proven_activation(
+        sibling.binding, sibling.plan_identity, proven, keep_plan=False
+    )
+    assert _store_names(store) == before
+    claims = store.activation_claims(sibling.binding, sibling.plan_identity)
+    assert store.collect_proven_activation(
+        sibling.binding, sibling.plan_identity, claims, keep_plan=True
+    )
+    assert store.system_activations(record.binding.system_id) == [
+        (record.binding, record.plan_identity)
+    ]
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_collection_with_keep_plan_keeps_the_materialization(
+    tmp_path: Path,
+) -> None:
+    """#3486: a kept activation of the same Run still needs the plan's materialization."""
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    stem = record.plan_identity.removeprefix("sha256:")
+    identity = record.materialization.identity.removeprefix("sha256:")
+    pair = {f"{stem}.materialization-index", f"{identity}.materialization"}
+    assert pair <= _store_names(store)
+
+    store.collect_torn_down_activation(record.binding, record.plan_identity, keep_plan=True)
+
+    assert pair <= _store_names(store)
+    store.collect_torn_down_activation(record.binding, record.plan_identity)
+    assert not pair & _store_names(store)
+    adapter.close()
+
+
+def test_remote_activation_volumes_absent_reads_every_named_volume() -> None:
+    """#3486: module, nonce-rendered and boot names are each read; nothing is deleted."""
+    binding = _record().binding
+    nonce = _remote_preparation_request().operation.operation_nonce
+    rendered = {
+        render_module_volume_name(binding.system_id, binding.run_id, nonce, kind)
+        for kind in ("source.ext4", "scratch.ext4")
+    }
+    refs = RemoteFinalizedTeardownRefsV1(
+        module_volumes=(("modules", "kept-source"),),
+        operation_nonce=nonce,
+        boot_artifacts=(RemoteFinalizedBootArtifactV1(ref="kernel-a", kind="kernel", sha256=None),),
+    )
+    looked: list[tuple[str, str]] = []
+    present: set[str] = set()
+
+    class Pool:
+        def __init__(self, name: str) -> None:
+            self.pool = name
+
+        def storageVolLookupByName(self, name: str) -> object:  # noqa: N802
+            looked.append((self.pool, name))
+            if name in present:
+                return object()
+            error = libvirt.libvirtError("absent")
+            error.err = (libvirt.VIR_ERR_NO_STORAGE_VOL,) + (0,) * 8
+            raise error
+
+    class Connection:
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def storagePoolLookupByName(self, name: str) -> Pool:  # noqa: N802
+            return Pool(name)
+
+    operations = ConcreteRemoteExternalBootOperations(
+        cast(Any, object()), cast(Any, Connection), "boot", lambda: 1.0, cast(Any, object())
+    )
+
+    assert operations.activation_volumes_absent(binding, refs)
+    assert set(looked) == {("modules", "kept-source"), ("boot", "kernel-a")} | {
+        ("boot", name) for name in rendered
+    }
+    present.add("kernel-a")
+    assert not operations.activation_volumes_absent(binding, refs)
+
+
+def _seed_recovered_sibling(
+    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+) -> RemoteExternalBootRecoveryRecord:
+    """Another activation with every per-activation file, a recovery record and its receipt."""
+    objects = sorted(
+        (OpaqueProviderRef(ref=f"volumes/sibling-{kind}") for kind in ("source", "scratch")),
+        key=OpaqueProviderRef.to_canonical_json,
+    )
+    sibling = RemoteExternalBootRecoveryRecord.model_validate(
+        _sibling(record, "00000000-0000-4000-8000-0000000000aa")
+        .model_copy(update={"recovery_objects": tuple(objects)})
+        .model_dump(mode="python", by_alias=True)
+    )
+    _publish_terminal(store, sibling)
+    _seed_activation_residue(store, sibling)
+    store.record_cleanup_quarantine(
+        RemoteCleanupQuarantineV1(
+            binding=sibling.binding,
+            plan_identity=sibling.plan_identity,
+            recovery_ref=store.publish_recovery(sibling),
+            operation_identity="cleanup-sibling",
+            attempt_id=uuid4(),
+            journal_sequence=6,
+            journal_digest="sha256:" + "a" * 64,
+        )
+    )
+    return sibling
+
+
+def _activation_names(
+    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+) -> set[str]:
+    """An activation's own files on disk plus the plan's shared materialization pair."""
+    derived, anchors = store._activation_file_groups(
+        record.binding, record.plan_identity, keep_plan=False
+    )
+    return {name for name in derived + anchors if store._read(name) is not None}
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_collects_every_provable_activation(
+    tmp_path: Path,
+) -> None:
+    """#3486: finalized and proven siblings go; an unproven one and an adopted trio stay."""
+    adapter, record, request, _context, store = await _finalized_release_store(tmp_path)
+    finalized = _sibling(record, "00000000-0000-4000-8000-0000000000a1")
+    absent = _sibling(record, "00000000-0000-4000-8000-0000000000a2")
+    kept = _sibling(record, "00000000-0000-4000-8000-0000000000a3")
+    for sibling in (finalized, absent, kept):
+        _publish_terminal(store, sibling)
+    store._publish(
+        store._finalized_name(finalized.binding, finalized.plan_identity),
+        RemoteCleanupQuarantineV1(
+            binding=finalized.binding,
+            plan_identity=finalized.plan_identity,
+            recovery_ref=OpaqueProviderRef(ref="remote-external-boot/" + "e" * 64),
+            operation_identity="cleanup-finalized",
+            attempt_id=uuid4(),
+            journal_sequence=5,
+            journal_digest="sha256:" + "f" * 64,
+        ).to_canonical_json(),
+    )
+    (observed,) = await adapter.cleanup_quarantine_inventory(request, _native_context(request))
+    await adapter.adopt_recovery_object(
+        observed.binding, authority_reference(request), observed.observed_digest
+    )
+    kept_names = _activation_names(store, kept)
+    absent_request = store.reopen_terminal(absent.binding, absent.plan_identity).request
+    operations = _ProvingTeardownOperations(keep=frozenset({kept.binding.activation_id}))
+
+    assert await _system_teardown(store, operations)
+
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None and receipt.managed
+    identity = external_boot_authority._recovery_identity(receipt.recovery_ref)
+    index = f"{store._recovery_key(record.binding, record.plan_identity)}.recovery-index"
+    assert _store_names(store) == {
+        _teardown_name(store),
+        f"{identity}.recovery",
+        f"{identity}.cleanup-quarantine",
+        index,
+        *kept_names,
+    }
+    assert sorted(operations.proved) == [absent.binding.activation_id, kept.binding.activation_id]
+    with pytest.raises(external_boot_authority.RemoteCleanupFinalizedError):
+        store.stage(absent_request, 1.0)
+    cleanup = request.model_copy(update={"activation_id": UUID(absent.binding.activation_id)})
+    assert adapter._observe(cleanup).category == "absent"
+    adapter.close()
+
+
+@pytest.mark.anyio
 async def test_remote_finalize_after_teardown_collection_writes_nothing(tmp_path: Path) -> None:
     """#3472: an orphan delete that read the receipt before collection publishes no marker."""
     adapter, record, request, context = await _cleaned_release(tmp_path)
@@ -4482,7 +4777,8 @@ async def test_remote_teardown_collection_resumes_after_a_crash_at_any_unlink(
         staged = store.reopen_terminal(record.binding, record.plan_identity).request
         if finalized:
             await adapter.finalize(request, context)
-        operations = _CollectingTeardownOperations()
+        _seed_recovered_sibling(store, record)
+        operations = _ProvingTeardownOperations()
         seen = 0
 
         def failing(path: str, *args: Any, _at: int = crash_at, **kwargs: Any) -> None:
@@ -4508,7 +4804,7 @@ async def test_remote_teardown_collection_resumes_after_a_crash_at_any_unlink(
         adapter.close()
         if not crashed:
             break
-    assert crashes >= (5 if finalized else 10)
+    assert crashes >= (25 if finalized else 30)
 
 
 @pytest.mark.anyio
