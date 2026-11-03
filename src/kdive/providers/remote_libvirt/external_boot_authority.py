@@ -1961,11 +1961,27 @@ class RemoteModuleVolumePreparationStore:
             return False
 
     def _activation_files(
-        self, binding: ExternalBootActivationBinding, plan_identity: str
+        self, binding: ExternalBootActivationBinding, plan_identity: str, *, keep_plan: bool
     ) -> list[str]:
         """Every per-activation file but the recovery record; anchors after the rest (#3486)."""
-        derived, anchors = self._activation_file_groups(binding, plan_identity, keep_plan=False)
+        derived, anchors = self._activation_file_groups(binding, plan_identity, keep_plan=keep_plan)
         return derived + anchors
+
+    def _plan_needed_by_sibling(
+        self, binding: ExternalBootActivationBinding, plan_identity: str
+    ) -> bool:
+        """Whether another unfinalized activation of the Run still names this plan (#3494).
+
+        The plan's materialization pair is shared by every activation of the Run, so only the
+        last one to finalize removes it. A finalized sibling keeps its marker, so it is skipped.
+        """
+        return any(
+            (other, plan) != (binding, plan_identity)
+            and other.run_id == binding.run_id
+            and plan == plan_identity
+            and self._read(self._finalized_name(other, plan)) is None
+            for other, plan in self.system_activations(binding.system_id)
+        )
 
     def _activation_file_groups(
         self, binding: ExternalBootActivationBinding, plan_identity: str, *, keep_plan: bool
@@ -2259,7 +2275,11 @@ class RemoteModuleVolumePreparationStore:
                 "remote recovery record differs from the quarantine receipt"
             )
         self._write_finalized_marker(receipt)
-        names = self._activation_files(receipt.binding, receipt.plan_identity)
+        names = self._activation_files(
+            receipt.binding,
+            receipt.plan_identity,
+            keep_plan=self._plan_needed_by_sibling(receipt.binding, receipt.plan_identity),
+        )
         owned = identity.encode("ascii")
         if record is not None:
             names += [

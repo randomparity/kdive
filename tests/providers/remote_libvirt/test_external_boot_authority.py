@@ -5185,8 +5185,6 @@ async def test_remote_finalize_deletes_the_activations_files_and_keeps_the_marke
         "completion",
         "lifecycle-request",
         "lifecycle-completion",
-        "materialization",
-        "materialization-index",
         "preparation",
         "prior-power",
         "prior-power-owner",
@@ -5196,6 +5194,7 @@ async def test_remote_finalize_deletes_the_activations_files_and_keeps_the_marke
         "cleanup-quarantine",
     }
     assert teardown in after
+    assert sum(name.endswith(".materialization") for name in after) == 1
     other_key = store._terminal_key(
         other.binding.system_id,
         other.binding.activation_id,
@@ -5204,6 +5203,28 @@ async def test_remote_finalize_deletes_the_activations_files_and_keeps_the_marke
     )
     assert f"{other_key}.terminal" in after
     assert sum(name.endswith((".request", ".result", ".completion")) for name in after) == 3
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_keeps_the_plan_pair_until_the_last_activation_finalizes(
+    tmp_path: Path,
+) -> None:
+    """#3494: two activations of one Run share a plan; only the last finalize removes its pair."""
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    sibling = _seed_recovered_sibling(store, record)
+    stem = record.plan_identity.removeprefix("sha256:")
+    identity = record.materialization.identity.removeprefix("sha256:")
+    pair = {f"{stem}.materialization-index", f"{identity}.materialization"}
+    sibling_receipt = store.read_cleanup_quarantine(sibling.binding, sibling.plan_identity)
+    assert sibling_receipt is not None
+    assert pair <= _store_names(store)
+
+    await adapter.finalize(request, context)
+
+    assert pair <= _store_names(store)
+    store.finalize_cleanup_quarantine(sibling_receipt)
+    assert not pair & _store_names(store)
     adapter.close()
 
 
