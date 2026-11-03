@@ -45,6 +45,7 @@ from kdive.providers.external_boot_authority.service import (
     AuthorityMutationAdapter,
     AuthorityServiceError,
     ExternalBootAuthorityService,
+    ProofBarrierAbort,
 )
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
@@ -2069,6 +2070,92 @@ async def test_cleanup_inventory_follows_the_adopted_proof_on_a_retry() -> None:
         await adapter.cleanup_quarantine_inventory(
             retry, other_attempt.model_copy(update={"attempt_id": uuid4()})
         )
+
+
+class _FinalizeFault:
+    """Aborts the next `before-finalize` checkpoint, as an operator abort does."""
+
+    def __init__(self) -> None:
+        self.armed = False
+
+    async def checkpoint(
+        self, system_id: UUID, run_id: UUID, operation: AuthorityOperation, checkpoint: str
+    ) -> None:
+        del system_id, run_id, operation
+        if checkpoint == "before-finalize" and self.armed:
+            self.armed = False
+            raise ProofBarrierAbort("aborted")
+
+
+@pytest.mark.parametrize("interrupted_retries", [0, 1])
+async def test_an_adopted_release_cleanup_finalizes_once_and_leaves_no_pending_point(
+    tmp_path: Path, interrupted_retries: int
+) -> None:
+    """The pending point is keyed by the identity that ran, so an adopted retry pops it (#3490)."""
+    io = _FakeIO(_metadata("recovered"))
+    peer = AuthenticatedPeer(uuid4())
+    root = _cleanup_takeover().model_copy(update={"operation": AuthorityOperation.RELEASE})
+    repository = _Repository(peer, root)
+    adapter = _adapter(io)
+    fault = _FinalizeFault()
+    service = ExternalBootAuthorityService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthorityJournal(tmp_path, f"{system_id}.journal"),
+        adapter=adapter,
+        proof_checkpoint=fault,
+    )
+    await service.acknowledge_takeover(peer, root)
+    repository.current = True
+    first = _cleanup_mutation("release-cleanup-1")
+    fault.armed = True
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await service.execute_mutation(peer, first)
+    assert len(adapter._pending_cleanup_finalization) == 1
+
+    last_generation = root.generation + 1 + interrupted_retries
+    for generation in range(root.generation + 1, last_generation + 1):
+        successor = root.model_copy(
+            update={
+                "authority_id": uuid4(),
+                "generation": generation,
+                "operation_identity": f"takeover-{generation}",
+            }
+        )
+        repository.allocating_request = successor
+        repository.current = False
+        await service.acknowledge_takeover(peer, successor)
+        repository.request = successor
+        repository.current = True
+        retry = first.model_copy(
+            update={
+                "authority_id": successor.authority_id,
+                "generation": generation,
+                "attempt_id": uuid4(),
+                "operation_identity": f"release-cleanup-{generation}",
+            }
+        )
+        fault.armed = generation < last_generation
+        if fault.armed:
+            with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+                await service.execute_mutation(peer, retry)
+        else:
+            await service.execute_mutation(peer, retry)
+
+    assert io.actions.count("cleanup") == 1
+    assert io.actions.count("finalize") == 1
+    assert io.finalized_proof is not None
+    assert io.finalized_proof.operation_id == first.operation_identity
+    assert adapter._pending_cleanup_finalization == {}
+
+
+def test_pending_cleanup_points_are_bounded() -> None:
+    adapter = _adapter(_FakeIO(_metadata("recovered")))
+    point = _point(_metadata("recovered"))
+    for index in range(adapter_module._MAX_ADMITTED_LANES + 5):
+        adapter._remember_cleanup_point(f"cleanup-{index}", point)
+
+    assert len(adapter._pending_cleanup_finalization) == adapter_module._MAX_ADMITTED_LANES
+    assert "cleanup-0" not in adapter._pending_cleanup_finalization
 
 
 async def test_a_teardown_commit_finalizes_the_tombstone(tmp_path: Path) -> None:
