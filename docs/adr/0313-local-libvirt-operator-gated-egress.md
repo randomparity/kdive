@@ -112,8 +112,7 @@ This *activates* an existing extension point rather than inventing a new path.
 `_append_ssh_forward`, which emits `restrict=off` when `guest_egress` is set and `restrict=on`
 otherwise. Everything else about the NIC (loopback-only `hostfwd`, the pinned PCI slot, the
 `virtio-net-pci` device) is unchanged. The forward still binds SSH to `127.0.0.1` only; egress
-opens the guest's *outbound* path, not any new inbound host exposure (but see the 2026-11-03
-amendment below: the outbound path also reaches host loopback).
+opens the guest's *outbound* path, not any new inbound host exposure.
 
 ### 4. The knob is unreachable from the request
 
