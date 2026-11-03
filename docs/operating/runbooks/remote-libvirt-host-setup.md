@@ -217,3 +217,28 @@ This proves only TLS connectivity and volume visibility from that worker. Separa
 paths from step 1. Neither the TLS probe nor a catalog row proves the guest boots or captures a
 core. The [remote live-stack runbook](remote-live-stack.md) defines the disposable host-process
 lifecycle tests and their completion evidence.
+
+## Clear store files of torn-down Systems
+
+The external-boot authority keeps provider-host records under
+`/var/lib/kdive/provider-authority/remote-module-preparations/evidence`. A completed System
+teardown removes the records of every activation of that System it can prove safe
+([ADR-0787](../../adr/0787-abortable-finalize-proof-checkpoint.md), #3486). Systems torn down
+before #3472, and activations whose volumes were still present at teardown, keep their files; the
+authority logs `remote store keeps System … activation …` for the second case.
+
+Use this procedure only when every System ever placed on this host is `torn_down`. With a System
+in any other state, including `failed`, its records may be the only pointer to its volumes; leave
+the store alone.
+
+1. Stop the authority: `sudo systemctl stop kdive-external-boot-authority.service`.
+2. List the storage pool (`virsh vol-list <pool>`) and confirm that it holds no `kdive-module-…`
+   or `kdive-boot-v1-…` volume. If one remains, resolve it first: the store records are its only
+   pointer.
+3. Copy the directory aside, then remove every file in it except:
+   - each `<key>.teardown` record, which refuses a late stage of that System;
+   - each `<identity>.cleanup-quarantine` whose JSON has `"managed":true`, its
+     `<identity>.recovery`, and the `.recovery-index` file whose content is `<identity>`.
+4. Start the authority again: `sudo systemctl start kdive-external-boot-authority.service`.
+
+The operator who later removes an adopted receipt removes all three of its files together.
