@@ -451,7 +451,7 @@ class LocalExternalBootAuthorityAdapter:
         if request.operation not in _DELETING_OPERATIONS:
             return
         authority = _authority_ref(request)
-        point = self._pending_cleanup_finalization.pop(request.operation_identity, None)
+        point = self._pending_cleanup_finalization.pop(context.operation_identity, None)
         if point is None:
             point = await self._offload(
                 request,
@@ -572,7 +572,7 @@ class LocalExternalBootAuthorityAdapter:
             binding, authority, allow_cleanup_receipt=operation in _DELETING_OPERATIONS
         )
         if point is None and request.operation in _DELETING_OPERATIONS:
-            point = self._pending_cleanup_finalization.get(request.operation_identity)
+            point = self._pending_cleanup_finalization.get(context.operation_identity)
         if point is None and operation is AuthorityOperation.TEARDOWN:
             if not request.recovery_objects:
                 raise AuthorityServiceError("provider_conflict")
@@ -642,7 +642,7 @@ class LocalExternalBootAuthorityAdapter:
                 )
             elif operation in _DELETING_OPERATIONS:
                 if not self._ports.cleanup_is_accounted(point, authority):
-                    self._pending_cleanup_finalization[context.operation_identity] = point
+                    self._remember_cleanup_point(context.operation_identity, point)
                 self._ports.cleanup(point, authority)
                 self._ports.record_cleanup_quarantine(
                     point, _cleanup_proof(context, point), authority
@@ -661,6 +661,12 @@ class LocalExternalBootAuthorityAdapter:
         except Exception:  # noqa: BLE001 - bound provider failure to a closed category
             logger.exception("external-boot provider commit failed", extra={"operation": operation})
             raise AuthorityServiceError("provider_conflict") from None
+
+    def _remember_cleanup_point(self, operation_identity: str, point: RecoveryPoint) -> None:
+        pending = self._pending_cleanup_finalization
+        if len(pending) >= _MAX_ADMITTED_LANES:
+            del pending[next(iter(pending))]
+        pending[operation_identity] = point
 
     def _acknowledged_state(
         self, request: AuthorityMutationRequestV1, authority: OpaqueProviderRef
