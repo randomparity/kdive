@@ -227,6 +227,14 @@ teardown removes the records of every activation of that System it can prove saf
 before #3472, and activations whose volumes were still present at teardown, keep their files; the
 authority logs `remote store keeps System … activation …` for the second case.
 
+Release and orphan delete refuse with `remote preparation store holds more than 4096 …` once the
+store holds more than 4096 `.request`, `.lifecycle-request` and `.preparation` files
+([ADR-0787](../../adr/0787-abortable-finalize-proof-checkpoint.md), #3475). A completed teardown
+collects its provable activations' files, so tearing down Systems lowers the count. It does not
+remove the files of activations kept at teardown, of Systems torn down before #3472, or files that
+do not parse (the authority logs `unreadable and left in place`). When those hold the store over
+the limit, tearing down live Systems does not help: drain the host and use this procedure.
+
 Use this procedure only when every System ever placed on this host is `torn_down`. With a System
 in any other state, including `failed`, its records may be the only pointer to its volumes; leave
 the store alone.

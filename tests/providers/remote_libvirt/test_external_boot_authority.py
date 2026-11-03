@@ -5681,7 +5681,7 @@ async def test_remote_finalize_refuses_requests_with_one_nonce_and_different_ope
 async def test_remote_finalize_and_teardown_scans_ignore_accumulated_finalized_markers(
     tmp_path: Path,
 ) -> None:
-    """Markers outlive their activations, so teardown's scan bound counts only .request names."""
+    """Markers are never counted, so neither finalize nor teardown refuses on them (#3475)."""
     adapter, record, request, context, store = await _finalized_release_store(tmp_path)
     for count in range(4097):
         store._publish(f"{count:064x}.cleanup-finalized", b"{}")
@@ -5690,6 +5690,98 @@ async def test_remote_finalize_and_teardown_scans_ignore_accumulated_finalized_m
     await adapter.finalize(request, context)
 
     assert store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()
+
+
+_REMEDY = (
+    "remote preparation store holds more than 4096 request, lifecycle-request and preparation "
+    "records, so finalize is refused; tear down Systems on this host so teardown collects their "
+    "records, or, once every System on this host is torn down, follow the runbook procedure "
+    "Clear store files of torn-down Systems, then retry"
+)
+_PADDING_ACTIVATION = UUID("00000000-0000-4000-8000-0000000000c1")
+
+
+def _counted_names(store: RemoteModuleVolumePreparationStore) -> int:
+    return sum(
+        1
+        for name in _store_names(store)
+        for suffix in (".request", ".lifecycle-request", ".preparation")
+        if len(name) == 64 + len(suffix) and name.endswith(suffix)
+    )
+
+
+def _pad_requests(
+    store: RemoteModuleVolumePreparationStore,
+    record: RemoteExternalBootRecoveryRecord,
+    activation_id: UUID,
+    total: int,
+) -> None:
+    """Stage same-operation ``.request`` copies for ``activation_id`` until ``total`` count."""
+    terminal = store.reopen_terminal(record.binding, record.plan_identity)
+    for _ in range(total - _counted_names(store)):
+        authority = terminal.request.authority.model_copy(
+            update={"activation_id": activation_id, "attempt_id": uuid4()}
+        )
+        store.stage(terminal.request.model_copy(update={"authority": authority}), 999.0)
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_refuses_past_the_scan_bound_and_names_the_remedy(
+    tmp_path: Path,
+) -> None:
+    """#3475: release finalize refuses past 4096 counted names and writes nothing."""
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    _pad_requests(store, record, _PADDING_ACTIVATION, 4097)
+    before = _store_names(store)
+
+    with pytest.raises(ProviderRecoveryRefusal) as refused:
+        await adapter.finalize(request, context)
+
+    assert str(refused.value) == _REMEDY
+    assert len(_REMEDY) <= 512
+    assert _store_names(store) == before
+    assert not store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("collect", [False, True])
+async def test_remote_finalize_at_the_scan_bound_and_after_collection_frees_names(
+    tmp_path: Path, collect: bool
+) -> None:
+    """#3475: 4096 counted names finalize; past it, collection frees names for the retry.
+
+    The padding shares the released activation's System, so this proves only that unlinked
+    files lower the count; teardown over the bound has its own test.
+    """
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    _pad_requests(store, record, _PADDING_ACTIVATION, 4097 if collect else 4096)
+    if collect:
+        with pytest.raises(ProviderRecoveryRefusal):
+            await adapter.finalize(request, context)
+        padding = record.binding.model_copy(update={"activation_id": str(_PADDING_ACTIVATION)})
+        store.collect_torn_down_activation(padding, record.plan_identity, keep_plan=True)
+        assert _counted_names(store) == 3
+
+    await adapter.finalize(request, context)
+
+    assert store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_system_teardown_collects_over_the_scan_bound(tmp_path: Path) -> None:
+    """#3475: teardown is the remedy, so store size never refuses it.
+
+    4100 counted names hold 4098 ``.request`` names, past the bound teardown used to apply.
+    """
+    adapter, record, _request, _context, store = await _finalized_release_store(tmp_path)
+    _pad_requests(store, record, UUID(record.binding.activation_id), 4100)
+
+    assert await _system_teardown(store, _ProvingTeardownOperations())
+
+    assert _store_names(store) == {_teardown_name(store)}
     adapter.close()
 
 

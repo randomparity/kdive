@@ -85,7 +85,13 @@ type ProviderRecoveryRefusalReason = Literal[
     "remote module restored evidence has the wrong action",
     "remote prior-power evidence is malformed",
     "remote module terminal preparation binding differs",
-    "remote preparation store exceeds teardown scan bound",
+    (
+        "remote preparation store holds more than 4096 request, lifecycle-request and "
+        "preparation records, so finalize is refused; tear down Systems on this host so "
+        "teardown collects their records, or, once every System on this host is torn "
+        "down, follow the runbook procedure Clear store files of torn-down Systems, then "
+        "retry"
+    ),
     "remote preparation request name is malformed",
     "remote teardown found conflicting preparation attempts",
     "remote preparation receipt conflicts with durable bytes",

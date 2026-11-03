@@ -395,3 +395,55 @@ Considered & rejected:
   closed instead.
 - **Ship a one-time sweep for pre-#3472 stores.** judgment: a new entry point that deletes
   persisted state on hosts nobody is watching, for a backlog a drained-host procedure clears once.
+
+### Amendment (2026-11-03): release finalize is bounded, System teardown is not (#3475)
+
+This amendment supersedes the #3419 bullets "Accepted limitation: the finalize directory scans
+stay unbounded" and "System teardown's existing 4096-name bound in `teardown_preparation` is
+kept", and the 2026-11-02 sentence "The #3419 accepted limitation on unbounded scans stands until
+#3475 replaces it". The #3419 rejection "Bound the finalize scan and refuse past it" no longer
+holds: #3472 and #3486 gave the bound a remedy.
+
+- Remote `finalize_cleanup_quarantine`, reached by release cleanup finalize and by the orphan
+  delete, counts the store's names of 64 hex characters followed by `.request`,
+  `.lifecycle-request` or `.preparation`. The count runs under the store lock, after the
+  torn-down no-op check and before the `cleanup-finalized` marker is written. Above 4096 it
+  raises a fixed `ProviderRecoveryRefusal` (ADR-0707) and writes nothing. A refused release
+  finalize takes the existing failure path: the authority publishes the cleanup quarantine, and
+  a later release attempt or orphan delete retries finalize.
+- The counted suffixes are the files finalize parses by content and a completed System teardown
+  collects, so the remedy lowers the count. Finalize reads a `cleanup-finalized` marker and its
+  own `.recovery` record by exact name; only collection scans `.recovery` by content (orphan
+  `.recovery` collection stays out of scope). Each `.teardown` record stays for the life of the
+  host, so counting it could make the refusal permanent. None of the three is counted, and
+  bounding markers and `.teardown` records stays out of scope.
+- The refusal names two remedies: tear down Systems on the host, so teardown collects their
+  records, or, once every System on the host is torn down, the runbook procedure
+  [Clear store files of torn-down Systems](../operating/runbooks/remote-libvirt-host-setup.md#clear-store-files-of-torn-down-systems).
+  Teardown does not remove three kinds of counted file: an activation whose volumes were present
+  at teardown, a System torn down before #3472, and a counted file that does not parse.
+  Collection leaves the last with a warning, and the strict scans in `activation_claims` then
+  fail, so every never-finalized sibling on the host is kept. Only the runbook procedure clears
+  these. A host where they alone exceed the bound refuses every release and orphan delete,
+  possibly from the first deploy of this change, until it is drained.
+- `teardown_preparation` no longer bounds its scan, and System teardown and its collection
+  (`system_activations`, `activation_claims`, `_collect`) stay unbounded. They are the remedy: a
+  teardown bound stopped teardown before `complete`, so nothing was collected and no operator
+  action short of deleting files by hand freed names. Teardown's cost grows with the store:
+  collection parses about (activations of the System) x (counted files), because each sibling
+  proof rescans. Nothing bounds it; it runs after `complete` and logs a failure instead of
+  raising.
+- `os.listdir` in finalize still lists every name, so uncounted files cost a name comparison each.
+
+Considered & rejected:
+
+- **Bound teardown too, above the release bound (for example 16384).** judgment: the trap moves
+  further out; a teardown refusal could then only truthfully name deleting files by hand on a
+  host with a live non-finalized activation, outside the runbook's precondition.
+- **Bound release and teardown at one value.** judgment: with a live non-finalized activation on
+  the host no operator action frees names, so the refusal text could not be true (attempt-1
+  park note on #3475).
+- **Bound inside `_scan_owned`.** judgment: collection shares it, and bounding collection
+  bounds the remedy.
+- **Do nothing.** judgment: #3475 requires a bound on release, and the teardown bound kept the
+  trap.
