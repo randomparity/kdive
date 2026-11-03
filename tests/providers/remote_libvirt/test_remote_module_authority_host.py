@@ -8,6 +8,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -31,7 +32,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTeardownMutationRequestV1,
 )
 from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
-from kdive.providers.ports.external_boot import ExternalBootActivationBinding
+from kdive.providers.ports.external_boot import ExternalBootActivationBinding, ExternalBootPlan
 from kdive.providers.remote_libvirt.authority_client import (
     RemoteModuleAuthorityAdapter,
     module_completion,
@@ -80,6 +81,7 @@ from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.remote_module_authority_preparation import (
     execute_remote_module_lifecycle_on_authority_host,
+    prepare_remote_module_on_authority_host,
 )
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (
     UUID1,
@@ -100,17 +102,36 @@ from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes_suppo
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes_support import Volume
 from tests.support.external_boot_plan import external_boot_plan
 
+_STAGED_MANIFEST = "sha256:" + "7" * 64
+_VMLINUX_BYTES = b"vmlinux-bytes"
 
-def _request() -> RemoteModuleVolumePreparationRequestV1:
+
+def _staged(plan: ExternalBootPlan) -> ExternalBootPlan:
+    """The plan with the uploaded vmlinux staged in the module tree (#3131)."""
+    member = {
+        "key": "builds/vmlinux",
+        "version": "v1",
+        "sha256": "sha256:" + hashlib.sha256(_VMLINUX_BYTES).hexdigest(),
+        "size_bytes": len(_VMLINUX_BYTES),
+        "staged_module_source_manifest": _STAGED_MANIFEST,
+    }
+    return ExternalBootPlan.model_validate(
+        plan.model_dump(mode="json", by_alias=True) | {"debuginfo": member}
+    )
+
+
+def _request(*, staged: bool = False) -> RemoteModuleVolumePreparationRequestV1:
     operation = module_operation()
     system_id = UUID(operation.system_id)
     run_id = UUID(operation.run_id)
     plan = external_boot_plan(system_id, run_id)
+    if staged:
+        plan = _staged(plan)
     operation = operation.model_copy(
         update={
             "plan_identity": plan.identity,
             "release": plan.module_obligation.release,
-            "source_manifest": plan.module_obligation.source_manifest,
+            "source_manifest": plan.module_tree_manifest,
         }
     )
     authority = AuthorityPreparationMutationRequestV1(
@@ -139,6 +160,7 @@ class _Writer:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._evidence: SourceFilesystemEvidence | None = None
+        self.debuginfo: bytes | None = None
 
     def build(self, operation: bytes, entries: tuple[ModuleTreeEntry, ...]) -> BuiltSourceImage:
         self._path.write_bytes(b"source-image".ljust(4096, b"\0"))
@@ -155,8 +177,11 @@ class _Writer:
         assert self._evidence is not None
         return self._evidence
 
-    def build_from_archive(self, operation: bytes, archive: Path) -> BuiltSourceImage:
+    def build_from_archive(
+        self, operation: bytes, archive: Path, debuginfo: Path | None = None
+    ) -> BuiltSourceImage:
         assert archive.read_bytes() == b"canonical-module-archive"
+        self.debuginfo = None if debuginfo is None else debuginfo.read_bytes()
         return self.build(operation, (ModuleTreeEntry("kernel.ko", 0o100644, content=b"abc"),))
 
 
@@ -164,8 +189,16 @@ class _Stager:
     def materialize_artifacts(
         self, plan: object, directory_fd: int
     ) -> tuple[dict[str, object], str]:
-        request_plan = _request().authority.plan
-        assert plan == request_plan
+        assert isinstance(plan, ExternalBootPlan)
+        request_plan = plan
+        if plan.module_tree_debuginfo is not None:
+            staged = os.open(
+                "debuginfo", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd
+            )
+            try:
+                os.write(staged, _VMLINUX_BYTES)
+            finally:
+                os.close(staged)
         descriptor = os.open(
             "modules", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd
         )
@@ -176,7 +209,7 @@ class _Stager:
         return (
             {
                 "release": request_plan.module_obligation.release,
-                "module_source_manifest": request_plan.module_obligation.source_manifest,
+                "module_source_manifest": request_plan.module_tree_manifest,
             },
             "sha256:" + "0" * 64,
         )
@@ -211,10 +244,11 @@ def _install_appliance(root: Path, architecture: str = "x86_64") -> tuple[Path, 
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("staged", [False, True])
 async def test_production_factory_binds_overlay_and_verified_installed_appliance(
-    tmp_path: Path,
+    tmp_path: Path, staged: bool
 ) -> None:
-    request = _request()
+    request = _request(staged=staged)
     appliance_root = tmp_path / "appliance"
     appliance_directory, manifest_digest = _install_appliance(appliance_root)
     connection = StorageConn()
@@ -256,6 +290,7 @@ async def test_production_factory_binds_overlay_and_verified_installed_appliance
     assert isinstance(begin, RemoteModulePreparationBeginResponseV1)
     assert begin.preparation == preparation
     assert begin.operation.root_volume.key == root_name
+    assert begin.operation.source_manifest == request.authority.plan.module_tree_manifest
     assert begin.operation.root_volume.identity.startswith("sha256:")
     assert begin.operation.appliance_image_digest == manifest_digest
     configuration = factory.configuration("x86_64")
@@ -675,8 +710,9 @@ class _Quiesce:
         fail: bool = False,
         appliance_present: bool = False,
         fixed_inspection: bool = False,
+        staged: bool = False,
     ) -> None:
-        self.request = _request()
+        self.request = _request(staged=staged)
         operation = self.request.operation
         self.scratch = _result(operation)
         names = [
@@ -692,6 +728,7 @@ class _Quiesce:
             detached_volumes=frozenset(("systems", name) for name in names),
         )
         after_failure = replace(detached, appliance_present=appliance_present)
+        self.writer = writer = _Writer(tmp_path / "source.ext4")
         self.storage = StorageConn()
         self.storage.seed_root(operation.root_volume.key)
         clock = self.clock = Clock()
@@ -706,7 +743,7 @@ class _Quiesce:
             storage=self.storage,
             pool_name="systems",
             entries=(),
-            writer=_Writer(tmp_path / "source.ext4"),
+            writer=writer,
             inspect_attachments=lambda identity_port, present_attempt_volumes=None: (
                 after_failure if fail else detached
             ),
@@ -844,6 +881,86 @@ async def test_running_system_is_recorded_then_stopped_before_the_appliance(
     assert stack.prior_power() == "running"
     assert stack.appliance.created_while_system_active == [False]
     stack.close()
+
+
+@pytest.mark.anyio
+async def test_a_staged_plan_builds_the_source_with_the_vmlinux(tmp_path: Path) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False), staged=True)
+
+    response = await stack.durable.execute(stack.request)
+
+    assert isinstance(response, RemoteModuleTerminalPreparationResponseV1)
+    assert stack.request.operation.source_manifest == _STAGED_MANIFEST
+    assert stack.writer.debuginfo == _VMLINUX_BYTES
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_a_plan_without_the_member_builds_the_source_without_it(tmp_path: Path) -> None:
+    stack = _Quiesce(tmp_path, _SystemDomain(active=False))
+
+    await stack.durable.execute(stack.request)
+
+    assert stack.writer.debuginfo is None
+    stack.close()
+
+
+@pytest.mark.anyio
+async def test_restore_rebuilds_the_source_with_the_vmlinux(tmp_path: Path) -> None:
+    system = _SystemDomain(active=False)
+    stack = _Quiesce(tmp_path, system, staged=True)
+    await stack.durable.execute(stack.request)
+    stack.writer.debuginfo = None
+
+    restored = await stack.restore()
+
+    assert restored.result.phase == "restored"
+    assert stack.writer.debuginfo == _VMLINUX_BYTES
+    stack.close()
+
+
+def test_the_request_binds_a_staged_plan_to_the_combined_manifest() -> None:
+    staged = _request(staged=True)
+    module_only = staged.operation.model_copy(
+        update={"source_manifest": staged.authority.plan.module_obligation.source_manifest}
+    )
+
+    assert staged.operation.source_manifest == _STAGED_MANIFEST
+    with pytest.raises(ValueError, match="differs from authority binding"):
+        RemoteModuleVolumePreparationRequestV1(authority=staged.authority, operation=module_only)
+
+
+@pytest.mark.anyio
+async def test_worker_refuses_a_module_only_operation_for_a_staged_plan() -> None:
+    staged = _request(staged=True)
+    module_only = staged.operation.model_copy(
+        update={"source_manifest": staged.authority.plan.module_obligation.source_manifest}
+    )
+    receipt = ModuleAttemptObligationReceiptV1(
+        system_id=staged.authority.system_id,
+        run_id=staged.authority.run_id,
+        operation_nonce=staged.operation.operation_nonce,
+    )
+
+    class _Sender:
+        async def open_remote_module_attempt(self, request: object, *, deadline: float) -> object:
+            return SimpleNamespace(
+                preparation=ModuleAttemptPreparationRequestV1(module_attempt_obligation=receipt),
+                operation=module_only,
+            )
+
+    with pytest.raises(ValueError, match="differs from worker plan"):
+        await prepare_remote_module_on_authority_host(
+            pool=cast(Any, None),
+            repository=cast(Any, None),
+            sender=cast(Any, _Sender()),
+            inputs=cast(Any, SimpleNamespace(authority=staged.authority)),
+            executor=None,
+            job_id=uuid4(),
+            job_attempt=1,
+            incarnation_credential=cast(Any, None),
+            deadline=asyncio.get_running_loop().time() + 100,
+        )
 
 
 @pytest.mark.anyio

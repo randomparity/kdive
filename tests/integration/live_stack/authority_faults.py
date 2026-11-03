@@ -496,10 +496,12 @@ async def activate(
     *,
     kernel_tree: Path | None = None,
     evidence_dir: Path | None = None,
+    with_vmlinux: bool = False,
 ) -> ActivationJob:
     """Start one external boot; a remote one that fails is a recorded blocker, not a pass.
 
-    ``kernel_tree`` defaults to ``KDIVE_KERNEL_SRC``; ``evidence_dir`` retains the upload record.
+    ``kernel_tree`` defaults to ``KDIVE_KERNEL_SRC``; ``evidence_dir`` retains the upload record;
+    ``with_vmlinux`` uploads the tree's ``vmlinux`` with the kernel.
     """
     remote = isinstance(system.config, RemoteAuthorityProofConfig)
     try:
@@ -515,6 +517,7 @@ async def activate(
             kernel_tree=kernel_tree,
             evidence_dir=evidence_dir,
             with_initrd=remote,
+            with_vmlinux=with_vmlinux,
         )
         await drain_job(system.op, "activate", activation.activate_job_id)
     except SpinePhaseError as failed:

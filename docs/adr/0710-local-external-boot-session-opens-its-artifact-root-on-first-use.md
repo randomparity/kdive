@@ -124,3 +124,28 @@ and the next disposition attempt replays against the unchanged receipt.
   disposition attempt replays costs less.
 - **Move the observation into the write session.** judgment: one session instead of three, but it
   changes `observe_object`, which this change does not own.
+
+### Amendment (2026-11-03): quarantine-row port methods open pinned without a domain (#3489)
+
+`LocalLibvirtExternalBoot.quarantined_objects`, `observe_object`, `delete_recovery_object` and
+`adopt_object` open `RealLocalExternalBootIO.open_pinned` instead of `open`. It resolves the
+operation lease, pins it and checks the expected ownership as `LocalExternalBootSessionFactory.open`
+does (`_require_expected_ownership`), then holds the pin until the call returns. It opens no
+libvirt connection, domain, XML or overlay. Delete and adopt still re-read and write while the pin
+is held, so the 2026-10-01 pinned-write property stands. `record_cleanup_quarantine` and the
+cleanup ports keep `open`.
+
+This changes two earlier statements. The 2026-10-01 amendment's "a missing domain or overlay
+therefore already fails the call" no longer holds for these four methods. ADR-0787's 2026-11-01
+remark that the local port needs the System's domain, so a kept receipt is visible on disk only
+after teardown, is overridden: the port reaches it. The lease is issued per call, so the pin proves
+an issued lease scope, not identity. The fences that remain are database selection with the
+authority-instance check, the System-lane serializer, `observe_object`'s full-binding match and
+the store `flock`.
+
+- **Reuse `open_teardown`.** judgment: it opens a libvirt connection these methods never use, and
+  its session type exposes host teardown actions.
+- **Drop the pin for these four methods.** judgment: the write would run outside an issued lease
+  scope, the residual #3012 and #3045 closed.
+- **Make `open` tolerate a missing domain.** judgment: every other session caller needs the domain,
+  so the tolerance would weaken their check.

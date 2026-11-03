@@ -353,6 +353,24 @@ appliance identity in operation and result documents, changes too; it must be re
 re-installed (`deploy/remote_module_appliance/README.md`, "Rebuilding the image"). No wire,
 document schema or journal phase changes.
 
+### Amendment (2026-11-03): a retry generation that adopted a preparation opens its module attempt (#3370)
+
+The #3348 amendment left the receipt gate requiring a `materialize`/`result_committed` audit row
+for the current generation, which a retry generation never writes because it adopts the first
+generation's preparation. Migration 0187 replaces `open_external_boot_remote_module_attempt`
+with the same signature, grants and fences, and changes only that clause. The committed row may
+now belong to any generation up to the current one, provided it names the same system, activation,
+run, plan identity, provider kind and authority instance as the current authority. The activation
+must still be `preparing` with its materialization recorded, and every other check is unchanged.
+
+Accepting the adopted predecessor's row, rather than writing a new audit outcome at adoption, keeps
+the audit table a record of commits that happened: the adopting generation commits nothing. The
+identity match is what makes the predecessor's row evidence for this generation. A generation with
+no committed preparation of the same activation and plan, an earlier one included, still finds no
+row and is refused, as does a row of a later generation or of another authority instance. A
+failed PREPARE is therefore retried in a new generation, and the module-attempt obligation keeps
+its nonce across the retry. No journal phase, wire field or request schema changes.
+
 ## Consequences
 
 - Remote offline mutation gains one operator-provisioned appliance image per supported hypervisor

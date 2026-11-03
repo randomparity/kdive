@@ -86,6 +86,9 @@ class _ContractIO:
         del authority, expected
         return _ContractContext(self)
 
+    def open_pinned(self, authority: OpaqueProviderRef, expected: object) -> _ContractContext:
+        return self.open(authority, expected)
+
     def finalize_tombstone(self, recovery: RecoveryPoint, proof: object) -> None:
         del recovery, proof
 

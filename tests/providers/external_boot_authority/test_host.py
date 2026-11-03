@@ -1288,6 +1288,10 @@ def test_host_constructs_mutation_chain_for_checked_provider_socket(
     operations = cast(Any, service._adapter)._coordinator._operations  # noqa: SLF001
     assert operations._pool_name == "authority-systems"  # noqa: SLF001
     assert operations._materializer._pool_name == "authority-systems"  # noqa: SLF001
+    # The module host fetches the staged vmlinux; the materializer needs only identities (#3131).
+    module_stager = remote_module_host._host._factory._artifact_stager  # noqa: SLF001
+    materializer_stager = operations._materializer._artifact_stager  # noqa: SLF001
+    assert (module_stager._fetch, materializer_stager._fetch) == (True, False)  # noqa: SLF001
     assert service.system_service is system_service
     assert len(system_inputs) == 1
     assert system_inputs[0][0].__class__ is Connection

@@ -47,6 +47,32 @@ text is one of a closed set of literals and so never carries provider output (op
 keeping ADR-0584's rule that provider output stays out of the operator trail. The refusal text
 still passes URL-userinfo redaction and a 512-character bound as defence in depth.
 
+### Amendment (2026-11-03): interpolated remote-adapter refusals stay class-only (#3476)
+
+This qualifies the closed-literal rule above. Some remote-adapter refusals are raised as plain
+`ValueError` with an f-string that interpolates a store file name or an operation value (for
+example `_strictly_owns`, which names the store file, and the commit-point refusal in
+`src/kdive/providers/remote_libvirt/external_boot_authority.py`, checked at commit `0b2019bb2`).
+They are not a `ProviderRecoveryRefusal`, so their text is not a closed literal. The decision is
+that they stay class-only: the provider-boundary warning names the exception type and never the
+interpolated text, at any log level (operator decision, 2026-11-03). The logging rule is
+unchanged; this amendment confirms it covers these refusals and does not widen the
+`ProviderRecoveryRefusal` exception.
+
+The rationale is the rule stated in the Decision section above: every other adapter or foreign
+exception is "logged by type alone at every level", and an adapter message "must not reach any
+log level" (operator, 2026-09-28; see the rejected options below). An interpolated refusal is
+adapter-raised text built from store and System state, so it falls under that rule, which keeps
+provider output out of the operator trail as ADR-0584 does for the audit record and journal.
+
+A refusal whose text should be loggable is converted to a fixed-literal
+`ProviderRecoveryRefusal`, the path #3464 and #3483 already took for fixed-literal refusals.
+
+Rejected for interpolated refusals, by operator decision (2026-11-03):
+
+- **Redact identifiers to a fixed shape and log the result.**
+- **Log them under an explicit allowlist amendment.**
+
 ## Consequences
 
 - A teardown of such an activation restarts a prior-running source domain and waits for readiness
