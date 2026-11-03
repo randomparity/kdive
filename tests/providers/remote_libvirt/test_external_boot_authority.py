@@ -91,6 +91,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootCoordinator,
     RemoteExternalBootOperations,
     RemoteExternalBootRecoveryRecord,
+    RemoteFinalizedBootArtifactV1,
     RemoteFinalizedTeardownRefsV1,
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
@@ -4611,6 +4612,56 @@ async def test_remote_collection_with_keep_plan_keeps_the_materialization(
     store.collect_torn_down_activation(record.binding, record.plan_identity)
     assert not pair & _store_names(store)
     adapter.close()
+
+
+def test_remote_activation_volumes_absent_reads_every_named_volume() -> None:
+    """#3486: module, nonce-rendered and boot names are each read; nothing is deleted."""
+    binding = _record().binding
+    nonce = _remote_preparation_request().operation.operation_nonce
+    rendered = {
+        render_module_volume_name(binding.system_id, binding.run_id, nonce, kind)
+        for kind in ("source.ext4", "scratch.ext4")
+    }
+    refs = RemoteFinalizedTeardownRefsV1(
+        module_volumes=(("modules", "kept-source"),),
+        operation_nonce=nonce,
+        boot_artifacts=(RemoteFinalizedBootArtifactV1(ref="kernel-a", kind="kernel", sha256=None),),
+    )
+    looked: list[tuple[str, str]] = []
+    present: set[str] = set()
+
+    class Pool:
+        def __init__(self, name: str) -> None:
+            self.pool = name
+
+        def storageVolLookupByName(self, name: str) -> object:  # noqa: N802
+            looked.append((self.pool, name))
+            if name in present:
+                return object()
+            error = libvirt.libvirtError("absent")
+            error.err = (libvirt.VIR_ERR_NO_STORAGE_VOL,) + (0,) * 8
+            raise error
+
+    class Connection:
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def storagePoolLookupByName(self, name: str) -> Pool:  # noqa: N802
+            return Pool(name)
+
+    operations = ConcreteRemoteExternalBootOperations(
+        cast(Any, object()), cast(Any, Connection), "boot", lambda: 1.0, cast(Any, object())
+    )
+
+    assert operations.activation_volumes_absent(binding, refs)
+    assert set(looked) == {("modules", "kept-source"), ("boot", "kernel-a")} | {
+        ("boot", name) for name in rendered
+    }
+    present.add("kernel-a")
+    assert not operations.activation_volumes_absent(binding, refs)
 
 
 @pytest.mark.anyio

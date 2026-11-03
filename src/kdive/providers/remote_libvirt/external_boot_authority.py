@@ -2904,6 +2904,10 @@ class RemoteSystemTeardownOperations(Protocol):
 
     def unfinished_preparation_absent(self, state: RemoteSystemTeardownState) -> bool: ...
 
+    def activation_volumes_absent(
+        self, binding: ExternalBootActivationBinding, refs: RemoteFinalizedTeardownRefsV1
+    ) -> bool: ...
+
 
 class RemoteExternalBootConflictOperations(Protocol):
     """Source restoration from an acknowledged third definition, outside the six operations."""

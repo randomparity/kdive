@@ -25,6 +25,7 @@ from kdive.providers.ports.external_boot import (
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootObservedState,
     RemoteExternalBootRecoveryRecord,
+    RemoteFinalizedTeardownRefsV1,
     RemoteModuleTerminalRecord,
     RemoteSystemTeardownInspection,
     RemoteSystemTeardownState,
@@ -703,6 +704,25 @@ class ConcreteRemoteExternalBootOperations:
             self._prove_teardown_graph(connection, state)
             return all(
                 self._teardown_volume_absent(connection, self._pool_name, name) for name in names
+            )
+
+    def activation_volumes_absent(
+        self, binding: ExternalBootActivationBinding, refs: RemoteFinalizedTeardownRefsV1
+    ) -> bool:
+        """Whether every pool volume an activation's records name reads absent (#3486).
+
+        Reads only: a present volume keeps the activation's records, the only pointer to it.
+        """
+        volumes = set(refs.module_volumes)
+        volumes |= {(self._pool_name, item.ref) for item in refs.boot_artifacts}
+        if refs.operation_nonce is not None:
+            volumes |= self._module_volume_names(
+                refs.operation_nonce, binding.system_id, binding.run_id
+            )
+        with self._connection() as connection:
+            return all(
+                self._teardown_volume_absent(connection, pool, name)
+                for pool, name in sorted(volumes)
             )
 
     def remove_system_artifacts(self, state: RemoteSystemTeardownState) -> None:
