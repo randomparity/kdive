@@ -4079,10 +4079,10 @@ class RecoveryMetadataStore:
                 _cleanup_quarantine_bytes(receipt),
             )
             os.fsync(directory_fd)
+            if self._read_cleanup_quarantine_at(directory_fd, recovery.binding) != receipt:
+                raise ValueError("cleanup quarantine receipt failed exact reopen")
         finally:
             os.close(directory_fd)
-        if self.read_cleanup_quarantine(recovery.binding) != receipt:
-            raise ValueError("cleanup quarantine receipt failed exact reopen")
 
     def read_cleanup_quarantine(
         self, binding: ExternalBootActivationBinding

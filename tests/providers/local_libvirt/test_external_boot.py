@@ -5881,6 +5881,7 @@ def test_record_cleanup_quarantine_keeps_a_receipt_adopted_before_its_replace(
         outcome.append(worker)
         worker.start()
         worker.join(timeout=0.5)  # blocked on the directory lock while the writer holds it
+        assert worker.is_alive()
         return replace(*args, **kwargs)
 
     monkeypatch.setattr(external_boot_module, "_replace_private_file", adopt_first)
