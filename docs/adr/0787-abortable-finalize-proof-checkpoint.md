@@ -479,8 +479,9 @@ protects the pair through `keep_plan` (#3486); finalize had no equivalent.
   the same `run_id` and plan identity that has no `cleanup-finalized` marker.
 - A finalized sibling keeps its marker and so no longer counts. The last activation of the Run
   to finalize removes the pair, either at its own finalize or through teardown collection.
-- The scan reads the same anchors teardown collection reads. It adds no bound: the existing
-  4096-name refusal runs before it.
+- The scan reads the same anchors teardown collection reads. It adds no refusal; its cost is
+  linear in the store's files, after the existing 4096-name refusal.
+- An activation with no anchor file yet is not found, so its plan pair is not kept for it.
 - A sibling whose anchor files are unparseable is not found, so its plan pair is not kept for
   it. Such a file is left in place with a warning (#3486) and nothing proves whose it is.
 
@@ -489,4 +490,5 @@ Considered & rejected:
 - **Reference-count the pair.** judgment: a new persisted counter that a crash between its
   update and the unlink would leave wrong, for a fact the anchors already carry.
 - **Never remove the pair at finalize; leave it to teardown collection.** judgment: a Run
-  released and finalized without a System teardown would leak the pair indefinitely.
+  released and finalized without a System teardown would leak the pair indefinitely. The chosen rule also keeps it while a sibling stays
+  unfinalized, until that sibling finalizes or teardown collection removes it (#3486).

@@ -5229,6 +5229,35 @@ async def test_remote_finalize_keeps_the_plan_pair_until_the_last_activation_fin
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("other", ["run", "plan", "finalized"])
+async def test_remote_finalize_removes_the_pair_when_no_sibling_needs_the_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other: str
+) -> None:
+    """#3494: a sibling of another Run, another plan or already finalized keeps nothing."""
+    adapter, record, request, context, store = await _finalized_release_store(tmp_path)
+    binding = record.binding.model_copy(
+        update={"activation_id": "00000000-0000-4000-8000-0000000000aa"}
+    )
+    plan = record.plan_identity
+    if other == "run":
+        binding = binding.model_copy(update={"run_id": "other-run"})
+    elif other == "plan":
+        plan = "sha256:" + "d" * 64
+    else:
+        store._publish(store._finalized_name(binding, plan), b"{}")
+    monkeypatch.setattr(store, "system_activations", lambda _system: [(binding, plan)])
+    stem = record.plan_identity.removeprefix("sha256:")
+    identity = record.materialization.identity.removeprefix("sha256:")
+    pair = {f"{stem}.materialization-index", f"{identity}.materialization"}
+    assert pair <= _store_names(store)
+
+    await adapter.finalize(request, context)
+
+    assert not pair & _store_names(store)
+    adapter.close()
+
+
+@pytest.mark.anyio
 async def test_remote_finalize_resumes_after_a_crash_at_any_deletion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
