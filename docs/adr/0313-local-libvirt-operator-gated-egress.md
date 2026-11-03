@@ -155,6 +155,30 @@ avoidance the issue requires.
   (`ops`/`resources` listing) so the operator matches it, and the resolver logs which name it
   consulted so a mis-set field is diagnosable from the worker log.
 
+### Amendment (2026-11-03): egress also exposes host-loopback services (#3495)
+
+This amendment qualifies the "Residual threat the operator accepts" bullet above, which
+describes only outbound use of the NIC, and the §3 statement that egress opens no new host
+exposure. The NIC is a raw `-netdev user,...,restrict=...,hostfwd=...` argument on the domain's
+`qemu:commandline`. With `restrict=off`, QEMU user-mode networking maps its gateway address,
+`10.0.2.2`, to the host's loopback interface. An egress-enabled guest can therefore open TCP
+connections to services that listen only on host loopback, not only to external destinations.
+
+- **Exposed account.** The guest reaches those services as the account that runs QEMU. That is
+  the worker's account for an ordinary local-libvirt System, and the provider-authority account
+  for an authority System whose manifest sets `guest_egress`. That includes remote authority
+  Systems, which share the user-mode NIC, once they can start (#3310).
+- **The zone firewall does not cover it.** The residual-threat bullet names the operator's
+  network-zone firewall as the enforcement boundary. That firewall filters traffic that leaves
+  the host. A connection to `10.0.2.2` terminates in the host's own loopback and never crosses
+  it, so the opt-in's safety argument does not extend to this path.
+- **Unaffected.** With `guest_egress` absent or `false`, `restrict=on` blocks the path along
+  with all other guest-initiated traffic. The inbound `hostfwd` SSH forward is unchanged.
+  Ordinary remote-libvirt guests use a libvirt network, not user-mode networking.
+
+This amendment discloses the exposure only. Whether to mitigate it, accept it, or change the
+NIC backend is tracked in #3496 and is not decided here.
+
 ## Considered & rejected
 
 - **A per-request `LibvirtProfile.guest_egress` field.** Rejected — it lets an agent grant its own
