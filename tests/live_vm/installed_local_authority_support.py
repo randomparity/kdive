@@ -2148,6 +2148,7 @@ async def start_external_boot_activation(
     before_activate: Callable[[str], None] | None = None,
     kernel_tree: Path | None = None,
     evidence_dir: Path | None = None,
+    with_vmlinux: bool = False,
 ) -> ActivationJob:
     """Create, install, and publicly admit one activation without polling its job.
 
@@ -2156,7 +2157,8 @@ async def start_external_boot_activation(
     carrier (#2152). ``require_kdump`` arms install's crash-config gate, so it is true only for
     a System minted with a crashkernel. ``kernel_tree`` and ``evidence_dir`` pass through to
     :func:`build_and_upload_kernel`. ``with_initrd`` uploads an initrd with the kernel, which
-    remote external boot requires (#3323).
+    remote external boot requires (#3323). ``with_vmlinux`` uploads the tree's unstripped
+    ``vmlinux`` too.
     """
     opened = ok(
         await scalar(
@@ -2191,6 +2193,7 @@ async def start_external_boot_activation(
         kernel_tree=kernel_tree,
         evidence_dir=evidence_dir,
         with_initrd=with_initrd,
+        with_vmlinux=with_vmlinux,
     )
     install = ok(await scalar(client, "runs.install", run_id=run_id), "install")
     await drain_job(client, "install", install.object_id)

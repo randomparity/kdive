@@ -4901,6 +4901,45 @@ async def test_remote_collection_refuses_a_malformed_recovery_index_before_unlin
 
 
 @pytest.mark.anyio
+async def test_remote_finalize_keeps_a_receipt_adopted_after_the_callers_read(
+    tmp_path: Path,
+) -> None:
+    """#3493: an adoption landing between the caller's read and the lock is not undone."""
+    adapter, record, _request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None and not receipt.managed
+    store.adopt_cleanup_quarantine(receipt)
+    before = _store_names(store)
+
+    store.finalize_cleanup_quarantine(receipt)
+
+    assert _store_names(store) == before
+    kept = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert kept is not None and kept.managed
+    assert not store.cleanup_finalized(record.binding, record.plan_identity)
+    adapter.close()
+
+
+@pytest.mark.anyio
+async def test_remote_finalize_refuses_a_receipt_that_changed_since_the_read(
+    tmp_path: Path,
+) -> None:
+    adapter, record, _request, _context = await _cleaned_release(tmp_path)
+    store = adapter._coordinator._store
+    receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
+    assert receipt is not None
+    stale = receipt.model_copy(update={"journal_sequence": receipt.journal_sequence + 1})
+    before = _store_names(store)
+
+    with pytest.raises(ProviderRecoveryRefusal, match="proof differs from the quarantine"):
+        store.finalize_cleanup_quarantine(stale)
+
+    assert _store_names(store) == before
+    adapter.close()
+
+
+@pytest.mark.anyio
 async def test_remote_adoption_after_teardown_collection_fails_as_changed(tmp_path: Path) -> None:
     adapter, record, _request, _context = await _cleaned_release(tmp_path)
     store = adapter._coordinator._store

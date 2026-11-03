@@ -304,7 +304,7 @@ class RemoteModuleVolumePreparationRequestV1(BaseModel):
             or operation.run_id != str(authority.run_id)
             or operation.plan_identity != authority.plan_identity
             or operation.release != authority.plan.module_obligation.release
-            or operation.source_manifest != authority.plan.module_obligation.source_manifest
+            or operation.source_manifest != authority.plan.module_tree_manifest
         ):
             raise ValueError("remote module operation differs from authority binding")
         return self
@@ -2218,13 +2218,22 @@ class RemoteModuleVolumePreparationStore:
         removed only while it names this record, whether or not the record is still present.
         The ordering against a concurrent stage rests on the System lane (``refuse_finalized``).
         It runs under the store lock and writes nothing for any activation of a torn-down System,
-        so it cannot publish a marker after collection (#3472, #3486).
+        so it cannot publish a marker after collection (#3472, #3486). The receipt is read again
+        under the lock: one an adoption made ``managed`` or removed leaves everything in place, and
+        one that changed otherwise is refused (#3493).
         """
         with self._exclusive():
             if not self.system_torn_down(receipt.binding.system_id):
                 self._finalize_cleanup_quarantine(receipt)
 
     def _finalize_cleanup_quarantine(self, receipt: RemoteCleanupQuarantineV1) -> None:
+        current = self._receipt(receipt.recovery_ref)
+        if current is None or current.managed:
+            return
+        if current != receipt:
+            raise ProviderRecoveryRefusal(
+                "remote cleanup proof differs from the quarantine receipt"
+            )
         counted = sum(
             1
             for name in os.listdir(self._root_fd)
