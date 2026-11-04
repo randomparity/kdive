@@ -15,7 +15,7 @@ Expected implementation size: 150–230 changed lines (M) — source and SQL in 
 
 ## Global Constraints
 
-- Assigned numbers are exact: `docs/adr/0814-*.md`=0814, `src/kdive/db/schema/0193_*.sql`=0193.
+- Assigned numbers are exact: ADR 0814 and migration 0193.
 - No free-form text in the frame. No new dependency.
 - Guardrails: `just lint`, `just type`, `just test-changed`, `prek run`; full gate
   `just ci > <file> 2>&1 < /dev/null`, run in bash after `git fetch origin main`.
