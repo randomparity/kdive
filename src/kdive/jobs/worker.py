@@ -715,6 +715,14 @@ class Worker:
             advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
             advisory_xact_lock(conn, LockScope.RUN, run_id),
         ):
+            if not await _activation_is_active(conn, result.activation_id, run_id):
+                _log.warning(
+                    "activation %s of run %s is no longer its active activation; "
+                    "boot step not recorded",
+                    result.activation_id,
+                    run_id,
+                )
+                return
             claim = await claim_run_step(conn, run_id, "boot")
             if not claim.claimed:
                 recorded = claim.result.get("system_id") if isinstance(claim.result, dict) else None
@@ -839,6 +847,21 @@ def _is_committed_activation(result: ExternalBootAuthorityResultV1, committed: J
         and result.result.operation == "activate"
         and committed.state is JobState.SUCCEEDED
     )
+
+
+async def _activation_is_active(conn: AsyncConnection, activation_id: UUID, run_id: UUID) -> bool:
+    """Whether ``activation_id`` is still ``run_id``'s committed, active activation.
+
+    A forced re-boot supersedes the activation this write belongs to; the check runs under the
+    System and Run locks so a stale step cannot land after the re-boot deleted it.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT 1 FROM external_boot_activations "
+            "WHERE id = %s AND run_id = %s AND state = 'active'",
+            (activation_id, run_id),
+        )
+        return await cur.fetchone() is not None
 
 
 def _external_marker(job: Job) -> ExternalBootAuthorityMarkerV1 | None:
