@@ -24,8 +24,9 @@ write with a warning. A failed write is retried three times, then logged, leavin
 
 - A failed, queued, superseded or `deadline` result records no step.
 - A worker crash between the commit and the write leaves the Run without a step, and the job is
-  not redelivered. Attach keeps refusing with `boot_first`; `runs.boot` with `force` is the
-  recovery. No reconciler backfill exists.
+  not redelivered. Attach keeps refusing with `boot_first`; releasing the activation and then
+  `runs.boot` is the recovery (a forced re-boot is refused while the activation is `active`). No
+  reconciler backfill exists.
 - No schema, migration or public API change.
 
 ## Considered & rejected
@@ -38,4 +39,4 @@ write with a warning. A failed write is retried three times, then logged, leavin
 - **Relax the attach precondition for authority Systems.** judgment: it is a trust gate; the
   step is the evidence that a boot completed, so the evidence is produced, not waived.
 - **Backfill from the reconciler.** judgment: it adds a new repair surface and database authority
-  to close a crash window that `runs.boot` force already recovers.
+  to close a crash window that release then `runs.boot` already recovers.

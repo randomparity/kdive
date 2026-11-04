@@ -8,6 +8,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
@@ -114,7 +115,7 @@ def test_unfinished_or_superseded_activation_records_no_boot_step(
 def test_transient_step_write_failure_is_retried(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real = worker_module.complete_run_step
+    real = worker_module._activation_is_active
     calls = 0
 
     async def flaky(*args: Any, **kwargs: Any) -> Any:
@@ -124,7 +125,7 @@ def test_transient_step_write_failure_is_retried(
             raise RuntimeError("transient")
         return await real(*args, **kwargs)
 
-    monkeypatch.setattr(worker_module, "complete_run_step", flaky)
+    monkeypatch.setattr(worker_module, "_activation_is_active", flaky)
     monkeypatch.setattr(worker_module, "_BOOT_STEP_RETRY_DELAY_S", 0.0)
     step, _gate, vehicle = asyncio.run(_commit(migrated_url, monkeypatch))
     assert calls == 2
@@ -137,8 +138,27 @@ def test_exhausted_step_write_logs_and_leaves_no_step(
     async def broken(*_a: Any, **_k: Any) -> Any:
         raise RuntimeError("down")
 
-    monkeypatch.setattr(worker_module, "complete_run_step", broken)
+    monkeypatch.setattr(worker_module, "_activation_is_active", broken)
     monkeypatch.setattr(worker_module, "_BOOT_STEP_RETRY_DELAY_S", 0.0)
     step, _gate, _vehicle = asyncio.run(_commit(migrated_url, monkeypatch))
     assert step is None
     assert "boot step was not recorded" in caplog.text
+
+
+def test_existing_step_for_another_system_is_left_unchanged(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    real = worker_module._activation_is_active
+
+    async def seed_foreign_step(conn: Any, activation_id: Any, run_id: Any, system_id: Any) -> Any:
+        await conn.execute(
+            "INSERT INTO run_steps (run_id, step, state, result) "
+            "VALUES (%s, 'boot', 'succeeded', %s)",
+            (run_id, Jsonb({"system_id": "other", "boot_outcome": "ready"})),
+        )
+        return await real(conn, activation_id, run_id, system_id)
+
+    monkeypatch.setattr(worker_module, "_activation_is_active", seed_foreign_step)
+    step, _gate, _vehicle = asyncio.run(_commit(migrated_url, monkeypatch))
+    assert step == {"system_id": "other", "boot_outcome": "ready"}
+    assert "already has a boot step" in caplog.text

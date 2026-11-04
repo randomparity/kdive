@@ -24,21 +24,25 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg import Error as PsycopgError
 from psycopg.errors import InsufficientPrivilege
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr, ValidationError
 
-from kdive.db.idempotency import claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import JobState, RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
-from kdive.domain.lifecycle.run_steps import BOOT_OUTCOME_READY, BootStepResult
+from kdive.domain.lifecycle.run_steps import (
+    BOOT_OUTCOME_READY,
+    RUN_STEP_SUCCEEDED,
+    BootStepResult,
+)
 from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, Job, JobKind, dispatch_lane_for_kind
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
@@ -64,7 +68,6 @@ from kdive.providers.system_authority.protocol import (
 )
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.serialization import JsonValue
 
 _log = logging.getLogger(__name__)
 
@@ -715,7 +718,7 @@ class Worker:
             advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
             advisory_xact_lock(conn, LockScope.RUN, run_id),
         ):
-            if not await _activation_is_active(conn, result.activation_id, run_id):
+            if not await _activation_is_active(conn, result.activation_id, run_id, system_id):
                 _log.warning(
                     "activation %s of run %s is no longer its active activation; "
                     "boot step not recorded",
@@ -723,22 +726,31 @@ class Worker:
                     run_id,
                 )
                 return
-            claim = await claim_run_step(conn, run_id, "boot")
-            if not claim.claimed:
-                recorded = claim.result.get("system_id") if isinstance(claim.result, dict) else None
-                if recorded != str(system_id):
-                    _log.warning(
-                        "run %s already has a boot step for system %s, not %s; left unchanged",
-                        run_id,
-                        recorded,
-                        system_id,
-                    )
-                return
             boot_result: BootStepResult = {
                 "system_id": str(system_id),
                 "boot_outcome": BOOT_OUTCOME_READY,
             }
-            await complete_run_step(conn, run_id, "boot", cast(JsonValue, boot_result))
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO run_steps (run_id, step, state, result) "
+                    "VALUES (%s, 'boot', %s, %s) ON CONFLICT (run_id, step) DO NOTHING "
+                    "RETURNING 1",
+                    (run_id, RUN_STEP_SUCCEEDED, Jsonb(boot_result)),
+                )
+                if await cur.fetchone() is not None:
+                    return
+                await cur.execute(
+                    "SELECT result ->> 'system_id' FROM run_steps "
+                    "WHERE run_id = %s AND step = 'boot'",
+                    (run_id,),
+                )
+                row = await cur.fetchone()
+            _log.warning(
+                "run %s already has a boot step (system %s), not recording system %s",
+                run_id,
+                None if row is None else row[0],
+                system_id,
+            )
 
     async def _log_superseded_commit(self, job: Job) -> None:
         """Separate a real reclaim from a refused commit on the attempt that still holds the job."""
@@ -849,7 +861,9 @@ def _is_committed_activation(result: ExternalBootAuthorityResultV1, committed: J
     )
 
 
-async def _activation_is_active(conn: AsyncConnection, activation_id: UUID, run_id: UUID) -> bool:
+async def _activation_is_active(
+    conn: AsyncConnection, activation_id: UUID, run_id: UUID, system_id: UUID
+) -> bool:
     """Whether ``activation_id`` is still ``run_id``'s committed, active activation.
 
     A forced re-boot supersedes the activation this write belongs to; the check runs under the
@@ -858,8 +872,8 @@ async def _activation_is_active(conn: AsyncConnection, activation_id: UUID, run_
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT 1 FROM external_boot_activations "
-            "WHERE id = %s AND run_id = %s AND state = 'active'",
-            (activation_id, run_id),
+            "WHERE id = %s AND run_id = %s AND system_id = %s AND state = 'active'",
+            (activation_id, run_id, system_id),
         )
         return await cur.fetchone() is not None
 
