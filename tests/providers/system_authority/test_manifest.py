@@ -7,7 +7,7 @@ import subprocess
 import sys
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -345,6 +345,78 @@ def test_local_installation_rejects_base_with_wrong_root_identity(tmp_path: Path
             owner_uid=os.getuid(),
             owner_gid=os.getgid(),
         )
+
+
+def test_session_path_resolvers_equal_the_provisioners_file_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3524: the boot ownership check compares against exactly where the provisioner writes."""
+    from kdive.providers.local_libvirt import composition as local_composition
+
+    document = _local_document()
+    document["bases"] = (
+        {**document["bases"][0], "root_identity": "sha256:" + sha256(b"base").hexdigest()},
+    )
+    manifest = LocalAuthoritySystemManifestV1.model_validate(document)
+    state = tmp_path / "system-provisioning"
+    local = state / "local"
+    for path in (
+        state,
+        state / "system-operations",
+        local,
+        local / "state",
+        local / "state/intents",
+        local / "rootfs",
+        local / "rootfs/systems",
+        local / "rootfs/baselines",
+        local / "rootfs/bases",
+    ):
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    base = local / "rootfs/bases" / manifest.bases[0].filename
+    base.write_bytes(b"base")
+    base.chmod(0o400)
+    verified = validate_authority_system_installation(
+        manifest,
+        state_root=state,
+        local_root=local,
+        remote_root=state / "remote",
+        remote_pool_root=tmp_path / "pool",
+        owner_uid=os.getuid(),
+        owner_gid=os.getgid(),
+    )
+    provider, close = build_local_authority_system_provider(
+        manifest,
+        base_files=verified,
+        connect=lambda: None,
+        state_root=local / "state",
+        rootfs_root=local / "rootfs",
+        owner_uid=os.getuid(),
+        owner_gid=os.getgid(),
+    )
+    files = cast(Any, provider._provisioner)._delegate._files  # noqa: SLF001
+    host = type(
+        "Host",
+        (),
+        {
+            "authority_system_manifest": state / "manifest.json",
+            "authority_system_local_root": local,
+            "authority_uid": os.getuid(),
+            "authority_gid": os.getgid(),
+        },
+    )()
+    monkeypatch.setattr(
+        local_composition.AuthorityHostConfig, "from_environment", classmethod(lambda _c: host)
+    )
+    monkeypatch.setattr(
+        local_composition, "load_authority_system_manifest", lambda *_a, **_k: manifest
+    )
+
+    overlay_for, baseline_for = local_composition.authority_system_path_resolvers()
+
+    system_id = uuid4()
+    assert overlay_for(system_id) == files.overlay_path_for(system_id)
+    assert baseline_for(system_id) == files.baseline_dir_for(system_id)
+    close()
 
 
 @pytest.mark.parametrize(("accel", "expected_deadline"), [("kvm", 900), ("tcg", 9000)])

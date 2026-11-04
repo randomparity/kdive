@@ -241,6 +241,11 @@ def _configure_local_composition(
 
     monkeypatch.setattr(local_composition.config, "require", require)
     monkeypatch.setattr(RealLocalExternalBootIO, "open", lambda *_args: boundary.open())
+    monkeypatch.setattr(
+        local_composition,
+        "authority_system_path_resolvers",
+        lambda: (local_composition.overlay_path, local_composition.baseline_dir),
+    )
 
 
 def _host_config(secure: Path, instance: str, database_dsn: str) -> AuthorityHostConfig:

@@ -7,6 +7,7 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
 
@@ -412,6 +413,7 @@ def test_local_authority_builder_shares_scope_with_real_io(
     monkeypatch.setattr(composition.config, "require", require)
     opened: list[str] = []
     monkeypatch.setattr(composition.libvirt, "open", lambda uri: opened.append(uri))
+    _patch_authority_manifest(monkeypatch, None)
     provider_socket = seam / "libvirt?socket=foreign"
     binding = composition.build_local_external_boot_authority(
         cast(ObjectStore, object()), provider_socket
@@ -466,6 +468,7 @@ def test_authority_readiness_probes_domain_exit_on_the_provider_socket(
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="shut off", stderr="")
 
     monkeypatch.setattr(readiness_module.subprocess, "run", domstate)
+    _patch_authority_manifest(monkeypatch, None)
     factory = composition.build_external_boot_session_mechanisms(
         provider_socket=seam / "libvirt-sock"
     ).factory
@@ -527,3 +530,87 @@ def test_configuration_comes_only_from_the_composition_seam(
     # Equality, not identity: the seam hands out a fresh Path per resolution (see the
     # fixture), and what this asserts is provenance -- the value came from require.
     assert composition.build_external_boot_session_mechanisms().recovery_root == seam
+
+
+class _AuthorityHost:
+    authority_system_manifest = Path("/authority/manifest.json")
+    authority_system_local_root = Path("/authority/local")
+    authority_uid = 1
+    authority_gid = 2
+
+
+def _patch_authority_manifest(monkeypatch: pytest.MonkeyPatch, manifest: object) -> None:
+    monkeypatch.setattr(
+        composition.AuthorityHostConfig,
+        "from_environment",
+        classmethod(lambda _cls: _AuthorityHost()),
+    )
+    monkeypatch.setattr(composition, "load_authority_system_manifest", lambda *_a, **_k: manifest)
+
+
+def test_authority_resolvers_use_the_authority_root_for_a_local_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = composition.LocalAuthoritySystemManifestV1.model_construct()
+    _patch_authority_manifest(monkeypatch, manifest)
+    system_id = UUID(int=5)
+
+    overlay_for, baseline_for = composition.authority_system_path_resolvers()
+
+    assert overlay_for(system_id) == f"/authority/local/rootfs/systems/{system_id}.qcow2"
+    assert baseline_for(system_id) == f"/authority/local/rootfs/baselines/{system_id}-baseline"
+
+
+@pytest.mark.parametrize("manifest", [None, object()])
+def test_authority_resolvers_keep_the_legacy_layout_without_a_local_manifest(
+    monkeypatch: pytest.MonkeyPatch, manifest: object
+) -> None:
+    _patch_authority_manifest(monkeypatch, manifest)
+
+    assert composition.authority_system_path_resolvers() == (
+        composition.overlay_path,
+        composition.baseline_dir,
+    )
+
+
+def test_authority_mechanisms_install_the_resolvers_in_the_session_factory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def overlay(_system_id: UUID) -> str:
+        return "overlay"
+
+    def baseline(_system_id: UUID) -> str:
+        return "baseline"
+
+    def fake_factory(**kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(composition, "authority_system_path_resolvers", lambda: (overlay, baseline))
+    monkeypatch.setattr(composition, "build_external_boot_session_factory", fake_factory)
+    monkeypatch.setattr(composition.config, "require", lambda _setting: tmp_path)
+
+    composition.build_external_boot_session_mechanisms(provider_socket=Path("/s"))
+
+    assert seen["overlay_path_for"] is overlay
+    assert seen["baseline_dir_for"] is baseline
+
+
+def test_worker_mechanisms_keep_the_legacy_resolvers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_factory(**kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(composition, "build_external_boot_session_factory", fake_factory)
+    monkeypatch.setattr(composition.config, "require", lambda _setting: tmp_path)
+
+    composition.build_external_boot_session_mechanisms()
+
+    assert seen["overlay_path_for"] is composition.overlay_path
+    assert seen["baseline_dir_for"] is composition.baseline_dir
