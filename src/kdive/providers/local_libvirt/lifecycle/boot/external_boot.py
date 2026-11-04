@@ -4353,6 +4353,10 @@ class RecoveryMetadataStore:
         try:
             # Held across the managed check and the replace, as adoption and finalize hold it.
             fcntl.flock(directory_fd, fcntl.LOCK_EX)
+            # A finalize that completed since the early read removed the tombstone: fail
+            # rather than write a receipt into a directory with none (#3517).
+            if self._read_tombstone(directory_fd) != expected:
+                raise ValueError("cleanup tombstone does not match recovery point")
             standing = self._read_cleanup_quarantine_at(directory_fd, recovery.binding)
             if standing is not None and standing.managed:
                 return  # an adopted receipt is kept as is: no path un-adopts it (ADR-0787)
