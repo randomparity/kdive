@@ -122,3 +122,16 @@ Fedora worker preparation installed only its Python binding. Reuse the existing 
 with a package/condition guard in the existing role runner. Retain the original failed command,
 verify the distro's actual executable provider, and rerun staging with its unchanged mandatory
 inspection and upload validation. No native ARM guest provider is introduced.
+
+### Native provider feature block
+
+The first real carrier reached provisioning and libvirt rejected pseries ACPI before guest boot.
+The remote renderer emits ACPI/vmcoreinfo unconditionally, while the accepted shared architecture
+trait already gates that block in local rendering. In `remote_libvirt/lifecycle/xml.py`, reuse
+`arch_traits(profile.arch).emit_acpi_features` for this existing block; preserve x86 bytes/order
+and all other features. Extend the existing remote provisioning and System-authority tests to
+require POWER feature absence, x86 preservation, successful canonical identity/replay and refusal
+of unexpected identity changes. Do not rewrite fixture XML or bypass authority validation.
+Retain the failed native journal and cleanup evidence. Demonstrate renderer RED before fixing,
+then focused Linux GREEN and a real native define/readback/undefine using the product renderer
+before redeploying both runtime ends and rerunning the unchanged full carrier.

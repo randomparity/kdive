@@ -1345,12 +1345,48 @@ async def test_ppc64le_uses_fixed_machine_and_completes_without_host_arch_infere
             _context(),
             _snapshot(architecture="ppc64le"),
         )
+        before = list(connection.mutations)
+        replay = await provider.execute_system_provision(
+            _request(architecture="ppc64le"), _context(), _snapshot(architecture="ppc64le")
+        )
+        assert replay == facts
+        assert connection.mutations == before
     finally:
         executor.shutdown()
 
     domain_xml = connection.domains[DOMAIN_NAME].xml
     assert facts.complete
+    assert ET.fromstring(domain_xml).find("features") is None
     assert '<type arch="ppc64le" machine="pseries-9.2">hvm</type>' in domain_xml
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("xml_flags", (_LIVE, _INACTIVE))
+@pytest.mark.parametrize("feature", ("acpi", "vmcoreinfo"))
+async def test_power_feature_tampering_is_not_canonical_identity(
+    tmp_path: Path, xml_flags: int, feature: str
+) -> None:
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection, architecture="ppc64le")
+    try:
+        await provider.execute_system_provision(
+            _request(architecture="ppc64le"), _context(), _snapshot(architecture="ppc64le")
+        )
+        before = list(connection.mutations)
+
+        def tamper(root: ET.Element[str]) -> None:
+            features = ET.SubElement(root, "features")
+            ET.SubElement(features, feature, {"state": "on"} if feature == "vmcoreinfo" else {})
+
+        connection.xml_transforms[xml_flags] = tamper
+        with pytest.raises(CategorizedError, match="differs from private intent") as caught:
+            await provider.observe_system_provision(
+                _request(architecture="ppc64le"), _context(), _snapshot(architecture="ppc64le")
+            )
+    finally:
+        executor.shutdown()
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert connection.mutations == before
 
 
 @pytest.mark.anyio
