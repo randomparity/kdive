@@ -130,6 +130,18 @@ def _declared_resource_values(doc: InventoryDoc) -> dict[tuple[str, str], dict[s
             MEMORY_MB_KEY: inst.memory_mb,
             CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
         }
+    for inst in doc.byo_host:
+        declared[(ResourceKind.BYO_HOST.value, inst.name)] = {
+            "cost_class": inst.cost_class,
+            "pool": inst.pool,
+            "host_uri": inst.ssh_target,
+            VCPUS_KEY: inst.vcpus,
+            MEMORY_MB_KEY: inst.memory_mb,
+            CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
+            "byo_host": inst.model_dump(mode="json"),
+            "guest_arches": {inst.arch: {"accel": "none", "emulator": "none"}},
+            "pseries_fadump": inst.pseries_fadump,
+        }
     return declared
 
 
@@ -158,6 +170,27 @@ async def _live_resource_values(
             MEMORY_MB_KEY: caps.get(MEMORY_MB_KEY),
             CONCURRENT_ALLOCATION_CAP_KEY: caps.get(CONCURRENT_ALLOCATION_CAP_KEY),
         }
+        if key[0] == ResourceKind.BYO_HOST.value:
+            stored = caps.get("byo_host")
+            # Columns/capacity remain authoritative after an operator detaches the row.
+            declaration = (
+                {
+                    **stored,
+                    **{field: value for field, value in live[key].items() if field != "host_uri"},
+                    "name": row["name"],
+                    "ssh_target": row["host_uri"],
+                    "pseries_fadump": caps.get("pseries_fadump"),
+                }
+                if isinstance(stored, dict)
+                else None
+            )
+            live[key].update(
+                {
+                    "byo_host": declaration,
+                    "guest_arches": caps.get("guest_arches"),
+                    "pseries_fadump": caps.get("pseries_fadump"),
+                }
+            )
     return live
 
 

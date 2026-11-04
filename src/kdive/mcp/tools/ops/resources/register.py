@@ -255,6 +255,12 @@ def _validate_branch_fields(request: ResourceRegistration) -> ToolResponse | Non
         ``None`` when every provider-specific field applicable to ``request.kind`` is supplied
         and no inapplicable one is.
     """
+    if request.kind is ResourceKind.BYO_HOST:
+        return config_error(
+            request.name,
+            "byo-host resources are config-owned; declare [[byo_host]] in systems.toml "
+            "and run reconcile-systems",
+        )
     branch = _BRANCHES[request.kind]
     supplied = {field for field in _BRANCH_FIELDS if (getattr(request, field) or "").strip()}
     missing = sorted(branch.fields - supplied)

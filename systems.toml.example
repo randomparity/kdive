@@ -356,6 +356,55 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 # memory_mb = 16384
 # seed = 7331
 
+# BYO hosts are inventory-only in this build: all host operations and provisioning profiles
+# are unavailable. These opt-in declarations create Resource rows, never machines. Replace
+# endpoints/ref names/baselines with your own before enabling; refs are filenames, not material.
+# vcpus/memory_mb are required positive ceilings; capacity is exactly one concurrent allocation
+# per Resource. Freeze placement with resources.set_scheduling, not a capacity greater than one.
+# [[byo_host]]
+# name = "byo-x86"
+# arch = "x86_64"
+# ssh_target = "root@target-x.example"
+# ssh_key_ref = "target-ssh-key"  # pragma: allowlist secret - filename ref
+# baseline_kernel = "6.17.0-example"
+# console_device = "ttyS0"       # declare the actual firmware-redirected console device
+# vcpus = 8
+# memory_mb = 32768
+# cost_class = "byo"            # seeded neutral coefficient 1.0; operator may retune it
+# pool = "default"
+# concurrent_allocation_cap = 1
+# pseries_fadump = false
+# [byo_host.oob]
+# kind = "redfish"              # or "ipmi" on x86
+# endpoint = "https://bmc-x.example"
+# username_ref = "bmc-user"
+# password_ref = "bmc-password" # pragma: allowlist secret - filename ref
+
+# POWER is an existing PowerVM LPAR, never a created/resized partition. Distinct LPARs can
+# share an HMC endpoint; the tuple (endpoint, managed_system, lpar_name) must be unique.
+# SSH targets and x86 BMC endpoints must also be unique. Different aliases for one machine
+# remain the operator's responsibility; coordinate comparison cannot prove physical isolation.
+# [[byo_host]]
+# name = "byo-power"
+# arch = "ppc64le"
+# ssh_target = "root@target-p.example"
+# ssh_key_ref = "power-ssh-key"  # pragma: allowlist secret - filename ref
+# baseline_kernel = "6.17.0-example"
+# console_device = "hvc0"       # replace with the host's actual console device
+# vcpus = 8
+# memory_mb = 32768
+# cost_class = "byo"
+# pool = "default"
+# concurrent_allocation_cap = 1
+# pseries_fadump = false        # explicit operator claim only; never inferred from POWER
+# [byo_host.oob]
+# kind = "hmc"
+# endpoint = "hmc.example"
+# username_ref = "hmc-user"
+# password_ref = "hmc-password" # pragma: allowlist secret - filename ref
+# managed_system = "managed-a"
+# lpar_name = "partition-a"
+
 # ---------------------------------------------------------------------------------------------
 # COST CLASSES — reconciled into cost_class_coefficients (ADR-0115).
 #

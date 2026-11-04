@@ -2991,7 +2991,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="ops.set_host_capacity",
         read_only=False,
         destructive=False,
-        help="Set a host's concurrent allocation cap. Blocks new placement; no eviction. Operator.",
+        help="Set a host's concurrent allocation cap; no eviction. Operator.",
         unwrap_request=False,
         flags=(
             GeneratedFlag(
@@ -3007,7 +3007,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                 name="--concurrent-allocation-cap",
                 dest="concurrent_allocation_cap",
                 required=True,
-                help="Maximum concurrent allocations on the host (>= 0).",
+                help="Per-resource concurrent allocation count (>=0; not clock based). BYO requires exactly 1; other values return configuration_error without mutation. Freeze BYO placement with resources.set_scheduling(state='cordoned').",
                 arg_type="int",
                 action=None,
                 choices=(),
@@ -3339,7 +3339,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                 help="Filter by resource kind (e.g. 'local-libvirt'); omit for all.",
                 arg_type="str",
                 action=None,
-                choices=("local-libvirt", "fault-inject", "remote-libvirt"),
+                choices=("local-libvirt", "fault-inject", "remote-libvirt", "byo-host"),
             ),
             GeneratedFlag(
                 name="--limit",
@@ -3372,17 +3372,17 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="resources.register",
         read_only=False,
         destructive=False,
-        help="Register a runtime resource of any provider kind (platform_admin).",
+        help="Register a supported runtime resource (platform_admin); BYO is config-only.",
         unwrap_request=False,
         flags=(
             GeneratedFlag(
                 name="--kind",
                 dest="kind",
                 required=True,
-                help="Provider kind to register. 'remote-libvirt' requires host_uri + base_image; 'local-libvirt' requires host_uri; 'fault-inject' takes neither (supplying one is a configuration_error).",
+                help="Provider kind to register. BYO is config-only: declare [[byo_host]] in systems.toml and run reconcile-systems; runtime registration refuses it. 'remote-libvirt' requires host_uri + base_image; 'local-libvirt' requires host_uri; 'fault-inject' takes neither (supplying one is a configuration_error).",
                 arg_type="str",
                 action=None,
-                choices=("local-libvirt", "fault-inject", "remote-libvirt"),
+                choices=("local-libvirt", "fault-inject", "remote-libvirt", "byo-host"),
             ),
             GeneratedFlag(
                 name="--name",
@@ -4383,7 +4383,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="systems.profile_examples",
         read_only=True,
         destructive=False,
-        help="Return a ready-to-edit example profile per configured provider. Requires a token.",
+        help="Return example profiles per configured provider. Requires a token.",
         unwrap_request=False,
         flags=(),
         json_params=(),

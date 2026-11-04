@@ -22,12 +22,17 @@ def _check_allowed_kinds(conn: psycopg.Connection) -> set[str]:
     return set(re.findall(r"'([^']+)'", row[0]))
 
 
-def test_check_admits_all_three_kinds(pg_conn: psycopg.Connection) -> None:
+def test_check_admits_all_provider_kinds(pg_conn: psycopg.Connection) -> None:
     migrate.apply_migrations(pg_conn)
 
     # 0018 widened the CHECK for fault-inject; 0020 widens it for remote-libvirt
     # (ADR-0076), landing with the runtime registration that admits it.
-    assert _check_allowed_kinds(pg_conn) == {"local-libvirt", "fault-inject", "remote-libvirt"}
+    assert _check_allowed_kinds(pg_conn) == {
+        "local-libvirt",
+        "fault-inject",
+        "remote-libvirt",
+        "byo-host",
+    }
 
 
 def test_every_check_allowed_kind_has_a_buildable_runtime(pg_conn: psycopg.Connection) -> None:
@@ -38,7 +43,7 @@ def test_every_check_allowed_kind_has_a_buildable_runtime(pg_conn: psycopg.Conne
     # fault-inject and remote-libvirt are opt-in, so the fully-enabled resolver is the
     # buildable universe. remote-libvirt is buildable without operator config (ADR-0076).
     resolver = ProviderComposition().build_provider_resolver(
-        enable_fault_inject=True, enable_remote_libvirt=True
+        enable_fault_inject=True, enable_remote_libvirt=True, enable_byo_host=True
     )
     buildable = {k.value for k in resolver.registered_kinds()}
     assert allowed <= buildable  # no admit-then-throw drift
@@ -53,7 +58,7 @@ def test_every_registered_kind_is_check_allowed(pg_conn: psycopg.Connection) -> 
     # No runtime for a kind the DB forbids (discovery insert would fail otherwise) —
     # checked for the widest registry, which includes both opt-in runtimes.
     resolver = ProviderComposition().build_provider_resolver(
-        enable_fault_inject=True, enable_remote_libvirt=True
+        enable_fault_inject=True, enable_remote_libvirt=True, enable_byo_host=True
     )
     for kind in resolver.registered_kinds():
         assert kind.value in allowed
@@ -68,6 +73,6 @@ def test_default_production_registry_registers_only_local_libvirt(
     # registry must not register them — a default production deployment has no bookable
     # fault-inject or remote-libvirt Resource.
     resolver = ProviderComposition().build_provider_resolver(
-        enable_fault_inject=False, enable_remote_libvirt=False
+        enable_fault_inject=False, enable_remote_libvirt=False, enable_byo_host=False
     )
     assert resolver.registered_kinds() == frozenset({ResourceKind.LOCAL_LIBVIRT})

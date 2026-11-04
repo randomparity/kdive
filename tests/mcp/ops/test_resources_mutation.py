@@ -1314,3 +1314,23 @@ def test_deregister_config_remote_libvirt_lost_race_not_found(
         assert resp.error_category == ErrorCategory.NOT_FOUND.value
 
     asyncio.run(_run())
+
+
+def test_byo_registration_refuses_before_database_probe_or_secrets() -> None:
+    request = ResourceRegistration(
+        kind=ResourceKind.BYO_HOST,
+        name="byo",
+        cost_class="byo",
+        vcpus=8,
+        memory_mb=32768,
+        secret_refs=("DO_NOT_RESOLVE",),
+    )
+    response = asyncio.run(
+        register_resource(cast("AsyncConnectionPool", object()), _admin_ctx(), request)
+    )
+    assert response.error_category == ErrorCategory.CONFIGURATION_ERROR
+    reason = response.data["reason"]
+    assert isinstance(reason, str)
+    assert "[[byo_host]]" in reason
+    assert "reconcile" in reason
+    assert "DO_NOT_RESOLVE" not in str(response.model_dump())

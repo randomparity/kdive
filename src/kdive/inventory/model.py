@@ -25,6 +25,7 @@ from __future__ import annotations
 from decimal import Decimal
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from typing import Annotated, Any, Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
@@ -355,6 +356,96 @@ class FaultInjectInstance(_Instance):
     seed: int = 0
 
 
+class ByoHostOob(BaseModel):
+    """Refs-only service-processor coordinates; no driver is enabled here (ADR-0813)."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    kind: Literal["redfish", "ipmi", "hmc"]
+    endpoint: str
+    username_ref: str
+    password_ref: str
+    managed_system: str | None = None
+    lpar_name: str | None = None
+
+    @field_validator("endpoint", "username_ref", "password_ref", "managed_system", "lpar_name")
+    @classmethod
+    def _nonblank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("must be nonblank")
+        return value
+
+    @field_validator("endpoint")
+    @classmethod
+    def _no_inline_credentials(cls, value: str) -> str:
+        parsed = urlsplit(value if "://" in value else f"//{value}")
+        if parsed.username is not None:
+            raise ValueError("endpoint must not contain user-info; use credential refs")
+        return value
+
+    @model_validator(mode="after")
+    def _partition_coordinates(self) -> Self:
+        if self.kind == "hmc":
+            if self.managed_system is None or self.lpar_name is None:
+                raise ValueError("hmc requires managed_system and lpar_name")
+        elif self.managed_system is not None or self.lpar_name is not None:
+            raise ValueError("managed_system and lpar_name apply only to hmc")
+        return self
+
+
+class ByoHostInstance(_Instance):
+    """One declared x86 host or PowerVM LPAR; operations remain unavailable (ADR-0813)."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    arch: Literal["x86_64", "ppc64le"]
+    ssh_target: str
+    ssh_key_ref: str
+    oob: ByoHostOob
+    baseline_kernel: str
+    console_device: str
+    vcpus: int = Field(gt=0, strict=True)
+    memory_mb: int = Field(gt=0, strict=True)
+    cost_class: str = "byo"
+    concurrent_allocation_cap: int = Field(default=1, ge=1, le=1, strict=True)
+    pseries_fadump: bool = Field(default=False, strict=True)
+
+    @field_validator(
+        "name", "ssh_target", "ssh_key_ref", "baseline_kernel", "console_device", "pool"
+    )
+    @classmethod
+    def _nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must be nonblank")
+        return value
+
+    @field_validator("cost_class")
+    @classmethod
+    def _cost_class_name(cls, value: str) -> str:
+        return validate_cost_class_name(value)
+
+    @field_validator("ssh_target")
+    @classmethod
+    def _no_ssh_password(cls, value: str) -> str:
+        if "://" in value:
+            password = urlsplit(value).password
+        else:
+            password = (
+                value.split("@", 1)[0] if "@" in value and ":" in value.split("@", 1)[0] else None
+            )
+        if password is not None:
+            raise ValueError("ssh_target must not contain a password; use ssh_key_ref")
+        return value
+
+    @model_validator(mode="after")
+    def _platform_matches_oob(self) -> Self:
+        if (self.arch == "ppc64le") != (self.oob.kind == "hmc"):
+            raise ValueError("ppc64le requires hmc; x86_64 requires redfish or ipmi")
+        if self.arch != "ppc64le" and self.pseries_fadump:
+            raise ValueError("pseries_fadump applies only to ppc64le")
+        return self
+
+
 class CostClassEntry(BaseModel):
     """A single ``[[cost_class]]`` declaration: a pricing coefficient for a cost class.
 
@@ -387,6 +478,7 @@ class InventoryDoc(BaseModel):
     local_libvirt: list[LocalLibvirtInstance] = Field(default_factory=list)
     fault_inject: list[FaultInjectInstance] = Field(default_factory=list)
     cost_class: list[CostClassEntry] = Field(default_factory=list)
+    byo_host: list[ByoHostInstance] = Field(default_factory=list)
 
     def _check_image_identities(self) -> None:
         seen: set[tuple[str, str, str]] = set()
@@ -414,11 +506,32 @@ class InventoryDoc(BaseModel):
             ("remote_libvirt", [i.name for i in self.remote_libvirt]),
             ("local_libvirt", [i.name for i in self.local_libvirt]),
             ("fault_inject", [i.name for i in self.fault_inject]),
+            ("byo_host", [i.name for i in self.byo_host]),
         )
         for kind, names in groups:
             dupes = sorted({n for n in names if names.count(n) > 1})
             if dupes:
                 raise InventoryError(kind, "name", f"duplicate instance names {dupes}")
+
+    def _check_byo_coordinates(self) -> None:
+        ssh: set[str] = set()
+        bmc: set[str] = set()
+        hmc: set[tuple[str, str | None, str | None]] = set()
+        for index, inst in enumerate(self.byo_host):
+            entry = f"byo_host[{index}]"
+            if inst.ssh_target in ssh:
+                raise InventoryError(entry, "ssh_target", "duplicate SSH target")
+            ssh.add(inst.ssh_target)
+            oob = inst.oob
+            if oob.kind == "hmc":
+                identity = (oob.endpoint, oob.managed_system, oob.lpar_name)
+                if identity in hmc:
+                    raise InventoryError(entry, "oob", "duplicate HMC partition identity")
+                hmc.add(identity)
+            else:
+                if oob.endpoint in bmc:
+                    raise InventoryError(entry, "oob.endpoint", "duplicate BMC endpoint")
+                bmc.add(oob.endpoint)
 
     def _check_cost_class_uniqueness(self) -> None:
         names = [c.name for c in self.cost_class]
@@ -452,9 +565,16 @@ class InventoryDoc(BaseModel):
         try:
             doc = cls.model_validate(data)
         except ValidationError as exc:
+            first = exc.errors(include_input=False)[0]
+            location = first["loc"]
+            if location and location[0] == "byo_host":
+                entry = f"byo_host[{location[1]}]" if len(location) > 1 else "byo_host"
+                field = ".".join(str(part) for part in location[2:]) or "schema"
+                raise InventoryError(entry, field, first["msg"]) from None
             raise InventoryError("inventory", "schema", str(exc)) from exc
         doc._check_image_identities()
         doc._check_base_image_refs()
         doc._check_instance_name_uniqueness()
         doc._check_cost_class_uniqueness()
+        doc._check_byo_coordinates()
         return doc
