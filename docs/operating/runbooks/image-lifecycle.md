@@ -385,15 +385,17 @@ table inet kdive_guest_loopback {
 - `table inet` is required: the slirp IPv6 gateway `fec0::2` reaches `::1`. `oif "lo"` also covers
   the host's own routable addresses, which a loopback-only `daddr` match misses.
 
-Ubuntu 26.04 and Fedora 44 proved it, with the results in ADR-0810 (amendment of 2026-11-04). The
+Ubuntu 26.04 and Fedora 44 on x86_64 with KVM proved it, with the results in ADR-0810 (amendment of 2026-11-04). The
 guest lost IPv4 and IPv6 loopback services, the host's own address, loopback UDP, and other guests'
 SSH and gdbstub ports. It kept DNS, outbound NAT and package installs, and clients on another
 account kept SSH and gdbstub attach. The customization boot NIC is covered the same way when its
-domain runs under the keyed uid. Rocky, openSUSE and `qemu:///system` are unproven.
+domain runs under the keyed uid. Rocky, openSUSE, ppc64le and `qemu:///system` are unproven.
 
 The rule covers traffic the kernel routes through `lo`. Off-host destinations remain your network
-zone's job. Addresses on local bridges, such as container or libvirt networks, do not route through
-`lo`, so it does not cover them; that was not tested. It is not persistent: a reboot or
+zone's job. Containers and VMs behind a local bridge route out of the bridge device, so it does not
+cover them; the host's own addresses, bridge gateways included, route through `lo`. Neither case
+was tested. A host service you want guests to reach, such as a local object-store endpoint, is cut
+too. It is not persistent: a reboot or
 `nft flush ruleset` removes it with no sign from QEMU, and your distribution's `nftables.service`
 may run that flush on stop or reload. Confirm it with
 `nft list table inet kdive_guest_loopback`, and from an egress guest confirm that a connection to

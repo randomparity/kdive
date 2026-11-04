@@ -149,7 +149,7 @@ was read from `deploy/ansible/roles/provider_authority_host`, not from a running
 **Rule.** In `table inet`, on the `output` hook: `meta skuid <qemu-uid> oif "lo" ct state new reject`,
 preceded by an accept for DNS to the host's loopback resolver. The runbook holds the full text.
 
-**Method.** The hosts were sys-R1 (Ubuntu 26.04, kernel 7.0.0, libvirtd) and sys-R2 (Fedora 44,
+**Method.** The hosts, both x86_64 with KVM, were sys-R1 (Ubuntu 26.04, kernel 7.0.0, libvirtd) and sys-R2 (Fedora 44,
 kernel 6.19.10, virtqemud, SELinux enforcing with QEMU in `svirt_t`). Both run libvirt 12.0.0,
 libslirp 4.9.1, nftables 1.1.6 and `systemd-resolved`'s stub resolver; QEMU is 10.2.1 and 10.2.2.
 Guests are Ubuntu 24.04 cloud images in domains carrying kdive's `-netdev user`, `virtio-net-pci`
@@ -199,11 +199,12 @@ debugger attached and detached.
   the throwaway-account arrangement. A real customization boot was not run. On the local provider
   it uses the same session daemon, so the condition above applies to it and it needs the same DNS
   exemption; a remote authority System has no customization boot (ADR-0804).
-- Rocky, openSUSE and `qemu:///system` are unproven. The first two were outside the proof's hosts;
-  the third is excluded by the operator.
+- Rocky, openSUSE and ppc64le are unproven because they were outside the proof's hosts;
+  `qemu:///system` is excluded by the operator.
 
-On both hosts the session daemon and QEMU ran in the login-session scope that started them, so
-there is no stable cgroup to match in place of the uid.
+On both hosts, started from a login session by `demo-up.sh`, QEMU ran in that session's scope, so
+there was no stable cgroup to match in place of the uid. The boot-persistent
+`kdive-libvirtd-live.service` arrangement was not run.
 
 ## Considered & rejected
 
