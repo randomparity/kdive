@@ -492,8 +492,9 @@ class LocalLibvirtInstaller:
 
         Raises:
             CategorizedError: ``MISSING_DEPENDENCY`` if libguestfs is absent or no writer is
-                configured; ``INFRASTRUCTURE_FAILURE`` on a force-off or libguestfs fault; any
-                fetch error category from the debuginfo-fetch seam.
+                configured; ``INFRASTRUCTURE_FAILURE`` on a force-off or libguestfs fault;
+                ``INSTALL_FAILURE`` when the guest lacks room for the vmlinux plus headroom;
+                any fetch error category from the debuginfo-fetch seam.
         """
         if self._kernel_writer is None:
             raise CategorizedError(
