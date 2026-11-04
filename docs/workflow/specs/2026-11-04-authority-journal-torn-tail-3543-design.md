@@ -36,7 +36,9 @@ message, so the reader's acceptance is unchanged (an approved exclusion).
   The `torn` token follows the #2983 precedent and tells an operator the file is not a record;
   the name stays inside the existing per-System and directory bounds.
 - `ValueError` or `OSError` from the recovery becomes `journal-conflict` with a logged exception,
-  as `_abandon_unconfirmed` does. Journal bytes stay as they were.
+  as `_abandon_unconfirmed` does. Journal bytes stay as they were. An unrecoverable torn tail
+  therefore changes wire category from `provider-conflict` (the transport's catch-all) to
+  `journal-conflict`; both refuse.
 
 A torn record is dropped whatever attempt wrote it, including the current one. Unlike a whole
 unconfirmed record, it cannot be compared with the record the request computes. The next request
