@@ -2171,11 +2171,15 @@ def _adapter_with_unresolvable_point(
 async def test_a_deleting_commit_uses_the_point_remembered_under_its_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No durable receipt: `_commit` takes the pending point keyed by its identity (#3516)."""
+    """No durable receipt: `_commit` takes the point keyed by the context's identity (#3516).
+
+    The request carries a different identity, as an adopted retry's does, so keying the
+    lookup by the request would find nothing.
+    """
     io, adapter = _adapter_with_unresolvable_point(monkeypatch, "cleanup-1")
 
     await adapter.commit(
-        _cleanup_mutation("cleanup-1"),
+        _cleanup_mutation("cleanup-2"),
         _context(AuthorityOperation.CLEANUP, operation_identity="cleanup-1"),
     )
 
@@ -2185,11 +2189,12 @@ async def test_a_deleting_commit_uses_the_point_remembered_under_its_identity(
 async def test_a_deleting_commit_ignores_a_point_remembered_under_another_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    io, adapter = _adapter_with_unresolvable_point(monkeypatch, "cleanup-other")
+    """A point remembered under the request's identity is not the context's (#3516)."""
+    io, adapter = _adapter_with_unresolvable_point(monkeypatch, "cleanup-2")
 
     with pytest.raises(AuthorityServiceError, match="provider_conflict"):
         await adapter.commit(
-            _cleanup_mutation("cleanup-1"),
+            _cleanup_mutation("cleanup-2"),
             _context(AuthorityOperation.CLEANUP, operation_identity="cleanup-1"),
         )
 
