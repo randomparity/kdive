@@ -27,6 +27,7 @@ The shared phase-naming contract has its own non-gated unit tests in
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import platform
@@ -253,11 +254,22 @@ def _live_script_provision_profile(arch: str) -> dict[str, object]:
         "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
         "provider": {
             "local-libvirt": {
-                "rootfs": {"kind": "local", "path": os.environ[_GUEST_IMAGE_ENV]},
+                "rootfs": _pinned_local_rootfs(os.environ[_GUEST_IMAGE_ENV]),
                 "crashkernel": arch_traits(arch).default_crashkernel,
             }
         },
     }
+
+
+def _pinned_local_rootfs(path: str) -> dict[str, str]:
+    """A local rootfs pinned to its digest, which the external-boot authority requires.
+
+    An authority install refuses a System whose root image carries no digest
+    (``root_provenance_missing``); the fixed worker accepts and checks the same pin (#3135).
+    """
+    with open(path, "rb") as image:
+        digest = hashlib.file_digest(image, "sha256").hexdigest()
+    return {"kind": "local", "path": path, "sha256": f"sha256:{digest}"}
 
 
 # --- non-gated unit tests (CI-runnable; pin the equality invariant, ADR-0205) ----------------
