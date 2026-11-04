@@ -72,6 +72,10 @@ Data flow:
    - Settling the recovery point left at `pre-stop-intent`: existing recovery (#3130).
    - The size-less `_implausible` refusal: stays `provider_conflict`, ended by ADR-0714.
    - `failure_message` on authority-path jobs: not provided by this change or any other.
+   - `runs.get`, `systems.get` and the failed-System admission message read `failure_message` and
+     flat `failure_detail_*` keys, so they show the category and no sizes. The charter requires
+     `jobs.get`.
+   - Rollout order: stated in ADR-0814; no deploy tooling enforces it, as for ADR-0811.
 
 ## Threat model
 

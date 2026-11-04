@@ -237,7 +237,11 @@ Steps:
 ```
 
 4. Write `0193_external_boot_install_refusal.sql`: `external_boot_install_refusal_is_valid(jsonb)`
-   (plpgsql, `IMMUTABLE`, `SET search_path = ''`, `REVOKE ALL`), and a `DO` block that rewrites the
+   (plpgsql, `IMMUTABLE`, `SET search_path = ''`, `REVOKE ALL`). It returns false unless the value is
+   an object with exactly the three keys, each `jsonb_typeof` is `number`, each value read as
+   `numeric` equals its `trunc` and lies in 0..9223372036854775807, and free is below the `numeric`
+   sum, which cannot overflow. It runs its checks in sequence, so a later cast never sees an unchecked
+   value. Then add a `DO` block that rewrites the
    commit function in place with the 0170 pattern: extend the field list, and add a clause beside the
    `authority_reason` one refusing `install_refusal` unless the category is `install_failure` and the
    helper is true. Each old fragment must occur exactly once or the block raises.
