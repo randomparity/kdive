@@ -6,6 +6,7 @@ import asyncio
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -1601,6 +1602,77 @@ def test_teardown_does_not_recycle_authority_job(migrated_url: str, prior: str) 
         assert response.object_id == job_id
         assert before is not None and after == before
         assert response.status == before[0]
+
+    asyncio.run(_run())
+
+
+_RECYCLE_AUDIT_SQL = (
+    "SELECT principal FROM audit_log WHERE tool = 'systems.teardown' "
+    "AND transition = 'teardown:recycled' AND object_id = %s"
+)
+_JOB_PRINCIPAL_SQL = "SELECT authorizing->>'principal' FROM jobs WHERE id = %s"
+
+
+async def _recycle_audit_principals(pool: AsyncConnectionPool, system_id: str) -> list[str]:
+    async with pool.connection() as conn:
+        cur = await conn.execute(_RECYCLE_AUDIT_SQL, (UUID(system_id),))
+        return [row[0] for row in await cur.fetchall()]
+
+
+def test_authority_recycle_keeps_first_principal_and_audits_requester(migrated_url: str) -> None:
+    """#3544, ADR-0447: the first enqueuer stays `authorizing`; the recycler gets an audit row."""
+
+    async def _run() -> None:
+        resolver = provider_resolver(external_boot=ExternalBootOperations())
+        second = replace(ctx(Role.ADMIN), principal="user-2")
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id = await _authority_teardown_job(pool)
+            first_rows = await _recycle_audit_principals(pool, system_id)
+            replay = await _teardown(pool, second, system_id, resolver=resolver)
+            replay_rows = await _recycle_audit_principals(pool, system_id)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET state = 'failed', attempt = max_attempts, "
+                    "error_category = 'conflict' WHERE id = %s",
+                    (job_id,),
+                )
+            recycled = await _teardown(pool, second, system_id, resolver=resolver)
+            async with pool.connection() as conn:
+                row = await (await conn.execute(_JOB_PRINCIPAL_SQL, (job_id,))).fetchone()
+            recycled_rows = await _recycle_audit_principals(pool, system_id)
+
+        assert first_rows == [] and replay_rows == []
+        assert replay.object_id == recycled.object_id == job_id
+        assert row == ("user-1",)
+        assert recycled_rows == ["user-2"]
+
+    asyncio.run(_run())
+
+
+def test_force_teardown_authority_recycle_writes_only_the_platform_audit_row(
+    migrated_url: str,
+) -> None:
+    """#3544: break-glass keeps its one platform row and adds no project audit row."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id = await _authority_teardown_job(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET state = 'failed', attempt = max_attempts, "
+                    "error_category = 'conflict' WHERE id = %s",
+                    (job_id,),
+                )
+            resolver = provider_resolver(external_boot=ExternalBootOperations())
+            response, platform_rows = await _force_teardown(pool, system_id, resolver)
+            async with pool.connection() as conn:
+                row = await (await conn.execute(_JOB_PRINCIPAL_SQL, (job_id,))).fetchone()
+            rows = await _recycle_audit_principals(pool, system_id)
+
+        assert response.status == "queued", response.model_dump()
+        assert row == ("user-1",)
+        assert platform_rows == 1
+        assert rows == []
 
     asyncio.run(_run())
 
