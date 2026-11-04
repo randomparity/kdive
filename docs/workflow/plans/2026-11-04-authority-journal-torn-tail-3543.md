@@ -13,8 +13,10 @@ split without changing acceptance; `_journal_state` recovers on that error. Spec
 - Evidence bounds: 4 per System, 256 in `abandoned/`; files 0600, directories 0700,
   `O_NOFOLLOW | O_CLOEXEC`, owner `self._owner_uid`.
 
-Expected implementation size: 200–280 changed lines (M) — journal about 60, service about 20,
-tests about 150, ADR amendment about 15.
+Expected implementation size: 500–540 changed lines (M) — journal about 90, service about 30,
+tests about 390, ADR amendment about 27. Corrected after the build: the first estimate of 200–280
+counted tests before the design review added the phase and cut parametrization and the service
+refusal cases.
 
 ## File map
 
