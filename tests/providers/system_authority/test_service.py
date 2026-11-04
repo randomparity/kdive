@@ -786,3 +786,30 @@ def test_full_evidence_refuses_quarantine_with_journal_conflict(
             assert journal.read() == before
 
     asyncio.run(scenario())
+
+
+def test_unwritable_evidence_directory_refuses_quarantine_with_journal_conflict(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        first = _service(repository, root)
+        await _crash_provision_at(
+            first, repository, _request(snapshot), AuthoritySystemJournalPhase.MUTATION_STARTED
+        )
+        await first.close()
+        (root / "system-operations" / "abandoned").mkdir(mode=0o755)
+        (root / "system-operations" / "abandoned").chmod(0o755)
+
+        teardown = _teardown(snapshot, 2)
+        repository.allocating = teardown
+        refused = _service(repository, root)
+        with pytest.raises(AuthoritySystemServiceError, match="journal-conflict"):
+            await refused.begin("worker-a", teardown)
+        await refused.close()
+        with FileAuthoritySystemJournal(root, snapshot.system_id) as journal:
+            assert len(journal.read()) == repository.sequence + 1
+
+    asyncio.run(scenario())

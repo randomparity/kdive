@@ -582,7 +582,7 @@ class AuthoritySystemService:
         assert state.unconfirmed is not None
         try:
             journal.abandon_unconfirmed_tail(state.db_sequence)
-        except ValueError:
+        except ValueError, OSError:
             _log.exception(
                 "authority System %s journal refused to quarantine the unconfirmed record "
                 "at sequence %d",

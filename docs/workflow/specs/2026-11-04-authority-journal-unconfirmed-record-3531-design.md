@@ -72,7 +72,9 @@ plus the evidence record is the original).
   `superseded` or `conflict` result) leaves a quarantinable record; a System with 4 of them
   refuses a fifth (fail closed). The operator reclaims space or the bound by deleting that
   System's `abandoned/<system_id>.*.jsonl` after inspection; the service never reads them.
-  A torn final append (no trailing newline) already fails the reader and is not recovered here
+  Evidence kept for a record that a later retry adopts (a crash during quarantine) stays and
+  counts toward the cap. An unwritable or foreign-owned `abandoned/`, or a full disk, fails
+  closed the same way. A torn final append (no trailing newline) already fails the reader and is not recovered here
   (follow-up). A same-uid actor can already rewrite the journal and is not a new threat.
 - Covered elsewhere: journal size bounds and teardown headroom (#3526); retry bound (#3530).
 
