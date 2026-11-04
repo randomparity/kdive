@@ -381,7 +381,13 @@ def test_accounting_snapshot_compares_kcu_by_value_not_scale(migrated_url: str) 
     assert asyncio.run(carrier.accounting_state(migrated_url, "proj")) == before
 
 
-def test_system_quota_probe_restates_the_allocation_size(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "host_arch,image_name",
+    [("x86_64", "fedora-kdive-ready-44"), ("ppc64le", "fedora-kdive-ready-44-ppc64le")],
+)
+def test_system_quota_probe_restates_the_allocation_size(
+    monkeypatch: pytest.MonkeyPatch, host_arch: str, image_name: str
+) -> None:
     # A profile whose size conflicts with the allocation is refused before the System quota,
     # so the probe would never reach the cap it claims to prove.
     sent: dict[str, object] = {}
@@ -393,6 +399,8 @@ def test_system_quota_probe_restates_the_allocation_size(monkeypatch: pytest.Mon
     async def none(*_args: object) -> list[object]:
         return []
 
+    monkeypatch.setattr(tool_cells.platform, "machine", lambda: host_arch)
+    monkeypatch.setitem(tool_cells.LANE_IMAGES, host_arch, image_name)
     monkeypatch.setattr(carrier, "_answer", reply)
     monkeypatch.setattr(carrier, "_rows", none)
     fixture = carrier._Fixture("p", "db", cast(HttpCaller, None))

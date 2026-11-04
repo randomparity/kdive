@@ -143,7 +143,7 @@ def test_one_example_per_configured_provider(tmp_path: Path) -> None:
     doc = InventoryDoc.parse({"schema_version": 2, "local_libvirt": [], "remote_libvirt": []})
     # kinds drives provider selection; passing all three yields one example per provider.
     examples = _examples(doc)
-    assert set(examples) == {"local-libvirt", "remote-libvirt", "fault-inject"}
+    assert set(examples) == {"local-libvirt", "remote-libvirt", "fault-inject", "byo-host"}
 
 
 def test_note_documents_destructive_ops_scope() -> None:
@@ -166,6 +166,9 @@ def test_full_inventory_examples_are_valid_and_use_real_refs(
     assert doc is not None
     examples = _examples(doc)
     for provider, data in examples.items():
+        if data.get("available") is False:
+            assert data["profile"] is None
+            continue
         profile = _profile_of(data)
         _validate(provider, profile)  # parses + passes provider policy as emitted
     # Real refs used where the inventory supplies them.
@@ -324,8 +327,11 @@ host_uri = "qemu:///system"
 
 def test_no_inventory_file_yields_default_placeholder_set() -> None:
     examples = _examples(None)
-    assert set(examples) == {"local-libvirt", "remote-libvirt", "fault-inject"}
+    assert set(examples) == {"local-libvirt", "remote-libvirt", "fault-inject", "byo-host"}
     for provider, data in examples.items():
+        if data.get("available") is False:
+            assert data["profile"] is None
+            continue
         _validate(provider, _profile_of(data))
         assert data["note"]
 
@@ -394,6 +400,9 @@ def test_examples_carry_sizing_note_and_concrete_size() -> None:
     # allocation as-is) AND a sizing_note telling the caller to omit/match for a shape-sized
     # allocation, whose resolved size would otherwise conflict.
     for data in _examples(None).values():
+        if data.get("available") is False:
+            assert data["profile"] is None
+            continue
         profile = _profile_of(data)
         for field in ("vcpu", "memory_mb", "disk_gb"):
             assert isinstance(profile[field], int)
@@ -425,12 +434,12 @@ def test_remote_and_fault_examples_carry_no_debug_block() -> None:
     assert "debug" not in fault
 
 
-def test_collection_and_item_status_are_ok() -> None:
-    # The collection and each item report the literal "ok" status (a read-only discovery success).
+def test_collection_is_ok_and_byo_item_is_unavailable() -> None:
+    # The collection succeeds; an inventory-only provider cannot supply a usable profile.
     resp = build_profile_examples(None, frozenset(ResourceKind))
     assert resp.status == "ok"
     assert resp.object_id == "profile-examples"
-    assert [item.status for item in resp.items] == ["ok", "ok", "ok"]
+    assert [item.status for item in resp.items] == ["ok", "ok", "ok", "unavailable"]
 
 
 def test_each_item_carries_the_exact_data_keys_and_object_id() -> None:
@@ -440,8 +449,11 @@ def test_each_item_carries_the_exact_data_keys_and_object_id() -> None:
     local_keys = base_keys | {"available_images", "selection_note", "description"}
     for item in resp.items:
         # The item object_id is the provider name, and its data carries exactly these keys.
-        assert item.object_id in {"local-libvirt", "remote-libvirt", "fault-inject"}
-        expected = local_keys if item.object_id == "local-libvirt" else base_keys
+        assert item.object_id in {"local-libvirt", "remote-libvirt", "fault-inject", "byo-host"}
+        if item.object_id == "byo-host":
+            expected = {"provider", "available", "profile", "note"}
+        else:
+            expected = local_keys if item.object_id == "local-libvirt" else base_keys
         assert set(cast(dict[str, Any], item.data)) == expected
         assert cast(dict[str, Any], item.data)["provider"] == item.object_id
 
@@ -663,3 +675,24 @@ def test_fault_inject_absent_unless_composed() -> None:
 def test_empty_composed_set_yields_no_examples() -> None:
     resp = build_profile_examples(None, frozenset())
     assert resp.items == []
+
+
+def test_byo_profile_is_explicitly_unavailable_without_a_local_fallback() -> None:
+    response = build_profile_examples(None, frozenset({ResourceKind.BYO_HOST}))
+    assert len(response.items) == 1
+    item = response.items[0]
+    assert item.status == "unavailable"
+    assert item.data["provider"] == "byo-host"
+    assert item.data["available"] is False
+    assert item.data["profile"] is None
+    assert "unavailable" in str(item.data["note"]).lower()
+    assert "rootfs" not in item.data and "kernel_source_ref" not in item.data
+
+
+def test_byo_private_example_builder_cannot_fall_through_to_local() -> None:
+    from kdive.domain.errors import CategorizedError, ErrorCategory
+    from kdive.mcp.tools.lifecycle.systems.profile_examples import _example_profile
+
+    with pytest.raises(CategorizedError) as exc:
+        _example_profile("byo-host", None)
+    assert exc.value.category is ErrorCategory.NOT_IMPLEMENTED

@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from pydantic import ValidationError
+
 from kdive.domain.catalog.images import Capability
 from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
@@ -34,6 +36,7 @@ from kdive.domain.catalog.resource_capabilities import (
     VCPUS_KEY,
 )
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.inventory.model import ByoHostInstance
 from kdive.inventory.overrides import (
     InventoryOverrideDisposition,
     InventorySourceKind,
@@ -140,6 +143,7 @@ class InventorySnapshot:
     local_libvirt: tuple[ResourceRow, ...]
     fault_inject: tuple[ResourceRow, ...]
     cost_classes: tuple[tuple[str, Decimal], ...]
+    byo_host: tuple[ByoHostInstance, ...] = ()
 
 
 # ---- TOML emitter primitives ----------------------------------------------------------
@@ -166,7 +170,7 @@ def _toml_str(value: str) -> str:
         escaped = _TOML_ESCAPES.get(ch)
         if escaped is not None:
             out.append(escaped)
-        elif ord(ch) < 0x20:
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
             out.append(f"\\u{ord(ch):04X}")
         else:
             out.append(ch)
@@ -211,6 +215,8 @@ def serialize_inventory(snapshot: InventorySnapshot) -> str:
         parts.append(_emit_local(host))
     for host in sorted(snapshot.fault_inject, key=lambda r: r.name):
         parts.append(_emit_fault(host))
+    for host in sorted(snapshot.byo_host, key=lambda r: r.name):
+        parts.append(_emit_byo(host))
     for name, coeff in sorted(snapshot.cost_classes, key=lambda c: c[0]):
         parts.append(_emit_cost_class(name, coeff))
     return "\n".join(parts)
@@ -302,6 +308,24 @@ def _emit_fault(host: ResourceRow) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _emit_byo(host: ByoHostInstance) -> str:
+    lines = ["[[byo_host]]"]
+    for key, value in host.model_dump(mode="json", exclude={"oob"}).items():
+        if isinstance(value, bool):
+            encoded = "true" if value else "false"
+        elif isinstance(value, int):
+            encoded = _toml_int(value)
+        else:
+            encoded = _toml_str(value)
+        lines.append(f"{key} = {encoded}")
+    lines.append("[byo_host.oob]")
+    lines.extend(
+        f"{key} = {_toml_str(value)}"
+        for key, value in host.oob.model_dump(exclude_none=True).items()
+    )
+    return "\n".join(lines) + "\n"
+
+
 def _emit_cost_class(name: str, coeff: Decimal) -> str:
     # ADR-0115 §6 idiom: coeff is a quoted string for an exact round-trip.
     return f"[[cost_class]]\nname = {_toml_str(name)}\ncoeff = {_toml_str(str(coeff))}\n"
@@ -337,6 +361,7 @@ async def read_inventory_snapshot(conn: AsyncConnection) -> InventorySnapshot:
         local_libvirt=await _read_resources(conn, ResourceKind.LOCAL_LIBVIRT, resource_overrides),
         fault_inject=await _read_resources(conn, ResourceKind.FAULT_INJECT, resource_overrides),
         cost_classes=await _read_cost_classes(conn),
+        byo_host=await _read_byo_resources(conn, resource_overrides),
     )
 
 
@@ -421,6 +446,46 @@ async def _read_resources(
             )
         )
     return tuple(rows)
+
+
+async def _read_byo_resources(
+    conn: AsyncConnection, overrides: Mapping[tuple[str, str], InventoryOverride]
+) -> tuple[ByoHostInstance, ...]:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT name,cost_class,pool,host_uri,capabilities FROM resources "
+            "WHERE kind='byo-host' AND managed_by='config' AND name IS NOT NULL"
+        )
+        fetched = await cur.fetchall()
+    hosts: list[ByoHostInstance] = []
+    for name, cost_class, pool, host_uri, caps in fetched:
+        if _is_removed(overrides, ResourceKind.BYO_HOST.value, name):
+            continue
+        stored = caps.get("byo_host") if isinstance(caps, dict) else None
+        if not isinstance(stored, dict):
+            raise ValueError(f"byo-host resource {name!r} is missing its persisted declaration")
+        try:
+            hosts.append(
+                ByoHostInstance.model_validate(
+                    {
+                        **stored,
+                        "name": name,
+                        "cost_class": cost_class,
+                        "pool": pool,
+                        "ssh_target": host_uri,
+                        "vcpus": caps.get(VCPUS_KEY),
+                        "memory_mb": caps.get(MEMORY_MB_KEY),
+                        "concurrent_allocation_cap": caps.get(CONCURRENT_ALLOCATION_CAP_KEY),
+                        "pseries_fadump": caps.get("pseries_fadump"),
+                    }
+                )
+            )
+        except ValidationError:
+            raise ValueError(
+                f"byo-host resource {name!r} has an invalid persisted declaration; "
+                "correct systems.toml and reconcile before exporting"
+            ) from None
+    return tuple(hosts)
 
 
 async def _read_cost_classes(conn: AsyncConnection) -> tuple[tuple[str, Decimal], ...]:

@@ -497,6 +497,8 @@ def build_runtime(
         # planes were proven live end-to-end on real KVM by the B6 (#680) milestone verifier, so
         # `debug.*` and `introspect.run` tool maturity is `implemented` (ADR-0218 §6 / ADR-0219).
         support=ProviderSupport(
+            supports_build=True,
+            supports_boot=True,
             component_sources=_component_sources(),
             capture_methods=frozenset(
                 {CaptureMethod.KDUMP, CaptureMethod.FADUMP, CaptureMethod.HOST_DUMP}

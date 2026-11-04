@@ -184,7 +184,7 @@ def test_waiver_table_has_no_stale_entries() -> None:
 # calling, because enforcement is a property of the call graph, not of any one runtime value: a
 # call site naming the kind is exactly what the removed declarations lacked. A rename of the helper
 # empties the enforced set, which reddens `test_every_declared_component_kind_is_enforced` and
-# `test_rootfs_is_declared_by_every_provider_and_enforced` rather than passing vacuously.
+# `test_rootfs_is_declared_by_operational_providers_and_enforced` rather than passing vacuously.
 #
 # What it proves and what it does not: a call site naming the kind exists somewhere in `src/kdive/`.
 # It does not prove that site is reachable from a request, so a call in dead code would satisfy it.
@@ -260,8 +260,8 @@ def _declared_component_sources() -> dict[str, ComponentSourceCapabilities]:
     Discovered from ``ProviderComposition._runtime_descriptors``, the one registry every provider
     runtime is built from, rather than from a hand-listed set: a fourth provider is covered the
     moment it is registered there, with no edit here. Listing the builders instead would make
-    :func:`test_rootfs_is_declared_by_every_provider_and_enforced` compare a hardcoded set against
-    itself, so a new provider could ship an inert declaration with every test green.
+    :func:`test_rootfs_is_declared_by_operational_providers_and_enforced` compare a hardcoded set
+    against itself, so a new provider could ship an inert declaration with every test green.
 
     The *unfiltered* descriptor list is deliberate. ``_enabled_runtime_descriptors`` drops whatever
     this deployment's env vars disable (ADR-0127/0131), and a declaration is wrong whether or not
@@ -269,7 +269,7 @@ def _declared_component_sources() -> dict[str, ComponentSourceCapabilities]:
     """
     composition = ProviderComposition(secret_registry=SecretRegistry())
     return {
-        runtime.support.component_sources.provider: runtime.support.component_sources
+        runtime.profile_policy.kind.value: runtime.support.component_sources
         for runtime in (
             descriptor.build_runtime() for descriptor in composition._runtime_descriptors()
         )
@@ -311,11 +311,13 @@ def test_every_declared_component_kind_is_enforced() -> None:
     )
 
 
-def test_rootfs_is_declared_by_every_provider_and_enforced() -> None:
-    """The positive half: narrowing must not empty the maps or drop the one enforced kind."""
+def test_rootfs_is_declared_by_operational_providers_and_enforced() -> None:
+    """Operational providers retain the enforced ROOTFS source; BYO stays empty."""
     assert ROOTFS_COMPONENT in _enforced_component_kinds()
     declarations = _declared_component_sources()
+    assert declarations.pop("byo-host").accepted_component_sources == {}
     assert set(declarations) == {"local-libvirt", "remote-libvirt", "fault-inject"}
     for provider, caps in declarations.items():
+        assert caps.provider == provider
         accepted = caps.accepted_component_sources.get(ROOTFS_COMPONENT, frozenset())
         assert "local" in accepted, f"{provider} must still accept a `local` ROOTFS source"
