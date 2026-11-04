@@ -2153,6 +2153,49 @@ async def test_an_adopted_release_cleanup_finalizes_once_and_leaves_no_pending_p
     assert adapter._pending_cleanup_finalization == {}
 
 
+def _adapter_with_unresolvable_point(
+    monkeypatch: pytest.MonkeyPatch, pending_identity: str
+) -> tuple[_FakeIO, LocalExternalBootAuthorityAdapter]:
+    """An adapter that resolves no durable point, holding one remembered point.
+
+    `_resolve_point` is stubbed rather than faulted through the IO double, because the
+    cleanup that follows a successful lookup reopens the same record.
+    """
+    io = _FakeIO(_metadata("recovered"))
+    adapter = _adapter(io)
+    monkeypatch.setattr(adapter, "_resolve_point", lambda *_args, **_kwargs: None)
+    adapter._remember_cleanup_point(pending_identity, _point(io.metadata))
+    return io, adapter
+
+
+async def test_a_deleting_commit_uses_the_point_remembered_under_its_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No durable receipt: `_commit` takes the pending point keyed by its identity (#3516)."""
+    io, adapter = _adapter_with_unresolvable_point(monkeypatch, "cleanup-1")
+
+    await adapter.commit(
+        _cleanup_mutation("cleanup-1"),
+        _context(AuthorityOperation.CLEANUP, operation_identity="cleanup-1"),
+    )
+
+    assert io.actions.count("cleanup") == 1
+
+
+async def test_a_deleting_commit_ignores_a_point_remembered_under_another_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    io, adapter = _adapter_with_unresolvable_point(monkeypatch, "cleanup-other")
+
+    with pytest.raises(AuthorityServiceError, match="provider_conflict"):
+        await adapter.commit(
+            _cleanup_mutation("cleanup-1"),
+            _context(AuthorityOperation.CLEANUP, operation_identity="cleanup-1"),
+        )
+
+    assert "cleanup" not in io.actions
+
+
 def test_pending_cleanup_points_are_bounded() -> None:
     adapter = _adapter(_FakeIO(_metadata("recovered")))
     point = _point(_metadata("recovered"))
