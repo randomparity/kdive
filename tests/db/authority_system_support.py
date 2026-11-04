@@ -121,12 +121,15 @@ def _seed_direct_terminal_attempt(
     *,
     disposition: str,
     generation: int = 1,
+    receipt_fields: dict[str, object] | None = None,
 ) -> tuple[object, object, bytes, str, str]:
     authority_id, request_attempt_id = uuid4(), uuid4()
     operation_digest = "sha256:" + "c" * 64
     head_digest = "sha256:" + "d" * 64
     receipt_digest = "sha256:" + "e" * 64
-    receipt = json.dumps({"disposition": disposition}, separators=(",", ":")).encode()
+    receipt = json.dumps(
+        {"disposition": disposition, **(receipt_fields or {})}, separators=(",", ":")
+    ).encode()
     marker = cast(dict[str, object], case["marker"])
     job_row = conn.execute("SELECT attempt FROM jobs WHERE id=%s", (case["job_id"],)).fetchone()
     assert job_row is not None

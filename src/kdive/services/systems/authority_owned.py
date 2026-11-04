@@ -22,6 +22,8 @@ from kdive.jobs.payloads import (
     load_payload,
 )
 from kdive.providers.system_authority.protocol import (
+    SSH_FORWARD_PORT_MAX,
+    SSH_FORWARD_PORT_MIN,
     AuthoritySystemMarkerV1,
     AuthoritySystemOperation,
 )
@@ -45,6 +47,7 @@ class AuthoritySystemBinding:
     profile_identity: str
     root_identity: str
     ownership_state: str
+    ssh_forward_port: int | None = None
 
 
 def _invalid_binding() -> CategorizedError:
@@ -85,7 +88,17 @@ def _binding(row: dict[str, object]) -> AuthoritySystemBinding:
         profile_identity=_text(row.get("profile_identity")),
         root_identity=_text(row.get("root_identity")),
         ownership_state=ownership_state,
+        ssh_forward_port=_forward_port(row.get("ssh_forward_port")),
     )
+
+
+def _forward_port(value: object) -> int | None:
+    """The reported loopback SSH port, or ``None``; a value outside the range is malformed."""
+    if value is None:
+        return None
+    if type(value) is not int or not SSH_FORWARD_PORT_MIN <= value <= SSH_FORWARD_PORT_MAX:
+        raise _invalid_binding()
+    return value
 
 
 async def authority_system_binding(
@@ -96,6 +109,33 @@ async def authority_system_binding(
         await cursor.execute(_BINDING_SQL, (system_id,))
         row = await cursor.fetchone()
     return None if row is None else _binding(dict(row))
+
+
+async def authority_ssh_forward_port(conn: AsyncConnection, system_id: UUID) -> int | None:
+    """The loopback SSH port a local authority-owned System reported, for drgn-live attach.
+
+    ``None`` means the System is not authority-owned or is not local-libvirt, so the provider
+    resolves the forward itself (ADR-0811). An authority-owned local System that cannot be
+    attached to raises ``CONFIGURATION_ERROR`` instead of falling back: the server's own libvirt
+    endpoint cannot see the authority's domain, and a guessed port would be a forged endpoint.
+    """
+    binding = await authority_system_binding(conn, system_id)
+    if binding is None or binding.provider_kind != "local-libvirt":
+        return None
+    if binding.ssh_forward_port is None:
+        reason = (
+            "authority_system_not_attachable"
+            if binding.ownership_state not in {"ready", "activated"}
+            else "authority_ssh_forward_unreported"
+        )
+        raise CategorizedError(
+            "this authority-owned System reported no SSH forward to attach through; it was "
+            "provisioned before the authority reported one, or the authority is older than this "
+            "server. Reprovision it against an upgraded authority.",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": reason},
+        )
+    return binding.ssh_forward_port
 
 
 async def ordinary_mutation_is_fenced(conn: AsyncConnection, system_id: UUID) -> bool:
