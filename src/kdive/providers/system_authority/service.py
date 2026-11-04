@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
@@ -40,6 +41,8 @@ from kdive.providers.system_authority.repository import (
     AuthoritySystemAdvanceResult,
     ResolvedAuthoritySystemOperation,
 )
+
+_log = logging.getLogger(__name__)
 
 
 class AuthoritySystemServiceError(RuntimeError):
@@ -364,6 +367,12 @@ class AuthoritySystemService:
             request.operation is AuthoritySystemOperation.PROVISION
             and len(state.records) + RECORDS_PER_ATTEMPT > PROVISION_RECORD_CEILING
         ):
+            _log.warning(
+                "authority System %s journal holds %d records; refusing another provision "
+                "attempt to keep room for systems.teardown",
+                request.system_id,
+                len(state.records),
+            )
             raise AuthoritySystemServiceError("journal-conflict")
 
     @staticmethod

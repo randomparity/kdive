@@ -23,7 +23,8 @@ Rejected: raising or removing the journal bound (excluded by the operator).
 - `AuthoritySystemService._begin` refuses a new provision attempt with `journal-conflict` when
   the attempt would not fit under the ceiling. The check runs only before the first record of a
   new attempt, so a started attempt always finishes. Teardown is never refused by it.
-- The refusal reuses the existing wire category, so there is no protocol change. The job fails
+- The refusal logs a warning on the authority host and reuses the existing wire category, so
+  there is no protocol change. The job fails
   retryably, exhausts its attempts without growing `max_attempts`, and `systems.teardown`
   takes over; migration 0171 then discharges the exhausted provision job.
 - Out of scope: a teardown that itself retains forever (it can still consume the reserve), the

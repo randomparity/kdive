@@ -12,6 +12,7 @@ import pytest
 
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.ports.external_boot import RootSpecV1
+from kdive.providers.system_authority import service as service_module
 from kdive.providers.system_authority.journal import (
     MAX_JOURNAL_BYTES,
     MAX_RECORDS_PER_JOURNAL,
@@ -590,3 +591,28 @@ def test_journal_bounds_are_unchanged() -> None:
     assert MAX_RECORDS_PER_JOURNAL == 1024
     assert MAX_JOURNAL_BYTES == 16 * 1024 * 1024
     assert PROVISION_RECORD_CEILING + TEARDOWN_RESERVE_RECORDS == MAX_RECORDS_PER_JOURNAL
+
+
+def test_started_attempt_resumes_above_the_provision_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        service = AuthoritySystemService(
+            repository=repository,
+            journal_factory=lambda system_id: FileAuthoritySystemJournal(root, system_id),
+            provider=_FailingProvisionProvider(),
+        )
+        request = _request(snapshot)
+        repository.fail_phase_once = AuthoritySystemJournalPhase.TAKEOVER_ACKNOWLEDGED
+        repository.allocating = request
+        with pytest.raises(AuthoritySystemServiceError):
+            await service.begin("worker-a", request)
+        monkeypatch.setattr(service_module, "PROVISION_RECORD_CEILING", 0)
+        acknowledgement = await service.begin("worker-a", request)
+        assert acknowledgement.attempt_id == request.attempt_id
+        await service.close()
+
+    asyncio.run(scenario())
