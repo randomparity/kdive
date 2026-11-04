@@ -24,7 +24,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -33,10 +33,12 @@ from psycopg.errors import InsufficientPrivilege
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr, ValidationError
 
+from kdive.db.idempotency import claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import JobState, RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
+from kdive.domain.lifecycle.run_steps import BOOT_OUTCOME_READY, BootStepResult
 from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, Job, JobKind, dispatch_lane_for_kind
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
@@ -62,6 +64,7 @@ from kdive.providers.system_authority.protocol import (
 )
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.serialization import JsonValue
 
 _log = logging.getLogger(__name__)
 
@@ -651,6 +654,8 @@ class Worker:
             if committed is None:
                 _log.warning("external boot job %s was reclaimed; result dropped", job.id)
                 return False
+            if _is_committed_activation(result, committed):
+                await self._record_authority_boot_step(result)
             return (
                 isinstance(committed, Job)
                 and isinstance(result, ExternalBootAuthoritySuccessV1)
@@ -675,6 +680,33 @@ class Worker:
                 job.id,
             )
         return False
+
+    async def _record_authority_boot_step(self, result: ExternalBootAuthorityResultV1) -> None:
+        """Record the ``boot`` run step an authority activation stands in for.
+
+        The fixed-worker ``boot`` handler writes this row; ``debug.start_session`` and
+        ``introspect.script`` refuse a Run without it (``boot_first``). The authority commit is a
+        database function that never touches ``run_steps``, so the step is written after the
+        activation committed, never before: a failed or superseded activation records none.
+        """
+        try:
+            async with self._pool.connection() as conn:
+                claim = await claim_run_step(conn, result.run_id, "boot")
+                if claim.claimed:
+                    boot_result: BootStepResult = {
+                        "system_id": str(result.system_id),
+                        "boot_outcome": BOOT_OUTCOME_READY,
+                    }
+                    await complete_run_step(
+                        conn, result.run_id, "boot", cast(JsonValue, boot_result)
+                    )
+        except Exception:
+            _log.error(
+                "activation of run %s committed but its boot step was not recorded; "
+                "debug attach will refuse with boot_first until it is",
+                result.run_id,
+                exc_info=True,
+            )
 
     async def _log_superseded_commit(self, job: Job) -> None:
         """Separate a real reclaim from a refused commit on the attempt that still holds the job."""
@@ -774,6 +806,15 @@ def _classified_external_boot_failure(
         "terminal": terminal,
     }
     return ExternalBootAuthorityFailureV1.model_validate(carrier)
+
+
+def _is_committed_activation(result: ExternalBootAuthorityResultV1, committed: Job) -> bool:
+    """Whether ``committed`` is the job a successful ``activate`` result just finished."""
+    return (
+        isinstance(result, ExternalBootAuthoritySuccessV1)
+        and result.result.operation == "activate"
+        and committed.state is JobState.SUCCEEDED
+    )
 
 
 def _external_marker(job: Job) -> ExternalBootAuthorityMarkerV1 | None:
