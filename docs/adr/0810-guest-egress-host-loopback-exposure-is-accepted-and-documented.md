@@ -188,10 +188,10 @@ debugger attached and detached.
   the server and reconciler run under another account; that arrangement was not run.
 - Slot account: a rule keyed to `kdive-worker-1` blocked no guest connection and failed that
   worker's object-store readiness check.
-- Remote authority: unproven, because neither lab host carries the provider-authority role and
-  this proof did not stand one up. The unit files name one account for the daemon and the service,
-  but no running QEMU was observed there, and whether the service has a loopback dependency was
-  not checked, so the rule's effect there is unknown.
+- Remote authority: unproven, because no lab host carries `provider_authority_host`. The operator
+  accepted this as a known limit on 2026-11-04. The unit files name one account for the daemon and
+  the service, but no running QEMU was observed there, and whether the service has a loopback
+  dependency was not checked, so the rule's effect there is unknown.
 - No arrangement that ran met the condition that no kdive service or client uses the QEMU uid, apart
   from the throwaway accounts.
 - `kdivebuild`: the rule covers this NIC. A domain with `user,id=kdivebuild,restrict=off` and no
