@@ -22,6 +22,7 @@ declared BYO facts. Runtime capabilities and scheduling remain their existing ow
 managed_system/lpar_name required only for HMC. POWER requires HMC and x86 rejects
 HMC; x86 rejects fadump true. All connection/config models forbid unknown fields,
 reject empty/whitespace strings, and never accept inline password/key fields.
+OOB endpoint user-info and password-bearing SSH targets are rejected before storage.
 Reference names identify secrets; this change neither resolves nor logs material.
 
 Within one parsed document names and SSH targets are unique. Redfish/IPMI endpoint
@@ -56,7 +57,7 @@ clearing a detached entry; a still-declared removed entry remains suppressed.
 InventorySnapshot gains default-empty typed BYO entries. Snapshot reading validates
 stored declaration, overlays live name/SSH target/cost/pool/capacity/cap, and fails
 before export if required config is missing. Serializer emits all fields and nested
-OOB with existing TOML escaping. Thus writeback cannot silently drop a BYO host;
+OOB with existing TOML escaping, corrected to escape U+007F as well as C0 controls. Thus writeback cannot silently drop a BYO host;
 export, parse and reconcile preserve its identity and credential references.
 
 An opt-in runtime descriptor uses valid inventory presence unless explicitly enabled
@@ -75,6 +76,17 @@ The existing runtime registration tool explicitly refuses BYO (config remains it
 sole creator), and the host-capacity setter refuses non-1 BYO caps; scheduling cordon
 remains the existing way to freeze a host without violating its declared cap.
 Wrapper documentation describes this result and generated references are regenerated.
+
+## Threat model
+
+The operator controls declarations and secret reference names; the parser treats them
+as data and performs no resolution or host I/O. Database state can include later
+runtime changes: export revalidates the stored BYO declaration and overlays live
+comparable values. Only the existing platform-operator export/writeback path emits
+full config; shared resource and profile-example views exclude credential refs.
+Parameterized SQL carries persisted values and TOML scalar escaping carries export
+values. Existing authorization gates stay ahead of new runtime-registration and
+capacity refusal guards. Skeleton ports cannot cross any host/network boundary.
 
 ## Success
 
