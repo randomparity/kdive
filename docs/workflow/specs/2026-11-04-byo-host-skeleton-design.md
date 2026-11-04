@@ -65,7 +65,12 @@ for buildability tests. Missing/malformed inventory disables BYO without crashin
 unrelated provider startup. Discovery is creates=False and never calls its target.
 Required typed ports and policy use explicit refusing methods raising existing
 not_implemented before I/O. All optional operational ports stay absent and
-ProviderSupport stays empty/false. platform_root_cmdline is explicitly None. Binding
+ProviderSupport stays empty/false. The existing catalog projection currently assumes
+build/boot are universal. Add supports_build/supports_boot booleans to the existing
+ProviderSupport descriptor, default False; set both True in the three existing
+provider compositions to preserve their current resource descriptions. Derive these
+two catalog plane tokens from the descriptor, never a provider-kind branch. BYO and
+an unconfigured descriptor therefore publish no base operations. platform_root_cmdline is explicitly None. Binding
 is deliberately absent until #1823 because these ports perform no operation.
 
 Provider section metadata marks BYO unavailable with no usable profile model. The

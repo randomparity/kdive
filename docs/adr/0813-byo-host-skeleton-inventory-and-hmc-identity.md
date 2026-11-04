@@ -26,7 +26,11 @@ allowlist. Reconciliation owns declared facts and preserves unrelated runtime fa
 A default-false fadump declaration is an operator claim, never a firmware probe.
 
 The opt-in runtime advertises no operational capabilities and refuses required port
-calls. Profile examples explicitly report BYO unavailable until #1819. Migration
+calls. The existing ProviderSupport descriptor gains supports_build/supports_boot,
+both default False. Existing local-libvirt, remote-libvirt and fault-inject
+compositions explicitly retain True; the catalog derives these tokens from the
+descriptor so an unwired/refusing runtime advertises neither. This changes no
+provider dispatch seam. Profile examples report BYO unavailable until #1819. Migration
 0190 carries the enum CHECK, neutral coefficient and the two schema prerequisites
 already assigned to #1817 by the milestone design; later issues own their writers.
 
