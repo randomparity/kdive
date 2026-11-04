@@ -41,4 +41,5 @@ Not in scope: an upload size cap (`validation.py` is untouched), the boot step r
 `test_debuginfo_file.py` (authority) and `test_stage_vmlinux_free_space.py` (fixed worker):
 enough space proceeds, exact boundary proceeds, one block short refuses with no upload, and
 hostile statistics refuse with no upload. `test_external_boot.py` runs the full activation with
-the fd-derived size. A real-image `statvfs` call is not exercised here; see the PR body.
+the fd-derived size. A one-off real libguestfs `statvfs` on an ext4 image returned integer `frsize`, `blocks` and
+`bavail` (bavail below bfree); no automated test runs it.
