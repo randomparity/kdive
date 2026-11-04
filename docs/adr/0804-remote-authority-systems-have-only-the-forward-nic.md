@@ -81,10 +81,11 @@ The ordinary (non-authority) remote renderer output is unchanged.
 
 ### Amendment (2026-11-04): the loopback exposure is accepted and documented (#3496)
 
-The Consequences bullet "Residual risk with `guest_egress` on ... tracked in #3311 and not
-addressed here" is superseded by [ADR-0810](0810-guest-egress-host-loopback-exposure-is-accepted-and-documented.md)
-(#3496), which accepts and documents the exposure. With `guest_egress` on, the `10.0.2.2` mapping
-reaches host loopback, including kdive's own per-System SSH forward and gdbstub listeners. The
+[ADR-0810](0810-guest-egress-host-loopback-exposure-is-accepted-and-documented.md) (#3496) accepts
+and documents the exposure the Consequences bullet "Residual risk with `guest_egress` on" records,
+so that bullet's "not addressed here" disposition is superseded; its facts stand. With
+`guest_egress` on, the `10.0.2.2` mapping reaches host loopback, including kdive's own per-System
+SSH forward and gdbstub listeners when the manifest binds them there. On the local provider the
 customization-boot NIC is `restrict=off` whatever `guest_egress` says, so build-time code in that
-boot has the same reach. The default (egress off) path is unchanged. ADR-0810 asks for this
-update to this record.
+boot has the same reach; a remote authority System has no customization boot. The default (egress
+off) path is unchanged. ADR-0810 asks for this update to this record.
