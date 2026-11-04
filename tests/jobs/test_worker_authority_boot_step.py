@@ -16,6 +16,7 @@ from kdive.domain.capacity.state import JobState, RunState, SystemState
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
+from kdive.jobs import worker as worker_module
 from kdive.jobs.models import ExternalBootAuthoritySuccessV1, HandlerRegistry
 from kdive.jobs.payloads import Authorizing, InstallPayload
 from kdive.jobs.worker import Worker
@@ -110,3 +111,25 @@ def test_unfinished_activation_records_no_boot_step(
     assert step is None
     assert isinstance(gate, ToolResponse)
     assert gate.data["reason"] == "boot_first"
+
+
+def test_transient_step_write_failure_is_retried(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = worker_module.complete_run_step
+    calls = 0
+
+    async def flaky(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(worker_module, "complete_run_step", flaky)
+    monkeypatch.setattr(worker_module, "_BOOT_STEP_RETRY_DELAY_S", 0.0)
+    step, gate, system_id = asyncio.run(
+        _commit(migrated_url, monkeypatch, operation="activate", job_state=JobState.SUCCEEDED)
+    )
+    assert calls == 2
+    assert step == {"system_id": str(system_id), "boot_outcome": "ready"}

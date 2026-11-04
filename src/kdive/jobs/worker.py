@@ -33,7 +33,7 @@ from psycopg.errors import InsufficientPrivilege
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr, ValidationError
 
-from kdive.db.idempotency import claim_run_step, complete_run_step
+from kdive.db.idempotency import abandon_run_step, claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import JobState, RunState
@@ -67,6 +67,9 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
 
 _log = logging.getLogger(__name__)
+
+_BOOT_STEP_ATTEMPTS = 3
+_BOOT_STEP_RETRY_DELAY_S = 0.5
 
 # The worker never writes a marked job's row (ADR-0620): only a receipt commit, the public teardown
 # recycle, or the reconciler's unowned-job dead-letter can move it, so logs say so.
@@ -689,24 +692,36 @@ class Worker:
         database function that never touches ``run_steps``, so the step is written after the
         activation committed, never before: a failed or superseded activation records none.
         """
-        try:
-            async with self._pool.connection() as conn:
-                claim = await claim_run_step(conn, result.run_id, "boot")
-                if claim.claimed:
-                    boot_result: BootStepResult = {
-                        "system_id": str(result.system_id),
-                        "boot_outcome": BOOT_OUTCOME_READY,
-                    }
-                    await complete_run_step(
-                        conn, result.run_id, "boot", cast(JsonValue, boot_result)
+        for attempt in range(1, _BOOT_STEP_ATTEMPTS + 1):
+            try:
+                await self._write_boot_step(result)
+                return
+            except Exception:
+                if attempt == _BOOT_STEP_ATTEMPTS:
+                    _log.error(
+                        "activation of run %s committed but its boot step was not recorded; "
+                        "debug attach will refuse with boot_first until it is",
+                        result.run_id,
+                        exc_info=True,
                     )
-        except Exception:
-            _log.error(
-                "activation of run %s committed but its boot step was not recorded; "
-                "debug attach will refuse with boot_first until it is",
-                result.run_id,
-                exc_info=True,
-            )
+                    return
+                await asyncio.sleep(_BOOT_STEP_RETRY_DELAY_S * attempt)
+
+    async def _write_boot_step(self, result: ExternalBootAuthorityResultV1) -> None:
+        async with self._pool.connection() as conn:
+            claim = await claim_run_step(conn, result.run_id, "boot")
+            if not claim.claimed:
+                return
+            boot_result: BootStepResult = {
+                "system_id": str(result.system_id),
+                "boot_outcome": BOOT_OUTCOME_READY,
+            }
+            try:
+                await complete_run_step(conn, result.run_id, "boot", cast(JsonValue, boot_result))
+            except Exception:
+                # Drop the running claim so the retry claims it instead of waiting it out.
+                await abandon_run_step(conn, result.run_id, "boot")
+                raise
 
     async def _log_superseded_commit(self, job: Job) -> None:
         """Separate a real reclaim from a refused commit on the attempt that still holds the job."""

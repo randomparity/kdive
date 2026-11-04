@@ -19,8 +19,10 @@ live spine cannot attach.
 ### Failure model
 
 - Activation fails, is superseded or requeued, or the result is not `activate`: no step.
-- The step write fails after the commit: the error is logged and the job stays succeeded; attach
-  keeps refusing with `boot_first`. A step already present is left alone (`claim_run_step`).
+- The step write fails after the commit: it is retried three times, abandoning its claim between
+  tries; if all fail the error is logged and the job stays succeeded, and attach keeps refusing
+  with `boot_first`. A worker crash in that window is not repaired (a reconciler backfill is a
+  larger surface, left unbuilt). A step already present is left alone (`claim_run_step`).
 
 ## Success
 
