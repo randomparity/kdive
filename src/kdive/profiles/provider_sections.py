@@ -27,11 +27,14 @@ class ProviderSectionSpec:
 
     kind: ResourceKind
     alias: str
-    model: type[BaseModel]
+    model: type[BaseModel] | None
     label: str
 
 
 PROVIDER_SECTIONS: dict[ResourceKind, ProviderSectionSpec] = {
+    ResourceKind.BYO_HOST: ProviderSectionSpec(
+        ResourceKind.BYO_HOST, ResourceKind.BYO_HOST.value, None, "byo-host (unavailable)"
+    ),
     ResourceKind.LOCAL_LIBVIRT: ProviderSectionSpec(
         ResourceKind.LOCAL_LIBVIRT,
         ResourceKind.LOCAL_LIBVIRT.value,
@@ -55,4 +58,8 @@ PROVIDER_SECTIONS: dict[ResourceKind, ProviderSectionSpec] = {
 
 def aliases_for(kinds: frozenset[ResourceKind]) -> frozenset[str]:
     """Return the profile-section aliases for the live ``kinds`` (ADR-0269)."""
-    return frozenset(PROVIDER_SECTIONS[k].alias for k in kinds if k in PROVIDER_SECTIONS)
+    return frozenset(
+        PROVIDER_SECTIONS[k].alias
+        for k in kinds
+        if k in PROVIDER_SECTIONS and PROVIDER_SECTIONS[k].model is not None
+    )

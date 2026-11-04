@@ -31,3 +31,8 @@ def test_aliases_for_filters_to_the_live_set() -> None:
     one = frozenset({ResourceKind.LOCAL_LIBVIRT})
     assert aliases_for(one) == frozenset({"local-libvirt"})
     assert aliases_for(frozenset()) == frozenset()
+
+
+def test_byo_metadata_has_no_usable_profile_model_or_live_alias() -> None:
+    assert PROVIDER_SECTIONS[ResourceKind.BYO_HOST].model is None
+    assert aliases_for(frozenset({ResourceKind.BYO_HOST})) == frozenset()

@@ -668,7 +668,15 @@ def test_bindings_cover_bound_tool_cells(tmp_path: Path) -> None:
     assert lane.image_sha256 == hashlib.sha256(b"lane").hexdigest()
 
 
-def test_guest_observing_service_cells_bind_what_their_frame_records(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "host_arch,image_name",
+    [("x86_64", "fedora-kdive-ready-44"), ("ppc64le", "fedora-kdive-ready-44-ppc64le")],
+)
+def test_guest_observing_service_cells_bind_what_their_frame_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host_arch: str, image_name: str
+) -> None:
+    monkeypatch.setattr(tool_cells.platform, "machine", lambda: host_arch)
+    monkeypatch.setitem(tool_cells.LANE_IMAGES, host_arch, image_name)
     marked = {t for g in load_mapping().groups for t in g.guest_observing}
     assert set(_SYSTEM_BODIES) == marked
     _name, entry = tool_cells.lane_image()

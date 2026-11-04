@@ -87,6 +87,8 @@ class System(DomainModel, Attribution):
     #: at mint (ADR-0368): `{model, vendor?, arch, baseline_level?}`. NULL when the resource
     #: advertises none (local/fault/un-refreshed remote) — treat NULL as unknown, never crash.
     resolved_cpu: dict[str, JsonValue] | None = None
+    #: Nullable schema prerequisite; adoption writers remain separate from the skeleton.
+    byo_adopt_facts: dict[str, JsonValue] | None = None
     #: Advisory binding to the owning Investigation (ADR-0441, #1502); NULL for a classic
     #: allocation-only System. Write-once at the admission layer once set — the reclaim gate's
     #: referencer enumeration depends on this column never silently dropping a live System.
