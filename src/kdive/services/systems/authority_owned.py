@@ -226,9 +226,7 @@ async def enqueue_preactivation_teardown(
             "an ordinary teardown job cannot be replayed for an authority-owned System",
             category=ErrorCategory.CONFLICT,
         )
-    if prior is not None and not (
-        prior.state is JobState.FAILED and recycle is not queue.JobRecyclePolicy.NEVER
-    ):
+    if prior is not None and prior.state is not JobState.FAILED:
         job = prior
     else:
         job = await queue.enqueue(
