@@ -26,6 +26,12 @@ _RECORD_PREFIX = b"kdive-authority-system-journal-v1\0"
 type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 type PositiveBigInt = Annotated[int, Field(ge=1, le=MAX_SIGNED_BIGINT)]
 type ProviderKind = Literal["local-libvirt", "remote-libvirt"]
+# The unprivileged loopback range a local authority draws its guest SSH forward from (ADR-0811).
+SSH_FORWARD_PORT_MIN = 1024
+SSH_FORWARD_PORT_MAX = 65535
+type SshForwardPort = Annotated[
+    int, Field(strict=True, ge=SSH_FORWARD_PORT_MIN, le=SSH_FORWARD_PORT_MAX)
+]
 
 
 def _bounded(value: str, *, maximum: int = 255) -> str:
@@ -241,6 +247,7 @@ class AuthoritySystemProvisionFacts(_ClosedValue):
     bootstrap_ready: bool
     quarantine_retained: bool
     completed_at: UtcDateTime | None
+    ssh_forward_port: SshForwardPort | None = Field(None, exclude_if=lambda value: value is None)
 
     @property
     def complete(self) -> bool:
@@ -318,6 +325,9 @@ class AuthoritySystemProvisionReadyV1(_AuthoritySystemProofBinding):
     bootstrap_ready: Literal[True]
     quarantine_retained: Literal[False]
     completed_at: UtcDateTime
+    # Additive (ADR-0811): the loopback port of the System's guest SSH forward. Excluded when
+    # absent so a receipt written before it existed still parses as canonical bytes.
+    ssh_forward_port: SshForwardPort | None = Field(None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def _operation_is_provision(self) -> Self:

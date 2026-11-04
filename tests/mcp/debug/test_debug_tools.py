@@ -79,10 +79,14 @@ class _FakeConnector:
     def __init__(self, *, raises: CategorizedError | None = None) -> None:
         self._raises = raises
         self.opened: list[tuple[str, str]] = []
+        self.forwards: list[int | None] = []
         self.closed: list[str] = []
 
-    def open_transport(self, system: SystemHandle, kind: str) -> TransportHandle:
+    def open_transport(
+        self, system: SystemHandle, kind: str, *, ssh_forward_port: int | None = None
+    ) -> TransportHandle:
         self.opened.append((str(system), kind))
+        self.forwards.append(ssh_forward_port)
         if self._raises is not None:
             raise self._raises
         port = 22 if kind == "drgn-live" else 1234
@@ -184,18 +188,20 @@ async def _session_count(pool: AsyncConnectionPool) -> int:
     return 0 if row is None else int(row["n"])
 
 
-async def _mark_authority_owned(pool: AsyncConnectionPool, system_id: str) -> None:
+async def _mark_authority_owned(
+    pool: AsyncConnectionPool, system_id: str, *, ssh_forward_port: int | None = None
+) -> None:
     async with pool.connection() as conn:
         await conn.execute(
             "INSERT INTO authority_system_ownership "
             "(system_id,allocation_id,resource_id,provider_kind,resource_name,"
-            "authority_instance,profile_identity,root_identity,state) "
+            "authority_instance,profile_identity,root_identity,state,ssh_forward_port) "
             "SELECT system.id,system.allocation_id,allocation.resource_id,'local-libvirt',"
             "'host-a','authority-a','sha256:' || repeat('a',64),"
-            "'sha256:' || repeat('b',64),'ready' "
+            "'sha256:' || repeat('b',64),'ready',%s "
             "FROM systems AS system JOIN allocations AS allocation "
             "ON allocation.id=system.allocation_id WHERE system.id=%s",
-            (system_id,),
+            (ssh_forward_port, system_id),
         )
 
 
@@ -884,7 +890,9 @@ class _OrderRecordingConnector(_FakeConnector):
         super().__init__(raises=raises)
         self._log = log
 
-    def open_transport(self, system: SystemHandle, kind: str) -> TransportHandle:
+    def open_transport(
+        self, system: SystemHandle, kind: str, *, ssh_forward_port: int | None = None
+    ) -> TransportHandle:
         self._log.append(f"open:{kind}")
         return super().open_transport(system, kind)
 
@@ -986,6 +994,7 @@ def test_start_session_drgn_live_attaches_and_row_records_transport(migrated_url
             )
             assert resp.status == "live"
             assert connector.opened == [("kdive-x", "drgn-live")]
+            assert connector.forwards == [None]  # a fixed-worker System resolves its own endpoint
             async with pool.connection() as c, c.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     "SELECT transport, transport_handle FROM debug_sessions WHERE id = %s",
@@ -1627,7 +1636,9 @@ def _remote_profile() -> dict[str, Any]:
 class _DomainHandleConnector(_FakeConnector):
     """Mimics the remote connector: drgn-live returns the bare SystemHandle (domain name)."""
 
-    def open_transport(self, system: SystemHandle, kind: str) -> TransportHandle:
+    def open_transport(
+        self, system: SystemHandle, kind: str, *, ssh_forward_port: int | None = None
+    ) -> TransportHandle:
         self.opened.append((str(system), kind))
         if kind == "drgn-live":
             return TransportHandle(str(system))
@@ -1842,5 +1853,87 @@ def test_end_session_without_operator_raises(migrated_url: str) -> None:
                 await _end_session(
                     pool, request_context(Role.VIEWER), session_id, connector=_FakeConnector()
                 )
+
+    asyncio.run(_run())
+
+
+# --- debug.start_session(drgn-live) on an authority-owned System (#3536, ADR-0811) -------------
+
+
+async def _admit_authority_owned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the pre-activation fence; an activated System reaches the attach resolver."""
+
+    async def _admit(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(debug_tools, "check_external_boot_admission", _admit)
+    monkeypatch.setattr(debug_service_lifecycle, "check_external_boot_admission", _admit)
+
+
+def test_start_session_drgn_live_attaches_through_the_authority_reported_forward(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        await _admit_authority_owned(monkeypatch)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
+            run_id = await seed_run(pool, sys_id)
+            await _mark_authority_owned(pool, sys_id, ssh_forward_port=41234)
+            connector = _FakeConnector()
+
+            resp = await _start_session(
+                pool, request_context(), run_id=run_id, transport="drgn-live", connector=connector
+            )
+
+            assert resp.status == "live"
+            assert connector.forwards == [41234]
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("transport", ["drgn-live"])
+def test_start_session_authority_system_without_a_reported_forward_fails_closed(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, transport: str
+) -> None:
+    async def _run() -> None:
+        await _admit_authority_owned(monkeypatch)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await _seed_drgn_system(pool, alloc_id)
+            run_id = await seed_run(pool, sys_id)
+            await _mark_authority_owned(pool, sys_id)
+            connector = _FakeConnector()
+
+            resp = await _start_session(
+                pool, request_context(), run_id=run_id, transport=transport, connector=connector
+            )
+
+            assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+            assert resp.data["reason"] == "authority_ssh_forward_unreported"
+            assert "Reprovision" in (resp.detail or "")
+            assert connector.opened == []
+            assert await _session_count(pool) == 0
+
+    asyncio.run(_run())
+
+
+def test_start_session_gdbstub_on_an_authority_system_does_not_forward_a_port(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        await _admit_authority_owned(monkeypatch)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await seed_run(pool, sys_id)
+            await _mark_authority_owned(pool, sys_id, ssh_forward_port=41234)
+            connector = _FakeConnector()
+
+            await _start_session(
+                pool, request_context(), run_id=run_id, transport="gdbstub", connector=connector
+            )
+
+            assert connector.forwards == [None]
 
     asyncio.run(_run())

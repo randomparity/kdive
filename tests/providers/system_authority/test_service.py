@@ -243,6 +243,7 @@ class _Provider:
             bootstrap_ready=True,
             quarantine_retained=False,
             completed_at=self.completed_at,
+            ssh_forward_port=41000,
         )
 
     async def execute_system_provision(self, request, context, snapshot):
@@ -366,6 +367,7 @@ def test_restart_after_mutation_started_observes_without_reexecution(tmp_path: P
         response = await recovered.execute("worker-a", _mutation(request), acknowledgement)
         await recovered.close()
         assert response.proof.disposition == "provision-ready"
+        assert response.proof.ssh_forward_port == 41000  # the proof carries the provider's port
         assert recovery_provider.execute_calls == 0
         assert recovery_provider.observe_calls == 1
 

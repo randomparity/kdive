@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -20,6 +21,7 @@ from kdive.providers.system_authority.protocol import (
     AuthoritySystemTakeoverRequestV1,
     canonical_system_authority_bytes,
     canonical_system_record_payload,
+    parse_authority_system_proof,
 )
 
 _DIGEST = "sha256:" + "a" * 64
@@ -97,7 +99,7 @@ def test_terminal_never_began_is_valid_for_both_operations(
 
 @pytest.mark.parametrize("kind", ["provision", "absence"])
 def test_provider_facts_require_literal_complete_shape(kind: str) -> None:
-    common = {
+    common: dict[str, Any] = {
         "intent_identity": _DIGEST,
         "quarantine_retained": False,
         "completed_at": datetime(2026, 9, 6, tzinfo=UTC),
@@ -167,3 +169,59 @@ def test_terminal_proof_disposition_is_bound_to_operation() -> None:
         )
     with pytest.raises(ValidationError):
         AuthoritySystemPreactivationAbsentV1.model_validate(binding)
+
+
+def _ready_binding() -> dict[str, Any]:
+    return {
+        **_marker().model_dump(exclude={"schema_"}),
+        "authority_id": uuid4(),
+        "generation": 1,
+        "attempt_id": uuid4(),
+        "operation_digest": _DIGEST,
+        "bootstrap_identity": _DIGEST,
+        "intent_identity": _DIGEST,
+        "domain_owned": True,
+        "root_storage_owned": True,
+        "boot_ready": True,
+        "bootstrap_ready": True,
+        "quarantine_retained": False,
+        "completed_at": datetime(2026, 9, 6, tzinfo=UTC),
+        "disposition": "provision-ready",
+    }
+
+
+def test_ready_proof_carries_the_ssh_forward_port_in_canonical_bytes() -> None:
+    proof = AuthoritySystemProvisionReadyV1.model_validate(
+        {**_ready_binding(), "ssh_forward_port": 41234}
+    )
+    payload = canonical_system_authority_bytes(proof)
+    assert b'"ssh_forward_port":41234' in payload
+    assert parse_authority_system_proof(payload) == proof
+
+
+def test_ready_proof_without_a_port_serializes_as_it_did_before_the_field() -> None:
+    proof = AuthoritySystemProvisionReadyV1.model_validate(_ready_binding())
+    payload = canonical_system_authority_bytes(proof)
+    assert b"ssh_forward_port" not in payload
+    assert parse_authority_system_proof(payload) == proof
+
+
+@pytest.mark.parametrize("port", [0, 80, 1023, 65536, "41234", 41234.0, True, -1])
+def test_ready_proof_refuses_a_forged_or_out_of_range_port(port: object) -> None:
+    with pytest.raises(ValidationError):
+        AuthoritySystemProvisionReadyV1.model_validate(
+            {**_ready_binding(), "ssh_forward_port": port}
+        )
+    with pytest.raises(ValidationError):
+        AuthoritySystemProvisionFacts.model_validate(
+            {
+                "intent_identity": _DIGEST,
+                "domain_owned": True,
+                "root_storage_owned": True,
+                "boot_ready": True,
+                "bootstrap_ready": True,
+                "quarantine_retained": False,
+                "completed_at": datetime(2026, 9, 6, tzinfo=UTC),
+                "ssh_forward_port": port,
+            }
+        )

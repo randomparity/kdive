@@ -164,6 +164,9 @@ class Guest:
     def lstatns(self, path: str) -> dict[str, int]:
         return {"st_mode": len(path)}
 
+    def statvfs(self, path: str) -> dict[str, int]:
+        return {"bavail": 1 << 40, "blocks": 1 << 40, "frsize": 4096}
+
     def readlink(self, path: str) -> str:
         return path
 
