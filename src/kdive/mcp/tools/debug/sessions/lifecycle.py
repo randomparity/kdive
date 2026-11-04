@@ -81,6 +81,7 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
+from kdive.services.systems.authority_owned import authority_ssh_forward_port
 
 if TYPE_CHECKING:
     from kdive.mcp.tools.debug.operations.runtime import DebugEngineRuntime, DebugRuntimeResolver
@@ -148,6 +149,9 @@ class _AttachPlan:
 
     request: debug_lifecycle.AttachRequest
     probe: _RuntimeProbe | None = None
+    #: The loopback SSH port a local authority-owned System reported (ADR-0811); ``None`` for every
+    #: other System, whose provider resolves the endpoint itself.
+    ssh_forward_port: int | None = None
 
 
 type _ConnectorForRun = Callable[[AsyncConnection, Run], Awaitable[_AttachResources | ToolResponse]]
@@ -235,13 +239,19 @@ async def _system_occupied(
 
 
 async def _open_transport(
-    connector: Connector, system: System, transport: DebugTransportKind
+    connector: Connector,
+    system: System,
+    transport: DebugTransportKind,
+    ssh_forward_port: int | None = None,
 ) -> TransportHandle | ToolResponse:
     """Open the transport outside any lock; map a provider failure to an envelope."""
     handle_name = system.domain_name or str(system.id)
+    # The keyword is passed only for an authority-owned System, so every other connector keeps the
+    # call shape it always had.
+    extra = {} if ssh_forward_port is None else {"ssh_forward_port": ssh_forward_port}
     try:
         return await asyncio.to_thread(
-            connector.open_transport, SystemHandle(handle_name), transport
+            connector.open_transport, SystemHandle(handle_name), transport, **extra
         )
     except CategorizedError as exc:
         category = (
@@ -386,7 +396,27 @@ class DebugSessionHandlers:
             missing_debuginfo=missing,
         )
         probe = _runtime_probe(system, transport, missing, resources.live_introspector)
-        return _AttachPlan(request=request, probe=probe)
+        forward = await self._authority_ssh_forward(conn, system, transport)
+        if isinstance(forward, ToolResponse):
+            return forward
+        return _AttachPlan(request=request, probe=probe, ssh_forward_port=forward)
+
+    @staticmethod
+    async def _authority_ssh_forward(
+        conn: AsyncConnection, system: System, transport: DebugTransportKind
+    ) -> int | None | ToolResponse:
+        """The SSH port an authority-owned local System reported, else ``None`` (ADR-0811).
+
+        Only a drgn-live attach rides the SSH forward. An authority-owned System that reported none
+        fails closed with a configuration error rather than falling back to the server's own libvirt
+        endpoint, which cannot see the authority's domain.
+        """
+        if transport != _DRGN_LIVE:
+            return None
+        try:
+            return await authority_ssh_forward_port(conn, system.id)
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(str(system.id), exc)
 
     async def _augment_after_open(
         self,
@@ -537,7 +567,10 @@ async def _attach_debug_session(
         if isinstance(plan, ToolResponse):
             return plan
         opened = await _open_transport(
-            plan.request.connector, plan.request.system, plan.request.transport
+            plan.request.connector,
+            plan.request.system,
+            plan.request.transport,
+            plan.ssh_forward_port,
         )
         if isinstance(opened, ToolResponse):
             return opened
