@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Literal
@@ -226,22 +227,8 @@ async def enqueue_preactivation_teardown(
     authorizing: Authorizing,
     *,
     recycle: queue.JobRecyclePolicy,
+    on_recycle: Callable[[Job], Awaitable[None]] | None = None,
 ) -> Job:
-    """Enqueue the sole authority teardown; see :func:`enqueue_preactivation_teardown_status`."""
-    job, _ = await enqueue_preactivation_teardown_status(
-        conn, system, binding, authorizing, recycle=recycle
-    )
-    return job
-
-
-async def enqueue_preactivation_teardown_status(
-    conn: AsyncConnection,
-    system: System,
-    binding: AuthoritySystemBinding,
-    authorizing: Authorizing,
-    *,
-    recycle: queue.JobRecyclePolicy,
-) -> tuple[Job, bool]:
     """Enqueue the sole authority teardown and advance its ownership state atomically.
 
     The caller holds the System transaction lock. A dedup collision with any ordinary teardown is
@@ -250,9 +237,9 @@ async def enqueue_preactivation_teardown_status(
     restarted only when ``recycle`` admits ``failed`` rows, i.e. on an operator request; automatic
     callers pass ``NEVER`` so the bound cannot be re-spent every sweep.
 
-    The second element is true when this call restarted a prior row. It comes from the same
-    statement that did the restart, so a caller that audits the recycle cannot miss a row that a
-    worker failed between a separate pre-read and this call.
+    ``on_recycle`` runs in this transaction, once the admission succeeds, when this call restarted
+    a prior row. The signal comes from the restarting statement, so a caller that audits the
+    recycle cannot miss a row a worker failed between a separate pre-read and this call.
     """
     dedup_key = _teardown_dedup_key(system.id)
     operation_identity = (
@@ -309,7 +296,9 @@ async def enqueue_preactivation_teardown_status(
             "authority-owned System teardown admission conflicted",
             category=ErrorCategory.CONFLICT,
         )
-    return job, recycled
+    if recycled and on_recycle is not None:
+        await on_recycle(job)
+    return job
 
 
 async def enqueue_control_teardown(

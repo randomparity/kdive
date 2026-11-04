@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import partial
 from hashlib import sha256
 from typing import LiteralString
 from uuid import UUID
@@ -68,7 +69,7 @@ from kdive.services.systems.admission import require_pinned_cpu_selectable
 from kdive.services.systems.authority_owned import (
     AuthoritySystemBinding,
     authority_system_binding,
-    enqueue_preactivation_teardown_status,
+    enqueue_preactivation_teardown,
 )
 from kdive.services.systems.validation import (
     RootfsValidator,
@@ -623,12 +624,14 @@ async def _enqueue_preactivation_authority_teardown(
 ) -> ToolResponse:
     """Enqueue and bind one activation-free teardown to immutable ownership."""
     try:
-        job, recycled = await enqueue_preactivation_teardown_status(
+        # `job.authorizing` stays the first enqueuer's by design (ADR-0447); audit the requester.
+        job = await enqueue_preactivation_teardown(
             conn,
             system,
             binding,
             job_authorizing(ctx, system.project),
             recycle=queue.JobRecyclePolicy.FAILED,
+            on_recycle=partial(_audit_authority_recycle, conn, ctx, system),
         )
     except CategorizedError as exc:
         if exc.category is not ErrorCategory.CONFLICT:
@@ -640,9 +643,6 @@ async def _enqueue_preactivation_authority_teardown(
             suggested_next_actions=["jobs.wait", "systems.get"],
             data={"reason": "ordinary_teardown_fenced_by_system_authority"},
         )
-    if recycled:
-        # `job.authorizing` stays the first enqueuer's by design (ADR-0447); audit the requester.
-        await _audit_authority_recycle(conn, ctx, system, job)
     envelope = job_envelope(job, "system_id", system.id)
     if idempotency_key is not None:
         await record_envelope(
