@@ -28,6 +28,7 @@ from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityConflictResolutionRequestV1,
+    AuthorityInstallRefusalV1,
     AuthorityMutationRequestV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
@@ -73,6 +74,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     RecoveryMetadataStore,
     RecoveryPhase,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import GuestFreeSpaceRefusal
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootSessionFactory,
     LocalExternalBootTimingConfigurationError,
@@ -1228,6 +1230,80 @@ async def test_unrelated_local_configuration_error_maps_provider_conflict(
     assert caught.value.category == "provider_conflict"
     assert "align server and host settings" in caplog.text
     assert "define-target" not in io.actions
+
+
+def _refusal_details(**sizes: int) -> dict[str, object]:
+    return {
+        "target": "system",
+        "directory": "/usr/lib/debug",
+        "vmlinux_bytes": 3,
+        "free_bytes": 1,
+        "headroom_bytes": 2,
+        **sizes,
+    }
+
+
+async def test_guest_free_space_refusal_maps_to_install_failure_with_its_sizes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FullGuestIO(_FakeIO):
+        def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+            del metadata
+            raise GuestFreeSpaceRefusal(
+                "the guest filesystem is full",
+                category=ErrorCategory.INSTALL_FAILURE,
+                details=_refusal_details(),
+            )
+
+    io = FullGuestIO(_metadata("pre-stop-intent"))
+    with pytest.raises(AuthorityServiceError) as caught:
+        await _adapter(io).commit(_request(), _context(AuthorityOperation.ACTIVATE))
+
+    assert caught.value.category == "install_failure"
+    assert caught.value.install_refusal == AuthorityInstallRefusalV1(
+        vmlinux_bytes=3, free_bytes=1, headroom_bytes=2
+    )
+    assert "the guest filesystem is full" in caplog.text
+    assert "define-target" not in io.actions
+
+
+async def test_guest_free_space_refusal_with_unbounded_sizes_stays_provider_conflict() -> None:
+    class ImplausibleGuestIO(_FakeIO):
+        def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+            del metadata
+            raise GuestFreeSpaceRefusal(
+                "the guest filesystem is full",
+                category=ErrorCategory.INSTALL_FAILURE,
+                details=_refusal_details(free_bytes=2**64, vmlinux_bytes=2**63),
+            )
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await _adapter(ImplausibleGuestIO(_metadata("pre-stop-intent"))).commit(
+            _request(), _context(AuthorityOperation.ACTIVATE)
+        )
+
+    assert caught.value.category == "provider_conflict"
+    assert caught.value.install_refusal is None
+
+
+async def test_sizeless_install_failure_stays_provider_conflict() -> None:
+    """The refusal for untrustworthy guest statistics names no sizes, so it stays generic."""
+
+    class UntrustworthyGuestIO(_FakeIO):
+        def activate_modules(self, metadata: LocalRecoveryMetadataV1) -> None:
+            del metadata
+            raise CategorizedError(
+                "the guest filesystem statistics cannot be trusted",
+                category=ErrorCategory.INSTALL_FAILURE,
+                details={"target": "system", "directory": "/usr/lib/debug"},
+            )
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await _adapter(UntrustworthyGuestIO(_metadata("pre-stop-intent"))).commit(
+            _request(), _context(AuthorityOperation.ACTIVATE)
+        )
+
+    assert caught.value.category == "provider_conflict"
 
 
 async def test_local_timing_refusal_maps_to_service_configuration_error(

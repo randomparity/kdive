@@ -17,6 +17,10 @@ _MAX_FRAGMENT_BYTES: Final = 1024 * 1024
 _MAX_BYTES: Final = 2**63 - 1
 
 
+class GuestFreeSpaceRefusal(CategorizedError):
+    """``install_failure`` whose ``details`` hold the sizes proving the shortfall (ADR-0814)."""
+
+
 def require_free_space_for_vmlinux(
     statvfs: Callable[[str], dict[str, int]],
     directory: str,
@@ -38,7 +42,7 @@ def require_free_space_for_vmlinux(
     needed = size + VMLINUX_HEADROOM_BYTES
     if free >= needed:
         return
-    raise CategorizedError(
+    raise GuestFreeSpaceRefusal(
         f"the guest filesystem at {directory} has {free} bytes free but the {size}-byte "
         f"vmlinux needs {needed} bytes including {VMLINUX_HEADROOM_BYTES} bytes of headroom; "
         f"enlarge the System root disk by at least {needed - free} bytes or build a smaller "

@@ -20,9 +20,12 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from uuid import UUID, uuid5
 
+from pydantic import ValidationError
+
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityConflictResolutionRequestV1,
+    AuthorityInstallRefusalV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
@@ -45,6 +48,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalSystemTeardownIntentV1,
     RecoveryIntentAbsentError,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import GuestFreeSpaceRefusal
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootTimingConfigurationError,
 )
@@ -125,6 +129,18 @@ def _activation_binding(
 
 def _identity_of(state: ProviderStateIdentity) -> str:
     return state.definition
+
+
+def _install_refusal(error: GuestFreeSpaceRefusal) -> AuthorityServiceError:
+    """Keep only the validated sizes for the wire; the message stays in this log (ADR-0814)."""
+    logger.warning("external-boot install refused: %s", error)
+    try:
+        sizes = AuthorityInstallRefusalV1.model_validate(
+            {key: error.details.get(key) for key in AuthorityInstallRefusalV1.model_fields}
+        )
+    except ValidationError:
+        return AuthorityServiceError("provider_conflict")
+    return AuthorityServiceError("install_failure", install_refusal=sizes)
 
 
 class LocalExternalBootAuthorityAdapter:
@@ -658,6 +674,8 @@ class LocalExternalBootAuthorityAdapter:
                 "external-boot provider configuration refused", extra={"operation": operation}
             )
             raise AuthorityServiceError("configuration_error") from None
+        except GuestFreeSpaceRefusal as error:
+            raise _install_refusal(error) from None
         except Exception:  # noqa: BLE001 - bound provider failure to a closed category
             logger.exception("external-boot provider commit failed", extra={"operation": operation})
             raise AuthorityServiceError("provider_conflict") from None
