@@ -1972,7 +1972,7 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
         "uuid": root.findtext("uuid"),
         "memory_bytes": _memory_bytes(memory),
         "vcpu": root.findtext("vcpu"),
-        "cpu": None if cpu is None else (cpu.get("mode"), cpu.findtext("model")),
+        "cpu": _rendered_cpu_projection(cpu),
         "os": None
         if os_element is None
         else {
@@ -2009,6 +2009,19 @@ def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: 
     }
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     return _digest(b"kdive-local-authority-domain-semantics-v2", payload)
+
+
+def _rendered_cpu_projection(cpu: ET.Element | None) -> tuple[str | None, str | None] | None:
+    """Project ``<cpu>`` only when KDIVE rendered it.
+
+    KDIVE renders ``host-passthrough``/``host-model`` (KVM) or a pinned ``custom`` element with
+    ``check='partial'``.  A TCG domain gets no rendered ``<cpu>``, but libvirt adds a defaulted
+    ``custom`` element (``check='none'``), which must not move the identity.  Any other ``check``
+    (``partial``, or libvirt's ``full`` rewrite of a pinned model) stays in the digest.
+    """
+    if cpu is None or (cpu.get("mode") == "custom" and cpu.get("check") in (None, "none")):
+        return None
+    return (cpu.get("mode"), cpu.findtext("model"))
 
 
 def _canonical_os_type_attrib(os_type: ET.Element) -> dict[str, str]:
