@@ -20,8 +20,9 @@ attempt therefore needs the very slot the unconfirmed record holds. The schema i
 Quarantine by rename (operator-approved 2026-11-04). When the file holds exactly one valid record
 past the confirmed head and the next record differs from it, the journal copies that record to
 an evidence file, builds the confirmed prefix in a scratch file, and atomically renames it over
-the active journal. The database is the authority: an unconfirmed record had no effect, because
-the provider call always follows confirmation. Journal bytes are never edited in place and the
+the active journal. The database is the authority: the record never reached it, and any
+provider effect after a confirmed `mutation-started` is re-observed by `_quiescence`, so
+dropping the record loses no authority fact. Journal bytes are never edited in place and the
 reader is unchanged. ADR-0623 gets an appended amendment (no new ADR; no new phase or field).
 
 Rejected: a new journal phase or record field (cannot satisfy the head function); a migration
@@ -31,32 +32,32 @@ plus the evidence record is the original).
 
 ## Scope
 
-- `journal.py`: `FileAuthoritySystemJournal.abandon_unconfirmed_tail(confirmed_sequence,
-  confirmed_digest)`; `inventory_authority_system_journals` skips the `abandoned` directory.
+- `journal.py`: `FileAuthoritySystemJournal.abandon_unconfirmed_tail(confirmed_sequence)`; `inventory_authority_system_journals` skips the `abandoned` directory.
 - Layout: a private `abandoned/` directory (0700, owner-checked, `O_NOFOLLOW`) inside
   `system-operations/`, because the authority unit's `ReadWritePaths` covers only that directory.
   Evidence file `<system_id>.<sequence>.<sha256-hex>.jsonl` holds the one canonical record line
   (0600, `O_EXCL`); scratch file `<system_id>.pending` holds the prefix.
-- Order: write evidence, fsync file and directory; write scratch, fsync; re-check the active
-  file is unchanged since validation; `rename(scratch, active)`; fsync both directories. Every
-  crash point leaves a valid journal: before the rename the active file is untouched and a retry
-  reuses identical evidence (same bytes) and replaces a stale scratch file; after it, the new
-  journal is complete.
-- Bounds: 4 evidence files per System and 256 in the directory (at most 256 MiB, records are at
-  most 1 MiB). Past either, the call raises `ValueError` and the service reports
-  `journal-conflict` and logs it, as with the #3526 headroom refusal.
-- Preconditions, else `ValueError`: the journal validates under the unchanged reader, holds
-  exactly `confirmed_sequence + 1` records, and record `confirmed_sequence` has
-  `confirmed_digest` (genesis when 0). A divergence inside the confirmed prefix is still
-  refused earlier by `_journal_state`.
-- `service.py` `_anchor`: on a mismatching file-ahead record, call the journal method, drop the
-  tail from `state.records`, then append the computed record. Identical record: adopted as now.
-- `service.py` readers of the file tail use the confirmed prefix instead
-  (`state.records[:state.db_sequence]`) in `_begin`, `_quiescence` and
-  `_ensure_mutation_started`. Without this, a retry would mistake an unconfirmed record for
+- Order: write evidence to the scratch name, fsync, rename it to the evidence name (a final name
+  only ever holds complete bytes; a retry replaces it with identical bytes); write the prefix to
+  the scratch name, fsync; re-check the active file is unchanged since validation;
+  `rename(scratch, active)`; fsync both directories. Every crash point leaves a valid journal:
+  before the last rename the active file is untouched and a retry replaces any stale scratch
+  file; after it, the new journal is complete.
+- Bounds: 4 `.jsonl` evidence files per System and 256 in the directory (the scratch file is
+  not counted; at most 256 MiB, as a record is at most 1 MiB). Past either, the call raises
+  `ValueError` and the service reports `journal-conflict` and logs it, as with the #3526
+  headroom refusal. The inventory only validates the directory.
+- Precondition, else `ValueError`: the journal validates under the unchanged reader and holds
+  exactly `confirmed_sequence + 1` records. A divergence inside the confirmed prefix is still
+  refused earlier by `_journal_state`, which compares the database head to the file.
+- `service.py`: `_JournalState.records` holds only the confirmed prefix; a file-ahead record
+  moves to a new `unconfirmed` field. Without this split, every reader of the tail
+  (`_begin`, `_quiescence`, `_ensure_mutation_started`) would mistake an unconfirmed record for
   confirmed progress, and a quarantine could record a terminal outcome without the provider
-  call. `_ensure_mutation_started` also skips the `admitted` anchor when `admitted` is already
-  confirmed (an existing gap on the same crash path).
+  call. `_anchor` adopts an identical `unconfirmed` record as now, and otherwise quarantines
+  it, then appends the computed record. `_ensure_mutation_started` also skips the `admitted`
+  anchor when `admitted` is already confirmed (an existing gap on the same crash path, which a
+  quarantined `mutation-started` would otherwise turn into a database refusal).
 - Out: SQL, requeue bound (#3530), journal bounds, reader validation, deploy templates.
 
 ### Failure model
@@ -64,10 +65,14 @@ plus the evidence record is the original).
 - Actors: the authority daemon (one process per host, one lane lock per System) and a
   same-uid operator; deployments: local-libvirt and remote-libvirt authority hosts.
 - Invariants: the database head and the confirmed prefix agree with the active journal; no
-  journal byte is lost; the reader accepts every state a crash can leave; disk use is bounded.
-- Accepted: a System with 4 quarantines refuses a fifth (fail closed; each needs a crash in a
-  one-record window); evidence files are never garbage collected (operator reclaims them);
-  a same-uid actor can already rewrite the journal and is not a new threat.
+  journal byte is lost; the reader accepts every state a crash between a complete append and
+  `advance_head`, or during quarantine, can leave; disk use is bounded.
+- Accepted: any append not followed by a confirmed advance (a crash, a database error, a
+  `superseded` or `conflict` result) leaves a quarantinable record; a System with 4 of them
+  refuses a fifth (fail closed). The operator reclaims space or the bound by deleting that
+  System's `abandoned/<system_id>.*.jsonl` after inspection; the service never reads them.
+  A torn final append (no trailing newline) already fails the reader and is not recovered here
+  (follow-up). A same-uid actor can already rewrite the journal and is not a new threat.
 - Covered elsewhere: journal size bounds and teardown headroom (#3526); retry bound (#3530).
 
 ## Success
@@ -87,10 +92,11 @@ plus the evidence record is the original).
 - Same-request retry adopts: focused-test, same file.
 - Prefix divergence still refused: focused-test, same file.
 - Quarantine result, evidence content, reader acceptance, idempotent retry after a crash at each
-  step, bounds, mode and owner and symlink refusal, inventory skip: focused-test,
+  step (including a short file left at the scratch name), bounds, mode and owner and symlink
+  refusal, inventory skip: focused-test,
   `tests/providers/system_authority/test_journal.py`.
-- Confirmed-prefix readers (`_begin`, `_quiescence`, `_ensure_mutation_started`): focused-test,
-  `test_service.py` (retry after crashed `watermark-installed`, `mutation-started`).
+- Confirmed-prefix state: focused-test, `test_service.py` (retry after a crashed unconfirmed
+  `watermark-installed`, `mutation-started`; teardown after a crashed `provider-returned`).
 - ADR-0623 amendment: task-test-not-applicable, prose; `just records` checks its form.
 - Fault: reverting the quarantine call in `_anchor` turns the teardown test red: controlled-fault.
 - Live proof: task-test-not-applicable; the tests run the real service and file journal.
