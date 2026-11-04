@@ -16,6 +16,9 @@ Not in scope: an upload size cap (`validation.py` is untouched), the boot step r
   System's overlay is not written by anyone else); the existing upload error path reports it.
 - Untrusted: `statvfs` comes from guest filesystem metadata, so negative, non-integer,
   oversized, `bavail > blocks`, or zero/over-1 MiB `frsize` values are refused as untrusted.
+- Narrowed: the authority boundary maps every provider exception to the closed category
+  `provider_conflict`, so there the typed refusal and its numbers reach the authority log, not
+  the wire. A bounded wire category is a contract change and is left to a follow-up.
 - Covered elsewhere: nothing else bounds the upload size (excluded above).
 
 ## Decision
@@ -29,12 +32,13 @@ Not in scope: an upload size cap (`validation.py` is untouched), the boot step r
   rebuild plus crash dumps and logs on the guests the live proofs used. It is a module
   constant, reversible by editing it.
 - The authority path keeps the prior file beside the live name until recovery, so the full
-  size is needed there too; the check does not credit the prior file.
+  size is needed there too; the check does not credit the prior file. The fixed worker
+  overwrites in place, so it credits the existing file's size.
 - Failure: `CategorizedError(INSTALL_FAILURE)` naming the directory, vmlinux bytes, free bytes,
   headroom and the fix (enlarge the System root disk by N bytes or build a smaller debuginfo).
   Details carry the same numbers. Untrusted statistics fail closed with the same category.
 - Size source: the fixed worker stats the host file; the authority path fstats the projection
-  artifact descriptor. `statvfs` joins `InactiveGuest` and the guarded wrapper.
+  artifact descriptor, only after the already-staged early return. `statvfs` joins `InactiveGuest` and the guarded wrapper.
 
 ## Verification
 

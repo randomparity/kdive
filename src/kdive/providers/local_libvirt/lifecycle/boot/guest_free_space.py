@@ -12,7 +12,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 # initramfs rebuild, crash dumps and logs after the file lands.
 VMLINUX_HEADROOM_BYTES: Final = 512 * 1024 * 1024
 
-# Real filesystem block sizes stop at 64 KiB; a larger fragment size is not a block size.
+# Real filesystem block sizes stop at 64 KiB; 1 MiB leaves slack and still rejects absurd values.
 _MAX_FRAGMENT_BYTES: Final = 1024 * 1024
 _MAX_BYTES: Final = 2**63 - 1
 
@@ -23,16 +23,18 @@ def require_free_space_for_vmlinux(
     *,
     size: int,
     target: str,
+    reclaimed: int = 0,
 ) -> None:
     """Raise ``install_failure`` unless ``directory``'s filesystem fits ``size`` plus headroom.
 
     ``statvfs`` is the libguestfs handle's call, so the figure comes from the guest filesystem
     the file is about to be written to. The values come from guest-controlled metadata:
     anything negative, non-integer, inconsistent or past 63 bits is refused rather than
-    trusted. Free space is ``bavail`` (what a non-reserved write may use). ``target`` names the
-    overlay or System in the error details.
+    trusted. Free space is ``bavail`` (what a non-reserved write may use) plus ``reclaimed``,
+    the size of a file the upload overwrites in place. ``target`` names the overlay or System
+    in the error details.
     """
-    free = _free_bytes(statvfs(directory), target, directory)
+    free = _free_bytes(statvfs(directory), target, directory) + reclaimed
     needed = size + VMLINUX_HEADROOM_BYTES
     if free >= needed:
         return

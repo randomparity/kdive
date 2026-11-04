@@ -23,6 +23,7 @@ class _Guest:
     def __init__(self, stats: dict[str, int]) -> None:
         self.stats = stats
         self.calls: list[str] = []
+        self.existing = 0
 
     def mkdir_p(self, path: str) -> None:
         self.calls.append("mkdir_p")
@@ -34,8 +35,11 @@ class _Guest:
     def upload(self, filename: str, remotefilename: str) -> None:
         self.calls.append("upload")
 
+    def is_file(self, path: str) -> int:
+        return int(self.existing > 0)
+
     def statns(self, path: str) -> dict[str, int]:
-        return {"st_size": _SIZE}
+        return {"st_size": self.existing or _SIZE}
 
 
 def _stage(guest: _Guest, tmp_path: Path) -> None:
@@ -73,3 +77,12 @@ def test_negative_statvfs_values_refuse_without_uploading(tmp_path: Path) -> Non
         _stage(guest, tmp_path)
 
     assert "upload" not in guest.calls
+
+
+def test_an_overwritten_vmlinux_counts_as_free_space(tmp_path: Path) -> None:
+    guest = _Guest(_free(VMLINUX_HEADROOM_BYTES))
+    guest.existing = _SIZE
+
+    _stage(guest, tmp_path)
+
+    assert guest.calls[-1] == "upload"

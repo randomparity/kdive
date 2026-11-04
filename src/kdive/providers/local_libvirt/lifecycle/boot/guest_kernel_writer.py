@@ -382,7 +382,11 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
             directory = f"{_DEBUGINFO_ROOT}/{version}"
             guest.mkdir_p(directory)
             require_free_space_for_vmlinux(
-                guest.statvfs, directory, size=Path(vmlinux).stat().st_size, target=overlay
+                guest.statvfs,
+                directory,
+                size=Path(vmlinux).stat().st_size,
+                target=overlay,
+                reclaimed=guest.statns(dest)["st_size"] if guest.is_file(dest) else 0,
             )
             guest.upload(vmlinux, dest)
             size = guest.statns(dest)["st_size"]

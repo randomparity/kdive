@@ -24,6 +24,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownReservationV1,
@@ -58,6 +59,9 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     convert_kernel_bundle_modules,
     recovery_directory_name,
     render_target_xml,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import (
+    VMLINUX_HEADROOM_BYTES,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import ProbeFailure, ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
@@ -3136,6 +3140,7 @@ class _RestartGuest(_GuestTreeHandle):
         self.files: dict[str, bytes] = {}
         self.directories: set[str] = {"/usr/lib/debug", "/usr/lib/debug/lib"}
         self.paths: list[str] = []
+        self.free_bytes = 1 << 50
 
     def exists(self, path: str) -> int:
         self.paths.append(path)
@@ -3146,7 +3151,7 @@ class _RestartGuest(_GuestTreeHandle):
         return int(path in self.states or path in self.directories)
 
     def statvfs(self, path: str) -> dict[str, int]:
-        return {"bavail": 1 << 40, "blocks": 1 << 40, "frsize": 4096}
+        return {"bavail": self.free_bytes // 4096, "blocks": 1 << 40, "frsize": 4096}
 
     def lstatns(self, path: str) -> dict[str, int]:
         if path not in self.files:
@@ -7332,6 +7337,26 @@ def test_activation_stages_and_publishes_debuginfo_and_recovery_restores_absence
 
     assert harness.guest.files == {}
     assert _recovery_phase(harness.root, harness.metadata) == "recovered"
+
+
+def test_activation_refuses_a_guest_without_room_for_the_artifact_before_uploading(
+    tmp_path: Path,
+) -> None:
+    harness = _FreshRestartHarness.create(
+        tmp_path,
+        phase="pre-stop-intent",
+        source_present=True,
+        debuginfo=(AbsentComponentState(), _DEBUGINFO_TARGET),
+    )
+    harness.guest.free_bytes = VMLINUX_HEADROOM_BYTES
+
+    with pytest.raises(CategorizedError) as caught:
+        harness.activate()
+
+    assert caught.value.category is ErrorCategory.INSTALL_FAILURE
+    assert caught.value.details["vmlinux_bytes"] != 0
+    assert "upload-debuginfo" not in [a.split("#")[0] for a in harness.faults.actions]
+    assert _recovery_phase(harness.root, harness.metadata) == "pre-stop-intent"
 
 
 def test_a_failed_debuginfo_upload_stays_in_pre_stop_intent_and_recovery_settles(

@@ -2303,7 +2303,7 @@ class _RealLocalExternalBootOperation:
                             lambda path: opened_guest.upload_projection_artifact(
                                 _debuginfo_ref(metadata), path
                             ),
-                            size=self._session_artifact_size(_debuginfo_ref(metadata)),
+                            size=lambda: self._session_artifact_size(_debuginfo_ref(metadata)),
                             system_id=metadata.binding.system_id,
                         )
                     publication.guest_sync()
@@ -2857,7 +2857,7 @@ class GuestDebuginfoFile:
         target: PresentComponentState,
         upload: Callable[[str], None],
         *,
-        size: int,
+        size: Callable[[], int],
         system_id: str,
     ) -> None:
         prior = _layout_component(source)
@@ -2870,7 +2870,7 @@ class GuestDebuginfoFile:
             self._guest.rm_rf(self.staging)
         self._directories(create=True)
         require_free_space_for_vmlinux(
-            self._guest.statvfs, self._directory, size=size, target=system_id
+            self._guest.statvfs, self._directory, size=size(), target=system_id
         )
         upload(self.staging)
         self._guest.chmod(0o644, self.staging)

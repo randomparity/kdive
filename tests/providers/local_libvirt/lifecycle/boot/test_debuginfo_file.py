@@ -37,7 +37,7 @@ _STAGING = f"{_DIRECTORY}/.kdive-{_BINDING.activation_id}-vmlinux-staging"
 _OLD = f"{_DIRECTORY}/.kdive-{_BINDING.activation_id}-vmlinux-old"
 _NEW = b"new dwarf vmlinux"
 _PRIOR = b"prior vmlinux from another install"
-_STAGE: dict[str, Any] = {"size": len(_NEW), "system_id": _BINDING.system_id}
+_STAGE: dict[str, Any] = {"size": lambda: len(_NEW), "system_id": _BINDING.system_id}
 _STANDARD_DIRECTORIES = ("/", "/usr", "/usr/lib", "/usr/lib/debug", "/usr/lib/debug/lib")
 
 
@@ -404,7 +404,7 @@ def test_staging_proceeds_with_exactly_the_size_plus_headroom_free() -> None:
     guest = _with_prior(_Guest())
     guest.statvfs_result = _space(_HEADROOM + 4096)
 
-    _file(guest).stage(_PRIOR_STATE, _TARGET, _upload(guest), size=4096, system_id="sys-1")
+    _file(guest).stage(_PRIOR_STATE, _TARGET, _upload(guest), size=lambda: 4096, system_id="sys-1")
 
     assert _STAGING in guest.files
 
@@ -415,7 +415,9 @@ def test_staging_one_block_short_of_the_boundary_refuses_before_any_write() -> N
     before = list(guest.mutations)
 
     with pytest.raises(CategorizedError, match="needs .* headroom") as caught:
-        _file(guest).stage(_PRIOR_STATE, _TARGET, _upload(guest), size=4096, system_id="sys-1")
+        _file(guest).stage(
+            _PRIOR_STATE, _TARGET, _upload(guest), size=lambda: 4096, system_id="sys-1"
+        )
 
     assert caught.value.category is ErrorCategory.INSTALL_FAILURE
     assert caught.value.details["vmlinux_bytes"] == 4096
@@ -434,6 +436,10 @@ def test_staging_one_block_short_of_the_boundary_refuses_before_any_write() -> N
         {"bavail": 5, "blocks": 10, "frsize": 1 << 40},
         {"bavail": True, "blocks": 10, "frsize": 4096},
         {"bavail": 5, "blocks": 10},
+        {},
+        {"bavail": 1.0, "blocks": 10, "frsize": 4096},
+        {"bavail": "5", "blocks": 10, "frsize": 4096},
+        {"bavail": 5, "blocks": 1 << 63, "frsize": 4096},
     ],
 )
 def test_untrustworthy_statvfs_values_refuse_before_any_write(stats: dict[str, int]) -> None:
