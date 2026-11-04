@@ -12,7 +12,15 @@ import pytest
 
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.ports.external_boot import RootSpecV1
-from kdive.providers.system_authority.journal import FileAuthoritySystemJournal
+from kdive.providers.system_authority import service as service_module
+from kdive.providers.system_authority.journal import (
+    MAX_JOURNAL_BYTES,
+    MAX_RECORDS_PER_JOURNAL,
+    PROVISION_RECORD_CEILING,
+    RECORDS_PER_ATTEMPT,
+    TEARDOWN_RESERVE_RECORDS,
+    FileAuthoritySystemJournal,
+)
 from kdive.providers.system_authority.protocol import (
     GENESIS_DIGEST,
     AuthoritySystemAbsenceFacts,
@@ -494,5 +502,117 @@ def test_successor_takeover_observes_started_predecessor_before_ack(tmp_path: Pa
         assert observer.observe_calls == 1
         assert acknowledgement.generation == 2
         assert repository.phase is AuthoritySystemJournalPhase.TAKEOVER_ACKNOWLEDGED
+
+    asyncio.run(scenario())
+
+
+class _FailingProvisionProvider(_Provider):
+    """A provider whose provision never completes and whose teardown always does."""
+
+    def _facts(self) -> AuthoritySystemProvisionFacts:
+        return AuthoritySystemProvisionFacts(
+            intent_identity=_DIGEST_A,
+            domain_owned=False,
+            root_storage_owned=False,
+            boot_ready=False,
+            bootstrap_ready=False,
+            quarantine_retained=True,
+            completed_at=None,
+        )
+
+    async def execute_preactivation_teardown(self, request, context) -> AuthoritySystemAbsenceFacts:
+        return await self.observe_preactivation_teardown(request, context)
+
+    async def observe_preactivation_teardown(self, request, context) -> AuthoritySystemAbsenceFacts:
+        return AuthoritySystemAbsenceFacts(
+            intent_identity=_DIGEST_A,
+            domain_absent=True,
+            root_storage_absent=True,
+            baseline_absent=True,
+            private_intent_absent=True,
+            quarantine_retained=False,
+            completed_at=self.completed_at,
+        )
+
+
+async def _run_attempt(
+    service: AuthoritySystemService,
+    repository: _Repository,
+    request: AuthoritySystemTakeoverRequestV1,
+) -> None:
+    repository.receipt = None  # the fake keeps one receipt; a new attempt starts without one
+    acknowledgement = await _begin(service, repository, request)
+    await service.execute("worker-a", _mutation(request), acknowledgement)
+
+
+def test_persistent_provision_failure_leaves_room_for_teardown(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        service = AuthoritySystemService(
+            repository=repository,
+            journal_factory=lambda system_id: FileAuthoritySystemJournal(root, system_id),
+            provider=_FailingProvisionProvider(),
+        )
+        records = lambda: repository.sequence  # noqa: E731 - head sequence is the record count
+        generation = 0
+        refused = False
+        while not refused and generation < MAX_RECORDS_PER_JOURNAL:
+            generation += 1
+            before = records()
+            try:
+                await _run_attempt(service, repository, _request(snapshot, generation=generation))
+            except AuthoritySystemServiceError as error:
+                assert error.category == "journal-conflict"
+                refused = True
+            else:
+                assert records() - before <= RECORDS_PER_ATTEMPT
+        assert refused
+        assert records() <= PROVISION_RECORD_CEILING
+        assert records() > PROVISION_RECORD_CEILING - RECORDS_PER_ATTEMPT
+
+        teardown = _request(snapshot, generation=generation + 1).model_copy(
+            update={
+                "operation": AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
+                "operation_identity": "teardown-a",
+            }
+        )
+        await _run_attempt(service, repository, teardown)
+        assert repository.phase is AuthoritySystemJournalPhase.TERMINAL
+        assert repository.receipt is not None
+        assert records() <= MAX_RECORDS_PER_JOURNAL
+        await service.close()
+
+    asyncio.run(scenario())
+
+
+def test_journal_bounds_are_unchanged() -> None:
+    assert MAX_RECORDS_PER_JOURNAL == 1024
+    assert MAX_JOURNAL_BYTES == 16 * 1024 * 1024
+    assert PROVISION_RECORD_CEILING + TEARDOWN_RESERVE_RECORDS == MAX_RECORDS_PER_JOURNAL
+
+
+def test_started_attempt_resumes_above_the_provision_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        service = AuthoritySystemService(
+            repository=repository,
+            journal_factory=lambda system_id: FileAuthoritySystemJournal(root, system_id),
+            provider=_FailingProvisionProvider(),
+        )
+        request = _request(snapshot)
+        repository.fail_phase_once = AuthoritySystemJournalPhase.TAKEOVER_ACKNOWLEDGED
+        repository.allocating = request
+        with pytest.raises(AuthoritySystemServiceError):
+            await service.begin("worker-a", request)
+        monkeypatch.setattr(service_module, "PROVISION_RECORD_CEILING", 0)
+        acknowledgement = await service.begin("worker-a", request)
+        assert acknowledgement.attempt_id == request.attempt_id
+        await service.close()
 
     asyncio.run(scenario())

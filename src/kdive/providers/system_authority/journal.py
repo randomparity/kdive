@@ -19,6 +19,13 @@ from kdive.providers.system_authority.protocol import (
 
 MAX_JOURNAL_FILES = 4096
 MAX_RECORDS_PER_JOURNAL = 1024
+# A full attempt writes at most watermark, superseded, acknowledged, admitted, mutation-started,
+# provider-returned, observed and terminal records.
+RECORDS_PER_ATTEMPT = 8
+# Journal space only a teardown may use, so a System whose provision never succeeds can still be
+# torn down: four teardown attempts.
+TEARDOWN_RESERVE_RECORDS = 4 * RECORDS_PER_ATTEMPT
+PROVISION_RECORD_CEILING = MAX_RECORDS_PER_JOURNAL - TEARDOWN_RESERVE_RECORDS
 MAX_JOURNAL_BYTES = 16 * 1024 * 1024
 _OPEN = os.O_CLOEXEC | os.O_NOFOLLOW
 

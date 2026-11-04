@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 from uuid import UUID
 
-from kdive.providers.system_authority.journal import FileAuthoritySystemJournal
+from kdive.providers.system_authority.journal import (
+    PROVISION_RECORD_CEILING,
+    RECORDS_PER_ATTEMPT,
+    FileAuthoritySystemJournal,
+)
 from kdive.providers.system_authority.ports import AuthoritySystemProvider
 from kdive.providers.system_authority.protocol import (
     GENESIS_DIGEST,
@@ -36,6 +41,8 @@ from kdive.providers.system_authority.repository import (
     AuthoritySystemAdvanceResult,
     ResolvedAuthoritySystemOperation,
 )
+
+_log = logging.getLogger(__name__)
 
 
 class AuthoritySystemServiceError(RuntimeError):
@@ -193,6 +200,7 @@ class AuthoritySystemService:
                             AuthoritySystemJournalPhase.TAKEOVER_SUPERSEDED,
                         }
                     ):
+                        self._require_attempt_headroom(request, state)
                         await self._anchor(
                             peer_incarnation,
                             request,
@@ -345,6 +353,27 @@ class AuthoritySystemService:
                 )
         finally:
             self._release_lane(request.system_id, lane)
+
+    @staticmethod
+    def _require_attempt_headroom(
+        request: AuthoritySystemTakeoverRequestV1, state: _JournalState
+    ) -> None:
+        """Keep the journal space reserved for teardown out of reach of provision retries.
+
+        Retained provision receipts requeue the job without a bound, so a persistently failing
+        provision would otherwise fill the journal and leave teardown unable to append.
+        """
+        if (
+            request.operation is AuthoritySystemOperation.PROVISION
+            and len(state.records) + RECORDS_PER_ATTEMPT > PROVISION_RECORD_CEILING
+        ):
+            _log.warning(
+                "authority System %s journal holds %d records; refusing another provision "
+                "attempt to keep room for systems.teardown",
+                request.system_id,
+                len(state.records),
+            )
+            raise AuthoritySystemServiceError("journal-conflict")
 
     @staticmethod
     def _db_phase(state: _JournalState) -> AuthoritySystemJournalPhase | None:
