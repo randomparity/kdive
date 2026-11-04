@@ -805,7 +805,7 @@ def test_spine_live_script_over_the_wire() -> None:
                 async with phase("end-session"):
                     ok(await scalar(op, "debug.end_session", session_id=session_id), "end-session")
                 async with phase("teardown"):
-                    # Teardown first, then release (ADR-0541): an external-boot authority fences
+                    # Teardown first, then release: an external-boot authority fences
                     # allocations.release while its activation is active, and systems.teardown
                     # (project ADMIN) is the admitted exit (#3135).
                     async with LiveStackClient.over_http(base_url, admin_token) as admin:
