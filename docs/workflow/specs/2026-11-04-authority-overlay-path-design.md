@@ -1,5 +1,4 @@
 # Authority-owned System overlay paths (#3524)
-
 ## Problem
 
 `runs.boot` and `systems.teardown` on a System the installed authority provisioned fail with
