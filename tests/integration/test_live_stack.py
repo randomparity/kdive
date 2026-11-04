@@ -683,6 +683,7 @@ def test_spine_live_script_over_the_wire() -> None:
     issuer, base_url, db_url = _spine_preflight()
     arch = require_native_guest_arch()
     operator_token = _token(issuer, role="operator")
+    admin_token = _token(issuer, role="admin")
 
     async def _run() -> None:
         op = LiveStackClient.over_http(base_url, operator_token)
@@ -803,6 +804,16 @@ def test_spine_live_script_over_the_wire() -> None:
                         )
                 async with phase("end-session"):
                     ok(await scalar(op, "debug.end_session", session_id=session_id), "end-session")
+                async with phase("teardown"):
+                    # Teardown first, then release (ADR-0541): an external-boot authority fences
+                    # allocations.release while its activation is active, and systems.teardown
+                    # (project ADMIN) is the admitted exit (#3135).
+                    async with LiveStackClient.over_http(base_url, admin_token) as admin:
+                        ok(
+                            await scalar(admin, "systems.teardown", system_id=system_id),
+                            "teardown",
+                        )
+                    await await_system_state(op, "teardown", system_id, "torn_down")
                 async with phase("release"):
                     ok(
                         await scalar(op, "allocations.release", allocation_id=allocation_id),
