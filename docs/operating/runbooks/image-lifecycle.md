@@ -364,7 +364,8 @@ run. An authority host, where one account owns the session daemon and the author
 unproven because no lab host carries `provider_authority_host`. Do not assume the rule is safe on
 either.
 
-Where the condition does hold, this is the tested rule:
+Where the condition does hold, this is the tested rule. Save it to a file, load it with
+`nft -f <file>`, and remove it with `nft delete table inet kdive_guest_loopback`:
 
 ```text
 table inet kdive_guest_loopback {
@@ -377,12 +378,15 @@ table inet kdive_guest_loopback {
 ```
 
 - `<qemu-uid>`: read it from the running process, not from an account name you expect:
-  `ps -eo uid=,comm= | grep -E 'qemu-(system|kvm)'`. The rule does not cut established connections, so load it
+  `ps -eo uid=,comm= | grep -E 'qemu-(system|kvm)'`. If that lists several uids, each one needs its
+  own pair of lines. The rule does not cut established connections, so load it
   before starting an egress guest; a guest without egress can supply the uid.
 - `<loopback-resolver>`: the `nameserver` in the host's `/etc/resolv.conf` when it is a loopback
   address, `127.0.0.53` under the `systemd-resolved` stub. Without this line guest DNS and package
-  installs fail. Delete the line on a host whose resolver is off-host. A resolver on `127.0.0.1` was
-  not tested; expect the guest to reach it through `10.0.2.2:53` as well.
+  installs fail. Delete the line on a host whose resolver is off-host. The field takes one IPv4
+  address, and an IPv6 value such as `::1` stops the file loading. Add one line per loopback
+  resolver; an IPv6 one needs `ip6 daddr`, which was not tested. A resolver on `127.0.0.1` was not
+  tested either; expect the guest to reach it through `10.0.2.2:53` as well.
 - `table inet` is required: the slirp IPv6 gateway `fec0::2` reaches `::1`. `oif "lo"` also covers
   the host's own routable addresses, which a loopback-only `daddr` match misses.
 
@@ -390,7 +394,9 @@ Ubuntu 26.04 and Fedora 44 on x86_64 with KVM proved it, with the results in ADR
 of 2026-11-04). The guest lost IPv4 and IPv6 loopback services, the host's own address, loopback UDP, and other guests'
 SSH and gdbstub ports. It kept DNS, outbound NAT and package installs, and clients on another
 account kept SSH and gdbstub attach. The customization boot NIC is covered the same way when its
-domain runs under the keyed uid. Rocky, openSUSE, ppc64le and `qemu:///system` are unproven.
+domain runs under the keyed uid. The proof used domains carrying kdive's NIC and gdbstub arguments,
+not provisioned Systems, and a real customization boot was not run. Rocky, openSUSE, ppc64le and
+`qemu:///system` are unproven.
 
 The rule covers traffic the kernel routes through `lo`. Off-host destinations remain your network
 zone's job. Containers and VMs behind a local bridge route out of the bridge device, so it does not
