@@ -152,3 +152,18 @@ matching canonical provision/replay and all malformed/wrong-architecture variant
 and inactive XML. Native define/readback/undefine must prove canonical equality and unchanged
 inventory before the unchanged full carrier rerun. If digest preservation is impossible, stop
 for an explicit persistence/version decision; no silent projection-version change is authorized.
+
+### Logical scratch capacity and physical allocation
+
+The native appliance produced a validated installed result, but its reader rejected the
+10 GiB scratch volume because physical allocation exceeded logical capacity by 4 KiB.
+The [libvirt volume contract](https://libvirt.org/formatstorage.html#storage-volume-general-metadata)
+permits allocation above capacity for metadata overhead. In the existing remote module result
+reader, require the exact configured logical capacity and nonnegative integer allocation without
+comparing physical allocation to logical capacity. Reject malformed types rather than coercing
+them. Preserve ownership checks, logical sparse data/hole bounds, fixed download length,
+document limits, deadlines and cleanup; no tolerance, caller limit or schema is introduced.
+Test real extraction with the observed extra allocation, wrong capacity, negative/malformed
+allocation and stream overflow. Retain native result/volume metadata and rerun the same reader
+on the inactive owned volume before full carrier proof. Earlier appliance timeouts remain
+separate inconclusive failures; an offline installed file is diagnostic evidence, not live proof.
