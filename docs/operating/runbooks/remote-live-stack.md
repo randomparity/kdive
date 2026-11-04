@@ -946,6 +946,16 @@ selection and network proof were used.
 The guest needs drgn and a working guest agent. Authority and control-plane revisions must match
 the candidate. The frame rechecks architecture before allocation and owns lifecycle cleanup.
 
+The module appliance is a separately pinned immutable image: rebuild and install its fresh
+manifest after changing the producer, then verify the installed kernel/initramfs digests as
+well as both runtime revisions. Its repeated fixed `phase=accepted` advisory is throttled to
+five appliance-monotonic seconds while work completes or the bounded depmod child remains alive;
+it is not a durable phase or install proof. The 30-second console idle and 300-second invocation
+caps remain in force; depmod's per-child 300-second deadline cannot extend the invocation.
+A missing advisory or a blocked syscall can still produce an incomplete attempt. Preserve the
+failed job/checkpoint and use existing recovery/teardown rather than counting operator cleanup
+or a diagnostic image as a successful carrier.
+
 The proof checks the uploaded SHA-256 at `/lib/modules/<release>/vmlinux`, real default-search
 `drgn -k` resolution of `init_uts_ns`, restored absence after release and baseline boot, and
 unchanged authority inventory/capacity. Native ppc64le completion requires an observed POWER

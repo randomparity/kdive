@@ -59,6 +59,16 @@ def _module() -> Any:
     return module
 
 
+class _ExitedChild:
+    returncode = 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        raise AssertionError("a reaped child must not be killed")
+
+
 def _newc_entries(data: bytes) -> dict[str, int]:
     entries: dict[str, int] = {}
     offset = 0
@@ -581,7 +591,7 @@ def test_appliance_source_has_fixed_depmod_and_no_guest_exec_or_network() -> Non
     assert "socket" not in source
     assert "os.exec" not in source
     assert source.startswith("#!/usr/bin/python3 -S\n")
-    assert "subprocess.run(" in source and '[DEPMOD, "-b"' in source
+    assert "subprocess.Popen(" in source and '[DEPMOD, "-b"' in source
     assert "200_000" in source
     assert "8 * 1024**3" in source
 
@@ -642,8 +652,8 @@ def test_capture_install_and_restore_round_trip(
     monkeypatch.setattr(appliance, "SCRATCH", scratch)
     monkeypatch.setattr(
         appliance.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0),
+        "Popen",
+        lambda *_args, **_kwargs: _ExitedChild(),
     )
     operation = _operation()
     operation["source_manifest"] = appliance._tree_manifest(new_tree)[0]
@@ -687,8 +697,8 @@ def test_capture_retry_resumes_after_durable_capture(
     monkeypatch.setattr(appliance, "SCRATCH", scratch)
     monkeypatch.setattr(
         appliance.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0),
+        "Popen",
+        lambda *_args, **_kwargs: _ExitedChild(),
     )
     operation = _operation()
     operation["source_manifest"] = appliance._tree_manifest(new_tree)[0]
@@ -734,17 +744,17 @@ def _appliance_fixture(
     monkeypatch.setattr(appliance, "SOURCE", source)
     monkeypatch.setattr(appliance, "SCRATCH", scratch)
 
-    def depmod(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def depmod(arguments: list[str], **_kwargs: object) -> _ExitedChild:
         base = Path(arguments[2])
         staged_tree = base / "lib" / "modules" / release
         assert (staged_tree / "new.ko").read_bytes() == b"new"
         assert _kwargs["stdout"] is subprocess.DEVNULL
         assert _kwargs["stderr"] is subprocess.DEVNULL
-        assert _kwargs["timeout"] == 300
+        assert _kwargs["env"] == {"PATH": "/sbin"}
         (staged_tree / "modules.dep").write_bytes(b"new.ko:\n")
-        return subprocess.CompletedProcess(arguments, 0)
+        return _ExitedChild()
 
-    monkeypatch.setattr(appliance.subprocess, "run", depmod)
+    monkeypatch.setattr(appliance.subprocess, "Popen", depmod)
     operation = _operation()
     operation["source_manifest"] = appliance._tree_manifest(new_tree)[0]
     return appliance, operation, old_tree, scratch
@@ -766,12 +776,31 @@ def test_depmod_timeout_maps_to_the_stable_error(
 ) -> None:
     appliance, operation, _old_tree, _scratch = _appliance_fixture(tmp_path, monkeypatch)
 
-    def timeout(*_args: object, **_kwargs: object) -> None:
-        raise subprocess.TimeoutExpired("depmod", 300)
+    class TimedOutChild:
+        returncode: int | None = None
+        reaped = False
 
-    monkeypatch.setattr(appliance.subprocess, "run", timeout)
+        def kill(self) -> None:
+            self.returncode = -9
+
+        def wait(self, timeout: float | None = None) -> int:
+            assert self.returncode == -9
+            self.reaped = True
+            return self.returncode
+
+    child = TimedOutChild()
+    moments = iter([0.0, 300.0])
+
+    class Clock:
+        @staticmethod
+        def monotonic() -> float:
+            return next(moments)
+
+    monkeypatch.setattr(appliance, "time", Clock)
+    monkeypatch.setattr(appliance.subprocess, "Popen", lambda *_args, **_kwargs: child)
     with pytest.raises(appliance.ApplianceError, match="DEPMOD_FAILURE"):
         appliance.execute(appliance._validate_operation(operation))
+    assert child.returncode == -9 and child.reaped
 
 
 @pytest.mark.parametrize("interrupted_phase", ["replacement-ready", "installed"])
@@ -1621,3 +1650,274 @@ def test_module_paths_refuse_a_symlinked_usr_under_a_valid_usr_merge(
 
     with pytest.raises(appliance.ApplianceError, match="RECOVERY_CONFLICT"):
         appliance._module_paths(appliance._validate_operation(_operation()))
+
+
+def test_long_work_keeps_the_accepted_process_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appliance, operation, destination, scratch = _appliance_fixture(tmp_path, monkeypatch)
+    payload = b"vmlinux-content\n" * (384 * 1024)
+    (appliance.SOURCE / "modules" / "vmlinux").write_bytes(payload)
+    operation["source_manifest"] = appliance._tree_manifest(appliance.SOURCE / "modules")[0]
+    (appliance.SOURCE / "operation-v1.json").write_bytes(_framed(operation))
+    clock = [0.0]
+    lines: list[tuple[float, str]] = []
+    original_fdopen = os.fdopen
+    original_open = open
+
+    class SlowRead:
+        def __init__(self, stream: Any) -> None:
+            self.stream = stream
+
+        def __enter__(self) -> SlowRead:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            self.stream.__exit__(*args)
+
+        def read(self, size: int) -> bytes:
+            chunk = self.stream.read(size)
+            if chunk:
+                clock[0] += 6.0
+            return chunk
+
+    def delayed_fdopen(descriptor: int, mode: str, *args: Any, **kwargs: Any) -> Any:
+        stream = original_fdopen(descriptor, mode, *args, **kwargs)
+        return (
+            SlowRead(stream) if mode == "rb" and os.fstat(descriptor).st_size > 1024**2 else stream
+        )
+
+    def delayed_open(path: str, mode: str, *args: Any, **kwargs: Any) -> Any:
+        stream = original_open(path, mode, *args, **kwargs)
+        return (
+            SlowRead(stream)
+            if mode == "rb" and os.fstat(stream.fileno()).st_size > 1024**2
+            else stream
+        )
+
+    class Clock:
+        @staticmethod
+        def monotonic() -> float:
+            return clock[0]
+
+    class PoweredOff(Exception):
+        pass
+
+    monkeypatch.setattr(appliance, "time", Clock, raising=False)
+    monkeypatch.setattr(appliance.os, "fdopen", delayed_fdopen)
+    monkeypatch.setattr(appliance, "open", delayed_open, raising=False)
+    monkeypatch.setattr(appliance, "_mount", lambda *_args: None)
+    monkeypatch.setattr(appliance, "_mount_root", lambda: None)
+    monkeypatch.setattr(appliance, "_announce", lambda line: lines.append((clock[0], line)))
+    monkeypatch.setattr(appliance, "_poweroff", lambda _document: (_ for _ in ()).throw(PoweredOff))
+
+    with pytest.raises(PoweredOff):
+        appliance.main()
+
+    assert json.loads((scratch / "result-v1.json").read_text())["phase"] == "installed"
+    assert clock[0] > 30
+    assert all(line == "phase=accepted" for _when, line in lines)
+    timestamps = [when for when, _line in lines] + [clock[0]]
+    assert (
+        max(right - left for left, right in zip(timestamps, timestamps[1:], strict=False)) < 30
+    ), "completed long-file work became silent for the host's whole idle budget"
+    assert (destination / "vmlinux").read_bytes() == payload
+
+
+def test_advisory_is_constant_and_throttled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+        _filter_console,
+    )
+
+    appliance = _module()
+    clock = [100.0]
+    lines: list[tuple[float, str]] = []
+
+    class Clock:
+        @staticmethod
+        def monotonic() -> float:
+            return clock[0]
+
+    monkeypatch.setattr(appliance, "time", Clock)
+    monkeypatch.setattr(appliance, "_announce", lambda line: lines.append((clock[0], line)))
+    appliance._progress()
+    assert lines == []
+    appliance._start_progress()
+    for now in [104.999, 105.0, 105.0, 109.999, 110.0]:
+        clock[0] = now
+        appliance._progress()
+    assert lines == [
+        (100.0, "phase=accepted"),
+        (105.0, "phase=accepted"),
+        (110.0, "phase=accepted"),
+    ]
+    console = "".join(f"{line}\n" for _when, line in lines)
+    assert _filter_console(console) == console
+
+
+def test_streamed_copy_preserves_the_module_tree(tmp_path: Path) -> None:
+    appliance = _module()
+    source = tmp_path / "source"
+    source.mkdir()
+    module = source / "module.ko"
+    module.write_bytes(b"module contents")
+    module.chmod(0o755)
+    os.utime(module, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    os.setxattr(module, "user.copy-proof", b"retained")
+    (source / "module-link").symlink_to("module.ko")
+    destination = tmp_path / "copied"
+
+    expected = appliance._tree_manifest(source, "recovery")
+    assert appliance._copy_tree(source, destination, "recovery") == expected
+    assert appliance._tree_manifest(destination, "recovery") == expected
+    copied = destination / "module.ko"
+    assert copied.read_bytes() == module.read_bytes()
+    assert stat.S_IMODE(copied.stat().st_mode) == 0o755
+    assert copied.stat().st_mtime_ns == module.stat().st_mtime_ns
+    assert os.getxattr(copied, "user.copy-proof") == b"retained"
+    assert (destination / "module-link").is_symlink()
+    assert os.readlink(destination / "module-link") == "module.ko"
+
+
+@pytest.mark.parametrize("failure", ["short-write", "substituted-link"])
+def test_copy_failure_retains_owned_partial_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    appliance = _module()
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "module.ko").write_bytes(b"module contents")
+    original = tmp_path / "original"
+    original.write_bytes(b"original")
+    destination = tmp_path / "stage"
+    opened: list[Any] = []
+
+    class ShortWriter:
+        def __init__(self, stream: Any) -> None:
+            self.stream = stream
+
+        def __enter__(self) -> ShortWriter:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            self.stream.__exit__(*args)
+
+        def write(self, chunk: bytes) -> int:
+            return self.stream.write(chunk[:2])
+
+    def controlled_open(path: str, mode: str) -> Any:
+        if mode == "xb" and failure == "substituted-link":
+            Path(path).symlink_to(original)
+        stream = open(path, mode)  # noqa: SIM115 - caller owns and verifies context closure
+        opened.append(stream)
+        return ShortWriter(stream) if mode == "xb" else stream
+
+    monkeypatch.setattr(appliance, "open", controlled_open, raising=False)
+    with pytest.raises(appliance.ApplianceError, match="FILESYSTEM_FAILURE"):
+        appliance._copy_tree(source, destination)
+    assert original.read_bytes() == b"original"
+    assert destination.exists()
+    assert all(stream.closed for stream in opened)
+    if failure == "short-write":
+        assert (destination / "module.ko").read_bytes() == b"mo"
+    else:
+        assert (destination / "module.ko").is_symlink()
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "success",
+        "nonzero",
+        "timeout",
+        "wait-error",
+        "announcement-error",
+        "spawn-error",
+        "kill-error",
+    ],
+)
+def test_depmod_liveness_keeps_one_deadline_and_reaps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    appliance = _module()
+    clock = [0.0]
+    waits: list[float] = []
+    lines: list[str] = []
+
+    class Clock:
+        @staticmethod
+        def monotonic() -> float:
+            return clock[0]
+
+    class Child:
+        returncode: int | None = None
+        killed = False
+        reaped = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            if timeout is None:
+                assert self.killed
+                self.reaped = True
+                return -9
+            waits.append(timeout)
+            clock[0] += timeout
+            if outcome == "wait-error":
+                raise OSError("wait failed")
+            if outcome in {"timeout", "announcement-error", "kill-error"} or len(waits) <= 2:
+                raise subprocess.TimeoutExpired("depmod", timeout)
+            self.returncode = 7 if outcome == "nonzero" else 0
+            self.reaped = True
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+            if outcome == "kill-error":
+                raise OSError("kill raced with child exit")
+
+    child = Child()
+
+    def popen(arguments: list[str], **kwargs: object) -> Child:
+        assert arguments == ["/sbin/depmod", "-b", str(tmp_path), "6.12"]
+        assert kwargs == {
+            "env": {"PATH": "/sbin"},
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if outcome == "spawn-error":
+            raise OSError("spawn failed")
+        return child
+
+    def announce(line: str) -> None:
+        if outcome == "announcement-error" and clock[0] > 0:
+            raise RuntimeError("console failed")
+        lines.append(line)
+        if outcome == "timeout":
+            clock[0] += 0.125
+
+    monkeypatch.setattr(appliance, "time", Clock)
+    monkeypatch.setattr(appliance, "_announce", announce)
+    monkeypatch.setattr(appliance.subprocess, "Popen", popen)
+    appliance._start_progress()
+    started = clock[0]
+    if outcome == "success":
+        appliance._index_modules(tmp_path, "6.12")
+    else:
+        error = RuntimeError if outcome == "announcement-error" else appliance.ApplianceError
+        message = "console failed" if outcome == "announcement-error" else "DEPMOD_FAILURE"
+        with pytest.raises(error, match=message):
+            appliance._index_modules(tmp_path, "6.12")
+    assert all(0 < timeout <= 5 for timeout in waits)
+    assert all(line == "phase=accepted" for line in lines)
+    if outcome == "timeout":
+        assert clock[0] == started + 300
+        assert sum(waits) < 300 and min(waits) < 5
+    if outcome == "spawn-error":
+        assert not child.killed and not child.reaped
+    else:
+        assert child.reaped
+        assert child.killed == (
+            outcome in {"timeout", "wait-error", "announcement-error", "kill-error"}
+        )
+    if outcome == "success":
+        assert len(lines) >= 3 and clock[0] > 10
