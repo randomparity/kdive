@@ -133,6 +133,74 @@ two keep the `qemu:commandline` route but still bring the addressing change belo
   the uid-scoped loopback firewall recipe on a lab host.
 - ADR-0721's dispatcher and the three return-route helpers are untouched.
 
+### Amendment (2026-11-04): the firewall recipe works only away from QEMU's uid (#3514)
+
+This amendment corrects the Consequences bullet on host-side controls and records the lab proof it
+asked for. It does not change the decision: the exposure stays accepted.
+
+**Correction.** The bullet says the worker slot accounts run the session libvirt daemon, so QEMU
+runs under them. They do not. `deploy/systemd/install-live-worker-lifecycle.sh` starts the daemon as
+the operator and refuses a daemon under any other uid; workers run as `kdive-worker-<slot>`. On both
+lab hosts below, the running QEMU, the session daemon, `kdive server` and `kdive reconciler` carried
+the operator uid, and the worker its slot uid. On a remote authority host the unit files give QEMU's
+session daemon and the authority service the single account `kdive-provider-authority`. That account
+was read from `deploy/ansible/roles/provider_authority_host`, not from a running host.
+
+**Rule.** In `table inet`, on the `output` hook: `meta skuid <qemu-uid> oif "lo" ct state new reject`,
+preceded by an accept for DNS to the host's loopback resolver. The runbook holds the full text.
+
+**Method.** The hosts were sys-R1 (Ubuntu 26.04, kernel 7.0.0, libvirtd) and sys-R2 (Fedora 44,
+kernel 6.19.10, virtqemud, SELinux enforcing with QEMU in `svirt_t`). Both run libvirt 12.0.0,
+libslirp 4.9.1, nftables 1.1.6 and `systemd-resolved`'s stub resolver; QEMU is 10.2.1 and 10.2.2.
+Guests are Ubuntu 24.04 cloud images in domains carrying kdive's `-netdev user`, `virtio-net-pci`
+and `-gdb` arguments, not provisioned Systems, and the attacking guest is `restrict=off`. Each host
+ran two arrangements. In the first, a throwaway account owned a private session daemon and QEMU, and
+a second throwaway account was the client. In the second, the installed lifecycle and `demo-up.sh`
+stack ran, the domains started through its published daemon socket, and the slot account
+`kdive-worker-1` was the client. Rounds on the installed stack ended with removal, and readiness
+returned. They ran the rule with its DNS exemption and left out the package install, so the
+no-exemption and `apt-get` rows come from the throwaway arrangement. sys-R2's installed arrangement
+has no separate no-rule round: its slot-keyed round below shows the same connections.
+
+| Check, both hosts | No rule | Rule on the QEMU uid |
+|---|---|---|
+| Guest to `10.0.2.2` TCP service on `127.0.0.1` | connected | blocked, timeout |
+| Guest to `[fec0::2]` TCP service on `::1` | connected | blocked, refused |
+| Guest to the host's routable address | connected | blocked, timeout |
+| Guest to `10.0.2.2` UDP service on `127.0.0.1` | reply | blocked, timeout |
+| Guest to another guest's SSH and gdbstub ports | connected | blocked, timeout |
+| Guest DNS to `10.0.2.3`, TCP and UDP | answered | answered with the exemption; fails without |
+| Guest outbound NAT | worked | worked |
+| Guest `apt-get` update and install | worked | worked with the exemption; fails without |
+| SSH `hostfwd` and gdb attach, other account | worked | worked |
+| SSH `hostfwd` and gdb attach, QEMU's account | worked | blocked |
+
+The results did not differ between the hosts or between the arrangements that ran each check. On
+sys-R1 a baseline guest's gdbstub probe left the other guest unable to answer SSH until a host
+debugger attached and detached.
+
+**Limits found.**
+
+- Installed local-libvirt: the rule cannot be used. Keyed to the operator, it left server and
+  reconciler `/readyz` at 503 with their object-store and OIDC checks false. Their Postgres check
+  stayed true while a new Postgres connection from that account was refused, and the operator's
+  own loopback clients failed.
+- Slot account: a rule keyed to `kdive-worker-1` blocked no guest connection and failed that
+  worker's object-store readiness check.
+- Remote authority: not run. The uid is shared, so the same limit is expected. Its listeners bind a
+  routable address, which `oif "lo"` covers for a guest on that host.
+- No shipped arrangement was shown to meet the condition that no kdive service or client uses the
+  QEMU uid.
+- `kdivebuild`: the rule covers this NIC. A domain with `user,id=kdivebuild,restrict=off` and no
+  forward connected to a loopback listener without the rule and failed with it, on both hosts, in
+  the throwaway-account arrangement. A real customization boot was not run; it uses the same session
+  daemon, so the condition above applies to it and it needs the same DNS exemption.
+- Rocky, openSUSE and `qemu:///system` are unproven. The first two were outside the proof's hosts;
+  the third is excluded by the operator.
+
+On both hosts the session daemon and QEMU ran in the login-session scope that started them, so
+there is no stable cgroup to match in place of the uid.
+
 ## Considered & rejected
 
 - **libvirt passt backend.** Rejected: it does not mitigate. passt's default gateway mapping is the

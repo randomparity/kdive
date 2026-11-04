@@ -340,8 +340,9 @@ false, behavior is exactly as before (`restrict=on`, no egress).
 **Security — host loopback is reachable too.** With `restrict=off`, QEMU user-mode networking
 maps the guest's gateway address, `10.0.2.2`, to the host's loopback interface. An egress-enabled
 guest can open TCP connections to any service that listens only on host loopback, as the account
-libvirt runs QEMU as: the libvirt QEMU user under `qemu:///system`, the invoking account under
-`qemu:///session`. For an authority System with `guest_egress` in its manifest, remote authority
+libvirt runs QEMU as: the libvirt QEMU user under `qemu:///system`, the account that owns the
+session daemon under `qemu:///session` (the operator on the installed local-libvirt lifecycle, not
+a worker slot account). For an authority System with `guest_egress` in its manifest, remote authority
 Systems included, it is the authority account that owns the private session daemon. Your
 network-zone firewall does not see these connections, because they terminate on the host. That
 includes kdive's own per-System listeners: other guests' loopback SSH forward ports and, on Systems
@@ -349,9 +350,52 @@ provisioned with `debug.gdbstub`, the unauthenticated QEMU gdbstub, which gives 
 control of that other guest. The image-build customization boot has its own ungated `restrict=off`
 NIC with the same mapping, so it reaches host-loopback services whether or not `guest_egress` is
 set. Before enabling `guest_egress`, treat every loopback-only service on that host as reachable by
-the guest's kernel and userspace, or do not enable it on that host. Whether kdive will mitigate this
-is tracked in #3496; until then the exposure is part of what you accept (ADR-0313, amendment of
-2026-11-03).
+the guest's kernel and userspace, or do not enable it on that host. ADR-0810 accepts this exposure and kdive does not
+mitigate it, so it is part of what you accept (ADR-0313, amendment of 2026-11-03).
+
+**Optional host firewall, and where it cannot be used.** An nftables rule that rejects new
+connections from QEMU's uid to local addresses closes this path, but only on a host where no kdive
+service or client uses that uid. **The installed local-libvirt stack does not meet that condition:**
+the session daemon, QEMU, `kdive server` and `kdive reconciler` all run as the operator. Keyed to
+the operator, the rule took server and reconciler `/readyz` to 503 and stopped the operator's own
+loopback clients until it was removed. On an authority host the session daemon and the authority
+service share one account; that arrangement was not run, so do not assume the rule is safe there.
+Keyed to a worker slot account, the rule blocks no guest connection and fails that worker's
+readiness.
+
+Where the condition does hold, this is the tested rule:
+
+```text
+table inet kdive_guest_loopback {
+  chain output {
+    type filter hook output priority filter; policy accept;
+    meta skuid <qemu-uid> oif "lo" ct state new ip daddr <loopback-resolver> meta l4proto { tcp, udp } th dport 53 accept
+    meta skuid <qemu-uid> oif "lo" ct state new counter reject
+  }
+}
+```
+
+- `<qemu-uid>`: read it from the running process (`ps -o uid= -C qemu-system-x86_64`), not from an
+  account name you expect.
+- `<loopback-resolver>`: the `nameserver` in the host's `/etc/resolv.conf` when it is a loopback
+  address, `127.0.0.53` under the `systemd-resolved` stub. Without this line guest DNS and package
+  installs fail. Delete the line on a host whose resolver is off-host. A resolver on `127.0.0.1` was
+  not tested; expect the guest to reach it through `10.0.2.2:53` as well.
+- `table inet` is required: the slirp IPv6 gateway `fec0::2` reaches `::1`. `oif "lo"` also covers
+  the host's own routable addresses, which a loopback-only `daddr` match misses.
+
+Ubuntu 26.04 and Fedora 44 proved it, with the results in ADR-0810 (amendment of 2026-11-04). The
+guest lost IPv4 and IPv6 loopback services, the host's own address, loopback UDP, and other guests'
+SSH and gdbstub ports. It kept DNS, outbound NAT and package installs, and clients on another
+account kept SSH and gdbstub attach. The customization boot NIC is covered the same way when its
+domain runs under the keyed uid. Rocky, openSUSE and `qemu:///system` are unproven.
+
+The rule covers traffic the kernel routes through `lo`; off-host destinations remain your network
+zone's job. It is not persistent: a reboot or `nft flush ruleset` removes it with no sign from
+QEMU, and on Fedora stopping `nftables.service` runs that flush. Confirm it with
+`nft list table inet kdive_guest_loopback`, and from an egress guest confirm that a connection to
+`10.0.2.2:<port>` of a host listener fails. A timeout counts: the guest sees IPv4 attempts time out
+and IPv6 attempts refused.
 
 **Note:** `restrict=off` opens the *route*; the guest still needs to DHCP the NIC and populate
 `/etc/resolv.conf` (SLIRP hands out `10.0.2.15` with DNS at `10.0.2.3`). The `kdive-ready` images do
