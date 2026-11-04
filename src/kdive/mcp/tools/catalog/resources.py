@@ -241,7 +241,7 @@ def _project_capabilities(envelope: ToolResponse, runtime: ProviderRuntime | Non
 
     Reads the resolved runtime's descriptor and emits a provider-neutral ``capabilities`` plane
     list plus the raw supported sets. No ``ResourceKind`` branching: every plane token is derived
-    from the descriptor or the universal ports. The block is omitted (never an error) when no
+    from the descriptor. The block is omitted (never an error) when no
     resolver is wired or the kind is unregistered — the same degrade-don't-fail contract as the
     staged-volume probe (ADR-0194).
     """
@@ -262,11 +262,15 @@ def _project_capabilities(envelope: ToolResponse, runtime: ProviderRuntime | Non
 def _capability_planes(runtime: ProviderRuntime) -> list[str]:
     """The sorted supported-plane tokens for ``runtime``, derived only from the descriptor.
 
-    ``build``/``boot`` are universal (every runtime wires a builder/booter). ``kdump`` and
+    ``build``/``boot`` require explicit support, since required ports may refuse. ``kdump`` and
     ``host-dump`` track the core-producing capture methods; ``debug`` and ``introspect`` track the
     non-empty transport/introspection sets.
     """
-    planes = {"build", "boot"}
+    planes: set[str] = set()
+    if runtime.support.supports_build:
+        planes.add("build")
+    if runtime.support.supports_boot:
+        planes.add("boot")
     if CaptureMethod.KDUMP in runtime.support.capture_methods:
         planes.add("kdump")
     if CaptureMethod.HOST_DUMP in runtime.support.capture_methods:
@@ -341,6 +345,9 @@ def register(
         **below the rootfs image's ISA floor** (``x86-64-v2`` for EL9/RHEL-family) produces a
         non-booting System — admission validates only that the host can deliver the model, not that
         the image can run on it.
+
+        ``data.capabilities`` lists advertised provider operations; an inventory-only provider
+        can return an empty list without claiming boot or build support.
 
         ``data.supported_capture_methods`` is the provider-wide set across every guest
         architecture the provider can host; it is not a given System's set or a readiness claim.

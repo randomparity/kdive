@@ -51,7 +51,9 @@ def _register_resources_register(
             ResourceKind,
             Field(
                 description=(
-                    "Provider kind to register. 'remote-libvirt' requires host_uri + base_image; "
+                    "Provider kind to register. BYO is config-only: declare [[byo_host]] in "
+                    "systems.toml and call ops.reconcile_systems; runtime registration refuses it. "
+                    "'remote-libvirt' requires host_uri + base_image; "
                     "'local-libvirt' requires host_uri; 'fault-inject' takes neither (supplying "
                     "one is a configuration_error)."
                 )
@@ -123,12 +125,14 @@ def _register_resources_register(
             ),
         ] = None,
     ) -> ToolResponse:
-        """Register a runtime resource of any provider kind (platform_admin).
+        """Register a supported runtime resource (platform_admin); BYO is config-only.
 
         ``kind`` selects the branch: 'remote-libvirt' needs ``host_uri`` + ``base_image``,
         'local-libvirt' needs ``host_uri``, 'fault-inject' needs neither. A field that does not
         apply to the chosen kind, or a required one left blank, returns ``configuration_error``,
-        as does a kind this deployment has not composed.
+        as does a kind this deployment has not composed. BYO hosts are config-owned: this
+        tool refuses them before probes, secrets or inserts. Declare [[byo_host]] in systems.toml
+        and call ops.reconcile_systems instead.
         """
         try:
             assert_kind_composed(kind, resolver.registered_kinds())

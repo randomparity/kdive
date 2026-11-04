@@ -109,6 +109,8 @@ def build_runtime(
         vmcore_introspector=introspect,
         live_introspector=introspect,
         support=ProviderSupport(
+            supports_build=True,
+            supports_boot=True,
             component_sources=_component_sources(),
             capture_methods=frozenset(
                 {CaptureMethod.CONSOLE, CaptureMethod.HOST_DUMP, CaptureMethod.GDBSTUB}

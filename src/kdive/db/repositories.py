@@ -465,7 +465,7 @@ SYSTEMS = StatefulRepository(
     System,
     "systems",
     SystemState,
-    json_columns=frozenset({"provisioning_profile", "resolved_cpu"}),
+    json_columns=frozenset({"provisioning_profile", "resolved_cpu", "byo_adopt_facts"}),
 )
 INVESTIGATIONS = StatefulRepository(
     Investigation, "investigations", InvestigationState, json_columns=frozenset({"external_refs"})
