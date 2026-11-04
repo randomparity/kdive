@@ -929,6 +929,12 @@ including `KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG`, `KDIVE_SYSTEMS_TOML` and
 `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`. Set `KDIVE_KERNEL_SRC` to a complete matching
 kernel tree with boot image, config, modules and unstripped DWARF `vmlinux`; its filesystem
 support must match the registered guest root (including `CONFIG_BTRFS_FS` for btrfs).
+On a foreign controller, set `KDIVE_PPC64LE_BUNDLE` to a native POWER-produced directory holding
+`kernel.tar.gz` and gzip `initrd.img`, built with `combined_kernel_tar` and `spine_initrd` in
+`tests.integration.live_stack.spine`. Copy the matching `.config`, unstripped `vmlinux` and
+`include/config/kernel.release` to the controller's `KDIVE_KERNEL_SRC`; the bundle supplies the
+boot image and modules. Its boot GNU build ID and module release must match that tree. Leave
+the bundle variable unset only when generating the artifacts on a matching native controller.
 The guest needs drgn and a working guest agent. Authority and control-plane revisions must match
 the candidate. The frame rechecks architecture before allocation and owns lifecycle cleanup.
 
