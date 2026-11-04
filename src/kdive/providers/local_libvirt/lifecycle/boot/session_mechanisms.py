@@ -73,7 +73,7 @@ _ARTIFACT_ROOT_REFUSED = "artifact root is not an owner-only service-owned direc
 _NOT_CANONICAL = "external-boot path component is not a canonical identifier"
 _RECOVERY_REFUSED = "recovery directory is not an owner-only service-owned directory"
 
-PAYLOAD_NAMES: tuple[str, ...] = ("kernel", "initrd", "modules")
+PAYLOAD_NAMES: tuple[str, ...] = ("kernel", "initrd", "modules", "debuginfo")
 
 UNAME_PROGRAM = "/usr/bin/uname"
 CAT_PROGRAM = "/usr/bin/cat"
