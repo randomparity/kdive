@@ -6024,10 +6024,10 @@ def test_record_cleanup_quarantine_rejects_a_tombstone_finalized_before_its_lock
     finalized: list[bool] = []
 
     def finalize_then_lock(fd: int, operation: int) -> None:
-        if not finalized:  # a whole finalize, rmdir included, lands before the writer locks
+        if not finalized:  # finalize's under-lock unlinks land before the writer locks
             finalized.append(True)
-            with RecoveryMetadataStore(root) as racing:
-                racing.finalize_tombstone(point.recovery_ref, point, _cleanup_proof_for(point))
+            (directory / "cleanup-quarantine.json").unlink()
+            (directory / "tombstone.json").unlink()
         flock(fd, operation)
 
     monkeypatch.setattr(external_boot_module.fcntl, "flock", finalize_then_lock)
@@ -6035,7 +6035,7 @@ def test_record_cleanup_quarantine_rejects_a_tombstone_finalized_before_its_lock
         store.record_cleanup_quarantine(point, _cleanup_proof_for(point))
     monkeypatch.undo()
 
-    assert not directory.exists()
+    assert list(directory.iterdir()) == []
 
 
 @pytest.mark.parametrize("operation", ["adopt", "finalize"])
