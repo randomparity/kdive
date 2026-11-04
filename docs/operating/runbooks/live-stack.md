@@ -289,6 +289,8 @@ phase's diagnostics if packaging, provisioning, or boot fails.
 
 ## 4. Start the host processes
 
+With an installed local authority, read the [live authority lab traps](live-testing.md#live-authority-lab) first.
+
 From a source checkout, run the convenience wrapper:
 
 ```bash
