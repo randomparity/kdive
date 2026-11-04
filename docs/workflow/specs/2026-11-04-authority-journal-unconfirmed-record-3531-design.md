@@ -18,8 +18,8 @@ attempt therefore needs the very slot the unconfirmed record holds. The schema i
 ## Decision
 
 Quarantine by rename (operator-approved 2026-11-04). When the file holds exactly one valid record
-past the confirmed head, that record belongs to another attempt and the next record differs from it, the journal copies that record to
-an evidence file, builds the confirmed prefix in a scratch file, and atomically renames it over
+past the confirmed head, that record belongs to another attempt and the next record differs
+from it, the journal copies that record to an evidence file, builds the confirmed prefix in a scratch file, and atomically renames it over
 the active journal. The database is the authority: the record never reached it, and any
 provider effect after a confirmed `mutation-started` is re-observed by `_quiescence`, so
 dropping the record loses no authority fact. Journal bytes are never edited in place and the

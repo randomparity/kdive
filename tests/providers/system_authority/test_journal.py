@@ -364,3 +364,26 @@ def test_abandon_evidence_is_bounded_across_systems(
         with pytest.raises(ValueError, match="evidence is full"):
             journal.abandon_unconfirmed_tail(2)
         assert len(journal.read()) == 3
+
+
+def test_abandon_refuses_a_journal_changed_after_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root(tmp_path)
+    system_id, records = _confirmed_then_extra(root)
+    calls: list[str] = []
+    real = FileAuthoritySystemJournal._write_scratch
+
+    def touch_journal_after_prefix(directory: int, name: str, payload: bytes) -> None:
+        real(directory, name, payload)
+        calls.append(name)
+        if len(calls) == 2:
+            os.utime(root / "system-operations" / f"{system_id}.jsonl", ns=(1, 1))
+
+    monkeypatch.setattr(
+        FileAuthoritySystemJournal, "_write_scratch", staticmethod(touch_journal_after_prefix)
+    )
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        with pytest.raises(ValueError, match="changed since validation"):
+            journal.abandon_unconfirmed_tail(2)
+        assert journal.read() == records
