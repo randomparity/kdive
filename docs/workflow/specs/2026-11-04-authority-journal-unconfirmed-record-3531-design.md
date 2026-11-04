@@ -18,7 +18,7 @@ attempt therefore needs the very slot the unconfirmed record holds. The schema i
 ## Decision
 
 Quarantine by rename (operator-approved 2026-11-04). When the file holds exactly one valid record
-past the confirmed head and the next record differs from it, the journal copies that record to
+past the confirmed head, that record belongs to another attempt and the next record differs from it, the journal copies that record to
 an evidence file, builds the confirmed prefix in a scratch file, and atomically renames it over
 the active journal. The database is the authority: the record never reached it, and any
 provider effect after a confirmed `mutation-started` is re-observed by `_quiescence`, so
@@ -54,8 +54,9 @@ plus the evidence record is the original).
   moves to a new `unconfirmed` field. Without this split, every reader of the tail
   (`_begin`, `_quiescence`, `_ensure_mutation_started`) would mistake an unconfirmed record for
   confirmed progress, and a quarantine could record a terminal outcome without the provider
-  call. `_anchor` adopts an identical `unconfirmed` record as now, and otherwise quarantines
-  it, then appends the computed record. `_ensure_mutation_started` also skips the `admitted`
+  call. `_anchor` adopts an identical `unconfirmed` record as now; a differing one of the same
+  attempt stays refused (the existing changed-recovery-observation contract); one of another
+  attempt is quarantined, then the computed record is appended. `_ensure_mutation_started` also skips the `admitted`
   anchor when `admitted` is already confirmed (an existing gap on the same crash path, which a
   quarantined `mutation-started` would otherwise turn into a database refusal).
 - Out: SQL, requeue bound (#3530), journal bounds, reader validation, deploy templates.

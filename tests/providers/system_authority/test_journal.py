@@ -9,7 +9,10 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from kdive.providers.system_authority import journal as journal_module
 from kdive.providers.system_authority.journal import (
+    ABANDONED_DIRECTORY,
+    MAX_ABANDONED_PER_SYSTEM,
     MAX_JOURNAL_FILES,
     FileAuthoritySystemJournal,
     inventory_authority_system_journals,
@@ -20,6 +23,7 @@ from kdive.providers.system_authority.protocol import (
     AuthoritySystemJournalRecordV1,
     AuthoritySystemOperation,
     authority_system_record_digest,
+    canonical_system_authority_bytes,
     canonical_system_record_payload,
 )
 
@@ -44,6 +48,7 @@ def _record(
     previous_digest: str,
     phase: AuthoritySystemJournalPhase,
     outcome: str | None = None,
+    generation: int = 1,
 ) -> AuthoritySystemJournalRecordV1:
     fields: dict[str, object] = {
         "schema": "authority-system-journal-v1",
@@ -58,7 +63,7 @@ def _record(
         "operation": AuthoritySystemOperation.PROVISION,
         "operation_identity": "provision-a",
         "authority_id": _AUTHORITY_ID,
-        "generation": 1,
+        "generation": generation,
         "attempt_id": _ATTEMPT_ID,
         "operation_digest": _DIGEST,
         "bootstrap_identity": _DIGEST,
@@ -188,3 +193,174 @@ def test_inventory_rejects_aggregate_4097_before_opening_any_journal(tmp_path: P
 def test_canonical_payload_rejects_self_inclusion() -> None:
     with pytest.raises(ValueError, match="exclude"):
         canonical_system_record_payload({"canonical_record": json.dumps({})})
+
+
+def _confirmed_then_extra(
+    root: Path, *, extra_generation: int = 1
+) -> tuple[UUID, tuple[AuthoritySystemJournalRecordV1, ...]]:
+    """Two confirmed records and one unconfirmed record appended after them."""
+    system_id = uuid4()
+    journal = FileAuthoritySystemJournal(root, system_id)
+    admitted = _record(
+        system_id,
+        sequence=1,
+        previous_digest=GENESIS_DIGEST,
+        phase=AuthoritySystemJournalPhase.ADMITTED,
+    )
+    started = _record(
+        system_id,
+        sequence=2,
+        previous_digest=authority_system_record_digest(admitted),
+        phase=AuthoritySystemJournalPhase.MUTATION_STARTED,
+    )
+    extra = _record(
+        system_id,
+        sequence=3,
+        previous_digest=authority_system_record_digest(started),
+        phase=(
+            AuthoritySystemJournalPhase.PROVIDER_RETURNED
+            if extra_generation == 1
+            else AuthoritySystemJournalPhase.WATERMARK_INSTALLED
+        ),
+        generation=extra_generation,
+    )
+    for record in (admitted, started, extra):
+        journal.append(record)
+    journal.close()
+    return system_id, (admitted, started, extra)
+
+
+def _evidence_names(root: Path) -> list[str]:
+    return sorted(os.listdir(root / "system-operations" / ABANDONED_DIRECTORY))
+
+
+def test_abandon_unconfirmed_tail_keeps_prefix_and_evidence(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    system_id, (admitted, started, extra) = _confirmed_then_extra(root)
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        journal.abandon_unconfirmed_tail(2)
+        assert journal.read() == (admitted, started)
+        successor = _record(
+            system_id,
+            sequence=3,
+            previous_digest=authority_system_record_digest(started),
+            phase=AuthoritySystemJournalPhase.WATERMARK_INSTALLED,
+            generation=2,
+        )
+        journal.append(successor)
+        assert journal.read() == (admitted, started, successor)
+    directory = root / "system-operations" / ABANDONED_DIRECTORY
+    digest = authority_system_record_digest(extra).removeprefix("sha256:")
+    assert _evidence_names(root) == [f"{system_id}.3.{digest}.jsonl"]
+    assert oct(directory.stat().st_mode & 0o777) == "0o700"
+    evidence = directory / f"{system_id}.3.{digest}.jsonl"
+    assert oct(evidence.stat().st_mode & 0o777) == "0o600"
+    assert evidence.read_bytes() == canonical_system_authority_bytes(extra) + b"\n"
+    assert [head.system_id for head in inventory_authority_system_journals(root)] == [system_id]
+
+
+def test_abandon_refuses_without_exactly_one_extra_record(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    system_id, _ = _confirmed_then_extra(root)
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        for confirmed in (1, 3):
+            with pytest.raises(ValueError, match="no single unconfirmed record"):
+                journal.abandon_unconfirmed_tail(confirmed)
+        assert len(journal.read()) == 3
+    assert not (root / "system-operations" / ABANDONED_DIRECTORY).exists()
+
+
+def test_abandon_evidence_is_bounded_per_system(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    system_id, (_, started, _) = _confirmed_then_extra(root)
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        journal.abandon_unconfirmed_tail(2)
+        for generation in range(2, MAX_ABANDONED_PER_SYSTEM + 2):
+            journal.append(
+                _record(
+                    system_id,
+                    sequence=3,
+                    previous_digest=authority_system_record_digest(started),
+                    phase=AuthoritySystemJournalPhase.WATERMARK_INSTALLED,
+                    generation=generation,
+                )
+            )
+            if generation <= MAX_ABANDONED_PER_SYSTEM:
+                journal.abandon_unconfirmed_tail(2)
+        with pytest.raises(ValueError, match="evidence is full"):
+            journal.abandon_unconfirmed_tail(2)
+        assert len(journal.read()) == 3
+    assert len(_evidence_names(root)) == MAX_ABANDONED_PER_SYSTEM
+
+
+def test_abandon_is_idempotent_after_partial_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root(tmp_path)
+    system_id, (admitted, started, extra) = _confirmed_then_extra(root)
+    real_rename = os.rename
+
+    def crash_on_journal_rename(src, dst, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if str(dst) == f"{system_id}.jsonl":
+            raise OSError("simulated crash before the journal rename")
+        return real_rename(src, dst, *args, **kwargs)
+
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        monkeypatch.setattr(os, "rename", crash_on_journal_rename)
+        with pytest.raises(OSError, match="simulated crash"):
+            journal.abandon_unconfirmed_tail(2)
+        monkeypatch.undo()
+        assert journal.read() == (admitted, started, extra)
+        pending = root / "system-operations" / ABANDONED_DIRECTORY / f"{system_id}.pending"
+        pending.write_bytes(b"short")
+        journal.abandon_unconfirmed_tail(2)
+        assert journal.read() == (admitted, started)
+    assert len(_evidence_names(root)) == 1
+    assert [head.sequence for head in inventory_authority_system_journals(root)] == [2]
+
+
+def test_abandoned_directory_must_be_private_and_not_a_link(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    system_id, _ = _confirmed_then_extra(root)
+    directory = root / "system-operations" / ABANDONED_DIRECTORY
+    other = tmp_path / "elsewhere"
+    other.mkdir(mode=0o700)
+    directory.symlink_to(other)
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        with pytest.raises(OSError):
+            journal.abandon_unconfirmed_tail(2)
+        assert len(journal.read()) == 3
+    with pytest.raises(OSError):
+        inventory_authority_system_journals(root)
+    directory.unlink()
+    directory.mkdir(mode=0o755)
+    directory.chmod(0o755)
+    with FileAuthoritySystemJournal(root, system_id) as journal, pytest.raises(PermissionError):
+        journal.abandon_unconfirmed_tail(2)
+    with pytest.raises(PermissionError):
+        inventory_authority_system_journals(root)
+    assert other.exists() and not list(other.iterdir())
+
+
+def test_inventory_ignores_abandoned_directory(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    system_id, _ = _confirmed_then_extra(root)
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        journal.abandon_unconfirmed_tail(2)
+    heads = inventory_authority_system_journals(root)
+    assert [(head.system_id, head.sequence) for head in heads] == [(system_id, 2)]
+
+
+def test_abandon_evidence_is_bounded_across_systems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root(tmp_path)
+    first, _ = _confirmed_then_extra(root)
+    second, _ = _confirmed_then_extra(root)
+    monkeypatch.setattr(journal_module, "MAX_ABANDONED_FILES", 1)
+    with FileAuthoritySystemJournal(root, first) as journal:
+        journal.abandon_unconfirmed_tail(2)
+    with FileAuthoritySystemJournal(root, second) as journal:
+        with pytest.raises(ValueError, match="evidence is full"):
+            journal.abandon_unconfirmed_tail(2)
+        assert len(journal.read()) == 3

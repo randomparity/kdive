@@ -117,8 +117,8 @@ function accepts nothing but `sequence = head + 1` chained to the head digest, a
 requires the same of the file. A different request, notably `systems.teardown`, needs that slot.
 No journal phase or field can express the recovery, so none is added.
 
-When the file holds exactly one valid record past the confirmed head and the next record
-differs, the journal keeps that record as evidence and replaces the active file with the
+When the file holds exactly one valid record past the confirmed head, it belongs to another
+attempt than the request, and the request's next record differs, the journal keeps that record as evidence and replaces the active file with the
 confirmed prefix by atomic rename. The database is the authority: the record never reached it, and
 any provider effect after a confirmed `mutation-started` is re-observed by the quiescence check,
 so dropping it loses no authority fact. Evidence lives in a private `abandoned/`

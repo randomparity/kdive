@@ -80,9 +80,12 @@ class AuthoritySystemRepository(Protocol):
 
 @dataclass(slots=True)
 class _JournalState:
+    """The database-confirmed prefix, plus the one file record the database never confirmed."""
+
     records: list[AuthoritySystemJournalRecordV1]
     db_sequence: int
     db_digest: str
+    unconfirmed: AuthoritySystemJournalRecordV1 | None = None
 
 
 @dataclass(slots=True)
@@ -404,7 +407,9 @@ class AuthoritySystemService:
                 or resolved.head.phase is not db_record.phase
             ):
                 raise AuthoritySystemServiceError("journal-conflict")
-        return _JournalState(records, resolved.head.sequence, resolved.head.digest)
+        confirmed = resolved.head.sequence
+        unconfirmed = records[confirmed] if len(records) > confirmed else None
+        return _JournalState(records[:confirmed], confirmed, resolved.head.digest, unconfirmed)
 
     async def _quiescence(
         self,
@@ -482,6 +487,16 @@ class AuthoritySystemService:
         state: _JournalState,
     ) -> bool:
         own = [record for record in state.records if record.authority_id == request.authority_id]
+        if own and own[-1].phase is AuthoritySystemJournalPhase.ADMITTED:
+            await self._anchor(
+                peer_incarnation,
+                request,
+                resolved,
+                journal,
+                state,
+                AuthoritySystemJournalPhase.MUTATION_STARTED,
+            )
+            return True
         if own and own[-1].phase in {
             AuthoritySystemJournalPhase.MUTATION_STARTED,
             AuthoritySystemJournalPhase.PROVIDER_RETURNED,
@@ -561,6 +576,27 @@ class AuthoritySystemService:
             }
         )
 
+    @staticmethod
+    def _abandon_unconfirmed(journal: FileAuthoritySystemJournal, state: _JournalState) -> None:
+        """Quarantine a record the database never confirmed so a different request can proceed."""
+        assert state.unconfirmed is not None
+        try:
+            journal.abandon_unconfirmed_tail(state.db_sequence)
+        except ValueError:
+            _log.exception(
+                "authority System %s journal refused to quarantine the unconfirmed record "
+                "at sequence %d",
+                state.unconfirmed.system_id,
+                state.unconfirmed.sequence,
+            )
+            raise AuthoritySystemServiceError("journal-conflict") from None
+        _log.warning(
+            "authority System %s journal quarantined the unconfirmed record at sequence %d",
+            state.unconfirmed.system_id,
+            state.unconfirmed.sequence,
+        )
+        state.unconfirmed = None
+
     async def _anchor(
         self,
         peer_incarnation: str,
@@ -583,13 +619,17 @@ class AuthoritySystemService:
             observation=observation,
             outcome=outcome,
         )
-        if len(state.records) == state.db_sequence:
+        if state.unconfirmed is not None and state.unconfirmed != record:
+            if (state.unconfirmed.authority_id, state.unconfirmed.generation) == (
+                request.authority_id,
+                request.generation,
+            ):
+                raise AuthoritySystemServiceError("journal-conflict")
+            self._abandon_unconfirmed(journal, state)
+        if state.unconfirmed is None:
             journal.append(record)
-            state.records.append(record)
-        elif state.records[state.db_sequence] != record:
-            raise AuthoritySystemServiceError("journal-conflict")
-        else:
-            record = state.records[state.db_sequence]
+        state.unconfirmed = None
+        state.records.append(record)
         result = await self._repository.advance_head(
             peer_incarnation,
             request,
