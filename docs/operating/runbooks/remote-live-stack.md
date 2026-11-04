@@ -935,6 +935,14 @@ On a foreign controller, set `KDIVE_PPC64LE_BUNDLE` to a native POWER-produced d
 `include/config/kernel.release` to the controller's `KDIVE_KERNEL_SRC`; the bundle supplies the
 boot image and modules. Its boot GNU build ID and module release must match that tree. Leave
 the bundle variable unset only when generating the artifacts on a matching native controller.
+For a Debian authority image build, the prerequisite role selects the installed running
+`vmlinuz-<release>` or `vmlinux-<release>` kernel. When the privileged direct libguestfs backend
+has been verified to provide network access under the existing host confinement, run the image
+playbook with `--skip-tags guest_image_prereqs_passt_relax` to preserve that policy. This skips
+only the existing global userns/passt relaxations; kernel and dependency preparation still run.
+The default role retains those blanket workarounds for other deployments. Record which
+selection and network proof were used.
+
 The guest needs drgn and a working guest agent. Authority and control-plane revisions must match
 the candidate. The frame rechecks architecture before allocation and owns lifecycle cleanup.
 

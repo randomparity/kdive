@@ -98,3 +98,20 @@ deployment. Its isolated ARM image needs the same drgn build tools/ELF headers a
 libkdumpfile runtime library through the existing architecture condition. Preserve amd64
 packages and pinned dependency versions. Verify the actual native ARM image build and normal
 backend bucket initialization before live execution; host venv success is insufficient.
+
+### Native image prerequisites
+
+The required native image operation exposed the Debian guest-image prerequisite's assumption
+that the running kernel is named `vmlinuz-<release>`; the POWER host instead installs the
+regular `vmlinux-<release>` file. In `guest_image_prereqs/tasks/main.yml`, select those exact
+running-release regular files in that order, fail actionably if neither exists, and make only
+the selected kernel readable. Preserve the existing x86 preference. Extend the existing real
+Ansible role runner with isolated x86, POWER, both and missing-file cases; demonstrate the
+POWER case fails before the fix and rerun the actual image operation afterward.
+
+The selected privileged direct-backend image workflow has demonstrated network access with
+the host's AppArmor/userns policy unchanged. Tag only the three existing passt policy-relaxation
+tasks so this deployment can explicitly skip them. Preserve default behavior and test that
+selection excludes exactly those tasks while retaining kernel and dependency prerequisites.
+Record the explicit selection in the runbook; this does not fix the existing blanket workaround
+for other deployments. Include these permission boundaries in the final security review.

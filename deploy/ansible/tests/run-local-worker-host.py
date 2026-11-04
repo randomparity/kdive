@@ -45,6 +45,85 @@ def tasks(output: str, *, include_tags: bool = False) -> list[str]:
     return lines if include_tags else [line.split("\tTAGS:", 1)[0] for line in lines]
 
 
+def guest_image_kernel_readability() -> None:
+    """Execute the production kernel-selection tasks against an isolated boot directory."""
+    role_tasks = yaml.safe_load((ANSIBLE / "roles/guest_image_prereqs/tasks/main.yml").read_text())
+    kernel_task = role_tasks[0]["block"][0]
+    for label, names, selected in (
+        ("x86", ["vmlinuz-proof"], "vmlinuz-proof"),
+        ("power", ["vmlinux-proof"], "vmlinux-proof"),
+        ("both", ["vmlinuz-proof", "vmlinux-proof"], "vmlinuz-proof"),
+        ("missing", [], None),
+    ):
+        with tempfile.TemporaryDirectory(prefix="kdive-image-kernel-") as temp_dir:
+            boot = Path(temp_dir)
+            for name in names:
+                kernel = boot / name
+                kernel.write_bytes(b"kernel")
+                kernel.chmod(0o600)
+            production = yaml.safe_load(yaml.safe_dump(kernel_task).replace("/boot/", f"{boot}/"))
+            probe = boot / "probe.yml"
+            probe.write_text(
+                yaml.safe_dump(
+                    [
+                        {
+                            "hosts": "localhost",
+                            "connection": "local",
+                            "gather_facts": False,
+                            "vars": {"ansible_kernel": "proof"},
+                            "tasks": [production],
+                        }
+                    ]
+                )
+            )
+            result = playbook(probe)
+            output = result.stdout + result.stderr
+            if selected is None:
+                require(result.returncode != 0, "missing kernel must fail")
+                require("Install the running kernel" in output, output)
+                require(
+                    not any((boot / name).exists() for name in ("vmlinuz-proof", "vmlinux-proof")),
+                    "missing kernel check created a kernel",
+                )
+            else:
+                require(result.returncode == 0, f"{label} kernel selection failed:\n{output}")
+                for name in names:
+                    expected = 0o644 if name == selected else 0o600
+                    require(
+                        (boot / name).stat().st_mode & 0o777 == expected,
+                        f"{label}: wrong permissions for {name}",
+                    )
+    with tempfile.TemporaryDirectory(prefix="kdive-image-policy-") as temp_dir:
+        probe = Path(temp_dir) / "probe.yml"
+        probe.write_text(
+            yaml.safe_dump([{"hosts": "localhost", "gather_facts": False, "tasks": role_tasks}])
+        )
+        all_tasks = playbook(probe, "--list-tasks")
+        selected = playbook(probe, "--list-tasks", "--skip-tags", "guest_image_prereqs_passt_relax")
+        require(
+            all_tasks.returncode == selected.returncode == 0, all_tasks.stderr + selected.stderr
+        )
+        policy_names = {
+            task["name"] for task in role_tasks[0]["block"] if task["name"].startswith("(b")
+        }
+        removed = set(tasks(all_tasks.stdout)) - set(tasks(selected.stdout))
+        require(
+            len(removed) == 3
+            and all(any(name in line for line in removed) for name in policy_names),
+            "passt skip tag must remove exactly the three policy tasks",
+        )
+        require(
+            "Make the installed running kernel readable" in selected.stdout
+            and "Install a DHCP client" in selected.stdout
+            and "Ensure debootstrap" in selected.stdout,
+            "passt skip tag removed required image prerequisites",
+        )
+    print("ok image kernel: exact running-release selection, failure and scoped policy skip")
+
+
+guest_image_kernel_readability()
+
+
 def live_vm_operator_identity() -> None:
     """Load real role defaults without applying the host, then execute its identity lookup."""
     runner_play = yaml.safe_load((ANSIBLE / "playbooks/runner.yml").read_text())[0]

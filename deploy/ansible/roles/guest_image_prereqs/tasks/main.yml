@@ -3,11 +3,37 @@
   when: ansible_os_family == 'Debian'
   block:
     - name: (a) The appliance must read the host kernel
-      ansible.builtin.file:
-        path: "/boot/vmlinuz-{{ ansible_kernel }}"
-        mode: "0644"
+      block:
+        - name: Find the installed running kernel
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "/boot/vmlinuz-{{ ansible_kernel }}"
+            - "/boot/vmlinux-{{ ansible_kernel }}"
+          register: guest_image_prereqs_kernel_candidates
+
+        - name: Select the installed running kernel
+          ansible.builtin.set_fact:
+            guest_image_prereqs_kernel_paths: >-
+              {{ guest_image_prereqs_kernel_candidates.results
+                 | selectattr('stat.isreg', 'defined')
+                 | selectattr('stat.isreg') | map(attribute='item') | list }}
+
+        - name: Require an installed running kernel
+          ansible.builtin.assert:
+            that: guest_image_prereqs_kernel_paths | length > 0
+            fail_msg: >-
+              Install the running kernel {{ ansible_kernel }} at
+              /boot/vmlinuz-{{ ansible_kernel }} or /boot/vmlinux-{{ ansible_kernel }}
+              before building the libguestfs appliance.
+
+        - name: Make the installed running kernel readable by the appliance
+          ansible.builtin.file:
+            path: "{{ guest_image_prereqs_kernel_paths | first }}"
+            mode: "0644"
 
     - name: (b1) Relax the global unprivileged-userns restriction for passt
+      tags: [guest_image_prereqs_passt_relax]
       ansible.posix.sysctl:
         name: kernel.apparmor_restrict_unprivileged_userns
         value: "0"
@@ -16,6 +42,7 @@
         reload: true
 
     - name: (b2) Disable the per-binary AppArmor profile for passt
+      tags: [guest_image_prereqs_passt_relax]
       ansible.builtin.file:
         src: /etc/apparmor.d/usr.bin.passt
         dest: /etc/apparmor.d/disable/usr.bin.passt
@@ -24,6 +51,7 @@
       register: guest_image_prereqs_passt_profile
 
     - name: (b2) Unload the passt AppArmor profile
+      tags: [guest_image_prereqs_passt_relax]
       ansible.builtin.command: apparmor_parser -R /etc/apparmor.d/usr.bin.passt
       when: guest_image_prereqs_passt_profile is changed  # noqa: no-handler
       # Sequential appliance fix within a block — not handler-appropriate; the
