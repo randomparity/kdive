@@ -5,13 +5,17 @@ from __future__ import annotations
 import hashlib
 import posixpath
 import stat
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     GuestDebuginfoFile,
     debuginfo_file_state,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import (
+    VMLINUX_HEADROOM_BYTES,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import InactiveGuest
 from kdive.providers.ports.external_boot import (
@@ -33,6 +37,7 @@ _STAGING = f"{_DIRECTORY}/.kdive-{_BINDING.activation_id}-vmlinux-staging"
 _OLD = f"{_DIRECTORY}/.kdive-{_BINDING.activation_id}-vmlinux-old"
 _NEW = b"new dwarf vmlinux"
 _PRIOR = b"prior vmlinux from another install"
+_STAGE: dict[str, Any] = {"size": len(_NEW), "system_id": _BINDING.system_id}
 _STANDARD_DIRECTORIES = ("/", "/usr", "/usr/lib", "/usr/lib/debug", "/usr/lib/debug/lib")
 
 
@@ -50,6 +55,7 @@ class _Guest:
         self.symlinks: dict[str, str] = {}
         self.mutations: list[tuple[str, ...]] = []
         self.fail_upload = False
+        self.statvfs_result: dict[str, int] = {"bavail": 1 << 40, "blocks": 1 << 40, "frsize": 4096}
 
     def _resolve(self, path: str, *, follow_last: bool = True) -> str:
         parts = [part for part in path.split("/") if part]
@@ -82,6 +88,10 @@ class _Guest:
             "st_uid": file.uid,
             "st_gid": file.gid,
         }
+
+    def statvfs(self, path: str) -> dict[str, int]:
+        assert self._resolve(path) in self.directories
+        return self.statvfs_result
 
     def is_symlink(self, path: str) -> int:
         return int(self._resolve(path, follow_last=False) in self.symlinks)
@@ -161,7 +171,7 @@ def _with_prior(guest: _Guest) -> _Guest:
 
 def _activate(guest: _Guest, source: ComponentState) -> None:
     file = _file(guest)
-    file.stage(source, _TARGET, _upload(guest))
+    file.stage(source, _TARGET, _upload(guest), **_STAGE)
     file.publish(source, _TARGET)
 
 
@@ -304,7 +314,7 @@ def test_a_failed_upload_leaves_the_live_name_untouched_and_recovery_settles() -
     guest.fail_upload = True
 
     with pytest.raises(RuntimeError, match="No space"):
-        _file(guest).stage(_PRIOR_STATE, _TARGET, _upload(guest))
+        _file(guest).stage(_PRIOR_STATE, _TARGET, _upload(guest), **_STAGE)
     _file(guest).restore(_PRIOR_STATE, _TARGET)
 
     assert _names(guest) == {_LIVE: _PRIOR}
@@ -315,7 +325,10 @@ def test_a_staged_file_that_does_not_read_back_as_the_target_stops_before_any_mo
 
     with pytest.raises(ValueError, match="does not match the materialized vmlinux"):
         _file(guest).stage(
-            _PRIOR_STATE, _TARGET, lambda path: guest.upload(b"corrupted in transit", path)
+            _PRIOR_STATE,
+            _TARGET,
+            lambda path: guest.upload(b"corrupted in transit", path),
+            **_STAGE,
         )
 
     assert not any(mutation[0] == "mv" for mutation in guest.mutations)
@@ -343,7 +356,7 @@ def test_staging_refuses_when_the_live_name_is_not_the_recorded_prior() -> None:
     guest = _with_prior(_Guest())
     file = _file(guest)
 
-    _no_mutation(guest, lambda: file.stage(_ABSENT, _TARGET, _upload(guest)))
+    _no_mutation(guest, lambda: file.stage(_ABSENT, _TARGET, _upload(guest), **_STAGE))
 
 
 def test_publication_refuses_when_staging_disappeared() -> None:
@@ -372,9 +385,63 @@ def test_a_symlinked_release_directory_is_refused() -> None:
     guest.directories.update({"/usr/lib/debug/lib/modules", "/elsewhere"})
     guest.symlinks[_DIRECTORY] = "/elsewhere"
 
-    _no_mutation(guest, lambda: _file(guest).stage(_ABSENT, _TARGET, _upload(guest)))
+    _no_mutation(guest, lambda: _file(guest).stage(_ABSENT, _TARGET, _upload(guest), **_STAGE))
 
 
 def test_the_release_must_be_one_path_segment() -> None:
     with pytest.raises(ValueError, match="release is invalid"):
         GuestDebuginfoFile(cast(InactiveGuest, _Guest()), binding=_BINDING, release="../etc")
+
+
+_HEADROOM = VMLINUX_HEADROOM_BYTES
+
+
+def _space(free: int) -> dict[str, int]:
+    return {"bavail": free // 4096, "blocks": 1 << 30, "frsize": 4096}
+
+
+def test_staging_proceeds_with_exactly_the_size_plus_headroom_free() -> None:
+    guest = _with_prior(_Guest())
+    guest.statvfs_result = _space(_HEADROOM + 4096)
+
+    _file(guest).stage(_PRIOR_STATE, _TARGET, _upload(guest), size=4096, system_id="sys-1")
+
+    assert _STAGING in guest.files
+
+
+def test_staging_one_block_short_of_the_boundary_refuses_before_any_write() -> None:
+    guest = _with_prior(_Guest())
+    guest.statvfs_result = _space(_HEADROOM)
+    before = list(guest.mutations)
+
+    with pytest.raises(CategorizedError, match="needs .* headroom") as caught:
+        _file(guest).stage(_PRIOR_STATE, _TARGET, _upload(guest), size=4096, system_id="sys-1")
+
+    assert caught.value.category is ErrorCategory.INSTALL_FAILURE
+    assert caught.value.details["vmlinux_bytes"] == 4096
+    assert caught.value.details["free_bytes"] == _HEADROOM
+    assert guest.mutations == before
+    assert guest.files[_LIVE].data == _PRIOR
+
+
+@pytest.mark.parametrize(
+    "stats",
+    [
+        {"bavail": -1, "blocks": 10, "frsize": 4096},
+        {"bavail": 1 << 62, "blocks": 1 << 62, "frsize": 4096},
+        {"bavail": 11, "blocks": 10, "frsize": 4096},
+        {"bavail": 5, "blocks": 10, "frsize": 0},
+        {"bavail": 5, "blocks": 10, "frsize": 1 << 40},
+        {"bavail": True, "blocks": 10, "frsize": 4096},
+        {"bavail": 5, "blocks": 10},
+    ],
+)
+def test_untrustworthy_statvfs_values_refuse_before_any_write(stats: dict[str, int]) -> None:
+    guest = _Guest()
+    guest.statvfs_result = stats
+
+    with pytest.raises(CategorizedError, match="cannot be trusted") as caught:
+        _file(guest).stage(_ABSENT, _TARGET, _upload(guest), **_STAGE)
+
+    assert caught.value.category is ErrorCategory.INSTALL_FAILURE
+    assert not any(mutation[0] == "upload" for mutation in guest.mutations)

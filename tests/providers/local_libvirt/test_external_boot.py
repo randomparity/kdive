@@ -3145,6 +3145,9 @@ class _RestartGuest(_GuestTreeHandle):
         del followsymlinks
         return int(path in self.states or path in self.directories)
 
+    def statvfs(self, path: str) -> dict[str, int]:
+        return {"bavail": 1 << 40, "blocks": 1 << 40, "frsize": 4096}
+
     def lstatns(self, path: str) -> dict[str, int]:
         if path not in self.files:
             return super().lstatns(path)
