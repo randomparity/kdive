@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import cast
 from uuid import uuid4
 
@@ -168,3 +169,39 @@ def _seed_direct_terminal_attempt(
         (authority_id, case["system_id"]),
     )
     return authority_id, request_attempt_id, receipt, head_digest, receipt_digest
+
+
+_FINALIZE = "SELECT * FROM finalize_authority_system_attempt(%s,%s,%s,%s,%s,2,%s,%s)"
+
+
+def retain_round(
+    migrated_url: str, role_dsns: Callable[[str], str], case: dict[str, object], round_number: int
+) -> tuple[str, str]:
+    """Seed round `round_number`'s retained receipt for the job's attempt and finalize it."""
+    with psycopg.connect(migrated_url) as conn:
+        if round_number > 1:
+            conn.execute(
+                "UPDATE jobs SET state='running',attempt=%s,worker_id=%s,"
+                "lease_expires_at=clock_timestamp()+interval '5 minutes' WHERE id=%s",
+                (round_number, case["worker"], case["job_id"]),
+            )
+        authority_id, _, receipt, head_digest, _ = _seed_direct_terminal_attempt(
+            conn, case, disposition="retained-quarantine", generation=round_number
+        )
+        conn.commit()
+    with psycopg.connect(role_dsns("kdive_worker")) as worker:
+        row = worker.execute(
+            _FINALIZE,
+            (
+                case["credential"],
+                case["job_id"],
+                round_number,
+                authority_id,
+                round_number,
+                head_digest,
+                receipt,
+            ),
+        ).fetchone()
+        worker.commit()
+    assert row is not None
+    return row[0], row[1]

@@ -108,6 +108,30 @@ intents.
 Considered: dropping ctime from the comparison. Rejected, because ctime is the field that
 catches the same-uid rewrite described above.
 
+### Amendment (2026-11-04): an unconfirmed journal record is quarantined (#3531)
+
+This qualifies the single per-System journal chain in the Decision. The service appends a
+record to the file journal before the database confirms it, so a crash between the two leaves
+one record past the database head. Only the same request can adopt it, because the head
+function accepts nothing but `sequence = head + 1` chained to the head digest, and the reader
+requires the same of the file. A different request, notably `systems.teardown`, needs that slot.
+No journal phase or field can express the recovery, so none is added.
+
+When the file holds exactly one valid record past the confirmed head, it belongs to another
+attempt than the request, and the request's next record differs, the journal keeps that record as evidence and replaces the active file with the
+confirmed prefix by atomic rename. The database is the authority: the record never reached it, and
+any provider effect after a confirmed `mutation-started` is re-observed by the quiescence check,
+so dropping it loses no authority fact. Evidence lives in a private `abandoned/`
+directory inside `system-operations/` (the authority unit's only writable journal path), as one
+canonical record line per file, at most four per System and 256 in total. Any append not followed by a confirmed advance (a crash, a database error, a
+superseded result) can leave such a record. A further quarantine fails closed with `journal-conflict`. The reader, the chain and identity validation, and the
+journal bounds are unchanged, and no journal byte is edited in place. Evidence files are not
+garbage collected; after inspection the operator deletes a System's
+`abandoned/<system_id>.*.jsonl`, which the service never reads.
+
+Considered: a new `abandoned` phase. Rejected, because the record would still need the slot
+the unconfirmed one holds. A migration to let the database chain past it is #3530's surface.
+
 ## Considered & rejected
 
 - **Provision through the worker and hand the domain to the authority.**
