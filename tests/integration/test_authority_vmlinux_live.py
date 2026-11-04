@@ -142,7 +142,7 @@ def _drgn_release(config: RemoteAuthorityProofConfig, system_id: str) -> str:
     return out
 
 
-async def _prove(system: AuthoritySystem, tree: Path) -> dict[str, object]:
+async def _prove(system: AuthoritySystem, tree: Path, guest_arch: str) -> dict[str, object]:
     config = system.config
     assert isinstance(config, RemoteAuthorityProofConfig)
     expected = hashlib.sha256((tree / "vmlinux").read_bytes()).hexdigest()
@@ -152,7 +152,11 @@ async def _prove(system: AuthoritySystem, tree: Path) -> dict[str, object]:
     try:
         with tempfile.TemporaryDirectory() as scratch:
             activation = await activate(
-                system, kernel_tree=tree, evidence_dir=Path(scratch) / "upload", with_vmlinux=True
+                system,
+                kernel_tree=tree,
+                evidence_dir=Path(scratch) / "upload",
+                with_vmlinux=True,
+                guest_arch=guest_arch,
             )
         release = await asyncio.to_thread(_wait_for_agent, config, system.system_id)
         staged = await asyncio.to_thread(_vmlinux_facts, config, system.system_id, release)
@@ -210,7 +214,7 @@ def test_remote_authority_stages_the_uploaded_vmlinux(tmp_path: Path) -> None:
     base_url, issuer = require_stack(), require_issuer()
 
     async def body(system: AuthoritySystem) -> dict[str, object]:
-        return await _prove(system, tree)
+        return await _prove(system, tree, arch)
 
     asyncio.run(on_authority_system(run, base_url, issuer, db_url, project=project, body=body))
     assert set(run.assertions) == {"effect", "cleanup"}

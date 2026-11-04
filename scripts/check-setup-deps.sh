@@ -634,11 +634,11 @@ probe_all() {
   probe_guestfs "${distro}"
   probe_boot_kernels
 
-  # Wheel-less arches (ppc64le) build drgn from source — its vendored libdrgn uses autotools, so
+  # ARM64 and POWER build drgn from source — its vendored libdrgn uses autotools, so
   # `uv sync --group live` fails at `autoreconf` without autoconf/automake/libtool. libtool the
   # .deb ships `libtoolize` (no `libtool` binary); the actual libtool script is generated per
   # project, so probe `libtoolize` — its presence is what drgn's build actually needs.
-  if arch_needs_rust "${host_arch}"; then
+  if [[ "${host_arch}" == aarch64 || "${host_arch}" == ppc64le ]]; then
     for cmd in autoconf automake libtoolize; do
       require_command future "${cmd}" "${distro}"
     done

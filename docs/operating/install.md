@@ -214,6 +214,12 @@ sudo zypper install gcc make pkg-config libvirt-devel python3-devel \
   libelf-devel ShellCheck shfmt git curl
 ```
 
+On ARM64 and POWER, the optional `live` group's drgn builds from source and requires
+`autoconf`, `automake`, and `libtool` (`libtoolize` on PATH), alongside the native headers
+listed above. Worker host preparation installs these packages for both architectures;
+the control-plane image carries matching build and runtime libraries. Rust requirements
+remain POWER-specific.
+
 On POWER, complete the [architecture-specific prerequisites](
 ../development/cross-platform.md#ppc64le-only), including Rust, before installing `just`/`prek`
 or syncing the environment. Then install [uv](https://docs.astral.sh/uv/) and the CLIs:

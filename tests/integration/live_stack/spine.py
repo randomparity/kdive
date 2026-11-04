@@ -29,6 +29,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
@@ -925,6 +926,53 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
     return tar_path
 
 
+def _prebuilt_power_kernel(
+    bundle: Path, kernel_src: Path, scratch: Path, phase_name: str, *, with_initrd: bool
+) -> Path:
+    """Bind a native-produced POWER bundle to the controller's unstripped build tree."""
+    kernel_tar = bundle / "kernel.tar.gz"
+    try:
+        if kernel_tar.stat().st_size == 0:
+            raise ValueError("kernel.tar.gz is empty")
+        if with_initrd:
+            with (bundle / "initrd.img").open("rb") as initrd:
+                if initrd.read(2) != b"\x1f\x8b":
+                    raise ValueError("initrd.img must be nonempty gzip")
+        release = (kernel_src / "include/config/kernel.release").read_text().strip()
+        with tarfile.open(kernel_tar, "r:gz") as archive:
+            members = archive.getmembers()
+            boots = [m for m in members if m.name.removeprefix("./") == "boot/vmlinuz"]
+            if len(boots) != 1 or not boots[0].isfile():
+                raise ValueError("expected one regular boot/vmlinuz")
+            releases = {
+                m.name.removeprefix("./").split("/")[2]
+                for m in members
+                if m.name.removeprefix("./").startswith("lib/modules/")
+                and len(m.name.removeprefix("./").split("/")) >= 3
+            }
+            if not release or releases != {release}:
+                raise ValueError("module release does not match kernel.release")
+            boot = scratch / "prebuilt-vmlinuz"
+            source = archive.extractfile(boots[0])
+            assert source is not None
+            with source, boot.open("wb") as target:
+                shutil.copyfileobj(source, target)
+        with boot.open("rb") as handle:
+            if handle.read(4) != b"\x7fELF":
+                raise ValueError("boot/vmlinuz is not ELF")
+        if elf_build_id(boot) != elf_build_id(kernel_src / "vmlinux"):
+            raise ValueError("boot/vmlinuz build ID does not match tree vmlinux")
+    except (
+        OSError,
+        tarfile.TarError,
+        ValueError,
+        RuntimeError,
+        subprocess.CalledProcessError,
+    ) as exc:
+        raise SpinePhaseError(phase_name, f"invalid prebuilt ppc64le bundle: {exc}") from exc
+    return kernel_tar
+
+
 async def build_and_upload_kernel(
     client: LiveStackClient,
     *,
@@ -956,10 +1004,14 @@ async def build_and_upload_kernel(
 
     ``with_initrd`` additionally uploads :func:`spine_initrd`'s initrd. Remote external boot
     refuses a build without one (``remote_external_boot_initrd_required``). dracut packs this
-    host's userspace, so the guest ``arch`` must be the host's.
+    host's userspace, so a generated initrd requires matching host/guest architecture.
+    For ppc64le, ``KDIVE_PPC64LE_BUNDLE`` instead supplies a native-produced ``kernel.tar.gz``
+    and ``initrd.img`` bound to the tree by boot build ID and module release; no native
+    builders run on the controller. Existing server artifact validation still applies.
 
     ``kernel_tree`` overrides the environment input. ``evidence_dir`` must be new;
-    it retains the bundle, effective config and upload declarations/completion result.
+    it retains staged inputs and upload declarations/completion result; a prebuilt bundle
+    remains at its configured path.
     ``complete=False`` uploads the artifacts and skips ``runs.complete_build``, so the Run stays
     ``created``.
     """
@@ -971,7 +1023,9 @@ async def build_and_upload_kernel(
         raise SpinePhaseError(phase_name, f"upload contract accepts no 'vmlinux': {accepted}")
     if with_initrd and "initrd" not in accepted:
         raise SpinePhaseError(phase_name, f"upload contract accepts no 'initrd': {accepted}")
-    if with_initrd and arch != platform.machine():
+    configured_bundle = os.environ.get("KDIVE_PPC64LE_BUNDLE") if arch == "ppc64le" else None
+    bundle = Path(configured_bundle) if configured_bundle else None
+    if with_initrd and bundle is None and arch != platform.machine():
         raise SpinePhaseError(
             phase_name, f"build the {arch} initrd on a {arch} host, not {platform.machine()}"
         )
@@ -999,7 +1053,13 @@ async def build_and_upload_kernel(
         if evidence_dir is not None
         else tempfile.TemporaryDirectory(prefix="kdive-spine-kernel-")
     ) as scratch:
-        kernel_tar = combined_kernel_tar(Path(kernel_src), Path(scratch), arch=arch)
+        kernel_tar = (
+            _prebuilt_power_kernel(
+                bundle, Path(kernel_src), Path(scratch), phase_name, with_initrd=with_initrd
+            )
+            if bundle is not None
+            else combined_kernel_tar(Path(kernel_src), Path(scratch), arch=arch)
+        )
         # The tree's own .config, so runs.complete_build's config advisories run on the live path
         # rather than failing open on an absent config (#2762).
         effective_config = Path(scratch) / "effective_config"
@@ -1028,7 +1088,11 @@ async def build_and_upload_kernel(
                 }
             )
         if with_initrd:
-            initrd = spine_initrd(Path(kernel_src), Path(scratch), phase_name)
+            initrd = (
+                bundle / "initrd.img"
+                if bundle is not None
+                else spine_initrd(Path(kernel_src), Path(scratch), phase_name)
+            )
             decls.append(
                 {
                     "name": "initrd",

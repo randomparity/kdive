@@ -4,7 +4,7 @@
 
 The remote staging implementation already exists (#3131), but its live carrier hardcodes
 x86_64. The remote authority frame already validates the selected guest architecture against
-the provider host and selects the matching registered root. No staging code needs changing.
+the provider host and selects the matching registered root. No product staging code needs changing.
 
 ## Scope
 
@@ -15,10 +15,30 @@ legacy remote delivery remains #3124. Other parent criteria remain unchanged.
 Read the configured authority host architecture with the existing `select_remote_lane` and
 `remote_authority_inventory` boundaries; accept x86_64 and ppc64le, feeding both Cell fields.
 The existing frame rechecks host architecture before allocation. Architecture-qualified cell
-IDs keep evidence distinct. The unfiltered x86 invocation stays compatible. Reuse `_prove`
-unchanged: upload, activate, guest SHA-256, real default-search drgn, release, baseline boot,
-restored absence, and frame cleanup. Observed architecture is smaller than a second carrier or a configuration key, and avoids
-failing the unselected architecture in an unfiltered run. A duplicate lifecycle would drift.
+IDs keep evidence distinct. The unfiltered x86 invocation stays compatible. Retain the existing
+upload, guest SHA-256, real default-search drgn, release, baseline boot, restored absence and
+frame cleanup assertions. Observed architecture avoids a duplicate lifecycle or configuration key.
+
+### Native bundle on a foreign controller
+
+The approved deployment uses an ARM64 controller and a native POWER authority. The remote
+activation helper requests an initrd but currently defaults its build profile to x86_64.
+Pass the carrier closure's already observed architecture through `_prove` and an optional
+`guest_arch` argument on `authority_faults.activate` to `start_external_boot_activation`;
+retain x86_64 defaults for existing callers and add no repeated SSH inventory read. Extend
+`tests/integration/live_stack/spine.py` and focused tests to reuse `KDIVE_PPC64LE_BUNDLE`.
+When set for ppc64le, upload its `kernel.tar.gz` and `initrd.img` rather than running native
+`strip`, `make modules_install`, or dracut on the controller. The native producer runs the
+existing combined-tar and initrd helpers against the same complete kernel tree. The controller
+still supplies that tree's `.config`, unstripped `vmlinux`, and `include/config/kernel.release`.
+Before any upload declaration, require both nonempty files, gzip initrd magic, a regular
+`boot/vmlinuz` with the same GNU build ID as tree `vmlinux`, and a matching module release.
+Malformed archives and missing or mismatched inputs fail with the upload phase. Existing
+server artifact/architecture validation and `runs.complete_build` remain authoritative.
+An unset bundle retains the generated lane's native-initrd architecture guard.
+No new API, schema, dependency, manifest format, identity shim, or foreign dracut path is added.
+This necessary surface extension was approved by the campaign root on 2026-11-04 under the
+same scope and exclusions; native SHA, drgn and restoration proof remains mandatory.
 
 ### Failure model
 
@@ -52,3 +72,29 @@ failing the unselected architecture in an unfiltered run. A duplicate lifecycle 
   with deployed revision equal to the test candidate and a matching complete kernel tree.
 - Runbook/spec/proof prose: task-test-not-applicable; no executable consumer validates prose.
   Run the repository doc guards. Never add tests that snapshot wording.
+
+- Prebuilt upload focused tests: valid matching bundle uploads kernel/config/vmlinux/initrd,
+  retains SHA declarations and completes with build ID without invoking native builders.
+  Missing, malformed and mismatched bundle inputs fail before upload declaration; an unset
+  bundle on a foreign controller still fails the existing generated-initrd guard. RED is the
+  current unconditional architecture rejection; GREEN is the scoped Linux spine test file.
+- Exercise the real remote inventory → carrier → activation → upload chain with SSH/MCP
+  boundaries mocked, preserving the actual activation helper; ppc64le must reach both the
+  Run build profile and upload selection. Existing local and x86 cases retain defaults.
+
+### Controller source-build prerequisites
+
+The ARM64 controller's live-group drgn installation builds from source and failed at
+`autoreconf`. Extend the existing setup dependency check and generic `local_worker_host`
+provisioning role to declare autoconf, automake and libtool for this supported source-build
+case. Correct the existing POWER-only wording/condition; do not add a dependency framework.
+Use the existing package names autoconf, automake and libtool through an Ansible package task
+for aarch64/ppc64le; keep Rust requirements separate. The setup-check CLI regression and existing
+worker-role structural runner must reject a missing prerequisite or incorrect architecture gate.
+Document this source-build prerequisite in the existing installation guide.
+
+The normal backend bucket-init one-shot builds the root Dockerfile even on this host-process
+deployment. Its isolated ARM image needs the same drgn build tools/ELF headers and matching
+libkdumpfile runtime library through the existing architecture condition. Preserve amd64
+packages and pinned dependency versions. Verify the actual native ARM image build and normal
+backend bucket initialization before live execution; host venv success is insufficient.

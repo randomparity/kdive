@@ -1220,3 +1220,29 @@ def container_daemon_order() -> None:
 
 container_daemon_order()
 print("ok container daemon: the enable and grant follow the engine install")
+
+
+source_build_tasks = yaml.safe_load(
+    (ANSIBLE / "roles/local_worker_host/tasks/main.yml").read_text()
+)
+autotools = next(
+    (
+        task
+        for task in source_build_tasks
+        if task.get("ansible.builtin.package", {}).get("name")
+        == ["autoconf", "automake", "libtool"]
+    ),
+    None,
+)
+if autotools is None:
+    raise SystemExit("local-worker-host regression: generic role must install drgn autotools")
+require(
+    autotools["ansible.builtin.package"].get("state") == "present", "autotools must be installed"
+)
+for architecture in ("aarch64", "ppc64le", "x86_64"):
+    condition = Environment(undefined=StrictUndefined).compile_expression(autotools["when"])
+    require(
+        bool(condition(ansible_facts={"architecture": architecture})) == (architecture != "x86_64"),
+        f"drgn autotools wrong architecture gate for {architecture}",
+    )
+print("ok source builds: ARM64 and POWER receive autotools; x86_64 keeps its wheel packages")
