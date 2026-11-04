@@ -71,6 +71,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     PrepareConsole,
     ReadinessProbe,
     RunningObserver,
+    SystemPath,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalArtifactRoot,
@@ -91,6 +92,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
     authorized_key_customizer,
 )
 from kdive.providers.local_libvirt.lifecycle.snapshot import LocalLibvirtSnapshotter
+from kdive.providers.local_libvirt.lifecycle.storage import baseline_dir, overlay_path
 from kdive.providers.local_libvirt.lifecycle.traffic_capture import LocalLibvirtTrafficCapture
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.local_libvirt.reaping import (
@@ -116,6 +118,10 @@ from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     real_module_debuginfo_resolver,
 )
 from kdive.providers.shared.traffic_capture.execution import CaptureExecutor
+from kdive.providers.system_authority.manifest import (
+    LocalAuthoritySystemManifestV1,
+    load_authority_system_manifest,
+)
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
@@ -229,6 +235,8 @@ def build_external_boot_session_factory(
     observe_running: RunningObserver | None,
     cleanup_payloads: CleanupPayloads,
     uri: str | None = None,
+    overlay_path_for: SystemPath = overlay_path,
+    baseline_dir_for: SystemPath = baseline_dir,
 ) -> LocalExternalBootSessionFactory:
     """Build the internal operation-session factory without opening host resources."""
     uri = uri or config.require(LIBVIRT_URI)
@@ -241,6 +249,8 @@ def build_external_boot_session_factory(
         readiness=readiness,
         observe_running=observe_running,
         cleanup_payloads=cleanup_payloads,
+        overlay_path_for=overlay_path_for,
+        baseline_dir_for=baseline_dir_for,
     )
 
 
@@ -275,6 +285,11 @@ def build_external_boot_session_mechanisms(
     every other host resource still come from fixed configuration or concrete mechanisms.
     """
     root = config.require(LIBVIRT_RECOVERY_ROOT)
+    overlay_path_for, baseline_dir_for = (
+        (overlay_path, baseline_dir)
+        if provider_socket is None
+        else authority_system_path_resolvers()
+    )
     lease_scope = LocalOperationLeaseScope()
     lane = LocalOperationLane()
     uri = (
@@ -291,8 +306,33 @@ def build_external_boot_session_mechanisms(
         observe_running=LocalRunningObserver(),
         cleanup_payloads=LocalPayloadCleanup(root).cleanup,
         uri=uri,
+        overlay_path_for=overlay_path_for,
+        baseline_dir_for=baseline_dir_for,
     )
     return LocalExternalBootMechanisms(factory=factory, recovery_root=root, lease_scope=lease_scope)
+
+
+def authority_system_path_resolvers() -> tuple[SystemPath, SystemPath]:
+    """Overlay and baseline resolvers matching where this authority host provisions Systems.
+
+    A host with an installed local System manifest provisions every local System under
+    ``<authority_system_local_root>/rootfs`` (ADR-0623); any other host keeps the worker's
+    legacy ``ROOTFS_DIR`` layout. The session's ownership check compares against these exact
+    strings, so they must equal ``build_local_authority_system_provider``'s ``ProvisioningFiles``.
+    """
+    host = AuthorityHostConfig.from_environment()
+    manifest = load_authority_system_manifest(
+        host.authority_system_manifest,
+        owner_uid=host.authority_uid,
+        owner_gid=host.authority_gid,
+    )
+    if not isinstance(manifest, LocalAuthoritySystemManifestV1):
+        return overlay_path, baseline_dir
+    rootfs = host.authority_system_local_root / "rootfs"
+    return (
+        lambda system_id: str(rootfs / "systems" / f"{system_id}.qcow2"),
+        lambda system_id: str(rootfs / "baselines" / f"{system_id}-baseline"),
+    )
 
 
 def build_local_external_boot_authority(

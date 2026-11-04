@@ -181,8 +181,8 @@ def _teardown_factory(
             AssertionError("teardown must not open or create activation artifacts")
         ),
         open_guest=lambda: Guest(events),
-        teardown_overlay_path=lambda _system_id: str(overlay),
-        teardown_baseline_path=lambda _system_id: str(baseline),
+        overlay_path_for=lambda _system_id: str(overlay),
+        baseline_dir_for=lambda _system_id: str(baseline),
     )
     return factory, overlay, baseline
 
@@ -2643,6 +2643,7 @@ def _factory(
     prepare_console: Callable[[UUID], ConsoleReadinessWindow] | None = None,
     readiness: Callable[[UUID, ConsoleReadinessWindow], ReadinessResult] | None = None,
     clock: _Clock | None = None,
+    **extra: Any,
 ) -> LocalExternalBootSessionFactory:
     selected = domain or Domain(events)
     fake_clock = clock or _Clock()
@@ -2660,6 +2661,7 @@ def _factory(
         readiness=readiness,
         sleep=fake_clock.sleep,
         clock=fake_clock,
+        **extra,
     )
 
 
@@ -3594,6 +3596,113 @@ def test_partial_construction_closes_every_acquired_resource_and_pin_last() -> N
         _factory(events, domain).open(lease, _expected())
     assert events[-1] == "connection.close"
     lease.release()
+
+
+_AUTHORITY_OVERLAY = f"/var/lib/kdive/authority/rootfs/systems/{SYSTEM_ID}.qcow2"
+_AUTHORITY_BASELINE = f"/var/lib/kdive/authority/rootfs/baselines/{SYSTEM_ID}-baseline"
+
+
+def _authority_paths() -> dict[str, Any]:
+    return {
+        "overlay_path_for": lambda _system_id: _AUTHORITY_OVERLAY,
+        "baseline_dir_for": lambda _system_id: _AUTHORITY_BASELINE,
+    }
+
+
+def test_open_expects_the_resolved_overlay_for_an_authority_owned_system() -> None:
+    events: list[str] = []
+    domain = Domain(events, _xml(overlay=_AUTHORITY_OVERLAY))
+
+    session = _factory(events, domain, **_authority_paths()).open(_lease(), _expected())
+
+    session.close()
+
+
+def test_open_refuses_the_legacy_overlay_under_the_authority_resolver() -> None:
+    events: list[str] = []
+    domain = Domain(events, _xml(overlay=OVERLAY))
+    lease = _lease()
+
+    with pytest.raises(ValueError, match="absent or ambiguous"):
+        _factory(events, domain, **_authority_paths()).open(lease, _expected())
+
+    lease.release()
+
+
+def test_open_refuses_the_authority_overlay_under_the_default_resolver() -> None:
+    events: list[str] = []
+    domain = Domain(events, _xml(overlay=_AUTHORITY_OVERLAY))
+    lease = _lease()
+
+    with pytest.raises(ValueError, match="absent or ambiguous"):
+        _factory(events, domain).open(lease, _expected())
+
+    lease.release()
+
+
+def test_open_refuses_a_doubled_reference_to_the_resolved_overlay() -> None:
+    events: list[str] = []
+    duplicate = (
+        '<disk type="file" device="disk"><driver name="qemu" type="qcow2" />'
+        f'<source file="{_AUTHORITY_OVERLAY}" /><target dev="vdb" bus="virtio" /></disk>'
+    )
+    xml = _xml(overlay=_AUTHORITY_OVERLAY).replace("</devices>", f"{duplicate}</devices>")
+    lease = _lease()
+
+    with pytest.raises(ValueError, match="absent or ambiguous"):
+        _factory(events, Domain(events, xml), **_authority_paths()).open(lease, _expected())
+
+    lease.release()
+
+
+def test_default_teardown_resolvers_keep_the_legacy_rootfs_layout() -> None:
+    events: list[str] = []
+    domain = _TeardownDomain(events)
+    domain.xml = _xml(overlay=OVERLAY)
+    domain.inactive_xml = domain.xml
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: _TeardownConn(events, domain),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: Guest(events),
+    )
+
+    session = factory.open_teardown(_lease(), _expected())
+
+    assert session.inspect().domain_validated
+    session.close()
+
+
+def test_failed_boot_teardown_removes_an_authority_owned_system(tmp_path: Path) -> None:
+    """#3524: an activation-bound teardown of an authority layout no longer fails ownership."""
+    events: list[str] = []
+    domain = _TeardownDomain(events)
+    overlay = tmp_path / "rootfs" / "systems" / f"{SYSTEM_ID}.qcow2"
+    baseline = tmp_path / "rootfs" / "baselines" / f"{SYSTEM_ID}-baseline"
+    overlay.parent.mkdir(parents=True)
+    baseline.mkdir(parents=True)
+    overlay.write_bytes(b"qcow")
+    domain.xml = _xml(overlay=str(overlay))
+    domain.inactive_xml = domain.xml
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: _TeardownConn(events, domain),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: Guest(events),
+        overlay_path_for=lambda _system_id: str(overlay),
+        baseline_dir_for=lambda _system_id: str(baseline),
+    )
+
+    session = factory.open_teardown(_lease(), _expected())
+    assert session.inspect().domain_validated
+    session.destroy()
+    session.undefine()
+    session.remove_overlay()
+    session.remove_baseline()
+    session.close()
+
+    assert not overlay.exists()
+    assert not baseline.exists()
 
 
 def test_narrow_injected_primitives_keep_host_authority_private() -> None:

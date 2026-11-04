@@ -1348,8 +1348,8 @@ class LocalExternalBootSessionFactory:
         readiness: ReadinessProbe | None = None,
         observe_running: RunningObserver | None = None,
         cleanup_payloads: CleanupPayloads | None = None,
-        teardown_overlay_path: SystemPath = lambda system_id: overlay_path(system_id),
-        teardown_baseline_path: SystemPath = lambda system_id: baseline_dir(system_id),
+        overlay_path_for: SystemPath = lambda system_id: overlay_path(system_id),
+        baseline_dir_for: SystemPath = lambda system_id: baseline_dir(system_id),
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -1372,8 +1372,8 @@ class LocalExternalBootSessionFactory:
         self._readiness = readiness or _unconfigured_readiness
         self._observe_running = observe_running or _unconfigured_observation
         self._cleanup_payloads = cleanup_payloads or _unconfigured_cleanup
-        self._teardown_overlay_path = teardown_overlay_path
-        self._teardown_baseline_path = teardown_baseline_path
+        self._overlay_path_for = overlay_path_for
+        self._baseline_dir_for = baseline_dir_for
         self._sleep = sleep
         self._clock = clock
 
@@ -1412,7 +1412,7 @@ class LocalExternalBootSessionFactory:
             connection = self._connect()
             expected_name = domain_name_for(system_id)
             domain = connection.lookupByName(expected_name)
-            expected_overlay = overlay_path(system_id)
+            expected_overlay = self._overlay_path_for(system_id)
             try:
                 inactive_xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
             except libvirt.libvirtError as exc:
@@ -1542,8 +1542,8 @@ class LocalExternalBootSessionFactory:
             system_id=facts.system_id,
             pin=pin,
             connection=connection,
-            overlay=self._teardown_overlay_path(facts.system_id),
-            baseline=self._teardown_baseline_path(facts.system_id),
+            overlay=self._overlay_path_for(facts.system_id),
+            baseline=self._baseline_dir_for(facts.system_id),
             binding=facts.binding,
             open_artifact_root=lambda: self._open_artifact_root(facts),
             cleanup_payloads=self._cleanup_payloads,
