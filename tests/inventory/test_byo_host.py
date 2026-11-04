@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import socket
 import subprocess
 from pathlib import Path
@@ -216,3 +217,31 @@ def test_cli_mixed_errors_hide_rejected_byo_secret(
     )
     assert cli.validate_systems(path) == 1
     assert "DO_NOT_ECHO_MATERIAL" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("field", ["ssh_target", "endpoint"])
+@pytest.mark.parametrize("diagnostic", ["parser", "cli"])
+def test_malformed_authority_hides_rejected_secret(
+    field: str,
+    diagnostic: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    raw = _host()
+    target = raw["oob"] if field == "endpoint" else raw
+    target[field] = "https://user:DO_NOT_ECHO_MATERIAL@x.example\uff0f"  # pragma: allowlist secret
+    if diagnostic == "parser":
+        with pytest.raises(InventoryError) as exc:
+            InventoryDoc.parse({"schema_version": 2, "byo_host": [raw]})
+        message = str(exc.value)
+    else:
+        lines = ["schema_version=2", "[[byo_host]]"]
+        lines.extend(f"{key}={json.dumps(value)}" for key, value in raw.items() if key != "oob")
+        lines.append("[byo_host.oob]")
+        lines.extend(f"{key}={json.dumps(value)}" for key, value in raw["oob"].items())
+        path = tmp_path / "systems.toml"
+        path.write_text("\n".join(lines))
+        assert cli.validate_systems(path) == 1
+        message = capsys.readouterr().err
+    assert field in message
+    assert "DO_NOT_ECHO_MATERIAL" not in message

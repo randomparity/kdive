@@ -378,7 +378,12 @@ class ByoHostOob(BaseModel):
     @field_validator("endpoint")
     @classmethod
     def _no_inline_credentials(cls, value: str) -> str:
-        parsed = urlsplit(value if "://" in value else f"//{value}")
+        try:
+            parsed = urlsplit(value if "://" in value else f"//{value}")
+        except ValueError:
+            raise ValueError(
+                "endpoint is malformed; use a valid endpoint and credential refs"
+            ) from None
         if parsed.username is not None:
             raise ValueError("endpoint must not contain user-info; use credential refs")
         return value
@@ -428,7 +433,12 @@ class ByoHostInstance(_Instance):
     @classmethod
     def _no_ssh_password(cls, value: str) -> str:
         if "://" in value:
-            password = urlsplit(value).password
+            try:
+                password = urlsplit(value).password
+            except ValueError:
+                raise ValueError(
+                    "ssh_target is malformed; use a valid target and ssh_key_ref"
+                ) from None
         else:
             password = (
                 value.split("@", 1)[0] if "@" in value and ":" in value.split("@", 1)[0] else None
