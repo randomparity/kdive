@@ -30,6 +30,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg import Error as PsycopgError
 from psycopg.errors import InsufficientPrivilege
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr, ValidationError
 
@@ -37,6 +38,11 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import JobState, RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
+from kdive.domain.lifecycle.run_steps import (
+    BOOT_OUTCOME_READY,
+    RUN_STEP_SUCCEEDED,
+    BootStepResult,
+)
 from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, Job, JobKind, dispatch_lane_for_kind
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
@@ -64,6 +70,9 @@ from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _log = logging.getLogger(__name__)
+
+_BOOT_STEP_ATTEMPTS = 3
+_BOOT_STEP_RETRY_DELAY_S = 0.5
 
 # The worker never writes a marked job's row (ADR-0620): only a receipt commit, the public teardown
 # recycle, or the reconciler's unowned-job dead-letter can move it, so logs say so.
@@ -651,6 +660,8 @@ class Worker:
             if committed is None:
                 _log.warning("external boot job %s was reclaimed; result dropped", job.id)
                 return False
+            if _is_committed_activation(result, committed):
+                await self._record_authority_boot_step(result)
             return (
                 isinstance(committed, Job)
                 and isinstance(result, ExternalBootAuthoritySuccessV1)
@@ -675,6 +686,71 @@ class Worker:
                 job.id,
             )
         return False
+
+    async def _record_authority_boot_step(self, result: ExternalBootAuthorityResultV1) -> None:
+        """Record the ``boot`` run step an authority activation stands in for.
+
+        The fixed-worker ``boot`` handler writes this row; ``debug.start_session`` and
+        ``introspect.script`` refuse a Run without it (``boot_first``). The authority commit is a
+        database function that never touches ``run_steps``, so the step is written after the
+        activation committed, never before: a failed or superseded activation records none.
+        """
+        for attempt in range(1, _BOOT_STEP_ATTEMPTS + 1):
+            try:
+                await self._write_boot_step(result)
+                return
+            except Exception:
+                if attempt == _BOOT_STEP_ATTEMPTS:
+                    _log.error(
+                        "activation of run %s committed but its boot step was not recorded; "
+                        "debug attach will refuse with boot_first until it is",
+                        result.run_id,
+                        exc_info=True,
+                    )
+                    return
+                await asyncio.sleep(_BOOT_STEP_RETRY_DELAY_S * attempt)
+
+    async def _write_boot_step(self, result: ExternalBootAuthorityResultV1) -> None:
+        run_id, system_id = result.run_id, result.system_id
+        async with (
+            self._pool.connection() as conn,
+            conn.transaction(),
+            advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
+            advisory_xact_lock(conn, LockScope.RUN, run_id),
+        ):
+            if not await _activation_is_active(conn, result.activation_id, run_id, system_id):
+                _log.warning(
+                    "activation %s of run %s is no longer its active activation; "
+                    "boot step not recorded",
+                    result.activation_id,
+                    run_id,
+                )
+                return
+            boot_result: BootStepResult = {
+                "system_id": str(system_id),
+                "boot_outcome": BOOT_OUTCOME_READY,
+            }
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO run_steps (run_id, step, state, result) "
+                    "VALUES (%s, 'boot', %s, %s) ON CONFLICT (run_id, step) DO NOTHING "
+                    "RETURNING 1",
+                    (run_id, RUN_STEP_SUCCEEDED, Jsonb(boot_result)),
+                )
+                if await cur.fetchone() is not None:
+                    return
+                await cur.execute(
+                    "SELECT result ->> 'system_id' FROM run_steps "
+                    "WHERE run_id = %s AND step = 'boot'",
+                    (run_id,),
+                )
+                row = await cur.fetchone()
+            _log.warning(
+                "run %s already has a boot step (system %s), not recording system %s",
+                run_id,
+                None if row is None else row[0],
+                system_id,
+            )
 
     async def _log_superseded_commit(self, job: Job) -> None:
         """Separate a real reclaim from a refused commit on the attempt that still holds the job."""
@@ -774,6 +850,32 @@ def _classified_external_boot_failure(
         "terminal": terminal,
     }
     return ExternalBootAuthorityFailureV1.model_validate(carrier)
+
+
+def _is_committed_activation(result: ExternalBootAuthorityResultV1, committed: Job) -> bool:
+    """Whether ``committed`` is the job a successful ``activate`` result just finished."""
+    return (
+        isinstance(result, ExternalBootAuthoritySuccessV1)
+        and result.result.operation == "activate"
+        and committed.state is JobState.SUCCEEDED
+    )
+
+
+async def _activation_is_active(
+    conn: AsyncConnection, activation_id: UUID, run_id: UUID, system_id: UUID
+) -> bool:
+    """Whether ``activation_id`` is still ``run_id``'s committed, active activation.
+
+    A forced re-boot supersedes the activation this write belongs to; the check runs under the
+    System and Run locks so a stale step cannot land after the re-boot deleted it.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT 1 FROM external_boot_activations "
+            "WHERE id = %s AND run_id = %s AND system_id = %s AND state = 'active'",
+            (activation_id, run_id, system_id),
+        )
+        return await cur.fetchone() is not None
 
 
 def _external_marker(job: Job) -> ExternalBootAuthorityMarkerV1 | None:
