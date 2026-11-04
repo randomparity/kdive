@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import replace
 
 import psycopg
@@ -86,15 +87,17 @@ def _fail(
     role_dsns: _RoleDsns,
     case: _AuthorityCase,
     authority: _Allocated,
-    context: dict[str, str],
+    context: Mapping[str, object],
     category: str = "infrastructure_failure",
+    *,
+    terminal: bool = False,
 ) -> tuple[str, str | None]:
     result = {
         "schema": "external-boot-authority-result-v1",
         "operation": "fail",
         "error_category": category,
         "failure_context": context,
-        "terminal": False,
+        "terminal": terminal,
     }
     with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
         row = worker.execute(
