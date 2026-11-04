@@ -298,10 +298,15 @@ def test_preactivation_teardown_uses_immutable_authority_binding(migrated_url: s
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("worker_fails_mid_call", [False, True])
 def test_preactivation_teardown_recycle_keeps_first_principal_and_audits_requester(
-    migrated_url: str,
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, worker_fails_mid_call: bool
 ) -> None:
-    """#3544, ADR-0447: a recycle leaves `authorizing` alone and audits the recycling caller."""
+    """#3544, ADR-0447: a recycle leaves `authorizing` alone and audits the recycling caller.
+
+    ``worker_fails_mid_call`` dead-letters the job just before the service reads it, as a worker
+    finalizing under a different lock can; the audit must follow the restart, not an earlier read.
+    """
     handlers = SystemProvisionHandlers(
         systems_support.TEST_PROFILE_POLICY,
         systems_support.TEST_COMPONENT_SOURCES,
@@ -340,11 +345,22 @@ def test_preactivation_teardown_recycle_keeps_first_principal_and_audits_request
             replayed = await teardown_system(pool, second, str(system_id))
             async with pool.connection() as conn:
                 before = await (await conn.execute(audit_sql, (system_id,))).fetchall()
-                await conn.execute(
-                    "UPDATE jobs SET state='failed',attempt=max_attempts,"
-                    "error_category='conflict' WHERE id=%s",
-                    (queued.object_id,),
-                )
+            fail_job = (
+                "UPDATE jobs SET state='failed',attempt=max_attempts,"
+                "error_category='conflict' WHERE id=%s"
+            )
+            if worker_fails_mid_call:
+                real_dedup_job = authority_owned._dedup_job
+
+                async def dead_letter_then_read(conn: psycopg.AsyncConnection, key: str) -> object:
+                    with psycopg.connect(migrated_url, autocommit=True) as other:
+                        other.execute(fail_job, (queued.object_id,))
+                    return await real_dedup_job(conn, key)
+
+                monkeypatch.setattr(authority_owned, "_dedup_job", dead_letter_then_read)
+            else:
+                async with pool.connection() as conn:
+                    await conn.execute(fail_job, (queued.object_id,))
             recycled = await teardown_system(pool, second, str(system_id))
             async with pool.connection() as conn:
                 principal = await (
