@@ -6202,7 +6202,10 @@ def test_quarantine_port_reaches_an_unmanaged_receipt_after_teardown(
     _assert_disposed(root, point, disposition)
 
 
-def test_adopt_refuses_a_receipt_replaced_between_observe_and_the_pin(tmp_path: Path) -> None:
+@pytest.mark.parametrize("swap", ["other-proof", "already-managed"])
+def test_adopt_refuses_a_receipt_replaced_between_observe_and_the_pin(
+    tmp_path: Path, swap: str
+) -> None:
     """#3518: the digest is rechecked inside the pin, as delete_recovery_object does."""
     root = tmp_path / "recovery"
     root.mkdir(mode=0o700)
@@ -6219,7 +6222,10 @@ def test_adopt_refuses_a_receipt_replaced_between_observe_and_the_pin(tmp_path: 
         pins.append(1)
         if len(pins) == 2:
             with RecoveryMetadataStore(root) as store:
-                store.record_cleanup_quarantine(point, other)
+                if swap == "other-proof":
+                    store.record_cleanup_quarantine(point, other)
+                else:
+                    store.adopt_cleanup_quarantine(receipt)
         return real_open_pinned(*args)
 
     setattr(io, "open_pinned", swapping_open_pinned)  # noqa: B010
@@ -6231,7 +6237,11 @@ def test_adopt_refuses_a_receipt_replaced_between_observe_and_the_pin(tmp_path: 
 
     with RecoveryMetadataStore(root) as store:
         kept = store.read_cleanup_quarantine(point.binding)
-    assert kept is not None and not kept.managed and kept.proof == other
+    assert kept is not None
+    if swap == "other-proof":
+        assert not kept.managed and kept.proof == other
+    else:
+        assert kept.managed and kept.proof == receipt.proof
 
 
 def test_quarantine_port_observes_a_kept_managed_receipt_after_teardown(tmp_path: Path) -> None:
