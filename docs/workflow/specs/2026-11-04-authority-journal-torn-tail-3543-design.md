@@ -43,7 +43,8 @@ unconfirmed record, it cannot be compared with the record the request computes. 
 writes its own record from database state.
 
 ADR-0623 gets an appended amendment: its #3531 text calls evidence "one canonical record line per
-file", which stops being true. No new ADR.
+file" and limits quarantine to another attempt's record, and neither holds for a torn tail. No new
+ADR.
 
 Rejected:
 
@@ -69,8 +70,11 @@ Rejected:
   - A record the database head references is never moved aside.
   - Torn bytes are durable under their final name before the active file changes.
   - The active journal stays valid or torn-as-found at each crash point; never a third state.
-  - Refusal leaves the journal unchanged; a refused recovery may leave an evidence file only if
-    the identity re-check fails after evidence is written, as in #3531.
+  - Refusal leaves the journal unchanged. A refusal of the preconditions writes nothing. A failure
+    or crash after the evidence rename leaves the evidence and possibly a `.pending` scratch, which
+    a retry reuses, as in #3531.
+  - Recovery needs free space for the torn bytes and a prefix copy (up to 16 MiB), and fails closed
+    with `journal-conflict` until it has it.
   - Evidence stays inside the #3531 bounds (4 per System, 256 total, at most 1 MiB each).
 - **Accepted failure classes**
   - A fifth quarantine for a System, whole or torn, fails closed with `journal-conflict`, as #3531
@@ -104,7 +108,8 @@ Rejected:
 - A first record torn on an empty prefix at head 0 recovers to an empty journal.
 - Refused, journal bytes unchanged, no recovery: head above the prefix (it references the tail),
   head below it, digest mismatch, a corrupt complete line before the tail, an oversize tail.
-- Each refusal above reaches the caller as `journal-conflict`.
+- Each refusal above, full evidence and an unwritable evidence directory reach the caller as
+  `journal-conflict`.
 - `read`, `head` and `append` still raise `incomplete final record` on a torn journal.
 - A crash before the active rename leaves a torn journal that a retry recovers without a second
   evidence file.

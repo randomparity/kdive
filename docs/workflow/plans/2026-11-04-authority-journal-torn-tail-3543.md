@@ -83,12 +83,16 @@ abandon_torn_tail(confirmed_sequence, confirmed_digest):
 new public surface.
 
 **Verification:**
-- Contract: same-request retry and teardown after a torn tail. Mode: focused-test,
-  `test_service.py::test_retry_recovers_a_torn_final_record`,
-  `test_teardown_recovers_a_torn_final_record`; red: `ValueError` incomplete final record; green:
+- Contract: same-request retry and teardown after a torn tail at each named offset. Mode:
+  focused-test, `test_service.py::test_retry_recovers_a_torn_final_record`,
+  `test_teardown_recovers_a_torn_final_record` (both parametrized over first byte, middle and
+  all but the newline); red: `ValueError` incomplete final record; green:
   `uv run python -m pytest tests/providers/system_authority/test_service.py -q -k torn`.
-- Contract: head-referenced torn tail refused as `journal-conflict`, bytes unchanged. Mode:
-  focused-test, `test_torn_record_the_head_references_is_refused`; same command.
+- Contract: refusals reach the caller as `journal-conflict`, bytes unchanged. Mode: focused-test,
+  `test_torn_record_the_head_references_is_refused` (head above and below the prefix),
+  `test_full_evidence_refuses_torn_recovery_with_journal_conflict`,
+  `test_unwritable_evidence_directory_refuses_torn_recovery_with_journal_conflict` (the
+  `OSError` arm, shaped like the #3531 tests of the same names); same command.
 - Contract: recovery is what the service path depends on. Mode: focused-test with a
   controlled fault: remove the `except` in `_journal_state`, observe the retry test red, restore.
 
@@ -114,5 +118,8 @@ logs a warning naming the System and the confirmed sequence. Neither logs torn b
 `just records` after `git fetch origin main` for its shape.
 
 Append `### Amendment (2026-11-04): a torn final record is quarantined (#3543)` after the #3531
-amendment: what changed (evidence may be torn bytes, `.torn.` name, same bounds and rename), and
-what did not (the reader, the bounds, the refusal when the head references the tail).
+amendment: what changed (evidence may be torn bytes, `.torn.` name, same bounds and rename; a torn
+tail is dropped whichever attempt wrote it, so the same-attempt changed-observation refusal does
+not apply to it, because the tail never reached the database and provider effects are re-observed
+from the confirmed `mutation-started`), and what did not (the reader, the bounds, the refusal when
+the head references the tail).
