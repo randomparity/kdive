@@ -12,6 +12,7 @@ import pytest
 
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.ports.external_boot import RootSpecV1
+from kdive.providers.system_authority import journal as journal_module
 from kdive.providers.system_authority import service as service_module
 from kdive.providers.system_authority.journal import (
     MAX_JOURNAL_BYTES,
@@ -614,5 +615,201 @@ def test_started_attempt_resumes_above_the_provision_ceiling(
         acknowledgement = await service.begin("worker-a", request)
         assert acknowledgement.attempt_id == request.attempt_id
         await service.close()
+
+    asyncio.run(scenario())
+
+
+_CRASHABLE_PHASES = (
+    AuthoritySystemJournalPhase.WATERMARK_INSTALLED,
+    AuthoritySystemJournalPhase.MUTATION_STARTED,
+    AuthoritySystemJournalPhase.PROVIDER_RETURNED,
+)
+
+
+def _service(
+    repository: _Repository, root: Path, provider: _Provider | None = None
+) -> AuthoritySystemService:
+    return AuthoritySystemService(
+        repository=repository,
+        journal_factory=lambda system_id: FileAuthoritySystemJournal(root, system_id),
+        provider=provider or _FailingProvisionProvider(),
+    )
+
+
+async def _crash_provision_at(
+    service: AuthoritySystemService,
+    repository: _Repository,
+    request: AuthoritySystemTakeoverRequestV1,
+    phase: AuthoritySystemJournalPhase,
+) -> AuthoritySystemAcknowledgementV1 | None:
+    """Run a provision attempt until the database refuses `phase`, leaving it in the file only."""
+    repository.fail_phase_once = phase
+    acknowledgement: AuthoritySystemAcknowledgementV1 | None = None
+    with pytest.raises(AuthoritySystemServiceError, match="journal-conflict"):
+        if phase is AuthoritySystemJournalPhase.WATERMARK_INSTALLED:
+            await _begin(service, repository, request)
+        else:
+            acknowledgement = await _begin(service, repository, request)
+            await service.execute("worker-a", _mutation(request), acknowledgement)
+    return acknowledgement
+
+
+def _teardown(
+    snapshot: AuthoritySystemProvisionSnapshot, generation: int
+) -> AuthoritySystemTakeoverRequestV1:
+    return _request(snapshot, generation=generation).model_copy(
+        update={
+            "operation": AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
+            "operation_identity": "teardown-a",
+        }
+    )
+
+
+def _abandoned(root: Path) -> list[Path]:
+    directory = root / "system-operations" / "abandoned"
+    return sorted(directory.iterdir()) if directory.exists() else []
+
+
+@pytest.mark.parametrize("phase", _CRASHABLE_PHASES)
+def test_teardown_succeeds_after_unconfirmed_provision_record(
+    tmp_path: Path, phase: AuthoritySystemJournalPhase
+) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        first = _service(repository, root)
+        await _crash_provision_at(first, repository, _request(snapshot), phase)
+        await first.close()
+        confirmed = repository.sequence
+
+        recovered = _service(repository, root)
+        await _run_attempt(recovered, repository, _teardown(snapshot, 2))
+        await recovered.close()
+        assert repository.phase is AuthoritySystemJournalPhase.TERMINAL
+        assert repository.receipt is not None
+        assert len(_abandoned(root)) == 1
+        with FileAuthoritySystemJournal(root, snapshot.system_id) as journal:
+            records = journal.read()
+        assert records[-1].phase is AuthoritySystemJournalPhase.TERMINAL
+        assert [r.sequence for r in records[:confirmed]] == list(range(1, confirmed + 1))
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("phase", _CRASHABLE_PHASES)
+def test_retry_adopts_unconfirmed_record(
+    tmp_path: Path, phase: AuthoritySystemJournalPhase
+) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        request = _request(snapshot)
+        first = _service(repository, root)
+        acknowledgement = await _crash_provision_at(first, repository, request, phase)
+        await first.close()
+        with FileAuthoritySystemJournal(root, snapshot.system_id) as journal:
+            file_ahead = journal.read()[repository.sequence]
+
+        provider = _FailingProvisionProvider()
+        recovered = _service(repository, root, provider)
+        if acknowledgement is None:
+            acknowledgement = await _begin(recovered, repository, request)
+        await recovered.execute("worker-a", _mutation(request), acknowledgement)
+        await recovered.close()
+        assert repository.receipt is not None
+        assert _abandoned(root) == []
+        with FileAuthoritySystemJournal(root, snapshot.system_id) as journal:
+            assert file_ahead in journal.read()
+        # Only a confirmed mutation-started means the provider may already have run.
+        provider_may_have_run = phase is AuthoritySystemJournalPhase.PROVIDER_RETURNED
+        assert provider.execute_calls == int(not provider_may_have_run)
+
+    asyncio.run(scenario())
+
+
+def test_divergence_inside_the_confirmed_prefix_is_still_refused(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        first = _service(repository, root)
+        await _crash_provision_at(
+            first, repository, _request(snapshot), AuthoritySystemJournalPhase.MUTATION_STARTED
+        )
+        await first.close()
+        with FileAuthoritySystemJournal(root, snapshot.system_id) as journal:
+            before = journal.read()
+
+        repository.sequence -= 1  # the file now holds two records past the database head
+        teardown = _teardown(snapshot, 2)
+        repository.allocating = teardown
+        refused = _service(repository, root)
+        with pytest.raises(AuthoritySystemServiceError, match="journal-conflict"):
+            await refused.begin("worker-a", teardown)
+        repository.sequence += 1
+        repository.digest = "sha256:" + "0" * 64  # the head digest no longer matches the file
+        with pytest.raises(AuthoritySystemServiceError, match="journal-conflict"):
+            await refused.begin("worker-a", teardown)
+        await refused.close()
+        with FileAuthoritySystemJournal(root, snapshot.system_id) as journal:
+            assert journal.read() == before
+        assert _abandoned(root) == []
+
+    asyncio.run(scenario())
+
+
+def test_full_evidence_refuses_quarantine_with_journal_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        first = _service(repository, root)
+        await _crash_provision_at(
+            first, repository, _request(snapshot), AuthoritySystemJournalPhase.MUTATION_STARTED
+        )
+        await first.close()
+        with FileAuthoritySystemJournal(root, snapshot.system_id) as journal:
+            before = journal.read()
+
+        monkeypatch.setattr(journal_module, "MAX_ABANDONED_PER_SYSTEM", 0)
+        teardown = _teardown(snapshot, 2)
+        repository.allocating = teardown
+        refused = _service(repository, root)
+        with pytest.raises(AuthoritySystemServiceError, match="journal-conflict"):
+            await refused.begin("worker-a", teardown)
+        await refused.close()
+        with FileAuthoritySystemJournal(root, snapshot.system_id) as journal:
+            assert journal.read() == before
+
+    asyncio.run(scenario())
+
+
+def test_unwritable_evidence_directory_refuses_quarantine_with_journal_conflict(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        first = _service(repository, root)
+        await _crash_provision_at(
+            first, repository, _request(snapshot), AuthoritySystemJournalPhase.MUTATION_STARTED
+        )
+        await first.close()
+        (root / "system-operations" / "abandoned").mkdir(mode=0o755)
+        (root / "system-operations" / "abandoned").chmod(0o755)
+
+        teardown = _teardown(snapshot, 2)
+        repository.allocating = teardown
+        refused = _service(repository, root)
+        with pytest.raises(AuthoritySystemServiceError, match="journal-conflict"):
+            await refused.begin("worker-a", teardown)
+        await refused.close()
+        with FileAuthoritySystemJournal(root, snapshot.system_id) as journal:
+            assert len(journal.read()) == repository.sequence + 1
 
     asyncio.run(scenario())
