@@ -55,9 +55,14 @@ it is a new migration.
   and the bound is per budget, not per System: a recycled budget counts afresh; a failed job holds no lease or worker;
   the receipt is consumed once.
 - Recovery of a capped teardown: `enqueue_preactivation_teardown`
-  (`src/kdive/services/systems/authority_owned.py`) re-enqueues a `failed` prior job with the
-  same marker and dedup key under `JobRecyclePolicy.FAILED`, which resets the attempt counter and
-  `created_at` (a fresh budget); any other prior job still replays. The operator widened the
+  (`src/kdive/services/systems/authority_owned.py`) takes the caller's `recycle` policy and, when
+  it admits `failed` rows, re-enqueues a `failed` prior job with the same marker and dedup key,
+  which resets the attempt counter and
+  `created_at` (a fresh budget). Only operator requests (`systems.teardown`, break-glass `ops.force_teardown`)
+  pass `FAILED`; the reconciler's orphan repair, investigation force-close and the cancel fence
+  pass `NEVER` and replay, so an automatic sweep cannot re-spend the bound. The bound therefore
+  applies per operator request. The one-line call-site changes in `mcp/tools/jobs.py` and
+  `mcp/tools/lifecycle/systems/admin.py` follow from this. The operator widened the
   surface to this function on 2026-11-04. `request_authority_system_preactivation_teardown`
   returns `replay` for a `teardown-requested` owner, so no SQL change is needed.
 

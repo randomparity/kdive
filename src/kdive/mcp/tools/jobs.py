@@ -258,7 +258,11 @@ async def _fence_authority_owned_provision_cancel(
         if binding.ownership_state == "activated":
             return
         await enqueue_preactivation_teardown(
-            conn, system, binding, _job_authorizing(ctx, system.project)
+            conn,
+            system,
+            binding,
+            _job_authorizing(ctx, system.project),
+            recycle=queue.JobRecyclePolicy.NEVER,
         )
 
 

@@ -14,7 +14,10 @@ from psycopg_pool import AsyncConnectionPool
 import kdive.services.systems.authority_owned as authority_owned
 from kdive.components.references import ROOTFS_COMPONENT
 from kdive.components.validation import ComponentSourceCapabilities
+from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
+from kdive.jobs import queue
+from kdive.jobs.payloads import Authorizing
 from kdive.mcp.tools import jobs as jobs_tools
 from kdive.mcp.tools.lifecycle.control.registrar import power_system
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
@@ -543,6 +546,18 @@ def test_failed_capped_teardown_restarts_and_completes(
             assert response.status == "queued"
             return str(response.object_id)
 
+    async def automatic_sweep_state(system_id: str) -> str:
+        async with systems_support.pool(migrated_url) as pool, pool.connection() as conn:
+            system = await SYSTEMS.get(conn, UUID(system_id))
+            assert system is not None
+            job = await authority_owned.enqueue_control_teardown(
+                conn,
+                system,
+                Authorizing(principal="user-1", agent_session="s", project="proj"),
+                recycle=queue.JobRecyclePolicy.NEVER,
+            )
+            return job.state.value
+
     system_id, job_id = asyncio.run(provision_and_request_teardown())
     worker = f"docker:capped-teardown-{uuid4()}"
     credential = uuid4().bytes + uuid4().bytes
@@ -572,6 +587,7 @@ def test_failed_capped_teardown_restarts_and_completes(
     outcomes = [retain_round(migrated_url, role_dsns, case, n)[1] for n in range(1, 5)]
     assert outcomes == ["queued", "queued", "queued", "failed"]
 
+    assert asyncio.run(automatic_sweep_state(system_id)) == "failed"
     assert asyncio.run(retry_teardown(system_id)) == job_id
     with psycopg.connect(migrated_url) as conn:
         assert conn.execute(

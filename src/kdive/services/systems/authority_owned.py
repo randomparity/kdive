@@ -184,11 +184,16 @@ async def enqueue_preactivation_teardown(
     system: System,
     binding: AuthoritySystemBinding,
     authorizing: Authorizing,
+    *,
+    recycle: queue.JobRecyclePolicy,
 ) -> Job:
     """Enqueue the sole authority teardown and advance its ownership state atomically.
 
     The caller holds the System transaction lock. A dedup collision with any ordinary teardown is
     a conflict: an authority-owned System must never let a worker dispatch an unmarked teardown.
+    A ``failed`` prior job with the same marker (its retained-receipt budget is spent, #3530) is
+    restarted only when ``recycle`` admits ``failed`` rows, i.e. on an operator request; automatic
+    callers pass ``NEVER`` so the bound cannot be re-spent every sweep.
     """
     dedup_key = _teardown_dedup_key(system.id)
     operation_identity = (
@@ -221,18 +226,18 @@ async def enqueue_preactivation_teardown(
             "an ordinary teardown job cannot be replayed for an authority-owned System",
             category=ErrorCategory.CONFLICT,
         )
-    if prior is not None and prior.state is not JobState.FAILED:
+    if prior is not None and not (
+        prior.state is JobState.FAILED and recycle is not queue.JobRecyclePolicy.NEVER
+    ):
         job = prior
     else:
-        # A failed teardown (its retained-receipt budget is spent, #3530) restarts under the same
-        # marker; enqueue also resets the budget's start.
         job = await queue.enqueue(
             conn,
             JobKind.TEARDOWN,
             TeardownPayload(system_id=str(system.id), authority_system_v1=marker),
             authorizing,
             dedup_key,
-            recycle=queue.JobRecyclePolicy.FAILED,
+            recycle=recycle,
         )
     result = await (
         await conn.execute(
@@ -258,13 +263,14 @@ async def enqueue_control_teardown(
     """Route a System-locked control teardown through its current ownership contract.
 
     ``recycle`` governs the ordinary ``{uid}:teardown`` row only; each caller states its policy
-    (ADR-0435). The preactivation-authority branch ignores it. A recycle overwrites ``payload``,
-    so an authority-marked prior row always replays: its re-run belongs to the authority path
-    (#2917, ADR-0620), which keys on the marker.
+    (ADR-0435). The preactivation-authority branch restarts a ``failed`` same-marker row only when
+    it admits one; any other authority-marked prior row replays (#2917, ADR-0620).
     """
     binding = await authority_system_binding(conn, system.id)
     if binding is not None and binding.ownership_state != "activated":
-        return await enqueue_preactivation_teardown(conn, system, binding, authorizing)
+        return await enqueue_preactivation_teardown(
+            conn, system, binding, authorizing, recycle=recycle
+        )
     dedup_key = _teardown_dedup_key(system.id)
     if recycle is not queue.JobRecyclePolicy.NEVER:
         prior = await _dedup_job(conn, dedup_key)

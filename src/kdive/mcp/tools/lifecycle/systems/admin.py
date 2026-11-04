@@ -615,7 +615,11 @@ async def _enqueue_preactivation_authority_teardown(
     """Enqueue and bind one activation-free teardown to immutable ownership."""
     try:
         job = await enqueue_preactivation_teardown(
-            conn, system, binding, job_authorizing(ctx, system.project)
+            conn,
+            system,
+            binding,
+            job_authorizing(ctx, system.project),
+            recycle=queue.JobRecyclePolicy.FAILED,
         )
     except CategorizedError as exc:
         if exc.category is not ErrorCategory.CONFLICT:
