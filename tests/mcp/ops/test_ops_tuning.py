@@ -884,3 +884,37 @@ def _complete_remote(text: str, *, base_image: str) -> str:
     for field, value in completions.items():
         text = text.replace(f'{field} = "REPLACE_ME_{field}"', f'{field} = "{value}"')
     return text
+
+
+def test_byo_capacity_stays_exactly_one_without_failed_write_side_effects(
+    migrated_url: str,
+) -> None:
+    async def run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                resource = await _resource(
+                    conn,
+                    cap=1,
+                    kind=ResourceKind.BYO_HOST,
+                    managed_by=ManagedBy.CONFIG,
+                    name="byo-cap",
+                )
+            for cap in (0, 2, True):
+                response = await tuning.set_host_capacity(
+                    pool, _OPERATOR, resource_id=str(resource), concurrent_allocation_cap=cap
+                )
+                assert response.error_category == ErrorCategory.CONFIGURATION_ERROR
+                assert response.suggested_next_actions == ["resources.set_scheduling"]
+                current = await _get_resource(pool, resource)
+                assert current.capabilities[CONCURRENT_ALLOCATION_CAP_KEY] == 1
+                assert (
+                    await _override_disposition(migrated_url, kind="byo-host", name="byo-cap")
+                    is None
+                )
+            assert not await _platform_audit_rows(migrated_url)
+            allowed = await tuning.set_host_capacity(
+                pool, _OPERATOR, resource_id=str(resource), concurrent_allocation_cap=1
+            )
+            assert allowed.status == "ok"
+
+    asyncio.run(run())

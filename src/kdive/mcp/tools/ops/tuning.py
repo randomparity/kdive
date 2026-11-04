@@ -162,6 +162,14 @@ async def set_host_capacity(
                     ErrorCategory.CONFIGURATION_ERROR,
                     suggested_next_actions=["resources.list"],
                 )
+            if host.kind is ResourceKind.BYO_HOST and (cap != 1 or isinstance(cap, bool)):
+                return ToolResponse.failure(
+                    _CAPACITY_OBJECT_ID,
+                    ErrorCategory.CONFIGURATION_ERROR,
+                    detail="BYO hosts require concurrent_allocation_cap=1; use "
+                    "resources.set_scheduling(state='cordoned') to freeze new placement",
+                    suggested_next_actions=["resources.set_scheduling"],
+                )
             async with resource_identity_lock(conn, host.kind, host.name):
                 await _merge_host_cap(conn, target, cap)
                 if host.managed_by == ManagedBy.CONFIG.value:
@@ -386,10 +394,21 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def ops_set_host_capacity(
         resource_id: Annotated[str, Field(description="Host (resource) id to set the cap for.")],
         concurrent_allocation_cap: Annotated[
-            int, Field(description="Maximum concurrent allocations on the host (>= 0).")
+            int,
+            Field(
+                description=(
+                    "Per-resource concurrent allocation count (>=0; not clock based). BYO requires "
+                    "exactly 1; other values return configuration_error without mutation. "
+                    "Freeze BYO placement with resources.set_scheduling(state='cordoned')."
+                )
+            ),
         ],
     ) -> ToolResponse:
-        """Set a host's concurrent allocation cap. Blocks new placement; no eviction. Operator."""
+        """Set a host's concurrent allocation cap; no eviction. Operator.
+
+        BYO hosts require exactly 1; other values return configuration_error without mutation.
+        Use resources.set_scheduling(state='cordoned') to freeze new BYO placement.
+        """
         return await set_host_capacity(
             pool,
             current_context(),

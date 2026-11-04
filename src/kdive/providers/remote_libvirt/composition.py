@@ -510,6 +510,8 @@ def build_runtime(
         vmcore_introspector=vmcore_introspector,
         live_introspector=live_introspector,
         support=ProviderSupport(
+            supports_build=True,
+            supports_boot=True,
             component_sources=_component_sources(),
             capture_methods=frozenset(
                 {

@@ -484,7 +484,12 @@ def _register_systems_profile_examples(app: FastMCP, resolver: ProviderResolver)
         meta={"maturity": "implemented"},
     )
     async def systems_profile_examples() -> ToolResponse:
-        """Return a ready-to-edit example profile per configured provider. Requires a token."""
+        """Return example profiles per configured provider. Requires a token.
+
+        An operational provider returns a ready-to-edit profile. BYO returns status=unavailable
+        with data.provider='byo-host', data.available=false, data.profile=null and a note:
+        provisioning is unavailable in this build. Do not use another provider's profile for it.
+        """
         # Auth-only (ADR-0117): the verifier already gated the transport; enforce token presence as
         # defence-in-depth. No platform/project gate, no audit — the projection is non-sensitive
         # inventory identifiers only (ADR-0124).

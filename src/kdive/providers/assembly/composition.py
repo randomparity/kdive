@@ -24,6 +24,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.images.rootfs.stage_volume import StageVolumeDeps
 from kdive.observability.console_telemetry import ConsoleTelemetry
+from kdive.providers.byo_host import composition as byo_composition
 from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.resource_registration import register_or_refresh_discovered_resource
@@ -338,12 +339,23 @@ class ProviderComposition:
         enable_fault_inject: bool | None = None,
         enable_remote_libvirt: bool | None = None,
         enable_local_libvirt: bool | None = None,
+        enable_byo_host: bool | None = None,
         local_reaper: InfraReaper | None = None,
         local_authority_sender: AuthorityRequestSender | None = None,
         authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
         | None = None,
     ) -> tuple[_RuntimeDescriptor, ...]:
         return (
+            _RuntimeDescriptor(
+                kind=ResourceKind.BYO_HOST,
+                enabled=lambda: (
+                    enable_byo_host
+                    if enable_byo_host is not None
+                    else byo_composition.is_configured()
+                ),
+                runtime_factory=byo_composition.build_runtime,
+                discovery_registration_factory=byo_composition.discovery_registration,
+            ),
             _RuntimeDescriptor(
                 kind=ResourceKind.LOCAL_LIBVIRT,
                 enabled=lambda: _local_libvirt_enabled(enable_local_libvirt),
@@ -409,6 +421,7 @@ class ProviderComposition:
         enable_fault_inject: bool | None = None,
         enable_remote_libvirt: bool | None = None,
         enable_local_libvirt: bool | None = None,
+        enable_byo_host: bool | None = None,
         local_reaper: InfraReaper | None = None,
         local_authority_sender: AuthorityRequestSender | None = None,
         authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
@@ -420,6 +433,7 @@ class ProviderComposition:
                 enable_fault_inject=enable_fault_inject,
                 enable_remote_libvirt=enable_remote_libvirt,
                 enable_local_libvirt=enable_local_libvirt,
+                enable_byo_host=enable_byo_host,
                 local_reaper=local_reaper,
                 authority_sender_factory=authority_sender_factory,
                 local_authority_sender=local_authority_sender,
@@ -433,6 +447,7 @@ class ProviderComposition:
         enable_fault_inject: bool | None = None,
         enable_remote_libvirt: bool | None = None,
         enable_local_libvirt: bool | None = None,
+        enable_byo_host: bool | None = None,
         local_authority_sender: AuthorityRequestSender | None = None,
         authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender]
         | None = None,
@@ -450,6 +465,7 @@ class ProviderComposition:
                 enable_fault_inject=enable_fault_inject,
                 enable_remote_libvirt=enable_remote_libvirt,
                 enable_local_libvirt=enable_local_libvirt,
+                enable_byo_host=enable_byo_host,
                 authority_sender_factory=authority_sender_factory,
                 local_authority_sender=local_authority_sender,
             )

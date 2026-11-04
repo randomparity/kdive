@@ -55,6 +55,9 @@ section. Pin a portable ``x86-64-vN`` rung for a deterministic reproducer. A pin
 non-booting System — admission validates only that the host can deliver the model, not that
 the image can run on it.
 
+``data.capabilities`` lists advertised provider operations; an inventory-only provider
+can return an empty list without claiming boot or build support.
+
 ``data.supported_capture_methods`` is the provider-wide set across every guest
 architecture the provider can host; it is not a given System's set or a readiness claim.
 Read ``systems.get``'s ``data.supported_capture_methods`` for a System's own architecture.
@@ -110,7 +113,7 @@ the image can run on it.
 
 `request` fields:
 
-- `kind` (``local-libvirt`, `fault-inject`, `remote-libvirt` (nullable)`, optional) — Filter by resource kind (e.g. 'local-libvirt'); omit for all.
+- `kind` (``local-libvirt`, `fault-inject`, `remote-libvirt`, `byo-host` (nullable)`, optional) — Filter by resource kind (e.g. 'local-libvirt'); omit for all.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 
@@ -118,12 +121,14 @@ the image can run on it.
 
 `implemented`
 
-Register a runtime resource of any provider kind (platform_admin).
+Register a supported runtime resource (platform_admin); BYO is config-only.
 
 ``kind`` selects the branch: 'remote-libvirt' needs ``host_uri`` + ``base_image``,
 'local-libvirt' needs ``host_uri``, 'fault-inject' needs neither. A field that does not
 apply to the chosen kind, or a required one left blank, returns ``configuration_error``,
-as does a kind this deployment has not composed.
+as does a kind this deployment has not composed. BYO hosts are config-owned: this
+tool refuses them before probes, secrets or inserts. Declare [[byo_host]] in systems.toml
+and call ops.reconcile_systems instead.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -131,7 +136,7 @@ as does a kind this deployment has not composed.
 | `concurrent_allocation_cap` | integer | no | Per-host concurrent-allocation cap (> 0). |
 | `cost_class` | string | yes | The cost class for pricing. |
 | `host_uri` | string (nullable) | no | Provider host URI. Required for 'remote-libvirt' and 'local-libvirt' (both TCP-probe it for reachability before the row is written); rejected for 'fault-inject', which is synthetic and has no endpoint. |
-| `kind` | `local-libvirt`, `fault-inject`, `remote-libvirt` | yes | Provider kind to register. 'remote-libvirt' requires host_uri + base_image; 'local-libvirt' requires host_uri; 'fault-inject' takes neither (supplying one is a configuration_error). |
+| `kind` | `local-libvirt`, `fault-inject`, `remote-libvirt`, `byo-host` | yes | Provider kind to register. BYO is config-only: declare [[byo_host]] in systems.toml and call ops.reconcile_systems; runtime registration refuses it. 'remote-libvirt' requires host_uri + base_image; 'local-libvirt' requires host_uri; 'fault-inject' takes neither (supplying one is a configuration_error). |
 | `memory_mb` | integer | yes | The host's memory size ceiling in MiB (admission ≤-resource-caps check). |
 | `name` | string | yes | The (kind, name) identity for the new resource. |
 | `owner_project` | string (nullable) | no | Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource. |

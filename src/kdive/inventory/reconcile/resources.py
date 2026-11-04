@@ -50,6 +50,7 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.inventory._row_typing import RowTyper
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import (
+    ByoHostInstance,
     FaultInjectInstance,
     InventoryDoc,
     LocalLibvirtInstance,
@@ -184,9 +185,9 @@ async def _create_config_resources(
     diff: ReconcileDiff,
     overrides: Mapping[tuple[str, str], Any],
 ) -> None:
-    """Upsert the config-owned kinds: fault-inject (no host) and remote-libvirt.
+    """Upsert the config-owned kinds: fault-inject, remote-libvirt and byo-host.
 
-    Both are keyed by their true identity ``(kind, name)`` — the migration's partial-unique
+    All are keyed by their true identity ``(kind, name)`` — the migration's partial-unique
     index. A row whose ``name`` already matches is updated in place (so a changed ``host_uri``
     propagates without a duplicate insert). Only when no name match exists does remote-libvirt
     fall back to **adopting** a discovery row for the same ``host_uri`` whose ``name`` is still
@@ -218,6 +219,10 @@ def _config_resource_upserts(
             yield request
     for inst in doc.remote_libvirt:
         request = _remote_libvirt_upsert(inst, overrides)
+        if request is not None:
+            yield request
+    for inst in doc.byo_host:
+        request = _byo_host_upsert(inst, overrides)
         if request is not None:
             yield request
 
@@ -265,7 +270,34 @@ def _remote_libvirt_upsert(
     )
 
 
-def _declared_caps(inst: FaultInjectInstance | RemoteLibvirtInstance) -> ResourceCaps:
+def _byo_host_upsert(
+    inst: ByoHostInstance, overrides: Mapping[tuple[str, str], Any]
+) -> _ConfigResourceUpsert | None:
+    disposition = _disposition(overrides, ResourceKind.BYO_HOST, inst.name)
+    if disposition is InventoryOverrideDisposition.REMOVED:
+        return None
+    return _ConfigResourceUpsert(
+        declared=_DeclaredResource(
+            kind=ResourceKind.BYO_HOST,
+            name=inst.name,
+            host_uri=inst.ssh_target,
+            cost_class=inst.cost_class,
+            pool=inst.pool,
+            caps={
+                **_declared_caps(inst),
+                "guest_arches": {inst.arch: {"accel": "none", "emulator": "none"}},
+                "pseries_fadump": inst.pseries_fadump,
+                "byo_host": inst.model_dump(mode="json"),
+            },
+        ),
+        adopt_by_host=False,
+        detached=disposition is InventoryOverrideDisposition.DETACHED,
+    )
+
+
+def _declared_caps(
+    inst: FaultInjectInstance | RemoteLibvirtInstance | ByoHostInstance,
+) -> ResourceCaps:
     return {
         VCPUS_KEY: inst.vcpus,
         MEMORY_MB_KEY: inst.memory_mb,
@@ -580,14 +612,16 @@ async def _prune_departed(
 def _declared_config_identities(doc: InventoryDoc) -> set[tuple[str, str]]:
     """The (kind, name) identities the file declares for the config-owned (sole-creator) kinds.
 
-    Only ``fault_inject`` / ``remote_libvirt`` are config-owned; ``local_libvirt`` rows are
-    discovery-owned and are never pruned by this reconcile.
+    ``fault_inject`` / ``remote_libvirt`` / ``byo_host`` are config-owned.
+    ``local_libvirt`` rows are discovery-owned and are never pruned by this reconcile.
     """
     identities: set[tuple[str, str]] = set()
     for inst in doc.fault_inject:
         identities.add((ResourceKind.FAULT_INJECT.value, inst.name))
     for inst in doc.remote_libvirt:
         identities.add((ResourceKind.REMOTE_LIBVIRT.value, inst.name))
+    for inst in doc.byo_host:
+        identities.add((ResourceKind.BYO_HOST.value, inst.name))
     return identities
 
 
