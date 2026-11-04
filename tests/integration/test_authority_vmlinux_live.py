@@ -1,8 +1,9 @@
 """The remote authority stages the uploaded vmlinux in the guest module tree (#3131).
 
 Gated ``live_stack`` and dormant unless ``KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG`` names an
-installed remote authority lane (x86_64). One body frames an authority-owned System, activates an
-external boot whose build uploaded the tree's ``vmlinux``, and observes four facts through the
+installed remote authority lane (x86_64 or ppc64le). The observed remote host architecture selects
+the native guest. One body frames an authority-owned System, activates an external boot whose
+build uploaded the tree's ``vmlinux``, and observes these facts through the
 guest agent on the authority's private libvirt, as the authority account:
 
 * ``/lib/modules/<release>/vmlinux`` exists in the booted guest with the uploaded SHA-256;
@@ -24,12 +25,14 @@ from pathlib import Path
 
 import pytest
 
+from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 from scripts.coverage_campaign.contract import Cell
 from tests.integration.live_stack.authority_faults import activate
 from tests.integration.live_stack.authority_lane import (
     REMOTE_CONFIG_ENV,
     AuthoritySystem,
     on_authority_system,
+    select_remote_lane,
 )
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.evidence import EvidenceWriter
@@ -38,6 +41,7 @@ from tests.integration.live_stack.spine import drain_job
 from tests.live_vm.installed_local_authority_support import release_external_boot
 from tests.live_vm.installed_remote_authority_support import (
     RemoteAuthorityProofConfig,
+    remote_authority_inventory,
     run_as_authority,
 )
 
@@ -187,16 +191,19 @@ def test_remote_authority_stages_the_uploaded_vmlinux(tmp_path: Path) -> None:
     if not tree_value or not (Path(tree_value) / "vmlinux").is_file():
         pytest.fail(f"{_KERNEL_TREE_ENV} must name a built tree holding an unstripped vmlinux")
     tree = Path(tree_value)
+    arch = remote_authority_inventory(select_remote_lane()).arch
+    if arch not in SUPPORTED_ARCHES:
+        pytest.fail(f"unsupported remote authority architecture: {arch}")
     cell = Cell(
-        "authority-vmlinux-staging",
+        f"authority-vmlinux-staging-{arch}",
         "tool/authority-vmlinux-staging",
         3131,
         "authority-frame",
         "vmlinux staging proof",
         ("effect", "cleanup"),
         provider="remote-libvirt",
-        host_arch="x86_64",
-        guest_arch="x86_64",
+        host_arch=arch,
+        guest_arch=arch,
     )
     run = CellRun(cell, EvidenceWriter(tmp_path))
     project = f"cov-{secrets.token_hex(4)}"

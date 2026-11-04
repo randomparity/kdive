@@ -915,6 +915,30 @@ crash-kernel boot), `introspect.from_vmcore`, `postmortem.crash`, and `vmcore.fe
 carried a host name or address. After the run, `demo-down.sh --wipe --yes` cleared the stack, the
 provider defined no `kdive-` domain, and its pool held only the base volumes.
 
+## 15. Remote authority vmlinux staging (#3512)
+
+The existing `tests/integration/test_authority_vmlinux_live.py` selects x86_64 or ppc64le from
+the configured remote authority's observed host architecture. The unfiltered invocation remains:
+
+```bash
+uv run python -m pytest -m live_stack -s tests/integration/test_authority_vmlinux_live.py
+```
+
+Configure the [installed remote authority lane](live-testing.md#remote-authority-branch-3209),
+including `KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG`, `KDIVE_SYSTEMS_TOML` and
+`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`. Set `KDIVE_KERNEL_SRC` to a complete matching
+kernel tree with boot image, config, modules and unstripped DWARF `vmlinux`; its filesystem
+support must match the registered guest root (including `CONFIG_BTRFS_FS` for btrfs).
+The guest needs drgn and a working guest agent. Authority and control-plane revisions must match
+the candidate. The frame rechecks architecture before allocation and owns lifecycle cleanup.
+
+The proof checks the uploaded SHA-256 at `/lib/modules/<release>/vmlinux`, real default-search
+`drgn -k` resolution of `init_uts_ns`, restored absence after release and baseline boot, and
+unchanged authority inventory/capacity. Native ppc64le completion requires an observed POWER
+KVM-HV run; mocked boundary tests, a skipped lane or TCG do not establish it. Record the exact
+candidate, accelerator, kernel/config provenance, observations and cleanup. No native ppc64le
+remote result has been established for #3512; an unavailable lane leaves the issue open.
+
 ## SUSE native image proof
 
 On untouched first boot, record the completed JeOS marker, skipped wizard units,
