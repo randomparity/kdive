@@ -20,6 +20,7 @@ class ResourceKind(StrEnum):
     LOCAL_LIBVIRT = "local-libvirt"
     FAULT_INJECT = "fault-inject"
     REMOTE_LIBVIRT = "remote-libvirt"
+    BYO_HOST = "byo-host"
 
 
 class Resource(DomainModel):

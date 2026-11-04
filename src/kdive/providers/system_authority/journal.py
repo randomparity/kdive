@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import stat
 from dataclasses import dataclass
@@ -31,6 +32,8 @@ MAX_JOURNAL_BYTES = 16 * 1024 * 1024
 # A crash, a database error or a superseded advance can each leave one appended record that the
 # database never confirmed. Quarantine keeps that record as evidence in this directory, inside
 # system-operations because the authority unit may write nowhere else (ADR-0623 amendment, #3531).
+# A crash or write failure inside an append leaves a torn final line, quarantined the same way
+# (ADR-0623 amendment, #3543).
 ABANDONED_DIRECTORY = "abandoned"
 MAX_ABANDONED_PER_SYSTEM = 4
 MAX_ABANDONED_FILES = 256
@@ -83,6 +86,10 @@ def _ownership_binding(record: AuthoritySystemJournalRecordV1) -> tuple[object, 
         record.root_identity,
         record.bootstrap_identity,
     )
+
+
+class AuthoritySystemJournalTornTailError(ValueError):
+    """The journal's final line has no newline, so an append did not finish."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,10 +206,10 @@ class FileAuthoritySystemJournal:
             status.st_nlink,
         )
 
-    def _read(self) -> tuple[tuple[AuthoritySystemJournalRecordV1, ...], os.stat_result | None]:
+    def _load(self) -> tuple[bytes, os.stat_result] | None:
         descriptor = self._open()
         if descriptor is None:
-            return (), None
+            return None
         try:
             status = os.fstat(descriptor)
             size = status.st_size
@@ -218,8 +225,20 @@ class FileAuthoritySystemJournal:
             os.close(descriptor)
         if len(payload) > MAX_JOURNAL_BYTES:
             raise ValueError("authority System journal exceeds 16 MiB")
+        return payload, status
+
+    def _read(self) -> tuple[tuple[AuthoritySystemJournalRecordV1, ...], os.stat_result | None]:
+        loaded = self._load()
+        if loaded is None:
+            return (), None
+        payload, status = loaded
         if payload and not payload.endswith(b"\n"):
-            raise ValueError("authority System journal has an incomplete final record")
+            raise AuthoritySystemJournalTornTailError(
+                "authority System journal has an incomplete final record"
+            )
+        return self._validate(payload), status
+
+    def _validate(self, payload: bytes) -> tuple[AuthoritySystemJournalRecordV1, ...]:
         lines = payload.splitlines()
         if len(lines) > MAX_RECORDS_PER_JOURNAL:
             raise ValueError("authority System journal exceeds 1024 records")
@@ -276,7 +295,7 @@ class FileAuthoritySystemJournal:
             prior_phase = record.phase
             prior_generation = record.generation
             records.append(record)
-        return tuple(records), status
+        return tuple(records)
 
     def read(self) -> tuple[AuthoritySystemJournalRecordV1, ...]:
         records, _status = self._read()
@@ -336,28 +355,29 @@ class FileAuthoritySystemJournal:
             os.close(descriptor)
         os.fsync(directory)
 
-    def abandon_unconfirmed_tail(self, confirmed_sequence: int) -> None:
-        """Replace the journal with its confirmed prefix, keeping the extra record as evidence.
+    def _quarantine(
+        self,
+        prefix: tuple[AuthoritySystemJournalRecordV1, ...],
+        evidence_name: str,
+        evidence: bytes,
+        validated: os.stat_result,
+    ) -> None:
+        """Replace the journal with `prefix`, keeping the bytes past it as evidence.
 
-        Every crash point leaves a valid journal: the evidence appears under its final name only
-        complete, and the active file is replaced by one atomic rename of a finished scratch file.
+        Every crash point leaves the journal as validated or as `prefix`: the evidence appears
+        under its final name only complete, and the active file is replaced by one atomic rename
+        of a finished scratch file.
         """
-        records, validated = self._read()
-        if validated is None or len(records) != confirmed_sequence + 1:
-            raise ValueError("authority System journal has no single unconfirmed record")
-        tail = records[confirmed_sequence]
-        digest = authority_system_record_digest(tail).removeprefix("sha256:")
-        evidence_name = f"{self._system_id}.{tail.sequence}.{digest}.jsonl"
         scratch = f"{self._system_id}.pending"
         directory = self._open_abandoned()
         try:
             self._check_evidence_bounds(directory, evidence_name)
-            self._write_scratch(directory, scratch, canonical_system_authority_bytes(tail) + b"\n")
+            self._write_scratch(directory, scratch, evidence)
             os.rename(scratch, evidence_name, src_dir_fd=directory, dst_dir_fd=directory)
             self._write_scratch(
                 directory,
                 scratch,
-                b"".join(canonical_system_authority_bytes(r) + b"\n" for r in records[:-1]),
+                b"".join(canonical_system_authority_bytes(r) + b"\n" for r in prefix),
             )
             current = os.stat(self._name, dir_fd=self._journal_fd, follow_symlinks=False)
             if self._identity(current) != self._identity(validated):
@@ -367,6 +387,44 @@ class FileAuthoritySystemJournal:
             os.fsync(directory)
         finally:
             os.close(directory)
+
+    def abandon_unconfirmed_tail(self, confirmed_sequence: int) -> None:
+        """Replace the journal with its confirmed prefix, keeping the extra record as evidence."""
+        records, validated = self._read()
+        if validated is None or len(records) != confirmed_sequence + 1:
+            raise ValueError("authority System journal has no single unconfirmed record")
+        tail = records[confirmed_sequence]
+        digest = authority_system_record_digest(tail).removeprefix("sha256:")
+        self._quarantine(
+            records[:-1],
+            f"{self._system_id}.{tail.sequence}.{digest}.jsonl",
+            canonical_system_authority_bytes(tail) + b"\n",
+            validated,
+        )
+
+    def abandon_torn_tail(self, confirmed_sequence: int, confirmed_digest: str) -> None:
+        """Move a torn final line aside when the confirmed head is exactly the lines before it."""
+        loaded = self._load()
+        if loaded is None:
+            raise ValueError("authority System journal has no torn final record")
+        payload, validated = loaded
+        end = payload.rfind(b"\n") + 1
+        torn = payload[end:]
+        if not torn:
+            raise ValueError("authority System journal has no torn final record")
+        if len(torn) > MAX_MESSAGE_BYTES:
+            raise ValueError("authority System journal torn final record is oversized")
+        records = self._validate(payload[:end])
+        digest = authority_system_record_digest(records[-1]) if records else GENESIS_DIGEST
+        if (len(records), digest) != (confirmed_sequence, confirmed_digest):
+            raise ValueError("authority System journal torn final record is not past the head")
+        self._quarantine(
+            records,
+            f"{self._system_id}.{confirmed_sequence + 1}.torn."
+            f"{hashlib.sha256(torn).hexdigest()}.jsonl",
+            torn,
+            validated,
+        )
 
     def append(self, record: AuthoritySystemJournalRecordV1) -> AuthoritySystemFileHead:
         record = AuthoritySystemJournalRecordV1.model_validate(

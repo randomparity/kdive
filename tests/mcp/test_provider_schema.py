@@ -38,6 +38,7 @@ def test_resource_kind_enum_narrows_to_live_set() -> None:
         "local-libvirt",
         "fault-inject",
         "remote-libvirt",
+        "byo-host",
     }
     projected = project_tool_schema(schema, frozenset({LOCAL}))
     assert _defs(projected)["ResourceKind"]["enum"] == ["local-libvirt"]

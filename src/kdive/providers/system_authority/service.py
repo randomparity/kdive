@@ -12,6 +12,7 @@ from uuid import UUID
 from kdive.providers.system_authority.journal import (
     PROVISION_RECORD_CEILING,
     RECORDS_PER_ATTEMPT,
+    AuthoritySystemJournalTornTailError,
     FileAuthoritySystemJournal,
 )
 from kdive.providers.system_authority.ports import AuthoritySystemProvider
@@ -385,11 +386,37 @@ class AuthoritySystemService:
         return state.records[state.db_sequence - 1].phase
 
     @staticmethod
+    def _recover_torn_tail(
+        resolved: ResolvedAuthoritySystemOperation, journal: FileAuthoritySystemJournal
+    ) -> None:
+        """Quarantine a torn final record, which `_anchor` cannot have sent to the database."""
+        head = resolved.head
+        try:
+            journal.abandon_torn_tail(head.sequence, head.digest)
+        except ValueError, OSError:
+            _log.exception(
+                "authority System %s journal refused to recover a torn final record "
+                "at database head %d",
+                head.system_id,
+                head.sequence,
+            )
+            raise AuthoritySystemServiceError("journal-conflict") from None
+        _log.warning(
+            "authority System %s journal quarantined a torn final record past sequence %d",
+            head.system_id,
+            head.sequence,
+        )
+
+    @staticmethod
     def _journal_state(
         resolved: ResolvedAuthoritySystemOperation,
         journal: FileAuthoritySystemJournal,
     ) -> _JournalState:
-        records = list(journal.read())
+        try:
+            records = list(journal.read())
+        except AuthoritySystemJournalTornTailError:
+            AuthoritySystemService._recover_torn_tail(resolved, journal)
+            records = list(journal.read())
         if not records:
             if resolved.head.sequence != 0 or resolved.head.digest != GENESIS_DIGEST:
                 raise AuthoritySystemServiceError("journal-conflict")

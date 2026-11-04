@@ -275,7 +275,10 @@ class ResourceCapabilities:
         return result
 
     def pseries_fadump(self) -> bool:
-        """Whether the host QEMU implements pseries fadump (ADR-0349), fail-closed.
+        """Whether the Resource advertises pseries fadump, fail-closed.
+
+        Local discovery probes QEMU (ADR-0349); BYO inventory records an explicit operator
+        declaration rather than inferring firmware support from architecture (ADR-0813).
 
         Returns ``True`` only for a stored ``bool`` ``True``; an absent key, a non-``bool``
         value, or a stale/hand-edited row reads as ``False`` so a fadump-opted provision is never

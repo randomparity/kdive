@@ -542,11 +542,17 @@ def test_run_round_trips_through_json() -> None:
     assert run.model_dump()["state"] == "running"
 
 
-def test_resource_kind_has_exactly_the_three_provider_kinds() -> None:
+def test_resource_kind_has_exactly_the_provider_kinds() -> None:
     assert ResourceKind.LOCAL_LIBVIRT.value == "local-libvirt"
     assert ResourceKind.FAULT_INJECT.value == "fault-inject"
     assert ResourceKind.REMOTE_LIBVIRT.value == "remote-libvirt"
-    assert {k.value for k in ResourceKind} == {"local-libvirt", "fault-inject", "remote-libvirt"}
+    assert ResourceKind.BYO_HOST.value == "byo-host"
+    assert {k.value for k in ResourceKind} == {
+        "local-libvirt",
+        "fault-inject",
+        "remote-libvirt",
+        "byo-host",
+    }
 
 
 def test_allocation_failure_category_coerces_and_defaults() -> None:

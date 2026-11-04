@@ -11,9 +11,10 @@ provider name and a ``PUBLIC``-visibility ``[[image]]`` name (for remote, the in
 ``base_image``, itself a declared image). It never reads or emits the ``[[remote_libvirt]]``
 ``uri``/``gdb_addr``/``gdbstub_range`` or any ``*_cert_ref`` secret-ref name, and it excludes
 ``private``-visibility images — so no operator-private or other-tenant identifier can reach the
-wire. The examples are schema-and-policy valid as emitted (they parse and pass provider policy), but
-not necessarily provisionable as-is: a placeholder reference must be replaced with a real one for
-the caller's host.
+wire. Operational examples parse and pass provider policy as emitted, but are not necessarily
+provisionable as-is: a placeholder reference must be replaced with a real one for
+the caller's host. BYO instead returns an unavailable item with no profile until its
+provisioning plane exists.
 
 The local-libvirt example also carries the profile's ``debug`` block (``gdbstub``/
 ``preserve_on_crash``, both non-sensitive booleans defaulting off) so an agent learns these
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.model import ImageEntry, InventoryDoc, StagedSource
 from kdive.mcp.responses import ToolResponse
 from kdive.profiles.provider_sections import PROVIDER_SECTIONS
@@ -141,6 +143,17 @@ def _example_item(provider: str, doc: InventoryDoc | None) -> ToolResponse:
     shape-sized allocation. ``uses_real_reference`` reports whether the provider rootfs/base-image
     was a real inventory ref.
     """
+    if provider == ResourceKind.BYO_HOST.value:
+        return ToolResponse.success(
+            provider,
+            "unavailable",
+            data={
+                "provider": provider,
+                "available": False,
+                "profile": None,
+                "note": "BYO host provisioning is unavailable in this build; no profile exists.",
+            },
+        )
     profile, placeholder = _example_profile(provider, doc)
     data: dict[str, JsonValue] = {
         "provider": provider,
@@ -162,7 +175,12 @@ def _example_profile(provider: str, doc: InventoryDoc | None) -> tuple[dict[str,
         return _remote_profile(doc)
     if provider == _FAULT:
         return _fault_profile(), False
-    return _local_profile(doc)
+    if provider == _LOCAL:
+        return _local_profile(doc)
+    raise CategorizedError(
+        "no provisioning profile is available for this provider",
+        category=ErrorCategory.NOT_IMPLEMENTED,
+    )
 
 
 def _local_profile(doc: InventoryDoc | None) -> tuple[dict[str, JsonValue], bool]:
