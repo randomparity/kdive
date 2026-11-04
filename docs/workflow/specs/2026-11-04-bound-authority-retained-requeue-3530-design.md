@@ -34,7 +34,7 @@ The receipt is retained when the provider's observation is incomplete. Retries h
 so each costs about 3 s; a transient cause that clears in that window is covered by the first
 retries. The journal reserves `TEARDOWN_RESERVE_RECORDS` = four attempts of eight records for a
 teardown (#3526), so a cap of 4 also keeps a teardown that retains forever within that reserve.
-One constant serves provision and teardown. The count lives in the helper function, so changing
+One constant serves provision and teardown; a test pins it to the journal reserve. The count lives in the helper function, so changing
 it is a new migration.
 
 ### Interaction with existing paths
@@ -51,10 +51,15 @@ it is a new migration.
 
 - Actors: the worker finalizer and the reconciler repair, both holding the per-System advisory
   lock and the job row lock.
-- Invariants: at most 4 retained requeues per job budget; a failed job holds no lease or worker;
+- Invariants: at most 4 retained attempts (3 requeues, the 4th receipt fails the job) per job budget,
+  and the bound is per budget, not per System: a recycled budget counts afresh; a failed job holds no lease or worker;
   the receipt is consumed once.
-- Accepted limits: a failed authority teardown job is replayed, not recycled, by
-  `enqueue_preactivation_teardown` (Python, outside this scope); it is reported as a follow-up.
+- Accepted limits: a teardown job that reaches the cap stays `failed` with the owner
+  `teardown-requested`, and `enqueue_preactivation_teardown` (Python, outside this change's
+  surface) replays a failed prior job instead of recycling it, so `systems.teardown` cannot retry
+  it. Before this change the same System was stranded when the journal reserve ran out. The
+  recycle belongs to a follow-up that changes `enqueue_preactivation_teardown` and the
+  `request_authority_system_preactivation_teardown` queued-job check together.
 
 ## Validation
 

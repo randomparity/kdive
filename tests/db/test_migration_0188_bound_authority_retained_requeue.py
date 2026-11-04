@@ -10,6 +10,10 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
+from kdive.providers.system_authority.journal import (
+    RECORDS_PER_ATTEMPT,
+    TEARDOWN_RESERVE_RECORDS,
+)
 from tests.db.authority_system_support import (
     _seed_direct_authority_case,
     _seed_direct_terminal_attempt,
@@ -18,6 +22,10 @@ from tests.db.external_boot_authority_support import _RoleDsns
 
 _CAP = 4
 _FINALIZE = "SELECT * FROM finalize_authority_system_attempt(%s,%s,%s,%s,%s,2,%s,%s)"
+
+
+def test_0188_cap_matches_the_journal_teardown_reserve() -> None:
+    assert TEARDOWN_RESERVE_RECORDS // RECORDS_PER_ATTEMPT == _CAP
 
 
 def test_0188_is_registered_once() -> None:
