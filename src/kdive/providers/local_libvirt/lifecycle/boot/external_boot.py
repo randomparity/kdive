@@ -33,6 +33,9 @@ from kdive.providers.external_boot_authority.teardown import (
     SystemTeardownSupersededError,
 )
 from kdive.providers.local_libvirt.lifecycle.boot import recovery as recovery_validation
+from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import (
+    require_free_space_for_vmlinux,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import extract_kernel_bundle
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
@@ -2300,6 +2303,8 @@ class _RealLocalExternalBootOperation:
                             lambda path: opened_guest.upload_projection_artifact(
                                 _debuginfo_ref(metadata), path
                             ),
+                            size=lambda: self._session_artifact_size(_debuginfo_ref(metadata)),
+                            system_id=metadata.binding.system_id,
                         )
                     publication.guest_sync()
                     publication.record_phase(
@@ -2313,6 +2318,13 @@ class _RealLocalExternalBootOperation:
                 completed = publication.metadata
                 observed = self._observe_modules(opened_guest, completed)
         self.record_phase(completed, "module-restored", inactive_modules=observed)
+
+    def _session_artifact_size(self, artifact: OpaqueProviderRef) -> int:
+        descriptor = self._session.open_projection_artifact(artifact, os.O_RDONLY)
+        try:
+            return os.fstat(descriptor).st_size
+        finally:
+            os.close(descriptor)
 
     def define_target(self, metadata: LocalRecoveryMetadataV1) -> None:
         while metadata.phase == "module-restored":
@@ -2844,6 +2856,9 @@ class GuestDebuginfoFile:
         source: ComponentState,
         target: PresentComponentState,
         upload: Callable[[str], None],
+        *,
+        size: Callable[[], int],
+        system_id: str,
     ) -> None:
         prior = _layout_component(source)
         live, staging, old = self._layout()
@@ -2854,6 +2869,9 @@ class GuestDebuginfoFile:
         if staging is not None:
             self._guest.rm_rf(self.staging)
         self._directories(create=True)
+        require_free_space_for_vmlinux(
+            self._guest.statvfs, self._directory, size=size(), target=system_id
+        )
         upload(self.staging)
         self._guest.chmod(0o644, self.staging)
         self._guest.chown(0, 0, self.staging)
