@@ -27,6 +27,7 @@ The shared phase-naming contract has its own non-gated unit tests in
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import platform
@@ -253,11 +254,22 @@ def _live_script_provision_profile(arch: str) -> dict[str, object]:
         "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
         "provider": {
             "local-libvirt": {
-                "rootfs": {"kind": "local", "path": os.environ[_GUEST_IMAGE_ENV]},
+                "rootfs": _pinned_local_rootfs(os.environ[_GUEST_IMAGE_ENV]),
                 "crashkernel": arch_traits(arch).default_crashkernel,
             }
         },
     }
+
+
+def _pinned_local_rootfs(path: str) -> dict[str, str]:
+    """A local rootfs pinned to its digest, which the external-boot authority requires.
+
+    An authority install refuses a System whose root image carries no digest
+    (``root_provenance_missing``); the fixed worker accepts and checks the same pin (#3135).
+    """
+    with open(path, "rb") as image:
+        digest = hashlib.file_digest(image, "sha256").hexdigest()
+    return {"kind": "local", "path": path, "sha256": f"sha256:{digest}"}
 
 
 # --- non-gated unit tests (CI-runnable; pin the equality invariant, ADR-0205) ----------------
@@ -671,6 +683,7 @@ def test_spine_live_script_over_the_wire() -> None:
     issuer, base_url, db_url = _spine_preflight()
     arch = require_native_guest_arch()
     operator_token = _token(issuer, role="operator")
+    admin_token = _token(issuer, role="admin")
 
     async def _run() -> None:
         op = LiveStackClient.over_http(base_url, operator_token)
@@ -791,6 +804,16 @@ def test_spine_live_script_over_the_wire() -> None:
                         )
                 async with phase("end-session"):
                     ok(await scalar(op, "debug.end_session", session_id=session_id), "end-session")
+                async with phase("teardown"):
+                    # Teardown first, then release: an external-boot authority fences
+                    # allocations.release while its activation is active, and systems.teardown
+                    # (project ADMIN) is the admitted exit (#3135).
+                    async with LiveStackClient.over_http(base_url, admin_token) as admin:
+                        ok(
+                            await scalar(admin, "systems.teardown", system_id=system_id),
+                            "teardown",
+                        )
+                    await await_system_state(op, "teardown", system_id, "torn_down")
                 async with phase("release"):
                     ok(
                         await scalar(op, "allocations.release", allocation_id=allocation_id),
