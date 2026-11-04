@@ -1718,11 +1718,13 @@ def test_teardown_recycles_lapsed_final_authority_attempt(migrated_url: str) -> 
             )
             async with pool.connection() as conn:
                 after = await (await conn.execute(_RUNNING_JOB_COLUMNS, (job_id,))).fetchone()
+            audited = await _recycle_audit_principals(pool, system_id)
 
         assert response.status == "queued", response.model_dump()
         assert response.object_id == job_id
         assert before is not None and after is not None
         assert after == ("queued", before[1], before[1] + before[2], None, None, before[5])
+        assert audited == ["user-1"]
 
     asyncio.run(_run())
 
@@ -1753,10 +1755,12 @@ def test_teardown_replays_final_authority_attempt_unchanged(
             )
             async with pool.connection() as conn:
                 after = await (await conn.execute(_RUNNING_JOB_COLUMNS, (job_id,))).fetchone()
+            audited = await _recycle_audit_principals(pool, system_id)
 
         assert response.status == "running", response.model_dump()
         assert response.object_id == job_id
         assert before is not None and after == before
+        assert audited == []
 
     asyncio.run(_run())
 

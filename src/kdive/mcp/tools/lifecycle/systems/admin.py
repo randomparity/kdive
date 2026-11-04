@@ -68,7 +68,7 @@ from kdive.services.systems.admission import require_pinned_cpu_selectable
 from kdive.services.systems.authority_owned import (
     AuthoritySystemBinding,
     authority_system_binding,
-    enqueue_preactivation_teardown,
+    enqueue_preactivation_teardown_status,
 )
 from kdive.services.systems.validation import (
     RootfsValidator,
@@ -622,11 +622,8 @@ async def _enqueue_preactivation_authority_teardown(
     idempotency_key: str | None,
 ) -> ToolResponse:
     """Enqueue and bind one activation-free teardown to immutable ownership."""
-    # Under the System lock a ``failed`` same-marker row is exactly what `FAILED` restarts.
-    prior = await dedup_replay(conn, _teardown_dedup_key(system.id))
-    recycled = prior is not None and prior.state is JobState.FAILED
     try:
-        job = await enqueue_preactivation_teardown(
+        job, recycled = await enqueue_preactivation_teardown_status(
             conn,
             system,
             binding,
