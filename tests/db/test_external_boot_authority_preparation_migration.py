@@ -522,3 +522,32 @@ def test_sql_plan_identity_matches_python_with_and_without_debuginfo(migrated_ur
     assert plan.identity == (
         "sha256:501702530d3d6f4bf522d5374e82caf7d21c78f840092d8cf787f22f753dbb63"
     )
+
+
+def test_sql_materialization_identity_matches_python_with_and_without_debuginfo(
+    migrated_url: str,
+) -> None:
+    materialization = external_boot_materialization(external_boot_plan(UUID(int=1), UUID(int=2)))
+    with_debuginfo = materialization.model_copy(
+        update={
+            "artifacts": materialization.artifacts.model_copy(
+                update={"debuginfo": OpaqueProviderRef(ref="artifact/debuginfo")}
+            ),
+            "verified_debuginfo_sha256": "sha256:" + "4" * 64,
+        }
+    )
+    assert with_debuginfo.identity != materialization.identity
+    with psycopg.connect(migrated_url) as conn:
+        identities = [
+            conn.execute(
+                "SELECT 'sha256:' || encode(sha256("
+                "convert_to('kdive-external-boot-materialization-v1', 'UTF8') || "
+                "decode('00', 'hex') || "
+                "convert_to(public.canonical_external_boot_authority_json(%s::jsonb), 'UTF8')"
+                "), 'hex')",
+                (Jsonb(value.model_dump(mode="json", by_alias=True)),),
+            ).fetchone()
+            for value in (materialization, with_debuginfo)
+        ]
+
+    assert identities == [(materialization.identity,), (with_debuginfo.identity,)]
