@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import stat
 from dataclasses import dataclass
@@ -27,6 +28,12 @@ RECORDS_PER_ATTEMPT = 8
 TEARDOWN_RESERVE_RECORDS = 4 * RECORDS_PER_ATTEMPT
 PROVISION_RECORD_CEILING = MAX_RECORDS_PER_JOURNAL - TEARDOWN_RESERVE_RECORDS
 MAX_JOURNAL_BYTES = 16 * 1024 * 1024
+# A crash, a database error or a superseded advance can each leave one appended record that the
+# database never confirmed. Quarantine keeps that record as evidence in this directory, inside
+# system-operations because the authority unit may write nowhere else (ADR-0623 amendment, #3531).
+ABANDONED_DIRECTORY = "abandoned"
+MAX_ABANDONED_PER_SYSTEM = 4
+MAX_ABANDONED_FILES = 256
 _OPEN = os.O_CLOEXEC | os.O_NOFOLLOW
 
 _NEXT_PHASES = {
@@ -284,6 +291,83 @@ class FileAuthoritySystemJournal:
             self._system_id, last.sequence, authority_system_record_digest(last), last.phase
         )
 
+    def _open_abandoned(self) -> int:
+        try:
+            os.mkdir(ABANDONED_DIRECTORY, 0o700, dir_fd=self._journal_fd)
+            created = True
+        except FileExistsError:
+            created = False
+        descriptor = os.open(
+            ABANDONED_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY | _OPEN, dir_fd=self._journal_fd
+        )
+        try:
+            if created:
+                os.fchmod(descriptor, 0o700)
+            _validate_directory(descriptor, self._owner_uid)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    def _check_evidence_bounds(self, directory: int, evidence_name: str) -> None:
+        names = [name for name in os.listdir(directory) if name.endswith(".jsonl")]
+        if evidence_name in names:
+            return
+        own = [name for name in names if name.startswith(f"{self._system_id}.")]
+        if len(own) >= MAX_ABANDONED_PER_SYSTEM or len(names) >= MAX_ABANDONED_FILES:
+            raise ValueError("authority System journal abandoned-record evidence is full")
+
+    @staticmethod
+    def _write_scratch(directory: int, name: str, payload: bytes) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(name, dir_fd=directory)
+        descriptor = os.open(
+            name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _OPEN, 0o600, dir_fd=directory
+        )
+        try:
+            offset = 0
+            while offset < len(payload):
+                written = os.write(descriptor, payload[offset:])
+                if written <= 0:
+                    raise OSError("authority System journal scratch write made no progress")
+                offset += written
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.fsync(directory)
+
+    def abandon_unconfirmed_tail(self, confirmed_sequence: int) -> None:
+        """Replace the journal with its confirmed prefix, keeping the extra record as evidence.
+
+        Every crash point leaves a valid journal: the evidence appears under its final name only
+        complete, and the active file is replaced by one atomic rename of a finished scratch file.
+        """
+        records, validated = self._read()
+        if validated is None or len(records) != confirmed_sequence + 1:
+            raise ValueError("authority System journal has no single unconfirmed record")
+        tail = records[confirmed_sequence]
+        digest = authority_system_record_digest(tail).removeprefix("sha256:")
+        evidence_name = f"{self._system_id}.{tail.sequence}.{digest}.jsonl"
+        scratch = f"{self._system_id}.pending"
+        directory = self._open_abandoned()
+        try:
+            self._check_evidence_bounds(directory, evidence_name)
+            self._write_scratch(directory, scratch, canonical_system_authority_bytes(tail) + b"\n")
+            os.rename(scratch, evidence_name, src_dir_fd=directory, dst_dir_fd=directory)
+            self._write_scratch(
+                directory,
+                scratch,
+                b"".join(canonical_system_authority_bytes(r) + b"\n" for r in records[:-1]),
+            )
+            current = os.stat(self._name, dir_fd=self._journal_fd, follow_symlinks=False)
+            if self._identity(current) != self._identity(validated):
+                raise ValueError("authority System journal changed since validation")
+            os.rename(scratch, self._name, src_dir_fd=directory, dst_dir_fd=self._journal_fd)
+            os.fsync(self._journal_fd)
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
     def append(self, record: AuthoritySystemJournalRecordV1) -> AuthoritySystemFileHead:
         record = AuthoritySystemJournalRecordV1.model_validate(
             record.model_dump(mode="python", by_alias=True)
@@ -397,6 +481,14 @@ def inventory_authority_system_journals(
         try:
             _validate_directory(directory_fd, expected_uid)
             names = os.listdir(directory_fd)
+            if ABANDONED_DIRECTORY in names:
+                abandoned_fd = os.open(
+                    ABANDONED_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY | _OPEN, dir_fd=directory_fd
+                )
+                try:
+                    _validate_directory(abandoned_fd, expected_uid)
+                finally:
+                    os.close(abandoned_fd)
         finally:
             os.close(directory_fd)
     finally:
@@ -405,6 +497,8 @@ def inventory_authority_system_journals(
         raise ValueError("authority System journal inventory exceeds 4096 files")
     system_ids: list[UUID] = []
     for name in names:
+        if name == ABANDONED_DIRECTORY:
+            continue
         if not name.endswith(".jsonl"):
             raise ValueError("authority System journal inventory has an invalid filename")
         parsed = UUID(name.removesuffix(".jsonl"))
