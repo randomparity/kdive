@@ -16,7 +16,7 @@ an authority-booted Run could not attach (#3135).
 After `queue.complete_external_boot` returns the job `succeeded` for an `activate` result, the
 worker writes the `boot` step (`{system_id, boot_outcome: ready}`, the fixed handler's shape).
 The write takes the System and Run advisory locks and, inside them, requires that the result's
-activation is still the Run's `active` activation; a forced re-boot that superseded it skips the
+activation is still the Run's `active` activation; an activation that was released or otherwise left `active` skips the
 write with a warning. A failed write is retried three times, then logged, leaving the job
 `succeeded`. The attach precondition is unchanged.
 

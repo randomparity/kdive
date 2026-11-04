@@ -9,9 +9,10 @@ live spine cannot attach.
 
 ## Scope
 
-- The worker, after `queue.complete_external_boot` returns a job in `succeeded` for a result whose
-  operation is `activate`, claims and completes the `boot` step with `{system_id, boot_outcome:
-  ready}`, the shape the fixed handler writes. The attach precondition is unchanged.
+- The worker, after `queue.complete_external_boot` returns a job in `succeeded` for an `activate`
+  result, inserts the succeeded `boot` step `{system_id, boot_outcome: ready}` (the fixed
+  handler's shape) under the System and Run locks, only if the result's activation is still the
+  Run's `active` one. The attach precondition is unchanged.
 - Rejected: writing it inside the commit function (needs a migration, out of scope); writing it
   in the activate handler before the commit (a refused commit would leave a phantom step).
 - No ownership change is needed: `Worker._commit_external_result` already owns the commit.
@@ -19,8 +20,7 @@ live spine cannot attach.
 ### Failure model
 
 - Activation fails, is superseded or requeued, or the result is not `activate`: no step.
-- The step write fails after the commit: it is retried three times, abandoning its claim between
-  tries; if all fail the error is logged and the job stays succeeded, and attach keeps refusing
+- The step write fails after the commit: the write is retried three times; if all fail the error is logged and the job stays succeeded, and attach keeps refusing
   with `boot_first`. A worker crash in that window is not repaired (a reconciler backfill is a
   larger surface, left unbuilt). A step already present is left alone.
 
