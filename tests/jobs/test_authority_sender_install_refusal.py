@@ -7,7 +7,7 @@ import json
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.jobs.authority_sender import _decode_response
+from kdive.jobs.authority_sender import _PEER_REASONS, _decode_response
 from kdive.providers.external_boot_authority.protocol import AuthorityObservationV1
 
 _SIZES = {"vmlinux_bytes": 3, "free_bytes": 1, "headroom_bytes": 2}
@@ -72,6 +72,4 @@ def test_any_other_shape_is_an_invalid_response(fields: dict[str, object]) -> No
 
 
 def test_the_device_identity_decoder_keeps_refusing_the_frame() -> None:
-    from kdive.jobs.authority_sender import _PEER_REASONS
-
     assert "install-failure" not in _PEER_REASONS
