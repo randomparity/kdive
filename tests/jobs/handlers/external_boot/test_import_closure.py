@@ -100,3 +100,10 @@ def test_the_import_closure_gate_bites() -> None:
     )
 
     assert _forbidden(loaded) != []
+
+
+def test_handlers_never_reach_the_server_only_route_admission() -> None:
+    """Route admission reads operator inventory (ADR-0752); worker handlers must not import it."""
+    loaded = _imported_modules(_package_modules())
+
+    assert "kdive.services.external_boot.route_admission" not in loaded

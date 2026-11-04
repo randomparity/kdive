@@ -381,3 +381,19 @@ def restore_root_logging() -> Iterator[None]:
     root.handlers[:] = handlers
     root.setLevel(level)
     logging.disable(disable)
+
+
+@pytest.fixture
+def resource_routed_to_server_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route every Resource to the server's configured authority (ADR-0752 admission).
+
+    A deployment that sends Runs to the external-boot authority also names that authority on
+    the System's Resource. Tests that exercise an admitted authority Run opt in; a test of the
+    refusal patches ``authority_instance_for_resource`` itself.
+    """
+    from kdive.providers.external_boot_authority.settings import AUTHORITY_INSTANCE
+
+    monkeypatch.setattr(
+        "kdive.services.external_boot.route_admission.authority_admission_routes_for_resource",
+        lambda _kind, _name: frozenset({config.get(AUTHORITY_INSTANCE)}),
+    )

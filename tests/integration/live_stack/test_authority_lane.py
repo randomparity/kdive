@@ -296,7 +296,7 @@ def test_success_orders_effects_and_proves_cleanup(
     # Operator decision D1 (#3186): every local record discloses the fixture-mode System.
     effect = json.loads((tmp_path / "artifacts" / run.assertions["effect"]).read_text())
     assert effect["system_provenance"] == authority_lane.FIXTURE_PROVENANCE
-    assert "#3144" in effect["system_provenance"]
+    assert "relocated_authority_instance" in effect["system_provenance"]
     assert "real authority" in effect["system_provenance"]
 
 

@@ -643,6 +643,13 @@ def _register_runs_install(
         with `reason: "build_ref_expired"`, `data.expires_at`, and `data.server_time`. Recover by
         calling `runs.create` without `build_ref`, then upload and complete a fresh external build.
         An unchanged already-installed variant remains an idempotent no-op after expiry.
+
+        When the server routes Runs to an external-boot authority but the System's Resource does
+        not route to it (no matching `authority_instance` or fixture `relocated_authority_instance`)
+        or the System is recorded as owned by another authority, this call returns
+        `configuration_error` with `reason: "authority_resource_route_mismatch"` or
+        `"authority_system_binding_mismatch"` before any job or activation. End the System and
+        provision a new one on a Resource that routes to the authority.
         """
         return await _install_run(
             pool,
@@ -699,6 +706,13 @@ def _register_runs_boot(
         Remote-libvirt external boot requires an initrd with the build. Without one, this call
         returns `configuration_error` before activation. Create a new Run without `build_ref`,
         upload a build with an initrd, then complete the build, install, and boot the new Run.
+
+        When the server routes Runs to an external-boot authority but the System's Resource does
+        not route to it (no matching `authority_instance` or fixture `relocated_authority_instance`)
+        or the System is recorded as owned by another authority, this call returns
+        `configuration_error` with `reason: "authority_resource_route_mismatch"` or
+        `"authority_system_binding_mismatch"` before any job or activation. End the System and
+        provision a new one on a Resource that routes to the authority.
         """
         return await _boot_run(
             pool,

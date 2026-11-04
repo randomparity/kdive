@@ -485,6 +485,27 @@ def test_local_libvirt_authority_instance_is_bounded_and_nonblank() -> None:
             )
 
 
+def test_local_libvirt_relocation_is_nonblank_and_exclusive_with_the_route() -> None:
+    instance = {
+        "name": "loc",
+        "cost_class": "local",
+        "host_uri": "qemu:///system",
+        "relocated_authority_instance": "authority-a",
+    }
+    doc = InventoryDoc.parse(_doc(remote_libvirt=[], local_libvirt=[instance]))
+    assert doc.local_libvirt[0].relocated_authority_instance == "authority-a"
+    assert doc.local_libvirt[0].authority_instance is None
+
+    for invalid in (
+        {"relocated_authority_instance": " "},
+        {"relocated_authority_instance": "a" * 256},
+        {"authority_instance": "authority-a"},
+        {"authority_instance": "authority-b"},
+    ):
+        with pytest.raises(InventoryError):
+            InventoryDoc.parse(_doc(remote_libvirt=[], local_libvirt=[{**instance, **invalid}]))
+
+
 def test_missing_required_field_rejected() -> None:
     d = _doc()
     del d["image"][0]["root_device"]

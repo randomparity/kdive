@@ -79,6 +79,8 @@ from tests.mcp.lifecycle import runs_support
 from tests.mcp.systems_support import provider_resolver
 from tests.support.object_store import INERT_OBJECT_STORE
 
+pytestmark = pytest.mark.usefixtures("resource_routed_to_server_authority")
+
 ARMS: dict[str, dict[str, Any]] = {
     "activate": {
         "purpose": "activate",
