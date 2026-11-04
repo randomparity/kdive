@@ -115,3 +115,10 @@ tasks so this deployment can explicitly skip them. Preserve default behavior and
 selection excludes exactly those tasks while retaining kernel and dependency prerequisites.
 Record the explicit selection in the runbook; this does not fix the existing blanket workaround
 for other deployments. Include these permission boundaries in the final security review.
+
+The actual controller `stage-volume` operation also requires `virt-inspector`; the generic
+Fedora worker preparation installed only its Python binding. Reuse the existing distro
+`guestfs-tools` package in `local_worker_host/tasks/packages_redhat.yml`, gated to Fedora,
+with a package/condition guard in the existing role runner. Retain the original failed command,
+verify the distro's actual executable provider, and rerun staging with its unchanged mandatory
+inspection and upload validation. No native ARM guest provider is introduced.

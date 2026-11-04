@@ -45,6 +45,36 @@ def tasks(output: str, *, include_tags: bool = False) -> list[str]:
     return lines if include_tags else [line.split("\tTAGS:", 1)[0] for line in lines]
 
 
+def fedora_image_inspection_packages() -> None:
+    package_tasks = yaml.safe_load(
+        (ANSIBLE / "roles/local_worker_host/tasks/packages_redhat.yml").read_text()
+    )
+    inspector = next(
+        (
+            task
+            for task in package_tasks
+            if task.get("ansible.builtin.dnf", {}).get("name") == "guestfs-tools"
+        ),
+        None,
+    )
+    if inspector is None:
+        raise SystemExit("Fedora controller must install virt-inspector via guestfs-tools")
+    require(
+        inspector["ansible.builtin.dnf"].get("state") == "present",
+        "Fedora image inspection tools must be installed",
+    )
+    condition = Environment(undefined=StrictUndefined).compile_expression(inspector["when"])
+    for distribution in ("Fedora", "RedHat", "Rocky", "AlmaLinux"):
+        require(
+            bool(condition(ansible_facts={"distribution": distribution}))
+            == (distribution == "Fedora"),
+            f"image inspection package has the wrong distribution gate: {distribution}",
+        )
+
+
+fedora_image_inspection_packages()
+
+
 def guest_image_kernel_readability() -> None:
     """Execute the production kernel-selection tasks against an isolated boot directory."""
     role_tasks = yaml.safe_load((ANSIBLE / "roles/guest_image_prereqs/tasks/main.yml").read_text())
