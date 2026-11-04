@@ -676,6 +676,7 @@ class LocalAuthoritySystemProvider:
             bootstrap_ready=True,
             quarantine_retained=False,
             completed_at=completion.completed_at,
+            ssh_forward_port=intent.ssh_port,
         )
 
     def _provision_facts(self, intent: _Intent) -> AuthoritySystemProvisionFacts:

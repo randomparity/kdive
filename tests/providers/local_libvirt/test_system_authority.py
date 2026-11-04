@@ -648,6 +648,7 @@ def test_completion_receipt_replays_a_stable_terminal_timestamp(tmp_path: Path) 
     replayed = provider._complete_provision_facts(intent, request, candidate, create=False)
 
     assert completed.complete
+    assert completed.ssh_forward_port == intent.ssh_port
     assert replayed == completed
     assert receipt.read_bytes() == before
 

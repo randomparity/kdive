@@ -64,6 +64,9 @@ type _Connect = Callable[[], _Conn]
 # these raise sites.
 _REASON_NO_DOMAIN = "system_domain_not_found"
 _REASON_NO_FORWARD = "ssh_not_provisioned"
+_REASON_BAD_FORWARD = "authority_ssh_forward_invalid"
+_MIN_FORWARD_PORT = 1024  # the authority draws forwards from the unprivileged range (ADR-0811)
+_MAX_FORWARD_PORT = 65535
 
 
 def _config_error(message: str, *, reason: str | None = None) -> CategorizedError:
@@ -110,8 +113,18 @@ class LocalLibvirtConnect:
             ssh_connect=_real_ssh_connect,
         )
 
-    def open_transport(self, system: SystemHandle, kind: DebugTransportKind) -> TransportHandle:
+    def open_transport(
+        self,
+        system: SystemHandle,
+        kind: DebugTransportKind,
+        *,
+        ssh_forward_port: int | None = None,
+    ) -> TransportHandle:
         """Open a single-attach transport (gdbstub or ssh) and return its handle.
+
+        ``ssh_forward_port`` is the port an authority-owned System reported (ADR-0811). The
+        authority's domain is invisible to this process, so a drgn-live attach uses it in place of
+        the domain-XML read; it is bounded here again because it crossed a trust boundary.
 
         Resolves the endpoint and enforces loopback-only. Gdbstub performs no debugger IO;
         actual attachment validates it later. Drgn-live retains its SSH reachability check.
@@ -124,10 +137,12 @@ class LocalLibvirtConnect:
                 ``TRANSPORT_FAILURE`` on a socket fault; ``INFRASTRUCTURE_FAILURE`` for a
                 libvirt read fault.
         """
+        if ssh_forward_port is not None and kind != _DRGN_LIVE:
+            raise _config_error("an authority SSH forward applies only to the drgn-live transport")
         if kind == _GDBSTUB:
             return self._open_gdbstub(system)
         if kind == _DRGN_LIVE:
-            return self._open_ssh(system)
+            return self._open_ssh(system, ssh_forward_port)
         raise _config_error(f"unsupported transport kind: {kind!r}")
 
     def _open_gdbstub(self, system: SystemHandle) -> TransportHandle:
@@ -136,8 +151,11 @@ class LocalLibvirtConnect:
             raise _config_error("gdbstub host must be a loopback IP literal")
         return TransportHandle(TransportHandleData(kind=_GDBSTUB, host=host, port=port).encode())
 
-    def _open_ssh(self, system: SystemHandle) -> TransportHandle:
-        host, port = self._resolve_ssh_endpoint(system)
+    def _open_ssh(self, system: SystemHandle, reported_port: int | None) -> TransportHandle:
+        if reported_port is None:
+            host, port = self._resolve_ssh_endpoint(system)
+        else:
+            host, port = _LOOPBACK_HOST, _checked_reported_port(reported_port)
         if not _is_loopback_literal(host):
             raise _config_error("ssh host must be a loopback IP literal")
         try:
@@ -184,6 +202,17 @@ class LocalLibvirtConnect:
             ):
                 return None
             raise
+
+
+def _checked_reported_port(port: int) -> int:
+    """Refuse a reported forward outside the unprivileged range (ADR-0811)."""
+    if type(port) is not int or not _MIN_FORWARD_PORT <= port <= _MAX_FORWARD_PORT:
+        raise _config_error(
+            "the authority reported an SSH forward outside the allowed port range; refusing to "
+            "attach",
+            reason=_REASON_BAD_FORWARD,
+        )
+    return port
 
 
 def _default_connect() -> _Conn:  # pragma: no cover - live_vm

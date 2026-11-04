@@ -81,7 +81,13 @@ class RemoteLibvirtConnect:
             secret_backend_factory=lambda: secret_backend_from_env(registry=secret_registry),
         )
 
-    def open_transport(self, system: SystemHandle, kind: DebugTransportKind) -> TransportHandle:
+    def open_transport(
+        self,
+        system: SystemHandle,
+        kind: DebugTransportKind,
+        *,
+        ssh_forward_port: int | None = None,
+    ) -> TransportHandle:
         """Open the gdbstub or drgn-live transport for ``system``; raise for any other kind.
 
         ``drgn-live`` reaches in-guest drgn over the qemu-guest-agent keyed by domain, so its
