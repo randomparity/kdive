@@ -181,20 +181,24 @@ debugger attached and detached.
 
 **Limits found.**
 
-- Installed local-libvirt: the rule cannot be used. Keyed to the operator, it left server and
-  reconciler `/readyz` at 503 with their object-store and OIDC checks false. Their Postgres check
-  stayed true while a new Postgres connection from that account was refused, and the operator's
-  own loopback clients failed.
+- `demo-up.sh` local-libvirt stack: the rule cannot be used. Keyed to the operator, it left server
+  and reconciler `/readyz` at 503, with the object-store check false on both and the OIDC check
+  false on the server. Their Postgres check stayed true while a new Postgres connection from that
+  account was refused, and the operator's own loopback clients failed. The `kdive` system units for
+  the server and reconciler run under another account; that arrangement was not run.
 - Slot account: a rule keyed to `kdive-worker-1` blocked no guest connection and failed that
   worker's object-store readiness check.
-- Remote authority: not run. The uid is shared, so the same limit is expected. Its listeners bind a
-  routable address, which `oif "lo"` covers for a guest on that host.
-- No shipped arrangement was shown to meet the condition that no kdive service or client uses the
-  QEMU uid.
+- Remote authority: unproven, because neither lab host carries the provider-authority role and
+  this proof did not stand one up. The unit files name one account for the daemon and the service,
+  but no running QEMU was observed there, and whether the service has a loopback dependency was
+  not checked, so the rule's effect there is unknown.
+- No arrangement that ran met the condition that no kdive service or client uses the QEMU uid, apart
+  from the throwaway accounts.
 - `kdivebuild`: the rule covers this NIC. A domain with `user,id=kdivebuild,restrict=off` and no
   forward connected to a loopback listener without the rule and failed with it, on both hosts, in
-  the throwaway-account arrangement. A real customization boot was not run; it uses the same session
-  daemon, so the condition above applies to it and it needs the same DNS exemption.
+  the throwaway-account arrangement. A real customization boot was not run. On the local provider
+  it uses the same session daemon, so the condition above applies to it and it needs the same DNS
+  exemption; a remote authority System has no customization boot (ADR-0804).
 - Rocky, openSUSE and `qemu:///system` are unproven. The first two were outside the proof's hosts;
   the third is excluded by the operator.
 

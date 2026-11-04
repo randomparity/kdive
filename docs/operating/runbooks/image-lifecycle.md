@@ -355,13 +355,13 @@ mitigate it, so it is part of what you accept (ADR-0313, amendment of 2026-11-03
 
 **Optional host firewall, and where it cannot be used.** An nftables rule that rejects new
 connections from QEMU's uid to local addresses closes this path, but only on a host where no kdive
-service or client uses that uid. **The installed local-libvirt stack does not meet that condition:**
-the session daemon, QEMU, `kdive server` and `kdive reconciler` all run as the operator. Keyed to
-the operator, the rule took server and reconciler `/readyz` to 503 and stopped the operator's own
-loopback clients until it was removed. On an authority host the session daemon and the authority
-service share one account; that arrangement was not run, so do not assume the rule is safe there.
-Keyed to a worker slot account, the rule blocks no guest connection and fails that worker's
-readiness.
+service or client uses that uid. **The `demo-up.sh` stack does not meet that condition:** the
+session daemon, QEMU, `kdive server` and `kdive reconciler` all run as the operator. Keyed to the
+operator, the rule took server and reconciler `/readyz` to 503 and stopped the operator's own
+loopback clients until it was removed. Keyed to a worker slot account, it blocks no guest connection
+and fails that worker's readiness. The `kdive` system units for the server and reconciler and an
+authority host, where one account owns the session daemon and the authority service, were not
+run, so do not assume the rule is safe on either.
 
 Where the condition does hold, this is the tested rule:
 
@@ -375,8 +375,9 @@ table inet kdive_guest_loopback {
 }
 ```
 
-- `<qemu-uid>`: read it from the running process (`ps -o uid= -C qemu-system-x86_64`), not from an
-  account name you expect.
+- `<qemu-uid>`: read it from the running process (`ps -eo uid=,comm= | grep -E 'qemu-(system|kvm)'`),
+  not from an account name you expect. The rule does not cut established connections, so load it
+  before starting an egress guest; a guest without egress can supply the uid.
 - `<loopback-resolver>`: the `nameserver` in the host's `/etc/resolv.conf` when it is a loopback
   address, `127.0.0.53` under the `systemd-resolved` stub. Without this line guest DNS and package
   installs fail. Delete the line on a host whose resolver is off-host. A resolver on `127.0.0.1` was
@@ -390,9 +391,11 @@ SSH and gdbstub ports. It kept DNS, outbound NAT and package installs, and clien
 account kept SSH and gdbstub attach. The customization boot NIC is covered the same way when its
 domain runs under the keyed uid. Rocky, openSUSE and `qemu:///system` are unproven.
 
-The rule covers traffic the kernel routes through `lo`; off-host destinations remain your network
-zone's job. It is not persistent: a reboot or `nft flush ruleset` removes it with no sign from
-QEMU, and on Fedora stopping `nftables.service` runs that flush. Confirm it with
+The rule covers traffic the kernel routes through `lo`. Off-host destinations remain your network
+zone's job. Addresses on local bridges, such as container or libvirt networks, do not route through
+`lo`, so it does not cover them; that was not tested. It is not persistent: a reboot or
+`nft flush ruleset` removes it with no sign from QEMU, and your distribution's `nftables.service`
+may run that flush on stop or reload. Confirm it with
 `nft list table inet kdive_guest_loopback`, and from an egress guest confirm that a connection to
 `10.0.2.2:<port>` of a host listener fails. A timeout counts: the guest sees IPv4 attempts time out
 and IPv6 attempts refused.
