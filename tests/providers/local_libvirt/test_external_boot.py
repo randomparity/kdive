@@ -6000,6 +6000,32 @@ def test_record_cleanup_quarantine_keeps_a_receipt_adopted_before_its_replace(
     assert held == receipt.model_copy(update={"managed": True})
 
 
+def test_record_cleanup_quarantine_rejects_a_tombstone_finalized_before_its_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3517: a finalize landing between the early read and the lock leaves no receipt."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, _receipt = _quarantined(root)
+    directory = root / recovery_directory_name(point.recovery_ref, point.binding)
+    flock = fcntl.flock
+    finalized: list[bool] = []
+
+    def finalize_then_lock(fd: int, operation: int) -> None:
+        if not finalized:  # finalize's under-lock unlinks, before the writer takes the lock
+            finalized.append(True)
+            (directory / "cleanup-quarantine.json").unlink()
+            (directory / "tombstone.json").unlink()
+        flock(fd, operation)
+
+    monkeypatch.setattr(external_boot_module.fcntl, "flock", finalize_then_lock)
+    with RecoveryMetadataStore(root) as store, pytest.raises(FileNotFoundError):
+        store.record_cleanup_quarantine(point, _cleanup_proof_for(point))
+    monkeypatch.undo()
+
+    assert list(directory.iterdir()) == []
+
+
 @pytest.mark.parametrize("operation", ["adopt", "finalize"])
 def test_receipt_decisions_wait_for_the_activation_directory_lock(
     tmp_path: Path, operation: str
