@@ -17,11 +17,11 @@ from kdive.providers.system_authority.journal import (
 from tests.db.authority_system_support import (
     _seed_direct_authority_case,
     _seed_direct_terminal_attempt,
+    retain_round,
 )
 from tests.db.external_boot_authority_support import _RoleDsns
 
 _CAP = 4
-_FINALIZE = "SELECT * FROM finalize_authority_system_attempt(%s,%s,%s,%s,%s,2,%s,%s)"
 
 
 def test_0188_cap_matches_the_journal_teardown_reserve() -> None:
@@ -30,39 +30,6 @@ def test_0188_cap_matches_the_journal_teardown_reserve() -> None:
 
 def test_0188_is_registered_once() -> None:
     assert [m.version for m in migrate.discover_migrations()].count("0188") == 1
-
-
-def _retain_once(
-    migrated_url: str, role_dsns: _RoleDsns, case: dict[str, object], round_number: int
-) -> tuple[str, str]:
-    """Seed round `round_number`'s retained receipt for the job's attempt and finalize it."""
-    with psycopg.connect(migrated_url) as conn:
-        if round_number > 1:
-            conn.execute(
-                "UPDATE jobs SET state='running',attempt=%s,worker_id=%s,"
-                "lease_expires_at=clock_timestamp()+interval '5 minutes' WHERE id=%s",
-                (round_number, case["worker"], case["job_id"]),
-            )
-        authority_id, _, receipt, head_digest, _ = _seed_direct_terminal_attempt(
-            conn, case, disposition="retained-quarantine", generation=round_number
-        )
-        conn.commit()
-    with psycopg.connect(role_dsns("kdive_worker")) as worker:
-        row = worker.execute(
-            _FINALIZE,
-            (
-                case["credential"],
-                case["job_id"],
-                round_number,
-                authority_id,
-                round_number,
-                head_digest,
-                receipt,
-            ),
-        ).fetchone()
-        worker.commit()
-    assert row is not None
-    return row[0], row[1]
 
 
 def _job_row(migrated_url: str, case: dict[str, object]) -> tuple[object, ...]:
@@ -80,7 +47,7 @@ def _job_row(migrated_url: str, case: dict[str, object]) -> tuple[object, ...]:
 def _drive(
     migrated_url: str, role_dsns: _RoleDsns, case: dict[str, object], rounds: int
 ) -> list[str]:
-    return [_retain_once(migrated_url, role_dsns, case, n)[1] for n in range(1, rounds + 1)]
+    return [retain_round(migrated_url, role_dsns, case, n)[1] for n in range(1, rounds + 1)]
 
 
 def test_0188_persistent_provision_failure_stops_at_the_cap_and_teardown_succeeds(
@@ -172,7 +139,7 @@ def test_0188_a_recycled_budget_restarts_the_count(
         conn.execute("UPDATE jobs SET created_at=clock_timestamp() WHERE id=%s", (case["job_id"],))
         conn.commit()
 
-    assert _retain_once(migrated_url, role_dsns, case, _CAP)[1] == "queued"
+    assert retain_round(migrated_url, role_dsns, case, _CAP)[1] == "queued"
 
 
 def test_0188_reconciler_repair_ends_an_exhausted_budget_failed(

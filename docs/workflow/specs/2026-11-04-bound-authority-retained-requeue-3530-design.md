@@ -54,12 +54,12 @@ it is a new migration.
 - Invariants: at most 4 retained attempts (3 requeues, the 4th receipt fails the job) per job budget,
   and the bound is per budget, not per System: a recycled budget counts afresh; a failed job holds no lease or worker;
   the receipt is consumed once.
-- Accepted limits: a teardown job that reaches the cap stays `failed` with the owner
-  `teardown-requested`, and `enqueue_preactivation_teardown` (Python, outside this change's
-  surface) replays a failed prior job instead of recycling it, so `systems.teardown` cannot retry
-  it. Before this change the same System was stranded when the journal reserve ran out. The
-  recycle belongs to a follow-up that changes `enqueue_preactivation_teardown` and the
-  `request_authority_system_preactivation_teardown` queued-job check together.
+- Recovery of a capped teardown: `enqueue_preactivation_teardown`
+  (`src/kdive/services/systems/authority_owned.py`) re-enqueues a `failed` prior job with the
+  same marker and dedup key under `JobRecyclePolicy.FAILED`, which resets the attempt counter and
+  `created_at` (a fresh budget); any other prior job still replays. The operator widened the
+  surface to this function on 2026-11-04. `request_authority_system_preactivation_teardown`
+  returns `replay` for a `teardown-requested` owner, so no SQL change is needed.
 
 ## Validation
 
@@ -69,6 +69,10 @@ migrated schema through the worker, server and reconciler roles):
 - persistent provision failure stops at the cap, then teardown is admitted;
 - persistent teardown failure stops at the cap;
 - retained receipts below the cap still requeue; a recycled budget restarts the count;
-- the reconciler repair ends an exhausted budget `failed`.
+- the reconciler repair ends an exhausted budget `failed`;
+- a teardown driven to the cap is restarted by `systems.teardown`: the job is `queued` at attempt
+  0, the owner stays `teardown-requested`, a worker claims attempt 1 and a preactivation-absent
+  receipt finalizes it (`tests/services/systems/test_authority_admission.py`).
 
-Controlled fault: removing the budget test from either function turns these red.
+Controlled faults: removing the budget test from either function, or the failed-job restart,
+turns these red.

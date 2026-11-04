@@ -12,7 +12,7 @@ from psycopg.rows import dict_row
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import Job, JobKind, JobState
 from kdive.jobs import queue
 from kdive.jobs.payloads import (
     EXTERNAL_BOOT_AUTHORITY_MARKER_KEY,
@@ -214,22 +214,25 @@ async def enqueue_preactivation_teardown(
         }
     )
     prior = await _dedup_job(conn, dedup_key)
-    if prior is not None:
-        if prior.payload.get("authority_system_v1") != marker.model_dump(
-            mode="json", by_alias=True
-        ):
-            raise CategorizedError(
-                "an ordinary teardown job cannot be replayed for an authority-owned System",
-                category=ErrorCategory.CONFLICT,
-            )
+    if prior is not None and prior.payload.get("authority_system_v1") != marker.model_dump(
+        mode="json", by_alias=True
+    ):
+        raise CategorizedError(
+            "an ordinary teardown job cannot be replayed for an authority-owned System",
+            category=ErrorCategory.CONFLICT,
+        )
+    if prior is not None and prior.state is not JobState.FAILED:
         job = prior
     else:
+        # A failed teardown (its retained-receipt budget is spent, #3530) restarts under the same
+        # marker; enqueue also resets the budget's start.
         job = await queue.enqueue(
             conn,
             JobKind.TEARDOWN,
             TeardownPayload(system_id=str(system.id), authority_system_v1=marker),
             authorizing,
             dedup_key,
+            recycle=queue.JobRecyclePolicy.FAILED,
         )
     result = await (
         await conn.execute(
