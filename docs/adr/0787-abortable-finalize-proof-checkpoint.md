@@ -493,3 +493,12 @@ Considered & rejected:
   released and finalized without a System teardown would leak the pair indefinitely. The chosen
   rule also keeps the pair while a sibling stays unfinalized, until that sibling finalizes or
   teardown collection removes it (#3486).
+
+### Amendment (2026-11-04): the local port reaches an adopted receipt after teardown (#3489)
+
+The 2026-11-01 amendment's remark that the local recovery-object port "opens a session that needs
+the System's domain, so after local teardown the receipt is visible on disk only" no longer holds.
+[ADR-0710](0710-local-external-boot-session-opens-its-artifact-root-on-first-use.md)'s 2026-11-03
+amendment (#3489) moved the four quarantine-row port methods to `open_pinned`, which needs no
+domain, and overrides that remark: the local port reads a kept `managed` receipt after System
+teardown, as the remote port does. The rest of the 2026-11-01 amendment stands.
