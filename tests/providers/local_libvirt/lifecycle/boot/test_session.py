@@ -23,7 +23,7 @@ from pydantic import SecretStr
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, resolve_local_timing
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.providers.external_boot_authority import transport
 from kdive.providers.external_boot_authority.protocol import (
@@ -68,6 +68,10 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     prove_no_foreign_system_storage_references,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import LocalArtifactRoot
+from kdive.providers.local_libvirt.settings import (
+    LIBVIRT_BOOT_WINDOW_S,
+    LIBVIRT_TCG_DEADLINE_MULTIPLIER,
+)
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     OpaqueProviderRef,
@@ -2781,6 +2785,42 @@ async def test_real_timing_refusal_crosses_authority_wire_without_host_detail(
     assert host_detail not in str(caught.value)
     assert "domain.create" not in events
     assert "artifact.open" not in events
+
+
+@pytest.mark.parametrize(
+    ("domain_type", "accel", "accepted"),
+    [
+        ("qemu", "tcg", True),
+        ("kvm", "kvm", True),
+        ("kvm", "tcg", False),
+        ("qemu", "kvm", False),
+        ("xen", "tcg", False),
+        ("xen", "kvm", False),
+    ],
+)
+def test_factory_compares_domain_type_in_accelerator_vocabulary(
+    domain_type: str, accel: Literal["kvm", "tcg"], accepted: bool
+) -> None:
+    events: list[str] = []
+    domain = Domain(events, xml=_xml(domain_type=domain_type))
+    config.load({})
+    try:
+        window = resolve_local_timing(
+            accel,
+            config.require(LIBVIRT_BOOT_WINDOW_S),
+            config.require(LIBVIRT_TCG_DEADLINE_MULTIPLIER),
+        ).console_window_s
+        timing = LocalExternalBootTimingV1(
+            accel=accel, console_window_s=window, deadline_budget_s=window + 3000
+        )
+        factory = _factory(events, domain)
+        if accepted:
+            factory.open(_lease(), _expected(), local_timing=timing).close()
+        else:
+            with pytest.raises(LocalExternalBootTimingConfigurationError, match="accelerator"):
+                factory.open(_lease(), _expected(), local_timing=timing)
+    finally:
+        config.reset()
 
 
 def test_factory_accepts_matching_snapshot_and_unknown_accelerator() -> None:
