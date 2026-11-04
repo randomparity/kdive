@@ -82,6 +82,7 @@ def _empty_snapshot(**rows: object) -> serialize.InventorySnapshot:
         "local_libvirt": (),
         "fault_inject": (),
         "cost_classes": (),
+        "byo_host": (),
     }
     base.update(rows)
     return serialize.InventorySnapshot(**base)  # type: ignore[arg-type]

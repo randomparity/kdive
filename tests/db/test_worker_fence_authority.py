@@ -166,6 +166,7 @@ flight across the pause edge, the drop's completion, and its own — 8 + 90 + 90
 _PROTECTED_TABLES = {
     "authority_system_attempts",
     "authority_system_ownership",
+    "byo_console_leases",
     "capture_operation_cutoff",
     "capture_operations",
     "external_boot_acknowledged_retry_consumptions",

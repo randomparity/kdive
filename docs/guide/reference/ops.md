@@ -234,11 +234,14 @@ Upsert a cost class's pricing coefficient. Applies from the next charge. Operato
 
 `implemented`
 
-Set a host's concurrent allocation cap. Blocks new placement; no eviction. Operator.
+Set a host's concurrent allocation cap; no eviction. Operator.
+
+BYO hosts require exactly 1; other values return configuration_error without mutation.
+Use resources.set_scheduling(state='cordoned') to freeze new BYO placement.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `concurrent_allocation_cap` | integer | yes | Maximum concurrent allocations on the host (>= 0). |
+| `concurrent_allocation_cap` | integer | yes | Per-resource concurrent allocation count (>=0; not clock based). BYO requires exactly 1; other values return configuration_error without mutation. Freeze BYO placement with resources.set_scheduling(state='cordoned'). |
 | `resource_id` | string | yes | Host (resource) id to set the cap for. |
 
 ## `ops.set_queue_paused`

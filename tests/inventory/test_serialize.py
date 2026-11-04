@@ -127,6 +127,7 @@ def _snapshot(**overrides: object) -> serialize.InventorySnapshot:
         "local_libvirt": (),
         "fault_inject": (),
         "cost_classes": (),
+        "byo_host": (),
     }
     base.update(overrides)
     return serialize.InventorySnapshot(**base)  # type: ignore[arg-type]

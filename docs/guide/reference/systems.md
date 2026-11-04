@@ -162,7 +162,11 @@ with none.
 
 `implemented` · `read-only`
 
-Return a ready-to-edit example profile per configured provider. Requires a token.
+Return example profiles per configured provider. Requires a token.
+
+An operational provider returns a ready-to-edit profile. BYO returns status=unavailable
+with data.provider='byo-host', data.available=false, data.profile=null and a note:
+provisioning is unavailable in this build. Do not use another provider's profile for it.
 
 ## `systems.provision`
 
