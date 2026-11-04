@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import (
+    require_free_space_for_vmlinux,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import (
     capped_tar_members,
     reject_oversize_member,
@@ -277,6 +280,7 @@ class _GuestFS(Protocol):  # pragma: no cover - live_vm (libguestfs binding surf
     def mkdir_p(self, path: str) -> None: ...
     def upload(self, filename: str, remotefilename: str) -> None: ...
     def statns(self, path: str) -> dict[str, int]: ...
+    def statvfs(self, path: str) -> dict[str, int]: ...
     def shutdown(self) -> None: ...
     def close(self) -> None: ...
 
@@ -375,9 +379,19 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
     def _stage_vmlinux(guest: _GuestFS, overlay: str, vmlinux: str, version: str) -> None:
         dest = _vmlinux_dest(version)
         try:
-            guest.mkdir_p(f"{_DEBUGINFO_ROOT}/{version}")
+            directory = f"{_DEBUGINFO_ROOT}/{version}"
+            guest.mkdir_p(directory)
+            require_free_space_for_vmlinux(
+                guest.statvfs,
+                directory,
+                size=Path(vmlinux).stat().st_size,
+                target=overlay,
+                reclaimed=guest.statns(dest)["st_size"] if guest.is_file(dest) else 0,
+            )
             guest.upload(vmlinux, dest)
             size = guest.statns(dest)["st_size"]
+        except CategorizedError:
+            raise
         except Exception as exc:
             raise _RealGuestKernelWriter._io_failure(
                 "staging the DWARF vmlinux for live drgn", overlay, exc
