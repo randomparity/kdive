@@ -1332,5 +1332,5 @@ def test_byo_registration_refuses_before_database_probe_or_secrets() -> None:
     reason = response.data["reason"]
     assert isinstance(reason, str)
     assert "[[byo_host]]" in reason
-    assert "reconcile" in reason
+    assert "ops.reconcile_systems" in reason
     assert "DO_NOT_RESOLVE" not in str(response.model_dump())

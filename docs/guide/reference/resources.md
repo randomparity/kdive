@@ -128,7 +128,7 @@ Register a supported runtime resource (platform_admin); BYO is config-only.
 apply to the chosen kind, or a required one left blank, returns ``configuration_error``,
 as does a kind this deployment has not composed. BYO hosts are config-owned: this
 tool refuses them before probes, secrets or inserts. Declare [[byo_host]] in systems.toml
-and run reconcile-systems instead.
+and call ops.reconcile_systems instead.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -136,7 +136,7 @@ and run reconcile-systems instead.
 | `concurrent_allocation_cap` | integer | no | Per-host concurrent-allocation cap (> 0). |
 | `cost_class` | string | yes | The cost class for pricing. |
 | `host_uri` | string (nullable) | no | Provider host URI. Required for 'remote-libvirt' and 'local-libvirt' (both TCP-probe it for reachability before the row is written); rejected for 'fault-inject', which is synthetic and has no endpoint. |
-| `kind` | `local-libvirt`, `fault-inject`, `remote-libvirt`, `byo-host` | yes | Provider kind to register. BYO is config-only: declare [[byo_host]] in systems.toml and run reconcile-systems; runtime registration refuses it. 'remote-libvirt' requires host_uri + base_image; 'local-libvirt' requires host_uri; 'fault-inject' takes neither (supplying one is a configuration_error). |
+| `kind` | `local-libvirt`, `fault-inject`, `remote-libvirt`, `byo-host` | yes | Provider kind to register. BYO is config-only: declare [[byo_host]] in systems.toml and call ops.reconcile_systems; runtime registration refuses it. 'remote-libvirt' requires host_uri + base_image; 'local-libvirt' requires host_uri; 'fault-inject' takes neither (supplying one is a configuration_error). |
 | `memory_mb` | integer | yes | The host's memory size ceiling in MiB (admission ≤-resource-caps check). |
 | `name` | string | yes | The (kind, name) identity for the new resource. |
 | `owner_project` | string (nullable) | no | Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource. |

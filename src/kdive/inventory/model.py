@@ -565,12 +565,13 @@ class InventoryDoc(BaseModel):
         try:
             doc = cls.model_validate(data)
         except ValidationError as exc:
-            first = exc.errors(include_input=False)[0]
-            location = first["loc"]
-            if location and location[0] == "byo_host":
+            errors = exc.errors(include_input=False)
+            byo_error = next((error for error in errors if error["loc"][:1] == ("byo_host",)), None)
+            if byo_error is not None:
+                location = byo_error["loc"]
                 entry = f"byo_host[{location[1]}]" if len(location) > 1 else "byo_host"
                 field = ".".join(str(part) for part in location[2:]) or "schema"
-                raise InventoryError(entry, field, first["msg"]) from None
+                raise InventoryError(entry, field, byo_error["msg"]) from None
             raise InventoryError("inventory", "schema", str(exc)) from exc
         doc._check_image_identities()
         doc._check_base_image_refs()

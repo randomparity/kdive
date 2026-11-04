@@ -259,7 +259,7 @@ def _validate_branch_fields(request: ResourceRegistration) -> ToolResponse | Non
         return config_error(
             request.name,
             "byo-host resources are config-owned; declare [[byo_host]] in systems.toml "
-            "and run reconcile-systems",
+            "and call ops.reconcile_systems",
         )
     branch = _BRANCHES[request.kind]
     supplied = {field for field in _BRANCH_FIELDS if (getattr(request, field) or "").strip()}

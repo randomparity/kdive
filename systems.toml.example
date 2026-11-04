@@ -15,7 +15,8 @@
 #                             #395): per-op provider config selects the granted Resource's host by
 #                             name, so you can pool several remote-libvirt hosts in one fleet.
 #
-# Load it with `kdive reconcile-systems` (or the deploy `migrate` step, or the reconciler loop).
+# Apply resource declarations with `ops.reconcile_systems` or the reconciler loop.
+# The `kdive reconcile-systems` CLI applies only images; `migrate` applies only database schema.
 # Path is `KDIVE_SYSTEMS_TOML` (default the XDG `~/.config/kdive/systems.toml`, ADR-0112; in k8s a
 # mounted ConfigMap).
 #

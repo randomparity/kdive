@@ -196,3 +196,23 @@ def test_documented_byo_examples_validate() -> None:
         )
         examples.extend(InventoryDoc.parse(tomllib.loads(text)).byo_host)
     assert {host.arch for host in examples} == {"x86_64", "ppc64le"}
+
+
+def test_mixed_errors_hide_rejected_byo_secret() -> None:
+    raw = _host()
+    raw["oob"]["password"] = "DO_NOT_ECHO_MATERIAL"  # pragma: allowlist secret
+    with pytest.raises(InventoryError) as exc:
+        InventoryDoc.parse({"schema_version": 1, "byo_host": [raw]})
+    assert "DO_NOT_ECHO_MATERIAL" not in str(exc.value)
+
+
+def test_cli_mixed_errors_hide_rejected_byo_secret(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "systems.toml"
+    path.write_text(
+        "schema_version=1\n[[byo_host]]\n"
+        'password="DO_NOT_ECHO_MATERIAL"\n'  # pragma: allowlist secret
+    )
+    assert cli.validate_systems(path) == 1
+    assert "DO_NOT_ECHO_MATERIAL" not in capsys.readouterr().err
