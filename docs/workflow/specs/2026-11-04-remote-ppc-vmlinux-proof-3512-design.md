@@ -4,7 +4,8 @@
 
 The remote staging implementation already exists (#3131), but its live carrier hardcodes
 x86_64. The remote authority frame already validates the selected guest architecture against
-the provider host and selects the matching registered root. No product staging code needs changing.
+the provider host and selects the matching registered root. Native execution also exposed the
+bounded prerequisite and existing-provider corrections specified below.
 
 ## Scope
 
@@ -40,18 +41,27 @@ No new API, schema, dependency, manifest format, identity shim, or foreign dracu
 This necessary surface extension was approved by the campaign root on 2026-11-04 under the
 same scope and exclusions; native SHA, drgn and restoration proof remains mandatory.
 
-### Failure model
+## Failure model
 
-- Deployment: configured remote authority on native x86_64 or ppc64le; native POWER/KVM-HV
-  is required for the new proof. TCG results cannot complete #3512.
-- Missing lane remains dormant in ordinary collection. An unsupported observed architecture
-  fails before entering the frame; architecture drift fails its existing precondition before
-  allocation. No inventory mutation precedes those checks.
-- Failed activation retains existing release/frame cleanup. Product failures are evidence to
-  investigate and report, never grounds to loosen assertions or count skips as success.
-- Missing matching filesystem, modules, guest agent, or drgn prevents proof. The uploaded
-  kernel must support the actual root filesystem, including CONFIG_BTRFS_FS for a btrfs root.
-- Existing deployment revision checks and root provenance checks remain authoritative.
+- Actors and deployments: configured native x86_64/ppc64le remote authorities and the approved
+  separate Linux host-process controller; native POWER/KVM-HV is required for this proof.
+- Invariants and assets: uploaded SHA, real drgn, restoration and inventory/capacity criteria;
+  exact revisions, identity/ownership, bounded private documents, captured original modules,
+  30-second monotonic console idle and 300-second monotonic invocation caps remain mandatory.
+- Accepted failures: an absent lane stays dormant in ordinary collection; unsupported/mismatched
+  architecture fails before allocation. Missing matching root filesystem support (including
+  CONFIG_BTRFS_FS for btrfs), modules, guest agent or drgn prevents proof. Unwritable console,
+  individual blocking I/O exceeding the idle bound or work
+  exceeding the invocation cap remain incomplete and use existing recovery/cleanup. Neither
+  missing hardware, TCG, skip, failed staging nor offline evidence completes the native criterion.
+- Covered elsewhere: local staging #3130, legacy delivery #3124, host readiness and ordinary
+  recovery/cleanup contracts retain their existing owners and guards. No HMC/LPAR work.
+
+## Global constraints
+
+Python 3.14; targets x86_64 and ppc64le. Reuse the existing provider, appliance builder, closed
+runtime, trusted console fields and artifact-upload contracts. No public API, schema, migration,
+dependency version, timeout increase, background thread, guest shell or network capability.
 
 ## Success
 
@@ -167,3 +177,63 @@ Test real extraction with the observed extra allocation, wrong capacity, negativ
 allocation and stream overflow. Retain native result/volume metadata and rerun the same reader
 on the inactive owned volume before full carrier proof. Earlier appliance timeouts remain
 separate inconclusive failures; an offline installed file is diagnostic evidence, not live proof.
+
+### Producer compliance with the existing idle contract
+
+A journal-clean isolated native replay measured completed source validation, source manifest,
+copy and normalization, then the unchanged supervisor's 30-second idle expiry during destination
+hashing, before fsync or depmod. A private numeric-stage image may affect timing and is diagnostic,
+not candidate proof. Earlier offline rebinding before journal recovery contaminated diagnostic
+scratch metadata; controlled offline A/B establishes that separate cause. Originals remain intact.
+
+Extend only `deploy/remote_module_appliance/appliance.py`, its existing deployment tests and
+appliance README, plus the existing remote runbook/spec/proof artifacts. Keep accepted ADR-0589's
+policy and existing ownership; this implements producer compliance, not a new console policy.
+
+After the validated operation is read, preserve the initial trusted `phase=accepted` announcement.
+Enable one process-local monotonic throttle then: at completed hash/copy chunks (at most 1 MiB),
+manifest entries, normalization steps and file/directory sync completions, emit the SAME fixed
+`phase=accepted` line when at least five seconds have elapsed since the last announcement.
+The interval is measured in seconds on the appliance's monotonic clock, scoped to that operation.
+It limits emission frequency; a blocked syscall does not gain a heartbeat or immunity from idle
+expiry. Missing console activity can still cause the existing host abort/recovery after 30 idle
+seconds; reducing/repairing the input or host and normal retry remains the recovery path.
+
+The repeated advisory means the accepted process is performing work or waiting for its live
+bounded depmod child; it is neither durable phase advancement, byte-integrity proof nor install
+success. Persisted result/checkpoints remain authoritative. Existing `_filter_console` accepts
+this literal; change neither its whitelist nor the supervisor's idle/hard caps. No path, release,
+identity, guest text or arbitrary child output enters the advisory.
+
+Use a streamed copy function for `shutil.copytree(symlinks=True)` so one long regular file offers
+chunk completion points. Preserve byte content, copy2-equivalent stat/xattr metadata and literal
+symlink behavior; close files on failure and retain existing partial-stage recovery. Source remains
+validated and read-only, destination is a newly owned tree; do not follow a substituted destination.
+
+Run the same fixed depmod argv/environment with DEVNULL output via `Popen.wait` slices of at most
+five seconds. While that child remains alive, a wait slice expiry may emit the same throttled
+advisory as liveness, not completed work. Preserve one absolute 300-second monotonic depmod deadline
+per child call; it does not restart per slice, and the host's earlier invocation cap still wins.
+Kill and reap a live child on deadline, wait error or unexpected announcement failure. Preserve
+stable DEPMOD_FAILURE behavior for spawn/nonzero/timeout errors and existing flush/recovery rules.
+
+Threat model:
+- Boundary inventory: no added/widened input or privilege boundary; existing validated module
+  tree→copy, fixed child execution, trusted console→existing filter and image→loader boundaries.
+- Actors: authenticated tenants supply bounded module trees; the isolated init owns its new
+  destination and reads an immutable source. Operators pin the rebuilt kernel/runtime/image.
+- Controls: preserve manifest size/count/path/symlink/metadata rules and copy2 metadata; fixed
+  rate-bounded console literal remains filtered/redacted; fixed argv/env/DEVNULL child has no
+  shell/network/output capture; existing builder/install/loader reverify immutable image identity.
+- Out of scope: OS/storage faults and individual blocked I/O remain existing bounded failures,
+  not proof success. Existing auth/tenancy and unfinished-preparation recovery guards remain.
+
+Validation Mode: focused-test. Exercise actual main→hash/copy/checkpoint and depmod paths with
+fake monotonic time/slow I/O and child boundaries, never mocking progress logic. Long single-file
+work and copy metadata/symlinks must pass; original code fails the observed >30-second silence
+case. Prove throttling, disabled-before-main behavior, constant filtered output, absolute child
+expiry, nonzero/spawn failures and kill/reap including announcement exceptions. Controlled removal
+of hash/copy callbacks must redden behavior tests. Existing supervisor idle/hard tests remain green.
+Validation Mode: task-test-not-applicable for explanatory README/runbook/proof prose only.
+Rebuild and verify the actual closed native image, then require separately authorized unchanged
+native carrier SHA/drgn/restoration/cleanup proof at matching final revisions; no diagnostic counts.
