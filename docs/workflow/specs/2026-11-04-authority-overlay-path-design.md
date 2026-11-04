@@ -11,27 +11,33 @@ boot also strands a `preparing` activation, because teardown fails the same way.
 ## Scope
 
 - The factory takes `overlay_path_for` and `baseline_dir_for` (`SystemPath`, defaulting to the
-  legacy `overlay_path`/`baseline_dir`). `open` and both teardown paths use them. They replace the
+  legacy `overlay_path`/`baseline_dir`). `open` (`session.py:1415`) and both teardown paths use the
+  same two resolvers. They replace the
   `teardown_overlay_path`/`teardown_baseline_path` parameters (one test call site).
 - `build_local_external_boot_authority` passes authority-rooted resolvers
   (`<root>/rootfs/systems/<id>.qcow2`, `<root>/rootfs/baselines/<id>-baseline`) when the host
-  has an installed local System manifest; otherwise the legacy defaults stand. A host with a
-  local manifest provisions every local System through the authority lane, so one root per host
-  suffices; no per-System resolution.
+  has an installed local System manifest; otherwise (none, or remote) the legacy defaults stand.
+  The root is `AuthorityHostConfig.authority_system_local_root`, the property the host hands the
+  provisioner; the manifest is read with `load_authority_system_manifest` from the host's fixed
+  path. Threading a root through `assembly` and `host.py` is outside the frozen surface. The
+  provision route (`provision.py` `AuthoritySystemRoute`) sends every local System of an
+  authority-enabled Resource through the authority lane, so one root per host suffices; no
+  per-System resolution.
 - `_parse_owned_xml` is unchanged: exact equality against the resolver's string, one `vda` disk,
   one reference. No either-path or XML-derived fallback.
-- Out of scope: worker `overlay_path` callers, vmlinux staging, reconciler dead-lettering of an
-  exhausted `running` teardown job (reported, not fixed).
+- Out of scope: worker `overlay_path` callers, vmlinux staging, reconciler dead-lettering.
 
 ### Failure model
 
-- Actors: the authority host process (fixed private roots); the worker via the authority socket.
+- Actors: the authority host process (fixed private roots), called by workers via its socket.
 - Invariants: only a domain whose disk is the exact host-derived path is destroyed or undefined;
   teardown deletes only the System's own overlay and baseline.
 - Accepted: a pre-manifest legacy System on a manifest-bearing host is refused (fails closed);
-  the manifest is read once at composition, so installing one needs a restart.
+  the manifest is read at composition, so installing one needs a restart; a partial teardown
+  retries idempotently (absence counts as success).
 - Covered elsewhere: manifest and root validation (`validate_authority_system_installation`);
-  exhausted-job dead-lettering (reported to the orchestrator).
+  exhausted-job dead-lettering (reported to the orchestrator); worker-side install/retrieve
+  `overlay_path` callers (excluded, legacy layout).
 
 ## Success
 
@@ -43,8 +49,13 @@ boot also strands a `preparing` activation, because teardown fails the same way.
 
 ## Validation
 
-- Resolver used by open and teardown: focused-test, `tests/providers/local_libvirt/lifecycle/boot/test_session.py`.
+- Resolver used by open and teardown, defaults still legacy: focused-test,
+  `tests/providers/local_libvirt/lifecycle/boot/test_session.py`.
 - Wrong-path and doubled reference refused: focused-test, same file, via the injected resolver.
-- Composition wiring (manifest present vs absent): focused-test, `tests/providers/local_libvirt/test_composition.py`.
-- Failed-boot teardown retires `preparing`: focused-test, `tests/providers/system_authority/`.
+- Composition wiring (local manifest, remote manifest, none): focused-test,
+  `tests/providers/local_libvirt/test_composition.py`; resolver strings equal the provisioner's
+  `ProvisioningFiles` output for one id.
+- Failed-boot teardown of an activation-bound System completes through the factory with the
+  authority resolver (the legacy resolver reproduces the ownership error): focused-test,
+  `test_session.py`. The `preparing` retirement logic is existing and unchanged.
 - Live boot and teardown: task-test-not-applicable, needs a real libvirt host; proven in the live arm.
