@@ -51,7 +51,7 @@ and neither authority protocol reported it.
 ## Consequences
 
 - **Schema:** one nullable column, one helper function, and replacements of the finalizer, the
-  repair and the binding function. Roll-forward only ([ADR-0015](0015-forward-only-migrations.md)).
+  repair and the binding function. Roll-forward only ([ADR-0015](0015-sql-migration-runner.md)).
 - **Wire:** the receipt shape grows. A server and worker built from this change accept an older
   authority's receipts, which carry no port, and fail closed at attach. An older worker rejects a
   newer authority's receipt, because the proof model forbids unknown fields. Upgrade workers
