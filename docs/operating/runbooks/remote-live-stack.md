@@ -960,8 +960,9 @@ The proof checks the uploaded SHA-256 at `/lib/modules/<release>/vmlinux`, real 
 `drgn -k` resolution of `init_uts_ns`, restored absence after release and baseline boot, and
 unchanged authority inventory/capacity. Native ppc64le completion requires an observed POWER
 KVM-HV run; mocked boundary tests, a skipped lane or TCG do not establish it. Record the exact
-candidate, accelerator, kernel/config provenance, observations and cleanup. No native ppc64le
-remote result has been established for #3512; an unavailable lane leaves the issue open.
+candidate, accelerator, kernel/config provenance, observations and cleanup. The
+[dated native proof](../../workflow/proofs/2026-11-04-remote-ppc-vmlinux-3512.md) records a pass at
+`7be2770516a81684ae5325179e54efbadae59361`; it does not claim a hardware rerun of later heads.
 
 ## SUSE native image proof
 
