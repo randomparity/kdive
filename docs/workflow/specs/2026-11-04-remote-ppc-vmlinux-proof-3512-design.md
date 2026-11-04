@@ -135,3 +135,20 @@ of unexpected identity changes. Do not rewrite fixture XML or bypass authority v
 Retain the failed native journal and cleanup evidence. Demonstrate renderer RED before fixing,
 then focused Linux GREEN and a real native define/readback/undefine using the product renderer
 before redeploying both runtime ends and rerunning the unchanged full carrier.
+
+### Documented pSeries panic default
+
+The real product-rendered define now succeeds, but canonical readback rejects libvirt's implicit
+`<panic model="pseries"/>`. The [libvirt panic-device contract](https://libvirt.org/formatdomain.html#panic-device)
+documents this always-enabled pSeries firmware notifier and forbids an address for that model.
+Extend only the existing harmless-default normalization in `remote_libvirt/system_authority.py`:
+on ppc64le with a pSeries machine, absent or one exact empty leaf with only `model="pseries"`
+projects as omitted. Duplicate devices, other models, extra attributes, children, content text
+or non-whitespace tail, and panic on x86 or another machine remain unexpected and fail identity.
+Do not broadly allowlist panic, change other identity checks, add unconditional projection keys,
+or change existing x86 v2 digests. Retain a pre-fix x86 digest vector and verify it is unchanged.
+Update the existing System-authority fake boundary with this measured libvirt default; test
+matching canonical provision/replay and all malformed/wrong-architecture variants on both live
+and inactive XML. Native define/readback/undefine must prove canonical equality and unchanged
+inventory before the unchanged full carrier rerun. If digest preservation is impossible, stop
+for an explicit persistence/version decision; no silent projection-version change is authorized.

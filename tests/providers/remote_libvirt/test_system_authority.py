@@ -30,12 +30,15 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation i
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import (
     overlay_volume_name,
+    render_domain_xml,
     render_volume_xml,
     supplied_base_volume_name,
 )
 from kdive.providers.remote_libvirt.system_authority import (
     RemoteAuthoritySystemManifestEntry,
     RemoteAuthoritySystemProvider,
+    _domain_projection,
+    _projection_identity,
 )
 from kdive.providers.shared.libvirt_xml import QEMU_NS
 from kdive.providers.system_authority import (
@@ -262,6 +265,11 @@ def _fill_libvirt_defaults(root: ET.Element[str], *, live: bool) -> None:
     if serial_target.get("type") is None:
         serial_target.set("type", serial_type)
         ET.SubElement(serial_target, "model", name=serial_model)
+    if os_type.get("arch") == "ppc64le":
+        # The real pSeries readback adds its implicit firmware notifier (#3512).
+        devices = root.find("devices")
+        assert devices is not None
+        ET.SubElement(devices, "panic", model="pseries").tail = "\n  "
     if not live:
         return
     cpu = root.find("./cpu")
@@ -1378,6 +1386,117 @@ async def test_power_feature_tampering_is_not_canonical_identity(
             features = ET.SubElement(root, "features")
             ET.SubElement(features, feature, {"state": "on"} if feature == "vmcoreinfo" else {})
 
+        connection.xml_transforms[xml_flags] = tamper
+        with pytest.raises(CategorizedError, match="differs from private intent") as caught:
+            await provider.observe_system_provision(
+                _request(architecture="ppc64le"), _context(), _snapshot(architecture="ppc64le")
+            )
+    finally:
+        executor.shutdown()
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert connection.mutations == before
+
+
+def _projection_probe_xml(architecture: Architecture = "x86_64", machine: str = "pc") -> str:
+    return render_domain_xml(
+        SYSTEM_ID,
+        _profile(architecture=architecture),
+        pool=POOL_NAME,
+        volume="overlay.qcow2",
+        overlay_path="/authority/pool/overlay.qcow2",
+        backing_path="/authority/pool/base.qcow2",
+        gdb_addr="127.0.0.1",
+        gdb_port=47001,
+        network=None,
+        machine=machine,
+    )
+
+
+def test_x86_v2_projection_digest_matches_the_pre_normalization_vector() -> None:
+    assert _projection_identity(_projection_probe_xml()) == (
+        "sha256:d074ca0c32b964ea7bf6b82fb8e076e6b9004de2e46dd4f45dd1f6ff076c27fc"
+    )
+
+
+@pytest.mark.parametrize(
+    ("architecture", "machine", "neutral"),
+    (
+        ("ppc64le", "pseries", True),
+        ("ppc64le", "pseries-9.2", True),
+        ("ppc64le", "pc", False),
+        ("ppc64le", "q35", False),
+        ("ppc64le", "pseriesx", False),
+        ("x86_64", "pc", False),
+        ("x86_64", "pseries-9.2", False),
+    ),
+)
+@pytest.mark.parametrize("live", (False, True))
+def test_panic_default_equivalence_requires_power_and_pseries(
+    architecture: Architecture, machine: str, neutral: bool, live: bool
+) -> None:
+    original = _projection_probe_xml(architecture, machine)
+    root = ET.fromstring(original)
+    devices = root.find("devices")
+    assert devices is not None
+    ET.SubElement(devices, "panic", model="pseries")
+    observed = _domain_projection(ET.tostring(root, encoding="unicode"), live=live)
+    assert (observed == _domain_projection(original, live=live)) is neutral
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("xml_flags", (_LIVE, _INACTIVE))
+@pytest.mark.parametrize(
+    "case",
+    (
+        "duplicate",
+        "model",
+        "missing-model",
+        "attribute",
+        "child",
+        "content",
+        "space",
+        "tail",
+        "nonxml-tail",
+    ),
+)
+async def test_malformed_pseries_panic_never_matches_private_identity(
+    tmp_path: Path, xml_flags: int, case: str
+) -> None:
+    def tamper(root: ET.Element[str]) -> None:
+        panic = root.find("./devices/panic")
+        assert panic is not None
+        if case == "duplicate":
+            devices = root.find("devices")
+            assert devices is not None
+            ET.SubElement(devices, "panic", model="pseries")
+        elif case == "model":
+            panic.set("model", "pvpanic")
+        elif case == "missing-model":
+            panic.attrib.clear()
+        elif case == "attribute":
+            panic.set("unexpected", "yes")
+        elif case == "child":
+            ET.SubElement(panic, "address", type="isa", iobase="0x505")
+        elif case in {"tail", "nonxml-tail"}:
+            panic.tail = "\u00a0" if case == "nonxml-tail" else "unexpected"
+        else:
+            panic.text = " " if case == "space" else "unexpected"
+
+    original = _projection_probe_xml("ppc64le", "pseries-9.2")
+    root = ET.fromstring(original)
+    devices = root.find("devices")
+    assert devices is not None
+    ET.SubElement(devices, "panic", model="pseries")
+    tamper(root)
+    observed = _projection_identity(ET.tostring(root, encoding="unicode"))
+    assert observed != _projection_identity(original)
+    connection = _Connection()
+    provider, _bootstrap, executor, _state = _provider(tmp_path, connection, architecture="ppc64le")
+    try:
+        await provider.execute_system_provision(
+            _request(architecture="ppc64le"), _context(), _snapshot(architecture="ppc64le")
+        )
+        before = list(connection.mutations)
         connection.xml_transforms[xml_flags] = tamper
         with pytest.raises(CategorizedError, match="differs from private intent") as caught:
             await provider.observe_system_provision(
