@@ -6,14 +6,13 @@ Both paths that write a DWARF `vmlinux` into a guest read the guest filesystem's
 through the libguestfs handle that writes the file, and refuse before the upload when it does
 not fit. The fixed-worker `_stage_vmlinux` and the authority `GuestDebuginfoFile.stage` (#3130)
 share `guest_free_space.require_free_space_for_vmlinux`. #3131 writes no guest vmlinux on main.
-Not in scope: an upload size cap (`validation.py` is untouched), the boot step row (#3135).
+Not in scope: an upload size cap, the boot step row (#3135).
 
 ### Failure model
 
 - Actors: the install worker and the authority activation, both host-side, on a System overlay.
 - Assets: a guest that still boots, keeps room for kdump and logs, and a clear refusal.
-- Accepted: another writer fills the guest between the check and the upload (a stopped
-  System's overlay is not written by anyone else); the existing upload error path reports it.
+- Accepted: another writer fills the guest between the check and the upload; the existing upload error path reports it.
 - Untrusted: `statvfs` comes from guest filesystem metadata, so negative, non-integer,
   oversized, `bavail > blocks`, or zero/over-1 MiB `frsize` values are refused as untrusted.
 - Narrowed: the authority boundary maps every provider exception to the closed category
