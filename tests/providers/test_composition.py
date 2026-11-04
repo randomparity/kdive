@@ -150,7 +150,9 @@ class _InstallProvider:
 
 
 class _ConnectorProvider:
-    def open_transport(self, system: SystemHandle, kind: str) -> TransportHandle:
+    def open_transport(
+        self, system: SystemHandle, kind: str, *, ssh_forward_port: int | None = None
+    ) -> TransportHandle:
         return TransportHandle(f"{kind}://{system}")
 
     def close_transport(self, handle: TransportHandle) -> None:

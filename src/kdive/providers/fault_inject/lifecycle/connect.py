@@ -29,7 +29,13 @@ def synthetic_port(handle: str) -> int:
 class FaultInjectConnect:
     """Connector port: open and close a loopback debug transport."""
 
-    def open_transport(self, system: SystemHandle, kind: DebugTransportKind) -> TransportHandle:
+    def open_transport(
+        self,
+        system: SystemHandle,
+        kind: DebugTransportKind,
+        *,
+        ssh_forward_port: int | None = None,
+    ) -> TransportHandle:
         if kind not in DEBUG_TRANSPORT_KINDS:
             raise config_error(f"unknown transport kind {kind!r}")
         handle_kind = cast(TransportHandleKind, kind)

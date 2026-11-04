@@ -193,6 +193,7 @@ def test_0149_control_binding_is_limited_to_server_and_reconciler(
         "sha256:" + "a" * 64,
         "sha256:" + "b" * 64,
         "provisioning",
+        None,  # ssh_forward_port, added by 0189 and reported only once the System is ready
     )
     for role in ("kdive_server", "kdive_reconciler"):
         with psycopg.connect(role_dsns(role)) as actor:

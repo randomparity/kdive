@@ -288,6 +288,52 @@ def test_open_ssh_resolves_endpoint_for_the_requested_system() -> None:
     assert seen == [_SYSTEM]
 
 
+def _forward_connector(ssh: _FakeSshConnect) -> LocalLibvirtConnect:
+    def unreadable(_system: SystemHandle) -> tuple[str, int]:
+        raise AssertionError("an authority-reported forward must not read the local domain")
+
+    return LocalLibvirtConnect(
+        resolve_endpoint=lambda _s: ("127.0.0.1", 1234),
+        resolve_ssh_endpoint=unreadable,
+        ssh_connect=ssh,
+    )
+
+
+def test_open_ssh_with_a_reported_forward_skips_the_domain_read() -> None:
+    ssh = _FakeSshConnect(result=True)
+    handle = _forward_connector(ssh).open_transport(_SYSTEM, "drgn-live", ssh_forward_port=41234)
+    assert TransportHandleData.decode(handle) == TransportHandleData(
+        kind="ssh", host="127.0.0.1", port=41234
+    )
+    assert ssh.calls == [("127.0.0.1", 41234)]
+
+
+@pytest.mark.parametrize("port", [0, 22, 1023, 65536, -1, True])
+def test_open_ssh_refuses_an_out_of_range_reported_forward_without_io(port: int) -> None:
+    ssh = _FakeSshConnect(result=True)
+    with pytest.raises(CategorizedError) as exc:
+        _forward_connector(ssh).open_transport(_SYSTEM, "drgn-live", ssh_forward_port=port)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"reason": "authority_ssh_forward_invalid"}
+    assert ssh.calls == []
+
+
+def test_a_reported_forward_applies_only_to_drgn_live() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        _forward_connector(_FakeSshConnect()).open_transport(
+            _SYSTEM, "gdbstub", ssh_forward_port=41234
+        )
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_open_ssh_with_a_reported_forward_still_probes_reachability() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        _forward_connector(_FakeSshConnect(result=False)).open_transport(
+            _SYSTEM, "drgn-live", ssh_forward_port=41234
+        )
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+
+
 def test_open_unsupported_kind_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as exc:
         _ssh_connector(_FakeSshConnect()).open_transport(

@@ -214,8 +214,18 @@ class Booter(Protocol):
 class Connector(Protocol):
     """Connect port for opening and closing debug transports."""
 
-    def open_transport(self, system: SystemHandle, kind: DebugTransportKind) -> TransportHandle:
+    def open_transport(
+        self,
+        system: SystemHandle,
+        kind: DebugTransportKind,
+        *,
+        ssh_forward_port: int | None = None,
+    ) -> TransportHandle:
         """Open a debug transport and return an opaque handle.
+
+        ``ssh_forward_port`` is the loopback SSH port an authority-owned System reported
+        (ADR-0811) for a drgn-live attach whose domain this process cannot read. A provider that
+        resolves the endpoint itself ignores it.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for an unknown transport kind,
