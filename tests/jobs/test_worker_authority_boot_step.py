@@ -133,3 +133,18 @@ def test_transient_step_write_failure_is_retried(
     )
     assert calls == 2
     assert step == {"system_id": str(system_id), "boot_outcome": "ready"}
+
+
+def test_exhausted_step_write_logs_and_leaves_no_step(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def broken(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(worker_module, "complete_run_step", broken)
+    monkeypatch.setattr(worker_module, "_BOOT_STEP_RETRY_DELAY_S", 0.0)
+    step, _gate, _system = asyncio.run(
+        _commit(migrated_url, monkeypatch, operation="activate", job_state=JobState.SUCCEEDED)
+    )
+    assert step is None
+    assert "boot step was not recorded" in caplog.text

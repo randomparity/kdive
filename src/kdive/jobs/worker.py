@@ -33,7 +33,7 @@ from psycopg.errors import InsufficientPrivilege
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr, ValidationError
 
-from kdive.db.idempotency import abandon_run_step, claim_run_step, complete_run_step
+from kdive.db.idempotency import claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import JobState, RunState
@@ -708,20 +708,29 @@ class Worker:
                 await asyncio.sleep(_BOOT_STEP_RETRY_DELAY_S * attempt)
 
     async def _write_boot_step(self, result: ExternalBootAuthorityResultV1) -> None:
-        async with self._pool.connection() as conn:
-            claim = await claim_run_step(conn, result.run_id, "boot")
+        run_id, system_id = result.run_id, result.system_id
+        async with (
+            self._pool.connection() as conn,
+            conn.transaction(),
+            advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
+            advisory_xact_lock(conn, LockScope.RUN, run_id),
+        ):
+            claim = await claim_run_step(conn, run_id, "boot")
             if not claim.claimed:
+                recorded = claim.result.get("system_id") if isinstance(claim.result, dict) else None
+                if recorded != str(system_id):
+                    _log.warning(
+                        "run %s already has a boot step for system %s, not %s; left unchanged",
+                        run_id,
+                        recorded,
+                        system_id,
+                    )
                 return
             boot_result: BootStepResult = {
-                "system_id": str(result.system_id),
+                "system_id": str(system_id),
                 "boot_outcome": BOOT_OUTCOME_READY,
             }
-            try:
-                await complete_run_step(conn, result.run_id, "boot", cast(JsonValue, boot_result))
-            except Exception:
-                # Drop the running claim so the retry claims it instead of waiting it out.
-                await abandon_run_step(conn, result.run_id, "boot")
-                raise
+            await complete_run_step(conn, run_id, "boot", cast(JsonValue, boot_result))
 
     async def _log_superseded_commit(self, job: Job) -> None:
         """Separate a real reclaim from a refused commit on the attempt that still holds the job."""
