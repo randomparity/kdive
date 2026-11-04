@@ -54,9 +54,9 @@ from kdive.services.external_boot.plan import (
     construct_external_boot_plan,
     external_boot_root_arguments,
 )
+from kdive.services.external_boot.route_admission import admit_authority_route
 from kdive.services.external_boot.routing import (
     authority_reservation_geometry,
-    server_authority_instance,
 )
 from kdive.services.runs.build_catalog import resolve_build, resolve_build_expiry
 from kdive.services.runs.steps import (
@@ -137,7 +137,8 @@ async def install_run(
                 return _not_bound(run_id)
             try:
                 binding = await resolver.binding_for_system(conn, run.system_id)
-                authority_instance = server_authority_instance(binding)
+                # Before keyed replay, so a stored key cannot bypass a now-invalid route.
+                authority_instance = await admit_authority_route(conn, run.system_id, binding)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(run_id, exc)
             # The method gate is on the crashkernel path only: an install without a reservation is
@@ -153,7 +154,7 @@ async def install_run(
                 project=run.project,
                 kind="runs.install",
                 do_work=lambda: _restage_and_enqueue_install(
-                    conn, ctx, run, cmdline, crashkernel, authority_instance
+                    conn, ctx, run, cmdline, crashkernel, binding, authority_instance
                 ),
             )
 
@@ -226,6 +227,7 @@ async def _restage_and_enqueue_install(
     run: Run,
     cmdline: str | None,
     crashkernel: str | None,
+    binding: ProviderBinding,
     authority_instance: str | None,
 ) -> ToolResponse:
     """Enqueue install under Investigation→Run locks, re-staging changed variants.
@@ -271,6 +273,11 @@ async def _restage_and_enqueue_install(
             or locked_run.system_id != system_id
         ):
             return _config_error(str(run.id))
+        try:
+            if await admit_authority_route(conn, system_id, binding) != authority_instance:
+                return _config_error(str(run.id), data={"reason": "authority_route_changed"})
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(str(run.id), exc)
         requested_cmdline = (
             cmdline.strip()
             if cmdline is not None
@@ -432,8 +439,11 @@ async def boot_run(
             if not await _has_succeeded_step(conn, uid, "install"):
                 return _install_first(run_id)
             if resolver is not None:
-                binding = await resolver.binding_for_system(conn, run.system_id)
-                authority_instance = server_authority_instance(binding)
+                try:
+                    binding = await resolver.binding_for_system(conn, run.system_id)
+                    authority_instance = await admit_authority_route(conn, run.system_id, binding)
+                except CategorizedError as exc:
+                    return ToolResponse.failure_from_error(run_id, exc)
                 if authority_instance is not None:
                     return await keyed_mutation(
                         conn,
@@ -483,8 +493,11 @@ async def _enqueue_external_boot(
         if locked_run is None or locked_run.system_id != system_id:
             return _config_error(str(run.id), data={"reason": "run_binding_changed"})
         binding = await resolver.binding_for_system(conn, system_id)
-        if server_authority_instance(binding) != authority_instance:
-            return _config_error(str(run.id), data={"reason": "authority_route_changed"})
+        try:
+            if await admit_authority_route(conn, system_id, binding) != authority_instance:
+                return _config_error(str(run.id), data={"reason": "authority_route_changed"})
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(str(run.id), exc)
         policy = (
             queue.JobRecyclePolicy.TERMINAL if force else await _step_recycle(conn, run.id, "boot")
         )

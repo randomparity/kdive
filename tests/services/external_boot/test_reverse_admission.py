@@ -10,7 +10,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from pathlib import Path
+from typing import Any, LiteralString, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -40,7 +41,7 @@ from kdive.mcp.tools.lifecycle.control.registrar import (
 )
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest, bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
-from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
+from kdive.mcp.tools.lifecycle.runs.steps import _enqueue_external_boot, boot_run, install_run
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_system
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
 from kdive.mcp.tools.lifecycle.systems.snapshot import (
@@ -51,6 +52,7 @@ from kdive.mcp.tools.lifecycle.systems.snapshot import (
 from kdive.mcp.tools.lifecycle.systems.ssh_access import authorize_ssh_key
 from kdive.mcp.tools.lifecycle.vmcore.handlers import VmcoreHandlers
 from kdive.providers.ports.handles import SystemHandle, TransportHandle
+from kdive.providers.system_authority.routing import authority_admission_routes_for_resource
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -67,6 +69,9 @@ from tests.mcp.systems_support import (
 )
 from tests.services.external_boot.admission_support import GUARDED_TOOLS
 from tests.services.external_boot.conftest import SeedActivation
+
+_real_admission_routes = authority_admission_routes_for_resource
+pytestmark = pytest.mark.usefixtures("resource_routed_to_server_authority")
 
 _STATE = ExternalBootActivationState
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -400,6 +405,174 @@ def test_public_boot_atomically_admits_configured_external_boot(migrated_url: st
     response = asyncio.run(run())
     assert response.status == "queued", response.model_dump()
     assert response.data["replayed"] is False
+
+
+async def _count(pool: AsyncConnectionPool, query: LiteralString) -> int:
+    async with pool.connection() as conn:
+        row = await (await conn.execute(query)).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+@pytest.mark.parametrize(
+    ("resource_route", "owner", "reason"),
+    [
+        (None, None, "authority_resource_route_mismatch"),
+        ("other-authority", None, "authority_resource_route_mismatch"),
+        ("authority-local", "other-authority", "authority_system_binding_mismatch"),
+    ],
+)
+def test_boot_refuses_an_authority_that_does_not_own_the_system(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    resource_route: str | None,
+    owner: str | None,
+    reason: str,
+) -> None:
+    """The defect case of #3138: no job and no activation, even for a replayed key (ADR-0752)."""
+    monkeypatch.setattr(
+        "kdive.services.external_boot.route_admission.authority_admission_routes_for_resource",
+        lambda _kind, _name: frozenset() if resource_route is None else frozenset({resource_route}),
+    )
+
+    async def run() -> tuple[ToolResponse, ToolResponse, int, int]:
+        async with runs_support.pool(migrated_url) as pool:
+            system_id, run_id = await _ready_system_with_run(pool)
+            await _mark_installed(pool, run_id)
+            await _prepare_external_boot_admission(pool, system_id, run_id)
+            if owner is not None:
+                await runs_support.mark_authority_owned(pool, system_id, owner)
+            refused = await boot_run(
+                pool, _ctx(), run_id, resolver=_resolver(), idempotency_key="boot-key"
+            )
+            replay = await boot_run(
+                pool, _ctx(), run_id, resolver=_resolver(), idempotency_key="boot-key"
+            )
+            jobs = await _count(pool, "SELECT count(*) FROM jobs WHERE kind = 'boot'")
+            activations = await _count(pool, "SELECT count(*) FROM external_boot_activations")
+            return refused, replay, jobs, activations
+
+    refused, replay, jobs, activations = asyncio.run(run())
+    for response in (refused, replay):
+        assert response.error_category == "configuration_error", response.model_dump()
+        assert response.data["reason"] == reason
+    assert (jobs, activations) == (0, 0)
+
+
+_INVENTORY = """
+schema_version = 2
+
+[[local_libvirt]]
+name = "{name}"
+cost_class = "local"
+host_uri = "qemu:///system"
+{declaration}
+"""
+
+
+@pytest.mark.parametrize(
+    ("declaration", "owner", "reason"),
+    [
+        ('relocated_authority_instance = "authority-local"', None, None),
+        ('authority_instance = "authority-local"', None, None),
+        ('relocated_authority_instance = "authority-local"', "authority-local", None),
+        ('relocated_authority_instance = "other-authority"', None, "resource_route"),
+        ("", None, "resource_route"),
+        ('relocated_authority_instance = "authority-local"', "other-authority", "binding"),
+    ],
+)
+def test_boot_admission_follows_the_resource_declaration_in_real_inventory(
+    migrated_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    declaration: str,
+    owner: str | None,
+    reason: str | None,
+) -> None:
+    """ADR-0752 against a real systems.toml: route, fixture relocation, binding, no entry."""
+    # The module-wide fixture stubs the Resource lookup; this test reads the real inventory.
+    monkeypatch.setattr(
+        "kdive.services.external_boot.route_admission.authority_admission_routes_for_resource",
+        _real_admission_routes,
+    )
+
+    async def run() -> ToolResponse:
+        async with runs_support.pool(migrated_url) as pool:
+            system_id, run_id = await _ready_system_with_run(pool)
+            await _mark_installed(pool, run_id)
+            await _prepare_external_boot_admission(pool, system_id, run_id)
+            async with pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        "SELECT r.name FROM systems s JOIN allocations a ON a.id=s.allocation_id "
+                        "JOIN resources r ON r.id=a.resource_id WHERE s.id=%s",
+                        (system_id,),
+                    )
+                ).fetchone()
+            assert row is not None
+            path = tmp_path / "systems.toml"
+            path.write_text(_INVENTORY.format(name=row[0], declaration=declaration))
+            config_registry.load(
+                {
+                    "KDIVE_SYSTEMS_TOML": str(path),
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": "authority-local",
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY": "store-local",
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_RESERVE_BYTES": "4096",
+                    "KDIVE_EXTERNAL_BOOT_AUTHORITY_RECOVERY_MAX_BYTES": "8192",
+                    "KDIVE_LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES": "4096",
+                }
+            )
+            if owner is not None:
+                await runs_support.mark_authority_owned(pool, system_id, owner)
+            return await boot_run(pool, _ctx(), run_id, resolver=_resolver())
+
+    response = asyncio.run(run())
+    if reason is None:
+        assert response.status == "queued", response.model_dump()
+    else:
+        assert response.error_category == "configuration_error", response.model_dump()
+        assert (
+            response.data["reason"]
+            == {
+                "resource_route": "authority_resource_route_mismatch",
+                "binding": "authority_system_binding_mismatch",
+            }[reason]
+        )
+
+
+def test_boot_rechecks_ownership_under_the_system_lock(migrated_url: str) -> None:
+    """An owner recorded after the pre-lock admission still refuses before any job (ADR-0752)."""
+
+    async def run() -> tuple[ToolResponse, int]:
+        async with runs_support.pool(migrated_url) as pool:
+            system_id, run_id = await _ready_system_with_run(pool)
+            await _mark_installed(pool, run_id)
+            await _prepare_external_boot_admission(pool, system_id, run_id)
+            await runs_support.mark_authority_owned(pool, system_id, "other-authority")
+            async with pool.connection() as conn:
+                booted = await RUNS.get(conn, UUID(run_id))
+                assert booted is not None
+                response = await _enqueue_external_boot(
+                    conn, _ctx(), booted, "authority-local", _resolver(), force=False
+                )
+            return response, await _count(pool, "SELECT count(*) FROM jobs WHERE kind = 'boot'")
+
+    response, jobs = asyncio.run(run())
+    assert response.error_category == "configuration_error", response.model_dump()
+    assert response.data["reason"] == "authority_system_binding_mismatch"
+    assert jobs == 0
+
+
+def test_boot_admits_an_authority_that_owns_the_system(migrated_url: str) -> None:
+    async def run() -> ToolResponse:
+        async with runs_support.pool(migrated_url) as pool:
+            system_id, run_id = await _ready_system_with_run(pool)
+            await _mark_installed(pool, run_id)
+            await _prepare_external_boot_admission(pool, system_id, run_id)
+            await runs_support.mark_authority_owned(pool, system_id, "authority-local")
+            return await boot_run(pool, _ctx(), run_id, resolver=_resolver())
+
+    assert asyncio.run(run()).status == "queued"
 
 
 def test_external_boot_rechecks_install_after_a_queued_restage(

@@ -326,13 +326,25 @@ class LocalLibvirtInstance(_Instance):
     # Opt-in for activation-free provisioning on the matching authority host. The server records
     # only this identity; socket paths and credentials remain fixed worker/host configuration.
     authority_instance: str | None = Field(default=None, min_length=1, max_length=255)
+    # Operator declaration for the live-vm fixture lane (ADR-0752): Systems provisioned on this
+    # Resource by the fixed worker are moved onto the named authority's daemon afterwards, so Runs
+    # may use that authority. Provisioning is unchanged; exclusive with ``authority_instance``.
+    relocated_authority_instance: str | None = Field(default=None, min_length=1, max_length=255)
 
-    @field_validator("authority_instance")
+    @field_validator("authority_instance", "relocated_authority_instance")
     @classmethod
-    def _authority_instance_is_nonblank(cls, value: str | None) -> str | None:
+    def _authority_instance_is_nonblank(cls, value: str | None, info: ValidationInfo) -> str | None:
         if value is not None and not value.strip():
-            raise ValueError("authority_instance must be non-empty")
+            raise ValueError(f"{info.field_name} must be non-empty")
         return value
+
+    @model_validator(mode="after")
+    def _route_and_relocation_are_exclusive(self) -> Self:
+        if self.authority_instance is not None and self.relocated_authority_instance is not None:
+            raise ValueError(
+                "authority_instance and relocated_authority_instance are mutually exclusive"
+            )
+        return self
 
 
 class FaultInjectInstance(_Instance):

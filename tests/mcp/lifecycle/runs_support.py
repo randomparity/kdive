@@ -108,6 +108,7 @@ async def seed_system(
                 updated_at=TEST_DT,
                 kind=ResourceKind.LOCAL_LIBVIRT,
                 pool="local-libvirt",
+                name=f"res-{uuid4().hex[:12]}",
                 cost_class="local",
                 status=ResourceStatus.AVAILABLE,
                 host_uri="qemu:///system",
@@ -146,6 +147,23 @@ async def seed_system(
             ),
         )
     return str(system.id)
+
+
+async def mark_authority_owned(
+    conn_pool: AsyncConnectionPool, system_id: str, authority_instance: str
+) -> None:
+    """Record ``authority_instance`` as the durable owner of a seeded System (ADR-0623)."""
+    async with conn_pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO authority_system_ownership "
+            "(system_id,allocation_id,resource_id,provider_kind,resource_name,"
+            "authority_instance,profile_identity,root_identity,state) "
+            "SELECT s.id,s.allocation_id,a.resource_id,'local-libvirt',r.name,%s,"
+            "'sha256:' || repeat('a',64),'sha256:' || repeat('b',64),'ready' "
+            "FROM systems s JOIN allocations a ON a.id=s.allocation_id "
+            "JOIN resources r ON r.id=a.resource_id WHERE s.id=%s",
+            (authority_instance, system_id),
+        )
 
 
 async def seed_investigation(

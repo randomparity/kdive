@@ -1941,7 +1941,7 @@ A `remote-libvirt` cell runs the remote branch below.
 with exactly `installed_revision` (the full 40-character SHA), `authority_service` (the literal
 `kdive-external-boot-authority.service`) and `system_mode`. An unset variable stops the cell
 `blocked`. `system_mode: "public"` stops `blocked` before any mutation: public authority-owned
-provisioning is blocked by #3144 and #3148, and an attempt strands its allocation.
+provisioning is not the lane's path, and an attempt strands its allocation.
 `system_mode: "fixture"` is the runnable path:
 
 1. The frame checks the authority unit, the installed revision, the `/readyz` revision of the
@@ -1969,14 +1969,19 @@ provisioning is blocked by #3144 and #3148, and an attempt strands its allocatio
 **Fixture-mode inventory.** A lane has one local-libvirt resource: resource rows are one per
 worker libvirt endpoint, so a plain `[[local_libvirt]]` entry cannot sit beside the routed one.
 Keep the lane's routed inventory file unchanged and make a separate copy in which only the
-`[[local_libvirt]]` entry's `authority_instance` line is removed. Place the copy beside the
+`[[local_libvirt]]` entry's `authority_instance = "<I>"` line is replaced by
+`relocated_authority_instance = "<I>"` (ADR-0752). The two fields are exclusive: the first makes
+`systems.provision` take the authority-owned path, the second declares that the Systems the fixed
+worker provisions on this resource are moved onto that authority's daemon by the fixture script,
+and is what lets `runs.install` and `runs.boot` reach the authority for them. Without the
+declaration the server refuses those Runs with `authority_resource_route_mismatch`. Declare it
+only on a resource whose every System is relocated. Place the copy beside the
 routed file with the same ownership and mode: the fixed workers read it, and a start refuses an
 inventory a worker slot cannot read. The `[[remote_libvirt]]`
 authority tuple stays the same in both, and the copy also declares the registered lane image.
 Bring the whole stack up on the copy (`KDIVE_SYSTEMS_TOML` naming it for `stack-services.sh`),
-and export the same path to the frame. Until #3144 and #3148 land, this copy is the lane's
-working inventory. To switch back, run `stack-services.sh` again with the routed file, and only
-when no authority-owned System, job or recovery is open on the lane.
+and export the same path to the frame. To switch back, run `stack-services.sh` again with the
+routed file, and only when no authority-owned System, job or recovery is open on the lane.
 
 Use the harness DSN (`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`). Run one authority
 scenario at a time on the lane; another scenario's domains change the listing and fail the frame.
@@ -2214,8 +2219,8 @@ configurations, both exposures, both providers) run in this frame through
   `systems.resolve_external_boot_conflict` cell runs the recovery-conflict arm above, each on the
   frame's own client.
 - A local record's `effect` discloses its fixture-mode System: provisioned through the worker
-  and moved onto the authority by the fixture script, because of #3144/#3148. Every operation
-  under test runs against the real authority.
+  and moved onto the authority by the fixture script, because the lane does not use
+  public authority provisioning. Every operation under test runs against the real authority.
 - A remote cell records the provider host as its host and the bound fedora representative as
   its guest, so the remote authority lane's single registered remote image must be
   `fedora-kdive-remote-base-43` (the same digest-pinned base in its private store). It records the
