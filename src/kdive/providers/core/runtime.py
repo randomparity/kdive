@@ -93,6 +93,9 @@ class ProviderSupport:
     # read at the ``control.watch_for_crash`` gate. Fail-closed: a provider whose console the
     # platform cannot watch leaves it False and the tool refuses with ``capability_unsupported``.
     supports_crash_watch: bool = False
+    # Required ports can be refusing stubs; their presence is not advertised support (ADR-0813).
+    supports_build: bool = False
+    supports_boot: bool = False
 
 
 @dataclass(frozen=True, slots=True)

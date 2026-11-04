@@ -752,6 +752,7 @@ def test_resource_register_is_one_kind_discriminated_tool() -> None:
         "local-libvirt",
         "remote-libvirt",
         "fault-inject",
+        "byo-host",
     }
     # Branch required-ness cannot live in JSON Schema (ADR-0464): only the common fields are
     # required, and host_uri/base_image are validated per kind by the handler.

@@ -7,6 +7,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -269,6 +270,8 @@ def _descriptor_runtime(
         vmcore_introspector=unused_port,
         live_introspector=unused_port,
         support=ProviderSupport(
+            supports_build=True,
+            supports_boot=True,
             capture_methods=capture,
             debug_transports=cast(Any, transports),
             introspection=cast(Any, introspection),
@@ -1647,3 +1650,46 @@ def test_describe_omits_host_cpu_when_absent(migrated_url: str) -> None:
         assert "host_cpu" not in resp.data
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("build,boot", [(False, False), (True, False), (False, True), (True, True)])
+def test_base_plane_flags_are_fail_closed(build: bool, boot: bool) -> None:
+    runtime = _descriptor_runtime(
+        capture=frozenset(), transports=frozenset(), introspection=frozenset()
+    )
+    runtime = replace(runtime, support=ProviderSupport(supports_build=build, supports_boot=boot))
+    expected = ({"build"} if build else set()) | ({"boot"} if boot else set())
+    assert set(catalog_resources_tools._capability_planes(runtime)) == expected
+
+
+def test_existing_provider_builders_keep_base_planes() -> None:
+    from kdive.providers.assembly.composition import ProviderComposition
+
+    resolver = ProviderComposition().build_provider_resolver(
+        enable_local_libvirt=True,
+        enable_remote_libvirt=True,
+        enable_fault_inject=True,
+        enable_byo_host=False,
+    )
+    for kind in (
+        ResourceKind.LOCAL_LIBVIRT,
+        ResourceKind.REMOTE_LIBVIRT,
+        ResourceKind.FAULT_INJECT,
+    ):
+        runtime = resolver.resolve(kind)
+        assert runtime.support.supports_build is True
+        assert runtime.support.supports_boot is True
+        assert {"build", "boot"} <= set(catalog_resources_tools._capability_planes(runtime))
+
+
+def test_byo_descriptor_advertises_no_operations_or_private_refs() -> None:
+    from kdive.providers.byo_host.composition import build_runtime
+
+    envelope = ToolResponse.success("byo", "available")
+    catalog_resources_tools._project_capabilities(envelope, build_runtime())
+    assert envelope.data == {
+        "capabilities": [],
+        "supported_capture_methods": [],
+        "supported_debug_transports": [],
+        "supported_introspection": [],
+    }
