@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -813,5 +814,168 @@ def test_unwritable_evidence_directory_refuses_quarantine_with_journal_conflict(
         await refused.close()
         with FileAuthoritySystemJournal(root, snapshot.system_id) as journal:
             assert len(journal.read()) == repository.sequence + 1
+
+    asyncio.run(scenario())
+
+
+_TORN_CUTS = ("first-byte", "middle", "all-but-newline")
+
+
+def _journal_path(root: Path, system_id: UUID) -> Path:
+    return root / "system-operations" / f"{system_id}.jsonl"
+
+
+def _tear_final_record(root: Path, system_id: UUID, cut: str) -> bytes:
+    """Cut the journal's final line as a crash inside `append` would, returning what is left."""
+    path = _journal_path(root, system_id)
+    payload = path.read_bytes()
+    start = payload[:-1].rfind(b"\n") + 1
+    line = len(payload) - start
+    kept = {"first-byte": 1, "middle": line // 2, "all-but-newline": line - 1}[cut]
+    os.truncate(path, start + kept)
+    return payload[start : start + kept]
+
+
+@pytest.mark.parametrize("cut", _TORN_CUTS)
+@pytest.mark.parametrize("phase", _CRASHABLE_PHASES)
+def test_retry_recovers_a_torn_final_record(
+    tmp_path: Path, phase: AuthoritySystemJournalPhase, cut: str
+) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        request = _request(snapshot)
+        first = _service(repository, root)
+        acknowledgement = await _crash_provision_at(first, repository, request, phase)
+        await first.close()
+        torn = _tear_final_record(root, snapshot.system_id, cut)
+
+        provider = _FailingProvisionProvider()
+        recovered = _service(repository, root, provider)
+        if acknowledgement is None:
+            acknowledgement = await _begin(recovered, repository, request)
+        await recovered.execute("worker-a", _mutation(request), acknowledgement)
+        await recovered.close()
+        assert repository.receipt is not None
+        assert [path.read_bytes() for path in _abandoned(root)] == [torn]
+        assert ".torn." in _abandoned(root)[0].name
+        provider_may_have_run = phase is AuthoritySystemJournalPhase.PROVIDER_RETURNED
+        assert provider.execute_calls == int(not provider_may_have_run)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cut", _TORN_CUTS)
+@pytest.mark.parametrize("phase", _CRASHABLE_PHASES)
+def test_teardown_recovers_a_torn_final_record(
+    tmp_path: Path, phase: AuthoritySystemJournalPhase, cut: str
+) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        first = _service(repository, root)
+        await _crash_provision_at(first, repository, _request(snapshot), phase)
+        await first.close()
+        torn = _tear_final_record(root, snapshot.system_id, cut)
+
+        recovered = _service(repository, root)
+        await _run_attempt(recovered, repository, _teardown(snapshot, 2))
+        await recovered.close()
+        assert repository.phase is AuthoritySystemJournalPhase.TERMINAL
+        assert repository.receipt is not None
+        assert [path.read_bytes() for path in _abandoned(root)] == [torn]
+
+    asyncio.run(scenario())
+
+
+async def _refused_with_journal_conflict(
+    repository: _Repository, root: Path, snapshot: AuthoritySystemProvisionSnapshot
+) -> None:
+    """A teardown refuses with `journal-conflict` and leaves the torn journal byte-identical."""
+    before = _journal_path(root, snapshot.system_id).read_bytes()
+    teardown = _teardown(snapshot, 2)
+    repository.allocating = teardown
+    refused = _service(repository, root)
+    with pytest.raises(AuthoritySystemServiceError, match="journal-conflict"):
+        await refused.begin("worker-a", teardown)
+    await refused.close()
+    assert _journal_path(root, snapshot.system_id).read_bytes() == before
+    assert not before.endswith(b"\n")
+
+
+def test_torn_record_the_head_references_is_refused(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        first = _service(repository, root)
+        await _begin(first, repository, _request(snapshot))
+        await first.close()
+        _tear_final_record(root, snapshot.system_id, "middle")
+
+        await _refused_with_journal_conflict(repository, root, snapshot)
+        assert _abandoned(root) == []
+
+    asyncio.run(scenario())
+
+
+def test_torn_line_past_an_unconfirmed_record_is_refused(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        first = _service(repository, root)
+        await _crash_provision_at(
+            first, repository, _request(snapshot), AuthoritySystemJournalPhase.MUTATION_STARTED
+        )
+        await first.close()
+        with _journal_path(root, snapshot.system_id).open("ab") as journal_file:
+            journal_file.write(b'{"torn')
+
+        await _refused_with_journal_conflict(repository, root, snapshot)
+        assert _abandoned(root) == []
+
+    asyncio.run(scenario())
+
+
+def test_full_evidence_refuses_torn_recovery_with_journal_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        first = _service(repository, root)
+        await _crash_provision_at(
+            first, repository, _request(snapshot), AuthoritySystemJournalPhase.MUTATION_STARTED
+        )
+        await first.close()
+        _tear_final_record(root, snapshot.system_id, "middle")
+
+        monkeypatch.setattr(journal_module, "MAX_ABANDONED_PER_SYSTEM", 0)
+        await _refused_with_journal_conflict(repository, root, snapshot)
+
+    asyncio.run(scenario())
+
+
+def test_unwritable_evidence_directory_refuses_torn_recovery_with_journal_conflict(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        snapshot = _snapshot(uuid4(), uuid4(), uuid4())
+        repository = _Repository(snapshot)
+        root = _root(tmp_path)
+        first = _service(repository, root)
+        await _crash_provision_at(
+            first, repository, _request(snapshot), AuthoritySystemJournalPhase.MUTATION_STARTED
+        )
+        await first.close()
+        _tear_final_record(root, snapshot.system_id, "middle")
+        (root / "system-operations" / "abandoned").mkdir(mode=0o755)
+        (root / "system-operations" / "abandoned").chmod(0o755)
+
+        await _refused_with_journal_conflict(repository, root, snapshot)
 
     asyncio.run(scenario())
