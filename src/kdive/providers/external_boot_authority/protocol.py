@@ -98,6 +98,11 @@ def teardown_proof_digest(proof: AuthorityTeardownProofV1) -> str:
 class _ClosedValue(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True)
 
+    @model_validator(mode="after")
+    def _serialized_size_is_bounded(self) -> Self:
+        _canonical_bytes(self)
+        return self
+
 
 type _RefusalBytes = Annotated[int, Field(strict=True, ge=0, le=2**63 - 1)]
 
@@ -113,11 +118,6 @@ class AuthorityInstallRefusalV1(_ClosedValue):
     def _is_a_shortfall(self) -> Self:
         if self.free_bytes >= self.vmlinux_bytes + self.headroom_bytes:
             raise ValueError("an install refusal must prove a shortfall")
-        return self
-
-    @model_validator(mode="after")
-    def _serialized_size_is_bounded(self) -> Self:
-        _canonical_bytes(self)
         return self
 
 
