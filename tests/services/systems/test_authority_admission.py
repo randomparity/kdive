@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -13,7 +14,10 @@ from psycopg_pool import AsyncConnectionPool
 import kdive.services.systems.authority_owned as authority_owned
 from kdive.components.references import ROOTFS_COMPONENT
 from kdive.components.validation import ComponentSourceCapabilities
+from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
+from kdive.jobs import queue
+from kdive.jobs.payloads import Authorizing
 from kdive.mcp.tools import jobs as jobs_tools
 from kdive.mcp.tools.lifecycle.control.registrar import power_system
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
@@ -23,6 +27,7 @@ from kdive.mcp.tools.lifecycle.systems.ssh_access import check_ssh_reachable
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.reconciler.repairs.systems import repair_orphaned_systems
 from kdive.security.authz.rbac import Role
+from tests.db.authority_system_support import _seed_direct_terminal_attempt, retain_round
 from tests.db.external_boot_authority_support import _RoleDsns
 from tests.mcp import systems_support
 
@@ -497,3 +502,122 @@ def test_preactivation_authority_system_fences_cancel_and_ordinary_mutations(
         assert teardown_state == ("queued",)
 
     asyncio.run(run())
+
+
+def test_failed_capped_teardown_restarts_and_completes(
+    migrated_url: str, request: pytest.FixtureRequest
+) -> None:
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    handlers = SystemProvisionHandlers(
+        systems_support.TEST_PROFILE_POLICY,
+        systems_support.TEST_COMPONENT_SOURCES,
+        lambda _root: None,
+        authority_route=lambda _kind, _name: "authority-a",
+    )
+
+    async def provision_and_request_teardown() -> tuple[str, str]:
+        async with systems_support.pool(migrated_url) as pool:
+            allocation_id = await systems_support.granted_allocation(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE resources SET name='host-a' WHERE id=("
+                    "SELECT resource_id FROM allocations WHERE id=%s)",
+                    (allocation_id,),
+                )
+                await conn.execute(
+                    "INSERT INTO image_catalog "
+                    "(id,provider,name,arch,format,root_device,object_key,digest,provenance,"
+                    "visibility,state) VALUES "
+                    "(%s,'local-libvirt','authority-base','x86_64','qcow2','/dev/vda',"
+                    "'authority-base.qcow2',%s,%s,'public','registered')",
+                    (uuid4(), _DIGEST, Jsonb(_ROOT)),
+                )
+            provision = await handlers.provision_system(
+                pool, systems_support.ctx(), allocation_id=allocation_id, profile=_profile()
+            )
+            system_id = str(provision.data["system_id"])
+            teardown = await teardown_system(pool, systems_support.ctx(role=Role.ADMIN), system_id)
+            assert teardown.status == "queued"
+            return system_id, str(teardown.object_id)
+
+    async def retry_teardown(system_id: str) -> str:
+        async with systems_support.pool(migrated_url) as pool:
+            response = await teardown_system(pool, systems_support.ctx(role=Role.ADMIN), system_id)
+            assert response.status == "queued"
+            return str(response.object_id)
+
+    async def automatic_sweep_state(system_id: str) -> str:
+        async with systems_support.pool(migrated_url) as pool, pool.connection() as conn:
+            system = await SYSTEMS.get(conn, UUID(system_id))
+            assert system is not None
+            job = await authority_owned.enqueue_control_teardown(
+                conn,
+                system,
+                Authorizing(principal="user-1", agent_session="s", project="proj"),
+                recycle=queue.JobRecyclePolicy.NEVER,
+            )
+            return job.state.value
+
+    system_id, job_id = asyncio.run(provision_and_request_teardown())
+    worker = f"docker:capped-teardown-{uuid4()}"
+    credential = uuid4().bytes + uuid4().bytes
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "INSERT INTO worker_incarnations "
+            "(incarnation,authority_kind,authority_binding,fence_protocol,credential_hash,state) "
+            "VALUES (%s,'docker','{}',4,%s,'active')",
+            (worker, credential),
+        )
+        row = conn.execute(
+            "UPDATE jobs SET state='running',attempt=1,worker_id=%s,"
+            "lease_expires_at=clock_timestamp()+interval '5 minutes' WHERE id=%s "
+            "RETURNING payload->'authority_system_v1'",
+            (worker, job_id),
+        ).fetchone()
+        conn.commit()
+    assert row is not None
+    case: dict[str, object] = {
+        "system_id": UUID(system_id),
+        "job_id": UUID(job_id),
+        "worker": worker,
+        "credential": credential,
+        "marker": row[0],
+    }
+
+    outcomes = [retain_round(migrated_url, role_dsns, case, n)[1] for n in range(1, 5)]
+    assert outcomes == ["queued", "queued", "queued", "failed"]
+
+    assert asyncio.run(automatic_sweep_state(system_id)) == "failed"
+    assert asyncio.run(retry_teardown(system_id)) == job_id
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT job.state,job.attempt,owner.state FROM jobs AS job, "
+            "authority_system_ownership AS owner WHERE job.id=%s AND owner.system_id=%s",
+            (job_id, system_id),
+        ).fetchone() == ("queued", 0, "teardown-requested")
+
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute("UPDATE jobs SET state='canceled' WHERE kind='provision'")
+        conn.commit()
+    with psycopg.connect(role_dsns("kdive_worker")) as worker_conn:
+        claimed = worker_conn.execute(
+            "SELECT id,attempt FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
+            (worker, credential),
+        ).fetchone()
+        assert claimed == (UUID(job_id), 1)
+        worker_conn.commit()
+    with psycopg.connect(migrated_url) as conn:
+        _, _, receipt, head_digest, _ = _seed_direct_terminal_attempt(
+            conn, case, disposition="preactivation-absent", generation=5
+        )
+        conn.commit()
+        authority_id = conn.execute(
+            "SELECT current_attempt_id FROM authority_system_ownership WHERE system_id=%s",
+            (system_id,),
+        ).fetchone()
+    assert authority_id is not None
+    with psycopg.connect(role_dsns("kdive_worker")) as worker_conn:
+        assert worker_conn.execute(
+            "SELECT * FROM finalize_authority_system_attempt(%s,%s,1,%s,5,2,%s,%s)",
+            (credential, job_id, authority_id[0], head_digest, receipt),
+        ).fetchone() == ("applied", "succeeded", "torn_down")
