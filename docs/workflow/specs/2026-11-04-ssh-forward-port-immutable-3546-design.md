@@ -41,11 +41,15 @@ usable port writes NULL over NULL, which the clause ignores.
 1. Actors and deployments: the worker finalizer and reconciler repair, as SECURITY DEFINER
    functions; every deployment that applies the migrations.
 2. Invariants and assets at stake: a non-NULL port never changes for the life of the row; the
-   finalizer and repair keep committing, because a raised exception would abort the ready
-   transition.
+   finalizer and repair keep committing for a row whose port is NULL at finalize, which is every
+   row the two writers can produce today.
 3. Accepted failure classes:
    - A NULL column may still be set outside finalize or repair. Approved exclusion, and only
      SECURITY DEFINER functions can reach the table (0149 revokes direct access).
+   - A row whose port was pre-set outside finalize or repair, then finalized with a different
+     value or none, raises. The refusal is fail-closed with no data loss, but repair runs its
+     batch in one transaction, so that row stops the batch on each pass until an operator
+     intervenes. No such writer exists, so no in-band recovery is added.
    - A database owner can disable the trigger or delete the row. Same exposure as the other
      immutable fields; the trigger guards application paths.
    - Rows whose port was already rewritten are not detected. No writer other than the two above
@@ -65,7 +69,8 @@ usable port writes NULL over NULL, which the clause ignores.
 
 ## Validation
 
-Tests in `tests/db/test_migration_0191_authority_system_ssh_forward_immutable.py`: value-to-other
+Tests in `tests/db/test_migration_0191_authority_system_ssh_forward_immutable.py`: the migration
+is registered once; value-to-other
 and value-to-NULL raise; same-value rewrite and a state-only update pass; NULL-to-value passes.
 The existing 0189 tests prove the finalizer and repair writes still commit. The test is shown red
 with the clause removed.

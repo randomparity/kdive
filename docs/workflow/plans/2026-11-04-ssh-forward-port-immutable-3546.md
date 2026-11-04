@@ -54,6 +54,7 @@ Steps:
                _set_port(conn, case["system_id"], rewrite)
    ```
 
+   Add `test_0191_is_registered_once` modelled on `test_0189_is_registered_once`.
    Pass cases: rewrite 41234 over 41234; `SET state='ready'` with a port set; NULL to 41234.
 2. Run the first green command. Expect the stated red.
 3. Write the migration: the header comment, then `CREATE OR REPLACE FUNCTION
