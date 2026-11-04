@@ -41,7 +41,7 @@ from kdive.mcp.tools.lifecycle.control.registrar import (
 )
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest, bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
-from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
+from kdive.mcp.tools.lifecycle.runs.steps import _enqueue_external_boot, boot_run, install_run
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_system
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
 from kdive.mcp.tools.lifecycle.systems.snapshot import (
@@ -538,6 +538,29 @@ def test_boot_admission_follows_the_resource_declaration_in_real_inventory(
                 "binding": "authority_system_binding_mismatch",
             }[reason]
         )
+
+
+def test_boot_rechecks_ownership_under_the_system_lock(migrated_url: str) -> None:
+    """An owner recorded after the pre-lock admission still refuses before any job (ADR-0752)."""
+
+    async def run() -> tuple[ToolResponse, int]:
+        async with runs_support.pool(migrated_url) as pool:
+            system_id, run_id = await _ready_system_with_run(pool)
+            await _mark_installed(pool, run_id)
+            await _prepare_external_boot_admission(pool, system_id, run_id)
+            await runs_support.mark_authority_owned(pool, system_id, "other-authority")
+            async with pool.connection() as conn:
+                booted = await RUNS.get(conn, UUID(run_id))
+                assert booted is not None
+                response = await _enqueue_external_boot(
+                    conn, _ctx(), booted, "authority-local", _resolver(), force=False
+                )
+            return response, await _count(pool, "SELECT count(*) FROM jobs WHERE kind = 'boot'")
+
+    response, jobs = asyncio.run(run())
+    assert response.error_category == "configuration_error", response.model_dump()
+    assert response.data["reason"] == "authority_system_binding_mismatch"
+    assert jobs == 0
 
 
 def test_boot_admits_an_authority_that_owns_the_system(migrated_url: str) -> None:

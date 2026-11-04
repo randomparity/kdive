@@ -4851,6 +4851,36 @@ def test_authority_install_admits_a_system_the_authority_owns(
     asyncio.run(_run())
 
 
+def test_authority_install_rechecks_ownership_under_the_system_lock(
+    migrated_url: str,
+) -> None:
+    """An owner recorded after the pre-lock admission still refuses before any job (ADR-0752)."""
+
+    async def _run() -> None:
+        _configure_install_authority()
+        async with runs_support.pool(migrated_url) as admin:
+            run_id = await _seed_succeeded_run(admin)
+            await _insert_root_provenance(admin, run_id)
+            async with admin.connection() as conn:
+                run = await RUNS.get(conn, UUID(run_id))
+                assert run is not None
+                binding = await provider_resolver().binding_for_system(
+                    conn, run.require_system_id()
+                )
+            await _mark_authority_owned(admin, run_id, "other-authority")
+            async with admin.connection() as conn:
+                response = await _restage_and_enqueue_install(
+                    conn, ctx(), run, None, None, binding, _AUTHORITY_INSTANCE
+                )
+            jobs = await _count(admin, "SELECT count(*) AS n FROM jobs", ())
+
+        assert response.error_category == "configuration_error", response.model_dump()
+        assert response.data["reason"] == "authority_system_binding_mismatch"
+        assert jobs == 0
+
+    asyncio.run(_run())
+
+
 def test_authority_install_refuses_stale_run_system_binding(migrated_url: str) -> None:
     async def _run() -> None:
         _configure_install_authority()

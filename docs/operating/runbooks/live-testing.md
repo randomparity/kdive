@@ -1941,7 +1941,7 @@ A `remote-libvirt` cell runs the remote branch below.
 with exactly `installed_revision` (the full 40-character SHA), `authority_service` (the literal
 `kdive-external-boot-authority.service`) and `system_mode`. An unset variable stops the cell
 `blocked`. `system_mode: "public"` stops `blocked` before any mutation: public authority-owned
-provisioning is blocked, and an attempt strands its allocation.
+provisioning is not the lane's path, and an attempt strands its allocation.
 `system_mode: "fixture"` is the runnable path:
 
 1. The frame checks the authority unit, the installed revision, the `/readyz` revision of the
@@ -2219,8 +2219,8 @@ configurations, both exposures, both providers) run in this frame through
   `systems.resolve_external_boot_conflict` cell runs the recovery-conflict arm above, each on the
   frame's own client.
 - A local record's `effect` discloses its fixture-mode System: provisioned through the worker
-  and moved onto the authority by the fixture script, because public authority provisioning is not the lane's path. Every operation
-  under test runs against the real authority.
+  and moved onto the authority by the fixture script, because the lane does not use
+  public authority provisioning. Every operation under test runs against the real authority.
 - A remote cell records the provider host as its host and the bound fedora representative as
   its guest, so the remote authority lane's single registered remote image must be
   `fedora-kdive-remote-base-43` (the same digest-pinned base in its private store). It records the
