@@ -11,9 +11,11 @@ from kdive.db import migrate
 from tests.db.external_boot_authority_support import (
     _COMMIT_SIGNATURE,
     _apply_through,
+    _attempt,
+    _case,
+    _fail,
     _RoleDsns,
 )
-from tests.db.test_migration_0170_repeated_provider_conflict import _attempt, _case, _fail
 
 _SIZES = {"vmlinux_bytes": 3, "free_bytes": 1, "headroom_bytes": 2}
 
