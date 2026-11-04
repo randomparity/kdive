@@ -33,10 +33,11 @@ or the built kernel tree.
 - An already-built **x86_64** kernel tree at `KDIVE_KERNEL_SRC` on the test client, including
   the boot image, modules, and unstripped `vmlinux` with a GNU build ID. The tests package and
   upload these artifacts; they do not compile the kernel. See the
-  [build and upload guide](../external-build-upload.md). The kernel must build in the root
-  filesystem driver of the guest image: `CONFIG_BTRFS_FS=y` for the Fedora-family cloud bases
-  (btrfs root), `CONFIG_XFS_FS=y` for the XFS-rooted guests. The pinned fixture fragment sets
-  both. A missing driver is not named by a preflight: the boot job ends `boot_timeout`.
+  [build and upload guide](../external-build-upload.md). The kernel must include the root
+  filesystem driver of the guest image: `CONFIG_BTRFS_FS` for the Fedora-family cloud bases
+  (btrfs root), `CONFIG_XFS_FS` for the XFS-rooted guests; the pinned fixture fragment builds
+  both in. On a kernel that has ext4, no preflight names a missing btrfs or XFS driver: the boot
+  job ends `boot_timeout`.
 
 ## 1. Worker → host TLS reachability
 

@@ -952,7 +952,7 @@ The default fragment also builds in `CONFIG_BTRFS_FS=y` beside ext4 and XFS. The
 base images have a btrfs root, and a kernel without the driver cannot mount it: the boot job ends
 `boot_timeout` with no named cause, because no kernel preflight names the btrfs driver
 (#3519). A fixture tree built before this symbol was added does not rebuild itself and still
-passes `verify`; rebuild it into a fresh output directory.
+passes `verify`; rebuild it into a fresh output directory and regenerate its evidence bindings.
 
 After an interrupted run, release the leftover allocation with `allocations.release` (or let the
 lease expire) and check `KDIVE_INSTALL_STAGING` (`/var/lib/kdive/install` on the demo lane) for
@@ -2299,9 +2299,9 @@ see
 [live and host-side debug information](../external-build-upload.md#choosing-your-kernel-config).
 
 The pinned debug fragment, `fixtures/kernel/debug.config`, sets the virtio, ext4, btrfs and
-debug-info symbols with `VIRTIO_NET=y`, and `ppc64le_defconfig` supplies the kdump ones, so a ppc64le tree
-from `scripts/kernel_fixtures.py build --arch ppc64le` passes the kernel preflight of every spine
-proof listed above. BTF generation needs host `pahole`; the `local_worker_host` role installs the
+debug-info symbols with `VIRTIO_NET=y`, and `ppc64le_defconfig` supplies the kdump ones, so a
+ppc64le tree from `scripts/kernel_fixtures.py build --arch ppc64le` passes the kernel preflight of
+every spine proof listed above. BTF generation needs host `pahole`; the `local_worker_host` role installs the
 package that provides it. The guest side is separate: without matching DWARF debug information
 readable inside the guest, the live-script proof stops at `attach-drgn-live`, whose response
 carries a `debuginfo_unloadable` warning, whatever the kernel config (#3121).
