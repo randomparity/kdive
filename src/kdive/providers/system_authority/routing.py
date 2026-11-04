@@ -27,5 +27,4 @@ def authority_admission_routes_for_resource(
     routes = {authority_instance_for_resource(kind, resource_name)}
     if kind is ResourceKind.LOCAL_LIBVIRT:
         routes.add(local_relocated_authority_for_resource(resource_name))
-    routes.discard(None)
     return frozenset(r for r in routes if r is not None)
