@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ from kdive.providers.system_authority.journal import (
 )
 from kdive.providers.system_authority.protocol import (
     GENESIS_DIGEST,
+    MAX_MESSAGE_BYTES,
     AuthoritySystemJournalPhase,
     AuthoritySystemJournalRecordV1,
     AuthoritySystemOperation,
@@ -387,3 +389,223 @@ def test_abandon_refuses_a_journal_changed_after_validation(
         with pytest.raises(ValueError, match="changed since validation"):
             journal.abandon_unconfirmed_tail(2)
         assert journal.read() == records
+
+
+_TORN_CUTS = ("first-byte", "middle", "all-but-newline")
+
+
+def _tear(root: Path, record: AuthoritySystemJournalRecordV1, cut: str) -> bytes:
+    """Cut the journal's final line as a crash inside `append` would, returning what is left."""
+    line = canonical_system_authority_bytes(record) + b"\n"
+    kept = {"first-byte": 1, "middle": len(line) // 2, "all-but-newline": len(line) - 1}[cut]
+    path = root / "system-operations" / f"{record.system_id}.jsonl"
+    os.truncate(path, path.stat().st_size - len(line) + kept)
+    return line[:kept]
+
+
+@pytest.mark.parametrize("cut", _TORN_CUTS)
+def test_abandon_torn_tail_keeps_prefix_and_evidence(tmp_path: Path, cut: str) -> None:
+    root = _root(tmp_path)
+    system_id, (admitted, started, extra) = _confirmed_then_extra(root)
+    torn = _tear(root, extra, cut)
+    head = authority_system_record_digest(started)
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        journal.abandon_torn_tail(2, head)
+        assert journal.read() == (admitted, started)
+        successor = _record(
+            system_id,
+            sequence=3,
+            previous_digest=head,
+            phase=AuthoritySystemJournalPhase.PROVIDER_RETURNED,
+        )
+        journal.append(successor)
+        assert journal.read() == (admitted, started, successor)
+    digest = hashlib.sha256(torn).hexdigest()
+    assert _evidence_names(root) == [f"{system_id}.3.torn.{digest}.jsonl"]
+    evidence = root / "system-operations" / ABANDONED_DIRECTORY / _evidence_names(root)[0]
+    assert evidence.read_bytes() == torn
+    assert oct(evidence.stat().st_mode & 0o777) == "0o600"
+    assert [entry.sequence for entry in inventory_authority_system_journals(root)] == [3]
+
+
+def test_abandon_torn_tail_of_the_first_record_leaves_an_empty_journal(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    system_id = uuid4()
+    first = _record(
+        system_id,
+        sequence=1,
+        previous_digest=GENESIS_DIGEST,
+        phase=AuthoritySystemJournalPhase.ADMITTED,
+    )
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        journal.append(first)
+    _tear(root, first, "middle")
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        journal.abandon_torn_tail(0, GENESIS_DIGEST)
+        assert journal.read() == ()
+        journal.append(first)
+        assert journal.read() == (first,)
+    assert len(_evidence_names(root)) == 1
+
+
+@pytest.mark.parametrize(
+    ("sequence", "digest_of"),
+    [(3, "extra"), (1, "admitted"), (2, "wrong")],
+    ids=["head-references-the-tail", "head-below-the-prefix", "digest-mismatch"],
+)
+def test_abandon_torn_tail_refuses_a_head_off_the_prefix(
+    tmp_path: Path, sequence: int, digest_of: str
+) -> None:
+    root = _root(tmp_path)
+    system_id, (admitted, _, extra) = _confirmed_then_extra(root)
+    digests = {
+        "extra": authority_system_record_digest(extra),
+        "admitted": authority_system_record_digest(admitted),
+        "wrong": _DIGEST,
+    }
+    _tear(root, extra, "middle")
+    path = root / "system-operations" / f"{system_id}.jsonl"
+    before = path.read_bytes()
+    with (
+        FileAuthoritySystemJournal(root, system_id) as journal,
+        pytest.raises(ValueError, match="not past the head"),
+    ):
+        journal.abandon_torn_tail(sequence, digests[digest_of])
+    assert path.read_bytes() == before
+    assert not (root / "system-operations" / ABANDONED_DIRECTORY).exists()
+
+
+def test_abandon_torn_tail_refuses_without_a_torn_tail(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    system_id, (_, _, extra) = _confirmed_then_extra(root)
+    head = authority_system_record_digest(extra)
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        with pytest.raises(ValueError, match="no torn final record"):
+            journal.abandon_torn_tail(3, head)
+        assert len(journal.read()) == 3
+    with (
+        FileAuthoritySystemJournal(root, uuid4()) as journal,
+        pytest.raises(ValueError, match="no torn final record"),
+    ):
+        journal.abandon_torn_tail(0, GENESIS_DIGEST)
+
+
+def test_abandon_torn_tail_refuses_corruption_before_the_tail(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    system_id, (_, started, extra) = _confirmed_then_extra(root)
+    _tear(root, extra, "middle")
+    path = root / "system-operations" / f"{system_id}.jsonl"
+    payload = path.read_bytes().replace(b'"phase":"admitted"', b'"phase":"terminal"', 1)
+    path.write_bytes(payload)
+    with (
+        FileAuthoritySystemJournal(root, system_id) as journal,
+        pytest.raises(ValueError, match="authority System journal|validation error"),
+    ):
+        journal.abandon_torn_tail(2, authority_system_record_digest(started))
+    assert path.read_bytes() == payload
+    assert not (root / "system-operations" / ABANDONED_DIRECTORY).exists()
+
+
+def test_abandon_torn_tail_refuses_a_tail_no_record_could_leave(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    system_id, (_, started, _) = _confirmed_then_extra(root)
+    path = root / "system-operations" / f"{system_id}.jsonl"
+    with path.open("ab") as journal_file:
+        journal_file.write(b"x" * (MAX_MESSAGE_BYTES + 1))
+    size = path.stat().st_size
+    with (
+        FileAuthoritySystemJournal(root, system_id) as journal,
+        pytest.raises(ValueError, match="oversized"),
+    ):
+        journal.abandon_torn_tail(2, authority_system_record_digest(started))
+    assert path.stat().st_size == size
+
+
+def test_abandon_torn_tail_counts_against_evidence_bounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root(tmp_path)
+    system_id, (_, started, extra) = _confirmed_then_extra(root)
+    torn = _tear(root, extra, "middle")
+    monkeypatch.setattr(journal_module, "MAX_ABANDONED_PER_SYSTEM", 0)
+    with (
+        FileAuthoritySystemJournal(root, system_id) as journal,
+        pytest.raises(ValueError, match="evidence is full"),
+    ):
+        journal.abandon_torn_tail(2, authority_system_record_digest(started))
+    path = root / "system-operations" / f"{system_id}.jsonl"
+    assert path.read_bytes().endswith(torn)
+
+
+def test_abandon_torn_tail_is_idempotent_after_partial_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root(tmp_path)
+    system_id, (admitted, started, extra) = _confirmed_then_extra(root)
+    _tear(root, extra, "middle")
+    head = authority_system_record_digest(started)
+    real_rename = os.rename
+
+    def crash_on_journal_rename(src, dst, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if str(dst) == f"{system_id}.jsonl":
+            raise OSError("simulated crash before the journal rename")
+        return real_rename(src, dst, *args, **kwargs)
+
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        monkeypatch.setattr(os, "rename", crash_on_journal_rename)
+        with pytest.raises(OSError, match="simulated crash"):
+            journal.abandon_torn_tail(2, head)
+        monkeypatch.undo()
+        with pytest.raises(ValueError, match="incomplete final record"):
+            journal.read()
+        journal.abandon_torn_tail(2, head)
+        assert journal.read() == (admitted, started)
+    assert len([name for name in _evidence_names(root) if name.endswith(".jsonl")]) == 1
+
+
+def test_abandon_torn_tail_refuses_a_journal_changed_after_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root(tmp_path)
+    system_id, (_, started, extra) = _confirmed_then_extra(root)
+    torn = _tear(root, extra, "middle")
+    path = root / "system-operations" / f"{system_id}.jsonl"
+    calls: list[str] = []
+    real = FileAuthoritySystemJournal._write_scratch
+
+    def touch_journal_after_prefix(directory: int, name: str, payload: bytes) -> None:
+        real(directory, name, payload)
+        calls.append(name)
+        if len(calls) == 2:
+            os.utime(path, ns=(1, 1))
+
+    monkeypatch.setattr(
+        FileAuthoritySystemJournal, "_write_scratch", staticmethod(touch_journal_after_prefix)
+    )
+    with (
+        FileAuthoritySystemJournal(root, system_id) as journal,
+        pytest.raises(ValueError, match="changed since validation"),
+    ):
+        journal.abandon_torn_tail(2, authority_system_record_digest(started))
+    assert path.read_bytes().endswith(torn)
+
+
+def test_torn_journal_still_refuses_read_head_and_append(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    system_id, (_, started, extra) = _confirmed_then_extra(root)
+    _tear(root, extra, "all-but-newline")
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        with pytest.raises(ValueError, match="incomplete final record"):
+            journal.read()
+        with pytest.raises(ValueError, match="incomplete final record"):
+            journal.head()
+        with pytest.raises(ValueError, match="incomplete final record"):
+            journal.append(
+                _record(
+                    system_id,
+                    sequence=3,
+                    previous_digest=authority_system_record_digest(started),
+                    phase=AuthoritySystemJournalPhase.PROVIDER_RETURNED,
+                )
+            )
+    assert not (root / "system-operations" / ABANDONED_DIRECTORY).exists()

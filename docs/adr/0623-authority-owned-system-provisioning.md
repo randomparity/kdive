@@ -132,6 +132,33 @@ garbage collected; after inspection the operator deletes a System's
 Considered: a new `abandoned` phase. Rejected, because the record would still need the slot
 the unconfirmed one holds. A migration to let the database chain past it is #3530's surface.
 
+### Amendment (2026-11-04): a torn final record is quarantined (#3543)
+
+This extends the #3531 amendment. A crash or write failure inside an append leaves a final line
+with no trailing newline. `advance_head` runs only after the append returns, so that line never
+reached the database, yet the reader refuses the file and every request for the System fails
+before the #3531 quarantine is reachable.
+
+When the first read of a request finds such a line, and the complete lines before it are valid and
+their count and final digest equal the database head, the journal moves the torn bytes aside and
+replaces the active file with those lines, by the same evidence-then-rename sequence. Evidence is
+the torn bytes verbatim, not a canonical record line, named `<system_id>.<sequence>.torn.<sha256-hex>.jsonl`
+in `abandoned/`, inside the same bounds and the same operator clean-up. Any other torn journal is
+refused with `journal-conflict`: a head that references the torn line, a head below the complete
+lines, a digest mismatch, a corrupt complete line, or a tail longer than a record can be.
+
+The #3531 rule that only another attempt's record is quarantined does not apply here. A torn line
+cannot be adopted, so it is dropped whichever attempt wrote it, and the same-attempt refusal of a
+changed recovery observation does not fire for it. That loses no authority fact: the line never
+reached the database, and any provider effect after a confirmed `mutation-started` is re-observed.
+
+Recovery needs free space for the torn bytes and a copy of the complete lines, and fails closed
+until it has it. The reader, its bounds and the append are unchanged, so `read`, `head` and
+`append` still refuse a torn journal.
+
+Considered: tolerating the torn line in the reader. Rejected, because `append` would then bury it
+inside the file.
+
 ## Considered & rejected
 
 - **Provision through the worker and hand the domain to the authority.**
