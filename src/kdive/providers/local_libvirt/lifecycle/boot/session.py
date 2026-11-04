@@ -1461,7 +1461,7 @@ class LocalExternalBootSessionFactory:
                 inactive_xml, system_id, expected_overlay, projected=True
             )
             if local_timing is not None:
-                xml_accel = inactive_root.get("type")
+                xml_accel = _DOMAIN_TYPE_ACCEL.get(inactive_root.get("type") or "")
                 if local_timing.accel is not None and local_timing.accel != xml_accel:
                     raise LocalExternalBootTimingConfigurationError(
                         "local external-boot accelerator disagrees with inactive domain XML; "
@@ -1870,6 +1870,10 @@ def _require_guest_agent_channel(root: ET.Element, system_id: UUID) -> None:
             details={"system_id": str(system_id)},
             terminal=True,
         )
+
+
+# libvirt names the TCG domain type "qemu"; the timing snapshot says "tcg".
+_DOMAIN_TYPE_ACCEL = {"kvm": "kvm", "qemu": "tcg"}
 
 
 def _parse_owned_xml(
