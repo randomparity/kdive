@@ -416,8 +416,8 @@ shows. The host preparation itself is
 
 - **Order: backends and schema, then the authority play, then the stack.** Run
   `just stack-backends` (backends, bucket and migrations, then stop). The play's one-shot readiness
-  probe connects with the authority DSN and fails `database/connection-failed` without a reachable,
-  migrated database. Then run
+  probe fails `database/connection-failed` when the authority DSN's database is unreachable, and
+  `database-role/query-failed` when it is reachable but not migrated. Then run
   [installed-local-authority.yml](../../../deploy/ansible/playbooks/installed-local-authority.yml),
   which installs the authority, the fixed worker lifecycle and the client route. Then run
   `stack-services.sh` (or `examples/local-libvirt/demo-up.sh`, which calls it) to start the workers
