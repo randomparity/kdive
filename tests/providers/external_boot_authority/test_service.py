@@ -25,6 +25,7 @@ from kdive.providers.external_boot_authority.proof_barrier import (
 )
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
+    AuthorityInstallRefusalV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
@@ -2820,6 +2821,48 @@ async def test_refusal_observed_as_conflict_is_journaled_and_answered(
     ]
     assert terminal.outcome == "conflict"
     assert terminal.observation == observation
+
+
+_INSTALL_REFUSAL = AuthorityInstallRefusalV1(vmlinux_bytes=3, free_bytes=1, headroom_bytes=2)
+
+
+@pytest.mark.anyio
+async def test_install_refusal_observed_as_conflict_is_answered_as_the_conflict(
+    tmp_path: Path,
+) -> None:
+    """ADR-0814: an install refusal keeps the ADR-0805 observation; a third state wins."""
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    adapter.commit_error = AuthorityServiceError(
+        "install_failure", install_refusal=_INSTALL_REFUSAL
+    )
+    adapter.observe_category = "conflict"
+
+    observation = await service.execute_mutation(peer, _mutation(request))
+
+    assert observation.category == "conflict"
+    assert adapter.calls == ["commit:activate", "observe"]
+    assert repository.records[-1].phase is JournalPhase.TERMINAL
+
+
+@pytest.mark.anyio
+async def test_install_refusal_without_a_conflict_keeps_its_sizes(tmp_path: Path) -> None:
+    service, repository, adapter, peer, request = _service(tmp_path)
+    await service.acknowledge_takeover(peer, request)
+    repository.current = True
+    adapter.commit_error = AuthorityServiceError(
+        "install_failure", install_refusal=_INSTALL_REFUSAL
+    )
+    adapter.observe_category = "source"
+
+    with pytest.raises(AuthorityServiceError) as caught:
+        await service.execute_mutation(peer, _mutation(request))
+
+    assert caught.value.category == "install_failure"
+    assert caught.value.install_refusal == _INSTALL_REFUSAL
+    assert adapter.calls == ["commit:activate", "observe"]
+    assert repository.records[-1].phase is JournalPhase.MUTATION_STARTED
 
 
 @pytest.mark.anyio

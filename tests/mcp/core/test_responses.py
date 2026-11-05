@@ -77,6 +77,20 @@ def test_from_job_failed_carries_category() -> None:
     assert resp.suggested_next_actions == []
 
 
+def test_from_job_failed_shows_an_install_refusal_with_its_sizes() -> None:
+    sizes = {"vmlinux_bytes": 3, "free_bytes": 1, "headroom_bytes": 2}
+    job = _BUILD_JOB.model_copy(
+        update={
+            "state": JobState.FAILED,
+            "error_category": ErrorCategory.INSTALL_FAILURE,
+            "failure_context": {"phase": "provider-call", "install_refusal": sizes},
+        }
+    )
+    resp = ToolResponse.from_job(job)
+    assert resp.error_category == "install_failure"
+    assert resp.data["install_refusal"] == sizes
+
+
 def test_from_job_failed_without_category_degrades_to_infrastructure_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
