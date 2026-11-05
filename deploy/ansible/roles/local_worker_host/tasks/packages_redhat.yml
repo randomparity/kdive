@@ -5,6 +5,13 @@
     state: present
   tags: [authority_prerequisites]
 
+- name: Install Fedora image inspection tools for remote staging
+  ansible.builtin.dnf:
+    name: guestfs-tools
+    state: present
+  when: ansible_facts['distribution'] == 'Fedora'
+  tags: [authority_prerequisites]
+
 - name: Install the EL10 Python guestfs binding build prerequisites
   ansible.builtin.dnf:
     name: "{{ local_worker_host_guestfs_packages_el10 }}"

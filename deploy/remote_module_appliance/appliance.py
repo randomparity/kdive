@@ -13,6 +13,7 @@ import re
 import shutil
 import stat
 import subprocess
+import time
 import unicodedata
 from pathlib import Path
 from re import Pattern
@@ -25,6 +26,10 @@ DOCUMENT_LIMIT = 16 * 1024
 VOLUME_KEY_BYTE_LIMIT = 255
 XATTR_BYTE_LIMIT = 32 * 1024**2
 DEPMOD_TIMEOUT_SECONDS = 300
+PROGRESS_INTERVAL_SECONDS = 5.0
+COPY_CHUNK_BYTES = 1024 * 1024
+_progress_enabled = False
+_last_progress = 0.0
 ROOT = Path("/mnt/root")
 SOURCE = Path("/mnt/source")
 SCRATCH = Path("/mnt/scratch")
@@ -233,6 +238,7 @@ def _manifest_entry(
             with os.fdopen(descriptor, "rb") as stream:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                     digest.update(chunk)
+                    _progress()
         except OSError as error:
             raise ApplianceError("FILESYSTEM_FAILURE") from error
         normalized_mode = 0o755 if mode & 0o111 else 0o644
@@ -317,6 +323,7 @@ def _tree_manifest(root: Path, kind: str = "source") -> tuple[str, int, int]:
                 raise ApplianceError("LIMIT_EXCEEDED")
             if document is not None:
                 entries_document.append(document)
+            _progress()
     entries_document.sort(key=lambda item: str(item["path"]).encode())
     schema = {
         "source": "module-source-manifest-v1",
@@ -358,7 +365,9 @@ def _normalize_source_tree(root: Path) -> None:
                 continue
             mode = path.stat(follow_symlinks=False).st_mode
             path.chmod(0o755 if mode & 0o111 else 0o644)
+            _progress()
         Path(directory).chmod(0o755)
+        _progress()
     for path in paths:
         try:
             names = os.listxattr(path, follow_symlinks=False)
@@ -385,13 +394,25 @@ def _normalize_source_tree(root: Path) -> None:
             if error.errno not in {errno.ENOTSUP, errno.EOPNOTSUPP}:
                 raise ApplianceError("FILESYSTEM_FAILURE") from error
 
+        _progress()
+
+
+def _copy_file(source: str, destination: str) -> str:
+    with open(source, "rb") as incoming, open(destination, "xb") as outgoing:
+        while chunk := incoming.read(COPY_CHUNK_BYTES):
+            if outgoing.write(chunk) != len(chunk):
+                raise OSError("module copy write was incomplete")
+            _progress()
+    shutil.copystat(source, destination)
+    return destination
+
 
 def _copy_tree(source: Path, destination: Path, kind: str = "source") -> tuple[str, int, int]:
     expected = _tree_manifest(source, kind)
     if destination.exists() or destination.is_symlink():
         raise ApplianceError("RECOVERY_CONFLICT")
     try:
-        shutil.copytree(source, destination, symlinks=True)
+        shutil.copytree(source, destination, symlinks=True, copy_function=_copy_file)
     except OSError as error:
         raise ApplianceError("FILESYSTEM_FAILURE") from error
     if kind == "source":
@@ -417,6 +438,7 @@ def _sync_tree(root: Path) -> None:
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
+                _progress()
             subdirectories[:] = [
                 name for name in subdirectories if not (current / name).is_symlink()
             ]
@@ -426,6 +448,7 @@ def _sync_tree(root: Path) -> None:
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
+            _progress()
         _sync_path(root)
     except OSError as error:
         raise ApplianceError("FLUSH_FAILURE") from error
@@ -442,6 +465,8 @@ def _sync_path(path: Path) -> None:
             os.close(descriptor)
     except OSError as error:
         raise ApplianceError("FLUSH_FAILURE") from error
+
+    _progress()
 
 
 def _write_json(path: Path, document: dict[str, object]) -> None:
@@ -816,6 +841,39 @@ def _finish_installed(
     return result
 
 
+def _index_modules(staged: Path, release: str) -> None:
+    try:
+        child = subprocess.Popen(
+            [DEPMOD, "-b", str(staged), release],
+            env={"PATH": "/sbin"},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            deadline = time.monotonic() + DEPMOD_TIMEOUT_SECONDS
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(DEPMOD, DEPMOD_TIMEOUT_SECONDS)
+                try:
+                    code = child.wait(timeout=min(PROGRESS_INTERVAL_SECONDS, remaining))
+                except subprocess.TimeoutExpired:
+                    _progress()
+                    continue
+                if code != 0:
+                    raise ApplianceError("DEPMOD_FAILURE")
+                _progress()
+                return
+        finally:
+            if child.returncode is None:
+                try:
+                    child.kill()
+                finally:
+                    child.wait()
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ApplianceError("DEPMOD_FAILURE") from error
+
+
 def _capture_install(document: dict[str, object]) -> dict[str, object]:
     destination, staged, staged_tree, displaced = _module_paths(document)
     source = SOURCE / "modules"
@@ -857,19 +915,7 @@ def _capture_install(document: dict[str, object]) -> dict[str, object]:
     _remove_owned_tree(staged)
     staged_tree.parent.mkdir(parents=True)
     _copy_tree(source, staged_tree)
-    try:
-        completed = subprocess.run(
-            [DEPMOD, "-b", str(staged), str(document["release"])],
-            check=False,
-            env={"PATH": "/sbin"},
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=DEPMOD_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise ApplianceError("DEPMOD_FAILURE") from error
-    if completed.returncode != 0:
-        raise ApplianceError("DEPMOD_FAILURE")
+    _index_modules(staged, str(document["release"]))
     _sync_tree(staged_tree)
     _sync_path(staged)
     installed, count, size = _tree_manifest(staged_tree, "installed")
@@ -1037,6 +1083,22 @@ def _announce(line: str) -> None:
             pass
 
 
+def _start_progress() -> None:
+    global _progress_enabled, _last_progress
+    _announce("phase=accepted")
+    _last_progress = time.monotonic()
+    _progress_enabled = True
+
+
+def _progress() -> None:
+    global _last_progress
+    if not _progress_enabled:
+        return
+    if time.monotonic() - _last_progress >= PROGRESS_INTERVAL_SECONDS:
+        _announce("phase=accepted")
+        _last_progress = time.monotonic()
+
+
 def _reboot() -> int:
     libc = ctypes.CDLL(None, use_errno=True)
     return int(libc.reboot(LINUX_REBOOT_CMD_POWER_OFF))
@@ -1126,7 +1188,7 @@ def main() -> NoReturn:
         _mount("/dev/vdb", SOURCE, "ext4", 1 | 2 | 4 | 8)
         _mount("/dev/vdc", SCRATCH, "ext4", 2 | 4 | 8)
         document = _read_operation(SOURCE / "operation-v1.json")
-        _announce("phase=accepted")
+        _start_progress()
         execute(document)
     except ApplianceError as error:
         operation_error = error

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import tarfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,12 @@ from tests.integration.live_stack.spine import (
     ok,
     phase,
 )
+from tests.integration.live_stack.spine_test_support import (
+    _BOOT_CONFIG,
+    _INITRD_CONFIG,
+    _kernel_tree,
+    _prebuilt_power_bundle,
+)
 
 
 class _FakeClient:
@@ -48,9 +55,6 @@ def _client(responses: list[ToolResponse]) -> _FakeClient:
 
 def _live_client(client: _FakeClient) -> Any:
     return cast(Any, client)
-
-
-_BOOT_CONFIG = b"CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_EXT4_FS=y\n"
 
 
 @pytest.mark.parametrize(
@@ -269,14 +273,6 @@ def test_spine_upload_requires_the_contract_to_accept_effective_config(
         asyncio.run(spine.build_and_upload_kernel(cast(Any, client), run_id="run-1"))
 
 
-def _kernel_tree(tmp_path: Path, config: bytes = _BOOT_CONFIG) -> Path:
-    tree = tmp_path / "tree"
-    (tree / "include/config").mkdir(parents=True)
-    (tree / ".config").write_bytes(config)
-    (tree / "include/config/kernel.release").write_text("7.1.0-spine\n")
-    return tree
-
-
 def test_spine_initrd_runs_dracut_without_host_etc_config_or_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -369,9 +365,6 @@ def test_spine_config_initrd_requires_gzip_initramfs_support(tmp_path: Path, mis
     assert spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build")
     with pytest.raises(SpinePhaseError, match=f"CONFIG_{missing}=y"):
         spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", require_initrd=True)
-
-
-_INITRD_CONFIG = _BOOT_CONFIG + b"CONFIG_BLK_DEV_INITRD=y\nCONFIG_RD_GZIP=y\n"
 
 
 def _fake_upload(
@@ -510,6 +503,95 @@ def test_spine_upload_with_initrd_refuses(
             )
         )
     assert "runs.complete_build" not in [name for name, _ in calls]
+
+
+def test_spine_prebuilt_power_upload_without_native_builders(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tree = _kernel_tree(tmp_path, _INITRD_CONFIG)
+    (tree / "vmlinux").write_bytes(b"\x7fELFpower-boot")
+    names = ("kernel", "effective_config", "vmlinux", "initrd")
+    calls, put, dracut = _fake_upload(monkeypatch, tmp_path, accepted=names, returned=names)
+    native_tar = Mock(side_effect=AssertionError("must not build on foreign controller"))
+    monkeypatch.setattr(spine, "combined_kernel_tar", native_tar)
+    bundle = _prebuilt_power_bundle(monkeypatch, tmp_path)
+    client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+    evidence = tmp_path / "evidence"
+    asyncio.run(
+        spine.build_and_upload_kernel(
+            cast(Any, client),
+            run_id="run-1",
+            arch="ppc64le",
+            kernel_tree=tree,
+            with_initrd=True,
+            with_vmlinux=True,
+            evidence_dir=evidence,
+        )
+    )
+    native_tar.assert_not_called()
+    dracut.assert_not_called()
+    assert put == {
+        "kernel": (bundle / "kernel.tar.gz").read_bytes(),
+        "initrd": (bundle / "initrd.img").read_bytes(),
+        "vmlinux": b"\x7fELFpower-boot",
+        "effective_config": _INITRD_CONFIG,
+    }
+    assert calls[-1] == ("runs.complete_build", {"run_id": "run-1", "build_id": "ab1234"})
+    assert json.loads((evidence / "upload.json").read_text())["build_id"] == "ab1234"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing-tar",
+        "missing-initrd",
+        "empty-initrd",
+        "bad-initrd",
+        "bad-tar",
+        "missing-vmlinux",
+        "mismatched-build-id",
+        "mismatched-release",
+        "missing-boot",
+    ],
+)
+def test_spine_prebuilt_power_refuses_before_upload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fault: str
+) -> None:
+    tree = _kernel_tree(tmp_path, _INITRD_CONFIG)
+    (tree / "vmlinux").write_bytes(b"\x7fELFpower-boot")
+    calls, put, dracut = _fake_upload(monkeypatch, tmp_path)
+    bundle = _prebuilt_power_bundle(monkeypatch, tmp_path)
+    if fault == "missing-tar":
+        (bundle / "kernel.tar.gz").unlink()
+    elif fault == "missing-initrd":
+        (bundle / "initrd.img").unlink()
+    elif fault in {"empty-initrd", "bad-initrd"}:
+        (bundle / "initrd.img").write_bytes(b"" if fault == "empty-initrd" else b"not-gzip")
+    elif fault == "bad-tar":
+        (bundle / "kernel.tar.gz").write_bytes(b"not-a-tar")
+    elif fault == "missing-vmlinux":
+        (tree / "vmlinux").unlink()
+    elif fault == "mismatched-build-id":
+        (tree / "vmlinux").write_bytes(b"another-kernel")
+    elif fault == "mismatched-release":
+        (tree / "include/config/kernel.release").write_text("wrong-release")
+    elif fault == "missing-boot":
+        with tarfile.open(bundle / "kernel.tar.gz", "w:gz"):
+            pass
+    client = SimpleNamespace(read_text_resource=AsyncMock(return_value="{}"))
+    with pytest.raises(SpinePhaseError, match="prebuilt ppc64le bundle"):
+        asyncio.run(
+            spine.build_and_upload_kernel(
+                cast(Any, client),
+                run_id="run-1",
+                arch="ppc64le",
+                kernel_tree=tree,
+                with_initrd=True,
+            )
+        )
+    assert calls == []
+    assert put == {}
+    dracut.assert_not_called()
 
 
 def _job(status: str, *, category: ErrorCategory | None = None) -> ToolResponse:

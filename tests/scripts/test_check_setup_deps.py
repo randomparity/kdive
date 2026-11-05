@@ -1277,3 +1277,15 @@ def test_developer_preflight_uses_checkout_formatter(
         _stub(local, "shfmt", f"#!/bin/sh\necho {private}\n")
     result = _run("ubuntu", str(bindir), tmp_path, args=["--setup"])
     assert ("run just setup for the checkout-local pinned formatter" in result.stderr) == missing
+
+
+@pytest.mark.parametrize("arch", ["aarch64", "ppc64le", "x86_64"])
+@pytest.mark.parametrize("present", [False, True])
+def test_live_drgn_source_build_autotools(tmp_path: Path, arch: str, present: bool) -> None:
+    tools = (("rustc", "cargo") if arch == "ppc64le" else ()) + (
+        ("autoconf", "automake", "libtoolize") if present else ()
+    )
+    result = _run_with_uname("debian", arch, tools, tmp_path)
+    for command in ("autoconf", "automake", "libtoolize"):
+        assert (command in result.stderr) == (arch != "x86_64" and not present)
+    assert result.returncode == 0  # Live prerequisites are advisory in ordinary preflight.

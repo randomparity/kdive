@@ -70,6 +70,36 @@ def test_overlay_volume_name_is_system_scoped() -> None:
     assert overlay_volume_name(SYSTEM_ID) == f"kdive-{SYSTEM_ID}-overlay.qcow2"
 
 
+@pytest.mark.parametrize(
+    ("architecture", "machine"), (("x86_64", "pc"), ("ppc64le", "pseries-10.2"))
+)
+def test_render_domain_features_follow_the_guest_architecture(
+    architecture: str, machine: str
+) -> None:
+    profile = _remote_profile().model_copy(update={"arch": architecture})
+    root = fromstring(
+        render_domain_xml(
+            SYSTEM_ID,
+            profile,
+            pool="default",
+            volume=overlay_volume_name(SYSTEM_ID),
+            overlay_path="/pool/overlay.qcow2",
+            backing_path="/pool/base.qcow2",
+            gdb_addr="127.0.0.1",
+            gdb_port=47001,
+            machine=machine,
+        )
+    )
+    features = root.find("features")
+    if architecture == "ppc64le":
+        assert features is None
+    else:
+        assert features is not None
+        assert ET.tostring(features, encoding="unicode") == (
+            '<features><acpi /><vmcoreinfo state="on" /></features>'
+        )
+
+
 def test_render_domain_xml_carries_agent_channel_gdb_and_metadata() -> None:
     xml = render_domain_xml(
         SYSTEM_ID,
