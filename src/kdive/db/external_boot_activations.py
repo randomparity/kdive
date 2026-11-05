@@ -1073,6 +1073,27 @@ class ExternalBootActivationRepository:
             raise RuntimeError("settlement returned no status")
         return SettlementStatus(row[0])
 
+    async def record_stranded_worker_ownership(
+        self,
+        conn: AsyncConnection,
+        *,
+        credential_hash: bytes,
+        job_id: UUID,
+        job_attempt: int,
+        activation_id: UUID,
+        domain_name: str,
+    ) -> CasStatus:
+        """State that this worker's own daemon holds the System's domain (ADR-0816)."""
+        row = await (
+            await conn.execute(
+                "SELECT public.record_stranded_activation_worker_ownership(%s,%s,%s,%s,%s)",
+                (credential_hash, job_id, job_attempt, activation_id, domain_name),
+            )
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("worker ownership record returned no status")
+        return CasStatus(str(row[0]))
+
     async def is_settled(self, conn: AsyncConnection, activation_id: UUID) -> bool:
         """Return whether the settlement primitive ended this activation (ADR-0816)."""
         row = await (

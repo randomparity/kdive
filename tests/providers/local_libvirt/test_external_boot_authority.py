@@ -48,6 +48,10 @@ from kdive.providers.external_boot_authority.service import (
     ExternalBootAuthorityService,
     ProofBarrierAbort,
 )
+from kdive.providers.external_boot_authority.stranded import (
+    StrandedAuthorityFacts,
+    StrandedTarget,
+)
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
@@ -76,6 +80,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
 )
 from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import GuestFreeSpaceRefusal
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    LocalExternalBootOperationLease,
     LocalExternalBootSessionFactory,
     LocalExternalBootTimingConfigurationError,
 )
@@ -101,7 +106,7 @@ from kdive.providers.ports.external_boot import (
 # The authority service's own repository double. Reused rather than reimplemented here:
 # a second implementation of `AuthorityRepository` in this package could drift from the
 # contract the service is actually tested against, which is the thing these tests rely on.
-from kdive.providers.shared.runtime_paths import overlay_path
+from kdive.providers.shared.runtime_paths import domain_name_for, overlay_path
 from tests.providers.external_boot_authority.service_support import _Repository
 from tests.providers.local_libvirt.lifecycle.boot.session_support import Conn, Domain, Guest
 from tests.providers.local_libvirt.lifecycle.boot.session_support import _xml as _session_xml
@@ -2591,3 +2596,104 @@ async def test_non_system_partial_abort_keeps_activation_residue_quarantined(
 
     assert (activation / "kernel").read_bytes() == b"unauthenticated"
     adapter.close()
+
+
+class _StrandedFactory:
+    def __init__(self, *, defined: bool = False, fault: Exception | None = None) -> None:
+        self.defined = defined
+        self.fault = fault
+        self.asked: list[str] = []
+
+    def domain_is_defined(self, domain_name: str) -> bool:
+        self.asked.append(domain_name)
+        if self.fault is not None:
+            raise self.fault
+        return self.defined
+
+
+def _stranded_io(root: Path, factory: _StrandedFactory) -> RealLocalExternalBootIO:
+    return RealLocalExternalBootIO(
+        root,
+        cast(LocalExternalBootMaterializer, object()),
+        cast(GuestRecoveryWriter, object()),
+        lambda _authority: cast(LocalExternalBootOperationLease, object()),
+        cast(LocalExternalBootSessionFactory, factory),
+        1024,
+    )
+
+
+def _stranded_observation(
+    root: Path, factory: _StrandedFactory
+) -> tuple[StrandedAuthorityFacts, StrandedTarget, UUID]:
+    activation_id = uuid4()
+    target = StrandedTarget(uuid4(), uuid4(), "kdive-stranded", (), None, None)
+    adapter = LocalExternalBootAuthorityAdapter(
+        LocalLibvirtExternalBoot(_stranded_io(root, factory))
+    )
+    try:
+        facts = asyncio.run(adapter.observe_stranded_absence(activation_id, target))
+    finally:
+        adapter.close()
+    return facts, target, activation_id
+
+
+def _private_root(tmp_path: Path) -> Path:
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    return root
+
+
+def test_stranded_observation_of_nothing_is_absent(tmp_path: Path) -> None:
+    facts, _target, _activation = _stranded_observation(_private_root(tmp_path), _StrandedFactory())
+
+    assert (facts.domain_absent, facts.store_absent) == (True, True)
+
+
+def test_stranded_observation_reports_a_defined_domain(tmp_path: Path) -> None:
+    facts, _target, _activation = _stranded_observation(
+        _private_root(tmp_path), _StrandedFactory(defined=True)
+    )
+
+    assert facts.domain_absent is False
+
+
+def test_stranded_observation_reports_a_held_activation_directory(tmp_path: Path) -> None:
+    root = _private_root(tmp_path)
+    activation_id = uuid4()
+    target = StrandedTarget(uuid4(), uuid4(), "kdive-stranded", (), None, None)
+    (root / str(target.system_id) / str(target.run_id) / str(activation_id)).mkdir(
+        mode=0o700, parents=True
+    )
+    (root / str(target.system_id)).chmod(0o700)
+    (root / str(target.system_id) / str(target.run_id)).chmod(0o700)
+    adapter = LocalExternalBootAuthorityAdapter(
+        LocalLibvirtExternalBoot(_stranded_io(root, _StrandedFactory()))
+    )
+    try:
+        facts = asyncio.run(adapter.observe_stranded_absence(activation_id, target))
+    finally:
+        adapter.close()
+
+    assert facts.store_absent is False
+    assert facts.recovery_ref
+
+
+def test_a_libvirt_fault_never_reads_as_absent(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="daemon unreachable"):
+        _stranded_observation(
+            _private_root(tmp_path), _StrandedFactory(fault=RuntimeError("daemon unreachable"))
+        )
+
+
+def test_a_rewritten_domain_name_cannot_hide_the_derived_domain(tmp_path: Path) -> None:
+    class DerivedNameOnly(_StrandedFactory):
+        def domain_is_defined(self, domain_name: str) -> bool:
+            super().domain_is_defined(domain_name)
+            return domain_name != "kdive-stranded"
+
+    factory = DerivedNameOnly()
+
+    facts, target, _activation = _stranded_observation(_private_root(tmp_path), factory)
+
+    assert facts.domain_absent is False
+    assert domain_name_for(target.system_id) in factory.asked

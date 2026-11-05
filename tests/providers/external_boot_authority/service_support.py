@@ -8,7 +8,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from kdive.db.external_boot_authority_journal import (
     AuthorityBinding,
@@ -57,6 +57,19 @@ def _takeover() -> AuthorityTakeoverRequestV1:
         operation_identity="takeover-a",
         operation_digest=_DIGEST_B,
     )
+
+
+def _interrupted_record(system_id: UUID) -> JournalRecordV1:
+    """A non-terminal lane head, the shape an interrupted attempt leaves."""
+    values = _takeover().model_dump(mode="json", by_alias=True)
+    values |= {
+        "system_id": str(system_id),
+        "sequence": 1,
+        "previous_digest": "sha256:" + "0" * 64,
+        "phase": "watermark-installed",
+        "attempt_id": str(uuid4()),
+    }
+    return JournalRecordV1.model_validate(values)
 
 
 def _mutation(request: AuthorityTakeoverRequestV1) -> AuthorityMutationRequestV1:

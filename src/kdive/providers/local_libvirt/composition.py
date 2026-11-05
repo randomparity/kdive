@@ -84,7 +84,10 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
 from kdive.providers.local_libvirt.lifecycle.capture_operation import (
     LocalLibvirtCaptureQuiescence,
 )
-from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
+from kdive.providers.local_libvirt.lifecycle.connect import (
+    LibvirtDomainPresence,
+    LocalLibvirtConnect,
+)
 from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl
 from kdive.providers.local_libvirt.lifecycle.install import LocalLibvirtInstall
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
@@ -487,6 +490,7 @@ def build_runtime(
         external_boot=external_boot,
         external_boot_preparation=external_boot,
         external_boot_recovery_objects=external_boot,
+        domain_presence=LibvirtDomainPresence(lambda: libvirt.open(config.require(LIBVIRT_URI))),
         # ADR-0208: advertise the core-producing capture methods local can actually fetch a vmcore
         # for — KDUMP (host-side overlay harvest, #115/ADR-0203), FADUMP (the pseries firmware-
         # assisted variant sharing that harvest, ADR-0349; host support is gated at admission), and

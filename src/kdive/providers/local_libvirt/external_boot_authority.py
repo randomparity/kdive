@@ -36,6 +36,10 @@ from kdive.providers.external_boot_authority.protocol import (
     operation_is_permitted,
 )
 from kdive.providers.external_boot_authority.service import AuthorityServiceError
+from kdive.providers.external_boot_authority.stranded import (
+    StrandedAuthorityFacts,
+    StrandedTarget,
+)
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
@@ -196,11 +200,12 @@ class LocalExternalBootAuthorityAdapter:
         self,
         request: AuthorityMutationRequestV1
         | AuthorityPreparationMutationRequestV1
-        | AuthorityTeardownMutationRequestV1,
+        | AuthorityTeardownMutationRequestV1
+        | None,
         operation: Callable[[], T],
     ) -> T:
         def scoped() -> T:
-            if self._lease_scope is None:
+            if self._lease_scope is None or request is None:
                 return operation()
             with self._lease_scope.issue(_authority_ref(request), _activation_binding(request)):
                 return operation()
@@ -370,6 +375,18 @@ class LocalExternalBootAuthorityAdapter:
             )
             return self._preparation_observation(receipt)
         return await self._offload(request, lambda: self._observe(request))
+
+    async def observe_stranded_absence(
+        self, activation_id: UUID, target: StrandedTarget
+    ) -> StrandedAuthorityFacts:
+        binding = ExternalBootActivationBinding(
+            system_id=str(target.system_id),
+            run_id=str(target.run_id),
+            activation_id=str(activation_id),
+        )
+        return await self._offload(
+            None, lambda: self._ports.stranded_facts(binding, target.domain_name)
+        )
 
     async def observe_running(
         self, request: AuthorityMutationRequestV1

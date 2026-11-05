@@ -47,6 +47,7 @@ class ExternalBootOperation(StrEnum):
     EXTERNAL_BOOT_RELEASE = "external_boot_release"
     EXTERNAL_BOOT_RESOLVE_CONFLICT = "external_boot_resolve_conflict"
     ALLOCATION_RELEASE = "allocation_release"
+    OBSERVE_STRANDED_ACTIVATION = "observe_stranded_activation"
 
 
 class ExternalBootDenied(CategorizedError):
@@ -87,7 +88,10 @@ _ALWAYS_ADMITTED = frozenset(
 
 # Total over the state enum, so no restricting activation can reach an undecided operation.
 _ADMITTED: Mapping[ExternalBootActivationState, frozenset[ExternalBootOperation]] = {
-    ExternalBootActivationState.PREPARING: _ALWAYS_ADMITTED,
+    # The observation changes neither owner's state and is the first step out of the one state no
+    # lane ends (ADR-0816).
+    ExternalBootActivationState.PREPARING: _ALWAYS_ADMITTED
+    | {ExternalBootOperation.OBSERVE_STRANDED_ACTIVATION},
     ExternalBootActivationState.PREPARED: _ALWAYS_ADMITTED,
     ExternalBootActivationState.ACTIVATING: _ALWAYS_ADMITTED,
     ExternalBootActivationState.RECOVERING: _ALWAYS_ADMITTED,

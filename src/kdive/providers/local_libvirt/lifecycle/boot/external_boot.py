@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kdive.build_artifacts import validation as build_validation
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
+from kdive.providers.external_boot_authority.stranded import StrandedAuthorityFacts
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
@@ -100,6 +101,7 @@ from kdive.providers.shared.libvirt_external_boot import (
     preserved_element_identity,
     render_target_xml,
 )
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.store.objectstore import ObjectStore
 
 
@@ -1130,6 +1132,14 @@ class LocalSystemTeardownIO(Protocol):
     ) -> None: ...
 
 
+class LocalStrandedObservationIO(Protocol):
+    """Read-only local facts about a stranded activation, separate from recovery I/O."""
+
+    def stranded_facts(
+        self, binding: ExternalBootActivationBinding, domain_name: str
+    ) -> StrandedAuthorityFacts: ...
+
+
 class LocalExternalBootMaterializer(Protocol):
     """Builds immutable local artifacts without owning guest recovery I/O."""
 
@@ -2018,6 +2028,23 @@ class RealLocalExternalBootIO:
                     intent.reservation,
                 )
             return facts
+
+    def stranded_facts(
+        self, binding: ExternalBootActivationBinding, domain_name: str
+    ) -> StrandedAuthorityFacts:
+        """Read this authority's daemon and store with no session: there is no domain to open.
+
+        `domain_name` comes from `systems.domain_name`, which the worker role can write, so the
+        name this provider derives is checked too. A rewritten row cannot hide the real domain.
+        """
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            store_absent = store.exact_recovery_absence(binding)
+        names = {domain_name, domain_name_for(UUID(binding.system_id))}
+        return StrandedAuthorityFacts(
+            domain_absent=not any(map(self._session_factory.domain_is_defined, names)),
+            store_absent=store_absent,
+            recovery_ref=_recovery_ref(binding).ref,
+        )
 
     @contextmanager
     def _open_system_teardown(
@@ -3515,6 +3542,11 @@ class LocalLibvirtExternalBoot:
     ) -> bool:
         with self._io.open(authority, _expected_binding(binding)) as operation:
             return cast(LocalPartialRecoveryOperation, operation).recovery_is_absent(binding)
+
+    def stranded_facts(
+        self, binding: ExternalBootActivationBinding, domain_name: str
+    ) -> StrandedAuthorityFacts:
+        return cast(LocalStrandedObservationIO, self._io).stranded_facts(binding, domain_name)
 
     def observe_state(
         self, binding: ExternalBootActivationBinding, authority: OpaqueProviderRef

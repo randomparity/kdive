@@ -26,6 +26,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
+    AuthorityStrandedObservationRequestV1,
+    AuthorityStrandedObservationResponseV1,
     AuthorityTakeoverRequestV1,
     AuthorityTeardownMutationRequestV1,
     AuthorityTeardownResponseV1,
@@ -97,6 +99,10 @@ class AuthorityRequestSender(Protocol):
     async def resolve_recovery_orphan(
         self, request: AuthorityRecoveryOrphanDispositionRequestV1, *, deadline: float
     ) -> AuthorityRecoveryOrphanDispositionResponseV1: ...
+
+    async def observe_stranded_activation(
+        self, request: AuthorityStrandedObservationRequestV1, *, deadline: float
+    ) -> AuthorityStrandedObservationResponseV1: ...
 
     async def execute_preparation(
         self, request: AuthorityPreparationMutationRequestV1, *, deadline: float

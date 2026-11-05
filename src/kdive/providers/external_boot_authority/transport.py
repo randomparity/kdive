@@ -43,6 +43,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
+    AuthorityStrandedObservationRequestV1,
+    AuthorityStrandedObservationResponseV1,
     AuthorityTakeoverRequestV1,
     AuthorityTeardownMutationRequestV1,
     AuthorityTeardownResponseV1,
@@ -97,6 +99,7 @@ type Operation = Literal[
     "resolve-device-identity",
     "sweep-module-volumes",
     "resolve-recovery-orphan",
+    "observe-stranded-activation",
     "acknowledge-system-takeover",
     "execute-system-operation",
 ]
@@ -172,6 +175,13 @@ class AuthorityRecoveryOrphanService(Protocol):
     ) -> AuthorityRecoveryOrphanDispositionResponseV1: ...
 
 
+@runtime_checkable
+class AuthorityStrandedObservationService(Protocol):
+    async def observe_stranded_activation(
+        self, peer: AuthenticatedPeer | None, request: AuthorityStrandedObservationRequestV1
+    ) -> AuthorityStrandedObservationResponseV1: ...
+
+
 class DeviceIdentityService(Protocol):
     async def resolve(self, request: DeviceIdentityRequestV1) -> DeviceIdentityResponseV1: ...
 
@@ -222,6 +232,8 @@ def _decode_operation_request(operation: Operation, payload: bytes) -> object:
         return AuthoritySystemExecutionV1.model_validate_json(payload)
     if operation == "resolve-device-identity":
         return decode_device_identity_request(payload)
+    if operation == "observe-stranded-activation":
+        return AuthorityStrandedObservationRequestV1.model_validate_json(payload)
     if operation == "sweep-module-volumes":
         return decode_module_volume_sweep_request(payload)
     if operation == "execute-remote-module-lifecycle":
@@ -274,6 +286,10 @@ def encode_request_envelope(
         raise ValueError("invalid-request")
     if operation == "resolve-recovery-orphan" and not isinstance(
         decoded, AuthorityRecoveryOrphanDispositionRequestV1
+    ):
+        raise ValueError("invalid-request")
+    if operation == "observe-stranded-activation" and not isinstance(
+        decoded, AuthorityStrandedObservationRequestV1
     ):
         raise ValueError("invalid-request")
     if operation == "health" and not isinstance(decoded, AuthorityHealthRequestV1):
@@ -349,6 +365,7 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             "resolve-device-identity",
             "sweep-module-volumes",
             "resolve-recovery-orphan",
+            "observe-stranded-activation",
             "acknowledge-system-takeover",
             "execute-system-operation",
         }:
@@ -398,6 +415,10 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             request, AuthorityRecoveryOrphanDispositionRequestV1
         ):
             raise ValueError
+        if operation == "observe-stranded-activation" and not isinstance(
+            request, AuthorityStrandedObservationRequestV1
+        ):
+            raise ValueError
         if operation == "health" and not isinstance(request, AuthorityHealthRequestV1):
             raise ValueError
         if operation == "resolve-device-identity" and not isinstance(
@@ -434,6 +455,7 @@ def _success(
     | RemoteModuleLifecycleResponseV1
     | RemoteModuleTerminalPreparationResponseV1
     | AuthorityRecoveryOrphanDispositionResponseV1
+    | AuthorityStrandedObservationResponseV1
     | AuthoritySystemAcknowledgementV1
     | AuthoritySystemResponseV1,
 ) -> bytes:
@@ -615,6 +637,12 @@ async def _dispatch(
             if not isinstance(service, AuthorityRecoveryOrphanService):
                 return _error("provider-not-configured")
             return _success(await service.resolve_recovery_orphan(peer, request))
+        if operation == "observe-stranded-activation":
+            if not isinstance(request, AuthorityStrandedObservationRequestV1):
+                raise _TransportError("invalid-request")
+            if not isinstance(service, AuthorityStrandedObservationService):
+                return _error("provider-not-configured")
+            return _success(await service.observe_stranded_activation(peer, request))
         if operation == "observe-running":
             if not isinstance(request, AuthorityMutationRequestV1):
                 raise _TransportError("invalid-request")

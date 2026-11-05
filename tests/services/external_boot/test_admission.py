@@ -46,6 +46,7 @@ _ADMITTING_STATES: dict[ExternalBootOperation, frozenset[ExternalBootActivationS
     _OP.CAPTURE_VMCORE: _ACTIVE_ONLY,
     _OP.CAPTURE_TRAFFIC: _ACTIVE_ONLY,
     _OP.DEBUG_ATTACH: _ACTIVE_ONLY,
+    _OP.OBSERVE_STRANDED_ACTIVATION: frozenset({_STATE.PREPARING}),
     # Every restricting state, like teardown, and for any Run: a detach reverses an attach the
     # matrix admitted, so denying it would strand a live session and leak its transport — and the
     # release refuses on any live session of the System regardless of owning Run, so an
@@ -419,7 +420,10 @@ def test_every_registered_mutating_tool_is_guarded_or_exempt() -> None:
 
 def test_every_operation_the_matrix_decides_has_a_guarded_tool() -> None:
     """The forward half: a member added without a call site fails too."""
-    assert set(GUARDED_TOOLS.values()) == set(ExternalBootOperation)
+    # OBSERVE_STRANDED_ACTIVATION has a service call site and no tool until #3551 adds one.
+    assert set(GUARDED_TOOLS.values()) == set(ExternalBootOperation) - {
+        ExternalBootOperation.OBSERVE_STRANDED_ACTIVATION
+    }
 
 
 def test_a_torn_down_activated_owner_admits_allocation_release_alone(

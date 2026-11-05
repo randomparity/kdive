@@ -53,6 +53,9 @@ class JobKind(StrEnum):
     # Platform-admin recovery-object disposition. Its closed payload names only durable
     # quarantine records; the worker resolves provider authority from those rows.
     RESOLVE_RECOVERY_ORPHAN = "resolve_recovery_orphan"
+    # Platform-admin evidence for a stranded activation (ADR-0816). Unmarked: it runs on the fixed
+    # worker and asks the authority for its own observation.
+    OBSERVE_STRANDED_ACTIVATION = "observe_stranded_activation"
 
 
 RETIRED_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})
@@ -93,7 +96,11 @@ ACTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
 """Job kinds accepted by current tool affordances and production handler registration."""
 
 PLATFORM_INTERNAL_JOB_KINDS: frozenset[JobKind] = frozenset(
-    {JobKind.REMOTE_MODULE_VOLUME_REAP, JobKind.RESOLVE_RECOVERY_ORPHAN}
+    {
+        JobKind.REMOTE_MODULE_VOLUME_REAP,
+        JobKind.RESOLVE_RECOVERY_ORPHAN,
+        JobKind.OBSERVE_STRANDED_ACTIVATION,
+    }
 )
 """Maintenance jobs that tenant-facing job surfaces must never expose or mutate."""
 

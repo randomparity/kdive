@@ -39,6 +39,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
+    AuthorityStrandedObservationRequestV1,
+    AuthorityStrandedObservationResponseV1,
     AuthorityTakeoverRequestV1,
     AuthorityTeardownMutationRequestV1,
     AuthorityTeardownProofV1,
@@ -49,6 +51,12 @@ from kdive.providers.external_boot_authority.protocol import (
     teardown_proof_digest,
 )
 from kdive.providers.external_boot_authority.service_teardown import teardown_proof
+from kdive.providers.external_boot_authority.stranded import (
+    StrandedAuthorityFacts,
+    StrandedObservationRepository,
+    StrandedTarget,
+    stranded_composite_state,
+)
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
@@ -110,6 +118,13 @@ class AuthorityMutationAdapter(Protocol):
     async def commit(
         self, request: AuthorityMutationRequestV1, context: AuthorityCommitContextV1
     ) -> AuthorityObservationV1: ...
+
+
+@runtime_checkable
+class AuthorityStrandedObserver(Protocol):
+    async def observe_stranded_absence(
+        self, activation_id: UUID, target: StrandedTarget
+    ) -> StrandedAuthorityFacts: ...
 
 
 class ProofBarrierAbort(RuntimeError):
@@ -404,6 +419,8 @@ JournalConflictReason = Literal[
     "preparation_plan_missing",
     "release_phase_mismatch",
     "replay_mutation_started_missing",
+    "stranded_head_mismatch",
+    "stranded_lane_failed",
     "suspended_state_mismatch",
     "takeover_head_missing",
     "takeover_head_missing_after_watermark",
@@ -584,8 +601,10 @@ class ExternalBootAuthorityService:
         proof_checkpoint: AuthorityProofCheckpoint | None = None,
         system_service: AuthoritySystemService | None = None,
         module_volume_sweeper: ModuleVolumeSweepPort | None = None,
+        stranded_observations: StrandedObservationRepository | None = None,
     ) -> None:
         self._module_volume_sweeper = module_volume_sweeper
+        self._stranded_observations = stranded_observations
         self._repository = repository
         self._journal_factory = journal_factory
         self._adapter = adapter
@@ -2825,6 +2844,86 @@ class ExternalBootAuthorityService:
             journal_sequence=terminal.sequence,
             journal_digest=record_digest(terminal),
         )
+
+    async def observe_stranded_activation(
+        self, peer: AuthenticatedPeer | None, request: AuthorityStrandedObservationRequestV1
+    ) -> AuthorityStrandedObservationResponseV1:
+        """Prove this lane quiescent, read its own daemon and store, and record absence.
+
+        The request names only an activation, so a peer cannot choose what this authority
+        testifies about. Nothing here journals: the recorder pins the head read under the lock.
+        """
+        if not self._accepting:
+            raise AuthorityServiceError("superseded")
+        task = asyncio.create_task(self._observe_stranded(peer, request))
+        self._track_completion(task)
+        return await asyncio.shield(task)
+
+    async def _observe_stranded(
+        self, peer: AuthenticatedPeer | None, request: AuthorityStrandedObservationRequestV1
+    ) -> AuthorityStrandedObservationResponseV1:
+        try:
+            if peer is None:
+                raise AuthorityServiceError("unauthenticated")
+            repository = self._stranded_observations
+            observer = self._adapter
+            if repository is None or not isinstance(observer, AuthorityStrandedObserver):
+                raise AuthorityServiceError("provider_conflict")
+            probe = await repository.read_target(request.activation_id)
+            if probe is None:
+                raise AuthorityServiceError("superseded")
+            lane = self._lane(probe.system_id)
+            try:
+                async with lane.lock:
+                    return await self._observe_stranded_locked(
+                        request.activation_id, probe.system_id, lane, repository, observer
+                    )
+            finally:
+                self._release_lane(probe.system_id, lane)
+        except AuthorityServiceError as error:
+            self._logger.warning(
+                "authority stranded observation rejected",
+                extra={"category": error.category, "reason": error.reason},
+            )
+            raise
+
+    async def _observe_stranded_locked(
+        self,
+        activation_id: UUID,
+        system_id: UUID,
+        lane: _Lane,
+        repository: StrandedObservationRepository,
+        observer: AuthorityStrandedObserver,
+    ) -> AuthorityStrandedObservationResponseV1:
+        if lane.failed:
+            raise AuthorityServiceError("journal_conflict", reason="stranded_lane_failed")
+        if lane.active is not None:
+            raise AuthorityServiceError("superseded")
+        _journal, records = self._lane_journal(system_id, lane)
+        target = await repository.read_target(activation_id)
+        if target is None or target.system_id != system_id:
+            raise AuthorityServiceError("superseded")
+        tail = (records[-1].sequence, record_digest(records[-1])) if records else (None, None)
+        if tail != (target.journal_sequence, target.journal_digest):
+            raise AuthorityServiceError("journal_conflict", reason="stranded_head_mismatch")
+        try:
+            facts = await observer.observe_stranded_absence(activation_id, target)
+        except AuthorityServiceError:
+            raise
+        except Exception as error:
+            self._logger.exception("authority stranded observation failed")
+            raise AuthorityServiceError("provider_conflict") from error
+        if not facts.domain_absent:
+            return AuthorityStrandedObservationResponseV1(disposition="domain_present")
+        if not facts.store_absent:
+            return AuthorityStrandedObservationResponseV1(
+                disposition="objects_present",
+                objects=(facts.recovery_ref, *target.object_refs),
+            )
+        composite_state = stranded_composite_state(activation_id, target)
+        if not await repository.record_absence(activation_id, target, composite_state):
+            raise AuthorityServiceError("superseded")
+        return AuthorityStrandedObservationResponseV1(disposition="recorded")
 
     async def observe_authority(
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1

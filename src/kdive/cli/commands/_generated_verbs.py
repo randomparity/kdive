@@ -2528,6 +2528,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                     "reclaim_investigation_rootfs",
                     "remote_module_volume_reap",
                     "resolve_recovery_orphan",
+                    "observe_stranded_activation",
                 ),
             ),
             GeneratedFlag(

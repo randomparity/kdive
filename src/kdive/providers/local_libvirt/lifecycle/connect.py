@@ -14,7 +14,7 @@ import socket
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
-from typing import Protocol
+from typing import Any, Protocol
 
 import libvirt
 from defusedxml.common import DefusedXmlException
@@ -283,6 +283,25 @@ def _resolved_port(xml: str, domain_name: str) -> int:
 def _close(conn: _Conn) -> None:
     with contextlib.suppress(libvirt.libvirtError):
         conn.close()
+
+
+class LibvirtDomainPresence:
+    """Answer whether one daemon defines a domain; only a missing domain reads as absent."""
+
+    def __init__(self, connect: Callable[[], Any]) -> None:
+        self._connect = connect
+
+    def is_defined(self, domain_name: str) -> bool:
+        conn = self._connect()
+        try:
+            conn.lookupByName(domain_name)
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                return False
+            raise
+        finally:
+            _close(conn)
+        return True
 
 
 def _resolve_ssh_endpoint_via(connect: _Connect) -> _ResolveEndpoint:

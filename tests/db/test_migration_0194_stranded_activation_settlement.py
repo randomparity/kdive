@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any, LiteralString, cast
 from uuid import UUID, uuid4
 
@@ -28,75 +27,22 @@ from kdive.serialization import validate_stored
 from kdive.services.external_boot.settlement import settle_stranded_activation
 from tests.db.external_boot_authority_support import (
     _acknowledge,
-    _allocate,
-    _Allocated,
-    _AuthorityCase,
     _RoleDsns,
-    _seed_case,
+)
+from tests.db.stranded_activation_support import (
+    _ALL_NAMED_OBJECTS,
+    _DOMAIN,
+    _SET_ABANDONED,
+    _SET_ALL_NAMED_OBJECTS,
+    _mark_authority_owned,
+    _strand,
+    _Stranded,
 )
 
-_DOMAIN = "kdive-stranded"
 _COMPOSITE = "sha256:" + "e" * 64
 _AUTHORITY_RECORD = "SELECT record_stranded_activation_authority_absence(%s,%s,%s,%s,%s,%s,%s)"
 _WORKER_RECORD = "SELECT record_stranded_activation_worker_ownership(%s,%s,%s,%s,%s)"
 _SETTLE = "SELECT settle_stranded_external_boot_activation(%s,%s,%s,%s,%s)"
-
-
-@dataclass(frozen=True, slots=True)
-class _Stranded:
-    case: _AuthorityCase
-    observer_job: UUID
-    authority: _Allocated | None
-
-
-def _strand(
-    migrated_url: str, role_dsns: _RoleDsns, *, suffix: str = "s", allocate: bool = True
-) -> _Stranded:
-    """Build the #3138 shape: a failed activate job over an unprepared activation."""
-    with psycopg.connect(migrated_url) as conn:
-        case = _seed_case(conn, worker_suffix=suffix)
-        conn.execute(
-            "UPDATE external_boot_activations SET state = 'preparing', materialization = NULL, "
-            "recovery_point = NULL WHERE id = %s",
-            (case.activation_id,),
-        )
-        conn.execute("UPDATE systems SET domain_name = %s WHERE id = %s", (_DOMAIN, case.system_id))
-        conn.execute(
-            "INSERT INTO external_boot_reservations "
-            "(activation_id, store_identity, owner_key, reserved_bytes, state) "
-            "VALUES (%s, 'store/private', 'owner/private', 4096, 'pending')",
-            (case.activation_id,),
-        )
-        conn.execute(
-            "INSERT INTO remote_module_attempt_obligations (system_id, run_id, operation_nonce) "
-            "VALUES (%s, %s, %s)",
-            (case.system_id, case.run_id, "1" * 32),
-        )
-    authority = None
-    if allocate:
-        with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
-            authority = _allocate(worker, case)
-    observer_job = uuid4()
-    with psycopg.connect(migrated_url) as conn:
-        conn.execute(
-            "UPDATE jobs SET state = 'failed', worker_id = NULL, lease_expires_at = NULL, "
-            "heartbeat_at = NULL, error_category = 'conflict' WHERE id = %s",
-            (case.job_id,),
-        )
-        conn.execute(
-            "INSERT INTO jobs (id, kind, payload, state, attempt, max_attempts, worker_id, "
-            "lease_expires_at, heartbeat_at, authorizing, dedup_key) VALUES "
-            "(%s, 'teardown', %s, 'running', 1, 3, %s, now() + interval '5 minutes', now(), "
-            "%s, %s)",
-            (
-                observer_job,
-                Jsonb({"system_id": str(case.system_id)}),
-                case.worker_id,
-                Jsonb({"principal": "p", "project": "proj"}),
-                f"observer-{observer_job}",
-            ),
-        )
-    return _Stranded(case, observer_job, authority)
 
 
 def _record_authority(
@@ -267,15 +213,7 @@ def test_authority_owned_system_cannot_settle(
     case = stranded.case
     assert _record_authority(authority_role_dsns, stranded) == "applied"
     assert _record_worker(authority_role_dsns, stranded) == "applied"
-    digest = "sha256:" + "f" * 64
-    with psycopg.connect(migrated_url) as conn:
-        conn.execute(
-            "INSERT INTO authority_system_ownership (system_id, allocation_id, resource_id, "
-            "provider_kind, resource_name, authority_instance, profile_identity, root_identity) "
-            "SELECT %s, id, resource_id, 'local-libvirt', 'resource', %s, %s, %s "
-            "FROM allocations WHERE id = %s",
-            (case.system_id, case.authority_instance, digest, digest, case.allocation_id),
-        )
+    _mark_authority_owned(migrated_url, case)
     before = _activation_row(migrated_url, case.activation_id)
 
     assert _settle(authority_role_dsns, case.activation_id) == "authority_owned"
@@ -302,12 +240,6 @@ def test_one_owner_is_not_evidence_for_the_other(
     assert _settle(authority_role_dsns, stranded.case.activation_id) == expected
 
 
-_SET_ABANDONED = (
-    "UPDATE external_boot_activations SET state = 'abandoned', terminal_evidence = "
-    "jsonb_build_object('schema', 'external-boot-terminal-evidence-v1', "
-    "'activation_id', id::text, 'system_id', system_id::text, 'outcome', 'abandoned') "
-    "WHERE id = {activation}"
-)
 _SET_SYSTEM_ENDED = "UPDATE systems SET state = 'torn_down' WHERE id = {system}"
 _SET_JOB_LIVE = "UPDATE jobs SET state = 'queued' WHERE id = {job}"
 _SET_JOB_RUNNING = (
@@ -435,35 +367,6 @@ def test_absent_objects_cover_every_object_the_activation_names(
     assert _record_worker(authority_role_dsns, stranded) == "applied"
 
     assert _settle(authority_role_dsns, case.activation_id) == "applied"
-
-
-_SET_ALL_NAMED_OBJECTS = (
-    "UPDATE external_boot_activations SET materialization = jsonb_build_object("
-    "'schema', 'external-boot-materialization-v1', "
-    "'ownership', jsonb_build_object('system_id', system_id::text, 'run_id', run_id::text), "
-    "'plan_identity', plan_identity, 'artifacts', jsonb_build_object("
-    "'kernel', jsonb_build_object('ref', 'held/kernel'), "
-    "'modules', jsonb_build_object('ref', 'held/modules'), "
-    "'initrd', jsonb_build_object('ref', 'held/initrd'), "
-    "'debuginfo', jsonb_build_object('ref', 'held/debuginfo'))), "
-    "recovery_point = jsonb_build_object('schema', 'external-boot-recovery-v1', "
-    "'binding', jsonb_build_object('system_id', system_id::text, 'run_id', run_id::text, "
-    "'activation_id', id::text), 'plan_identity', plan_identity, "
-    "'recovery_ref', jsonb_build_object('ref', 'held/recovery-point')), "
-    "pre_recovery_evidence = jsonb_build_object("
-    "'schema', 'external-boot-pre-recovery-evidence-v1', 'activation_id', id::text, "
-    "'system_id', system_id::text, 'run_id', run_id::text, 'plan_identity', plan_identity, "
-    "'recovery_object', jsonb_build_object('ref', 'held/pre-recovery')) "
-    "WHERE id = {activation}"
-)
-_ALL_NAMED_OBJECTS = (
-    "held/kernel",
-    "held/modules",
-    "held/initrd",
-    "held/debuginfo",
-    "held/recovery-point",
-    "held/pre-recovery",
-)
 
 
 @pytest.mark.parametrize("missing", _ALL_NAMED_OBJECTS)
