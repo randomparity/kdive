@@ -42,6 +42,24 @@ class CasStatus(StrEnum):
     RETAINED_CAPACITY = "retained_capacity"
 
 
+class SettlementStatus(StrEnum):
+    """Closed result of stranded activation settlement (ADR-0816)."""
+
+    APPLIED = "applied"
+    REPLAYED = "replayed"
+    NOT_FOUND = "not_found"
+    AUTHORITY_OWNED = "authority_owned"
+    NOT_PREPARING = "not_preparing"
+    SYSTEM_ENDED = "system_ended"
+    JOB_LIVE = "job_live"
+    AUTHORITY_EVIDENCE_MISSING = "authority_evidence_missing"
+    WORKER_EVIDENCE_MISSING = "worker_evidence_missing"
+    EVIDENCE_STALE = "evidence_stale"
+    AUTHORITY_JOURNAL_MOVED = "authority_journal_moved"
+    RESERVATION_MISSING = "reservation_missing"
+    OBJECTS_UNPROVEN = "objects_unproven"
+
+
 class ExternalBootTeardownInProgress(ValueError):
     """A current authority owns physical teardown for this System."""
 
@@ -1024,6 +1042,38 @@ class ExternalBootActivationRepository:
         release = validate_stored(ExternalBootReservationRelease, release_row)
         return CasResult(CasStatus.APPLIED, _activation(activation_row), release)
 
+    async def settle_stranded(
+        self,
+        conn: AsyncConnection,
+        *,
+        activation_id: UUID,
+        principal: str,
+        agent_session: str | None,
+        actor: str,
+        reason: str,
+    ) -> SettlementStatus:
+        """End a stranded activation on both owners' evidence; a refusal changes no row."""
+        row = await (
+            await conn.execute(
+                "SELECT public.settle_stranded_external_boot_activation(%s,%s,%s,%s,%s)",
+                (activation_id, principal, agent_session, actor, reason),
+            )
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("settlement returned no status")
+        return SettlementStatus(row[0])
+
+    async def is_settled(self, conn: AsyncConnection, activation_id: UUID) -> bool:
+        """Return whether the settlement primitive ended this activation (ADR-0816)."""
+        row = await (
+            await conn.execute(
+                "SELECT 1 FROM external_boot_activation_settlements "
+                "WHERE activation_id = %s AND settled_at IS NOT NULL",
+                (activation_id,),
+            )
+        ).fetchone()
+        return row is not None
+
     @staticmethod
     def _known_objects(activation_row: dict[str, Any]) -> set[str]:
         known: set[str] = set()
@@ -1164,4 +1214,5 @@ __all__ = [
     "CasStatus",
     "ExternalBootActivationRepository",
     "ExternalBootTeardownInProgress",
+    "SettlementStatus",
 ]

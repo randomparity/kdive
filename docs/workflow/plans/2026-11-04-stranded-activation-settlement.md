@@ -382,8 +382,14 @@ Steps:
 
 ```python
 async def settle_stranded(
-    self, conn, *, activation_id: UUID, principal: str, agent_session: str | None,
-    actor: str, reason: str,
+    self,
+    conn,
+    *,
+    activation_id: UUID,
+    principal: str,
+    agent_session: str | None,
+    actor: str,
+    reason: str,
 ) -> SettlementStatus: ...
 async def is_settled(self, conn, activation_id: UUID) -> bool: ...
 ```
