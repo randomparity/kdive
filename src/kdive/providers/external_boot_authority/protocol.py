@@ -565,6 +565,31 @@ class AuthorityTeardownResponseV1(_ClosedValue):
         return self
 
 
+class AuthorityStrandedObservationRequestV1(_ClosedValue):
+    """The activation to observe; the authority derives every other fact itself (ADR-0816)."""
+
+    schema_: Literal["external-boot-authority-stranded-observation-v1"] = Field(
+        "external-boot-authority-stranded-observation-v1", alias="schema"
+    )
+    activation_id: UUID
+
+
+class AuthorityStrandedObservationResponseV1(_ClosedValue):
+    """A recorded absence, or the closed reason none was recorded."""
+
+    schema_: Literal["external-boot-authority-stranded-observation-response-v1"] = Field(
+        "external-boot-authority-stranded-observation-response-v1", alias="schema"
+    )
+    disposition: Literal["recorded", "domain_present", "objects_present"]
+    objects: Annotated[tuple[str, ...], Field(max_length=32)] = ()
+
+    @model_validator(mode="after")
+    def _objects_name_the_refusal(self) -> Self:
+        if bool(self.objects) != (self.disposition == "objects_present"):
+            raise ValueError("objects must be named exactly when the authority holds them")
+        return self
+
+
 class JournalPhase(StrEnum):
     WATERMARK_INSTALLED = "watermark-installed"
     TAKEOVER_SUPERSEDED = "takeover-superseded"

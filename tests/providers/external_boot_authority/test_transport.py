@@ -37,6 +37,7 @@ from kdive.providers.external_boot_authority.host import (
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     ModuleVolumeSweepResponseV1,
 )
+from kdive.providers.external_boot_authority.protocol import AuthorityStrandedObservationResponseV1
 from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
     AuthorityServiceError,
@@ -1481,3 +1482,63 @@ def test_sweep_dispatch_hides_provider_failure_details() -> None:
 def test_sweep_envelope_rejects_a_malformed_request() -> None:
     with pytest.raises(ValueError):
         encode_request_envelope("sweep-module-volumes", {"retained": "x"}, "credential")
+
+
+def _stranded_envelope() -> bytes:
+    return encode_request_envelope(
+        "observe-stranded-activation",
+        {
+            "activation_id": "00000000-0000-4000-8000-000000000003",
+            "schema": "external-boot-authority-stranded-observation-v1",
+        },
+        "credential",
+    )
+
+
+def test_stranded_observation_reaches_the_service() -> None:
+    seen: list[Any] = []
+
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class Service:
+        async def observe_stranded_activation(self, peer: AuthenticatedPeer, request: Any) -> Any:
+            seen.append((peer, request))
+            return AuthorityStrandedObservationResponseV1(disposition="recorded")
+
+    response = asyncio.run(
+        transport._dispatch(_stranded_envelope(), authenticate, cast(Any, Service()), None, None)
+    )
+
+    assert json.loads(response) == {
+        "status": "ok",
+        "value": {
+            "disposition": "recorded",
+            "objects": [],
+            "schema": "external-boot-authority-stranded-observation-response-v1",
+        },
+    }
+    assert str(seen[0][1].activation_id).endswith("0003")
+
+
+def test_stranded_observation_on_a_service_without_it_is_not_configured() -> None:
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    response = asyncio.run(
+        transport._dispatch(_stranded_envelope(), authenticate, cast(Any, object()), None, None)
+    )
+
+    assert json.loads(response) == {"category": "provider-not-configured", "status": "error"}
+
+
+def test_stranded_observation_refuses_a_peer_supplied_fact_at_encode() -> None:
+    with pytest.raises(ValueError, match="invalid-request|validation"):
+        encode_request_envelope(
+            "observe-stranded-activation",
+            {
+                "activation_id": "00000000-0000-4000-8000-000000000003",
+                "domain_name": "chosen-by-the-peer",
+            },
+            "credential",
+        )
