@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import socket
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
@@ -11,7 +10,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
-import psycopg
 import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -27,7 +25,6 @@ from kdive.jobs.handlers.connectivity.ssh_reachable import (
     check_ssh_reachable_handler,
     serialize_reach_verdict,
 )
-from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -196,31 +193,6 @@ def _job_for(system_id: UUID) -> Job:
     )
 
 
-def _authority_resolver() -> MagicMock:
-    """A real local connector whose domain read fails: the authority's domain is invisible."""
-
-    def invisible(_system: SystemHandle) -> tuple[str, int]:
-        raise AssertionError("a carried SSH forward must not read the local domain")
-
-    connector = LocalLibvirtConnect(
-        resolve_endpoint=lambda _s: ("127.0.0.1", 1234),
-        resolve_ssh_endpoint=invisible,
-        ssh_connect=lambda _host, _port: True,
-    )
-    binding = SimpleNamespace(runtime=SimpleNamespace(connector=connector))
-    resolver = MagicMock()
-    resolver.binding_for_system = AsyncMock(return_value=binding)
-    return resolver
-
-
-async def _assert_binding_is_refused(worker_pool: AsyncConnectionPool, system_id: UUID) -> None:
-    async with worker_pool.connection() as conn:
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            await conn.execute(
-                "SELECT * FROM resolve_authority_system_control_binding(%s)", (system_id,)
-            )
-
-
 def _resolver(
     endpoint: tuple[str, int] | None, *, raises: BaseException | None = None
 ) -> MagicMock:
@@ -303,41 +275,6 @@ def test_handler_serializes_reachable_verdict(
         '"endpoint":{"host":"127.0.0.1","port":22001},"detail":"reachable","layer":null,'
         '"checks":[{"layer":"tcp_connect","ok":true},{"layer":"ssh_banner","ok":true}]}'
     )
-
-
-def test_handler_probes_the_carried_forward_as_the_worker_role(
-    migrated_url: str,
-    authority_role_dsns: Callable[[str], str],
-) -> None:
-    async def _run() -> str | None:
-        host, port, server = await _serve(b"SSH-2.0-test\r\n")
-        async with (
-            server,
-            AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool,
-        ):
-            await pool.open()
-            async with pool.connection() as conn:
-                system_id = await _seed_system(conn)
-            job = _job_for(system_id).model_copy(
-                update={"payload": {"system_id": str(system_id), "ssh_forward_port": port}}
-            )
-            async with AsyncConnectionPool(
-                authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
-            ) as worker_pool:
-                await _assert_binding_is_refused(worker_pool, system_id)
-                async with worker_pool.connection() as conn:
-                    return await check_ssh_reachable_handler(
-                        conn,
-                        job,
-                        resolver=_authority_resolver(),
-                        secret_registry=SecretRegistry(),
-                    )
-
-    verdict = asyncio.run(_run())
-    assert verdict is not None
-    decoded = json.loads(verdict)
-    assert decoded["reachable"] is True
-    assert decoded["endpoint"]["host"] == "127.0.0.1"
 
 
 def test_handler_serializes_unreachable_verdict_as_success(

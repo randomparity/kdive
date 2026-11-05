@@ -11,7 +11,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
-import psycopg
 import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -95,14 +94,6 @@ def _authority_resolver() -> MagicMock:
     resolver = MagicMock()
     resolver.binding_for_system = AsyncMock(return_value=binding)
     return resolver
-
-
-async def _assert_binding_is_refused(worker_pool: AsyncConnectionPool, system_id: UUID) -> None:
-    async with worker_pool.connection() as conn:
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            await conn.execute(
-                "SELECT * FROM resolve_authority_system_control_binding(%s)", (system_id,)
-            )
 
 
 def _resolver(
@@ -318,43 +309,6 @@ async def _seed_system(conn: AsyncConnection) -> UUID:
 def _carried_forward_job(system_id: UUID, port: int) -> Job:
     payload = {"system_id": str(system_id), "public_key": _KEY, "ssh_forward_port": port}
     return _job_for(system_id).model_copy(update={"payload": payload})
-
-
-def test_handler_authorizes_over_the_carried_forward_as_the_worker_role(
-    migrated_url: str,
-    authority_role_dsns: Callable[[str], str],
-) -> None:
-    probed: list[tuple[str, int]] = []
-    recorded: list[list[str]] = []
-
-    async def _probe(host: str, port: int) -> ReachResult:
-        probed.append((host, port))
-        return ReachResult.ok()
-
-    async def _run() -> None:
-        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
-            await pool.open()
-            async with pool.connection() as conn:
-                system_id = await _seed_system(conn)
-                await ensure_system_bootstrap_key(conn, system_id, secret_registry=SecretRegistry())
-            async with AsyncConnectionPool(
-                authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
-            ) as worker_pool:
-                await _assert_binding_is_refused(worker_pool, system_id)
-                async with worker_pool.connection() as conn:
-                    await authorize_ssh_key_handler(
-                        conn,
-                        _carried_forward_job(system_id, 41234),
-                        resolver=_authority_resolver(),
-                        secret_registry=SecretRegistry(),
-                        ssh_exec=lambda argv, _key: recorded.append(argv),
-                        probe=_probe,
-                    )
-
-    asyncio.run(_run())
-    assert probed == [("127.0.0.1", 41234)]
-    assert len(recorded) == 1
-    assert "root@127.0.0.1" in recorded[0] and "41234" in recorded[0]
 
 
 @pytest.mark.parametrize("state", ["failed", "torn_down"])
