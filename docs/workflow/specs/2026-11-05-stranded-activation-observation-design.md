@@ -88,7 +88,8 @@ one verdict over several locations, so the list says where to look, not which en
 Each refusal is logged with its reason, as `_resolve_recovery_orphan` does.
 
 The local adapter reads the daemon without a session, through a new
-`LocalExternalBootSessionFactory.domain_is_defined`, and the store through
+`LocalExternalBootSessionFactory.domain_is_defined`, for `domain_name` and for the name
+`domain_name_for(system_id)` derives, because the worker role can write `systems.domain_name`; the store goes through
 `RecoveryMetadataStore.exact_recovery_absence`. The remote branch of `_build_mutation_service`
 passes no repository.
 
@@ -139,7 +140,8 @@ on the grant.
 3. **Control per boundary.** Service: `require_platform_role(PLATFORM_ADMIN)`. Transport: peer
    authentication, closed request model, canonical decode. Read function: `session_user` role check,
    `REVOKE ALL`, one `GRANT`, `SET search_path = ''`. Authority: the request names only an
-   activation, so a peer cannot choose the domain, run, or object list. Refusals name object
+   activation, and the provider also checks its own derived domain name, so neither a peer nor a
+   rewritten `systems.domain_name` can choose the domain it testifies about. Refusals name object
    references the operator already owns and no provider detail.
 4. **Explicitly out of scope.** A compromised authority credential, trusted by ADR-0816 to name its
    instance. Denial auditing, which #3551's tool owns.

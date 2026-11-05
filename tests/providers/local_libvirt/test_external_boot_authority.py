@@ -106,7 +106,7 @@ from kdive.providers.ports.external_boot import (
 # The authority service's own repository double. Reused rather than reimplemented here:
 # a second implementation of `AuthorityRepository` in this package could drift from the
 # contract the service is actually tested against, which is the thing these tests rely on.
-from kdive.providers.shared.runtime_paths import overlay_path
+from kdive.providers.shared.runtime_paths import domain_name_for, overlay_path
 from tests.providers.external_boot_authority.service_support import _Repository
 from tests.providers.local_libvirt.lifecycle.boot.session_support import Conn, Domain, Guest
 from tests.providers.local_libvirt.lifecycle.boot.session_support import _xml as _session_xml
@@ -2602,8 +2602,10 @@ class _StrandedFactory:
     def __init__(self, *, defined: bool = False, fault: Exception | None = None) -> None:
         self.defined = defined
         self.fault = fault
+        self.asked: list[str] = []
 
     def domain_is_defined(self, domain_name: str) -> bool:
+        self.asked.append(domain_name)
         if self.fault is not None:
             raise self.fault
         return self.defined
@@ -2681,3 +2683,17 @@ def test_a_libvirt_fault_never_reads_as_absent(tmp_path: Path) -> None:
         _stranded_observation(
             _private_root(tmp_path), _StrandedFactory(fault=RuntimeError("daemon unreachable"))
         )
+
+
+def test_a_rewritten_domain_name_cannot_hide_the_derived_domain(tmp_path: Path) -> None:
+    class DerivedNameOnly(_StrandedFactory):
+        def domain_is_defined(self, domain_name: str) -> bool:
+            super().domain_is_defined(domain_name)
+            return domain_name != "kdive-stranded"
+
+    factory = DerivedNameOnly()
+
+    facts, target, _activation = _stranded_observation(_private_root(tmp_path), factory)
+
+    assert facts.domain_absent is False
+    assert domain_name_for(target.system_id) in factory.asked

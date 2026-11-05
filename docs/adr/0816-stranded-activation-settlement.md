@@ -103,7 +103,8 @@ journal tail equal to the database head, or no journal at all. The tail comparis
 proof; the in-memory failed flag only refuses while another caller holds the lane. A non-terminal head
 does not refuse. A provider call dies with the single authority process, so an interrupted head is
 the shape being recovered. It then observes its own daemon and store, and records absence only when
-the domain is absent and `exact_recovery_absence` holds for the activation.
+the domain is absent and `exact_recovery_absence` holds for the activation. It looks up both
+`systems.domain_name` and its own derived name, because the worker role can write that column.
 
 The observation writes no journal record, adds no `AuthorityOperation`, and is a new transport
 operation beside `sweep-module-volumes`.
