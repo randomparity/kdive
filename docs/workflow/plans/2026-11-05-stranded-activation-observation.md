@@ -39,6 +39,7 @@ Expected implementation size: 2000–2300 changed lines (L) — the delivered di
 | `src/kdive/providers/external_boot_authority/stranded.py` | new: repository, facts, digest |
 | `src/kdive/providers/external_boot_authority/service.py` | `observe_stranded_activation` |
 | `src/kdive/providers/external_boot_authority/host.py` | accepted function, wire repository |
+| `tests/db/stranded_activation_support.py` | new: the `_strand` fixture moved out of the 0194 test |
 | `src/kdive/providers/local_libvirt/external_boot_authority.py`, `.../lifecycle/boot/external_boot.py`, `.../lifecycle/boot/session.py` | adapter observation |
 
 No ownership move. No obsolete path. Tests live beside their subjects; the four `migrations[-K:]`

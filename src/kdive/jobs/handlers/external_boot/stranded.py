@@ -105,9 +105,9 @@ async def observe_stranded_activation_handler(
     if response.disposition == "objects_present":
         raise _refuse(
             "authority_objects_present",
-            f"the authority's store is not proven absent for activation {activation_id}: "
-            f"{', '.join(response.objects)}; inspect these references on the authority host, "
-            "settlement stays refused until they are gone",
+            f"settlement stays refused until the authority's store is clear for activation "
+            f"{activation_id}; inspect these references on the authority host: "
+            f"{', '.join(response.objects)}",
         )
     return json.dumps(
         {"activation_id": str(activation_id), "disposition": response.disposition},

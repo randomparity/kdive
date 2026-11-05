@@ -74,7 +74,7 @@ one verdict over several locations, so the list says where to look, not which en
 `ExternalBootAuthorityService.observe_stranded_activation`:
 
 1. Refuse `superseded` when closing or when the target read returns no row; refuse
-   `provider_conflict` with no peer, no repository, or an adapter without
+   `unauthenticated` with no peer, and `provider_conflict` with no repository or an adapter without
    `observe_stranded_absence`.
 2. Under the System lane lock: refuse `journal_conflict` (`stranded_lane_failed`) on a failed lane
    and `superseded` on an active operation.
@@ -115,7 +115,8 @@ on the grant.
    - An authority with no mutation service answers `provider-not-configured`; the job fails naming
      it, because that host has no daemon session to observe.
    - The failed flag refuses only while another caller holds the lane. The durable proof is the
-     tail and head comparison; a tail that differs is repaired by an authority restart.
+     tail and head comparison. An authority restart retracts one unanchored final record; any other
+     divergence fails host readiness and stays an operator repair.
    - A refusal message can lose its tail at the worker's 1000-character failure cap; the recovery
      reference comes first.
    - A worker record with no authority record: settlement refuses until it ages out, by design.
