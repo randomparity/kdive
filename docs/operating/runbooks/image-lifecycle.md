@@ -340,18 +340,73 @@ false, behavior is exactly as before (`restrict=on`, no egress).
 **Security — host loopback is reachable too.** With `restrict=off`, QEMU user-mode networking
 maps the guest's gateway address, `10.0.2.2`, to the host's loopback interface. An egress-enabled
 guest can open TCP connections to any service that listens only on host loopback, as the account
-libvirt runs QEMU as: the libvirt QEMU user under `qemu:///system`, the invoking account under
-`qemu:///session`. For an authority System with `guest_egress` in its manifest, remote authority
-Systems included, it is the authority account that owns the private session daemon. Your
+libvirt runs QEMU as: the libvirt QEMU user under `qemu:///system`, the account that owns the
+session daemon under `qemu:///session` (the operator on the installed local-libvirt lifecycle, not
+a worker slot account). For an authority System with `guest_egress` in its manifest, remote
+authority Systems included, it is the authority account that owns the private session daemon. Your
 network-zone firewall does not see these connections, because they terminate on the host. That
 includes kdive's own per-System listeners: other guests' loopback SSH forward ports and, on Systems
 provisioned with `debug.gdbstub`, the unauthenticated QEMU gdbstub, which gives the reaching guest
 control of that other guest. The image-build customization boot has its own ungated `restrict=off`
 NIC with the same mapping, so it reaches host-loopback services whether or not `guest_egress` is
 set. Before enabling `guest_egress`, treat every loopback-only service on that host as reachable by
-the guest's kernel and userspace, or do not enable it on that host. Whether kdive will mitigate this
-is tracked in #3496; until then the exposure is part of what you accept (ADR-0313, amendment of
-2026-11-03).
+the guest's kernel and userspace, or do not enable it on that host. ADR-0810 accepts
+this exposure and kdive does not mitigate it, so it is part of what you accept (ADR-0313, amendment of 2026-11-03).
+
+**Optional host firewall, and where it cannot be used.** An nftables rule that rejects new
+connections from QEMU's uid to local addresses closes this path, but only on a host where no kdive
+service or client uses that uid. **The `demo-up.sh` stack does not meet that condition:** the
+session daemon, QEMU, `kdive server` and `kdive reconciler` all run as the operator. Keyed to the
+operator, the rule took server and reconciler `/readyz` to 503 and stopped the operator's own
+loopback clients until it was removed. Keyed to a worker slot account, it blocks no guest connection
+and fails that worker's readiness. The `kdive` system units for the server and reconciler were not
+run. An authority host, where one account owns the session daemon and the authority service, is
+unproven because no lab host carries `provider_authority_host`. Do not assume the rule is safe on
+either.
+
+Where the condition does hold, this is the tested rule. Save it to a file, load it with
+`nft -f <file>`, and remove it with `nft delete table inet kdive_guest_loopback`:
+
+```text
+table inet kdive_guest_loopback {
+  chain output {
+    type filter hook output priority filter; policy accept;
+    meta skuid <qemu-uid> oif "lo" ct state new ip daddr <loopback-resolver> meta l4proto { tcp, udp } th dport 53 accept
+    meta skuid <qemu-uid> oif "lo" ct state new counter reject
+  }
+}
+```
+
+- `<qemu-uid>`: read it from the running process, not from an account name you expect:
+  `ps -eo uid=,comm= | grep -E 'qemu-(system|kvm)'`. If that lists several uids, each one needs its
+  own pair of lines. The rule does not cut established connections, so load it
+  before starting an egress guest; a guest without egress can supply the uid.
+- `<loopback-resolver>`: the `nameserver` in the host's `/etc/resolv.conf` when it is a loopback
+  address, `127.0.0.53` under the `systemd-resolved` stub. Without this line guest DNS and package
+  installs fail. Delete the line on a host whose resolver is off-host. The field takes one IPv4
+  address, and an IPv6 value such as `::1` stops the file loading. Add one line per loopback
+  resolver; an IPv6 one needs `ip6 daddr`, which was not tested. A resolver on `127.0.0.1` was not
+  tested either; expect the guest to reach it through `10.0.2.2:53` as well.
+- `table inet` is required: the slirp IPv6 gateway `fec0::2` reaches `::1`. `oif "lo"` also covers
+  the host's own routable addresses, which a loopback-only `daddr` match misses.
+
+Ubuntu 26.04 and Fedora 44 on x86_64 with KVM proved it, with the results in ADR-0810 (amendment
+of 2026-11-04). The guest lost IPv4 and IPv6 loopback services, the host's own address, loopback UDP, and other guests'
+SSH and gdbstub ports. It kept DNS, outbound NAT and package installs, and clients on another
+account kept SSH and gdbstub attach. The customization boot NIC is covered the same way when its
+domain runs under the keyed uid. The proof used domains carrying kdive's NIC and gdbstub arguments,
+not provisioned Systems, and a real customization boot was not run. Rocky, openSUSE, ppc64le and
+`qemu:///system` are unproven.
+
+The rule covers traffic the kernel routes through `lo`. Off-host destinations remain your network
+zone's job. Containers and VMs behind a local bridge route out of the bridge device, so it does not
+cover them; the host's own addresses, bridge gateways included, route through `lo`. Neither case
+was tested. A host service you want guests to reach, such as a local object-store endpoint, is cut
+too. It is not persistent: a reboot or `nft flush ruleset` removes it with no sign from QEMU, and
+your distribution's `nftables.service` may run that flush on stop or reload. Confirm it with
+`nft list table inet kdive_guest_loopback`, and from an egress guest confirm that a connection to
+`10.0.2.2:<port>` of a host listener fails. A timeout counts: the guest sees IPv4 attempts time out
+and IPv6 attempts refused.
 
 **Note:** `restrict=off` opens the *route*; the guest still needs to DHCP the NIC and populate
 `/etc/resolv.conf` (SLIRP hands out `10.0.2.15` with DNS at `10.0.2.3`). The `kdive-ready` images do
