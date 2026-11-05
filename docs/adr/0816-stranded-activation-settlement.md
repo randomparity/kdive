@@ -121,10 +121,11 @@ optional, so any other provider refuses by name.
 
 **Consequences.**
 
-- Upgrade order: migrate 0195 and deploy the authority host together, because the new grant fails
-  readiness on an older host; then deploy workers and servers. A newer worker against an older
-  authority gets `invalid-request` and the job fails closed. The lifecycle identity does not move:
-  `systemd_worker_contract.py` references neither `AuthorityOperation` nor job kinds.
+- Upgrade order: migrate 0195, then the authority host, because the new grant fails readiness on an
+  older host; then every worker; then servers, because an older worker cannot parse the new job
+  kind it claims. A newer worker against an older authority gets `invalid-request` and the job fails
+  closed. The issue's claim that a new `AuthorityOperation` moves the lifecycle identity does not
+  apply: none is added, and `systemd_worker_contract.py` references neither it nor job kinds.
 - `request_stranded_observation` and `read_stranded_observation` in
   `kdive.services.external_boot.settlement` are the only Python entries to the job. Both require
   `platform_admin` and write no audit row, and neither has an MCP tool until #3551 calls them.

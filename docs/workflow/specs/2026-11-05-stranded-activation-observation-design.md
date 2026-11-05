@@ -95,11 +95,49 @@ passes no repository.
 
 `check_database_role` adds the read function to `accepted_function`.
 
+## Held objects
+
+The refusal names the recovery reference and every object the activation row lists:
+`materialization.artifacts` (`kernel`, `modules`, `initrd`, `debuginfo`),
+`recovery_point.recovery_ref` and `pre_recovery_evidence.recovery_object`. The store check is one
+verdict over those locations, so the list says where to look.
+
+The shape is reached only when the authority's daemon once defined the domain:
+`LocalLibvirtExternalBoot.materialize` opens a session, and
+`LocalExternalBootSessionFactory.open` calls `lookupByName` before anything materializes. A System
+whose domain never reached the authority therefore holds no objects. A relocated fixture moved back
+to the worker is the case that does.
+
+## Other providers
+
+Only local-libvirt carries the producers. On remote-libvirt the worker runtime has no
+`domain_presence`, so the job refuses terminally with `stranded_observation_unsupported` before it
+records anything or sends to the authority. The remote branch of `_build_mutation_service` passes no
+repository, so a direct request refuses `provider_conflict`. This is a named refusal, not a silent
+gap, and the stranded shape and #3520 are local-libvirt.
+
 ## Upgrade order
 
-Migrate 0195 and deploy the authority host together, then workers and servers. The lifecycle
-identity does not move. After 0195 deploys, roll forward: a reverted authority host fails readiness
-on the grant.
+1. Migrate 0195, then deploy the authority host straight after it. A new host on an unmigrated
+   database fails readiness on its `regprocedure` cast; an old host on 0195 fails readiness with
+   `database-role: excessive-privilege`. The host is unready between the two steps.
+2. Deploy every worker. A new worker against an old authority gets `invalid-request` and the job
+   fails closed.
+3. Deploy servers last. An old worker raises a `ValidationError` on `Job.model_validate` for the
+   new kind, inside the claim transaction, so a request must not be enqueued until step 2 ends.
+   This branch has no caller; the ordering binds #3551's tool.
+
+After 0195 deploys, roll forward: a reverted authority host fails readiness on the grant.
+
+Correction to the issue: it says a new `AuthorityOperation` moves the lifecycle identity and fails a
+mismatched runner closed. That does not apply. This change adds no `AuthorityOperation`, and
+`lifecycle_protocol_identity()` hashes only `LifecycleRequest` and `LifecycleResponse`, whose
+`Operation` literal is a separate type, so the native runner needs no reprovision.
+
+Evidence, run against an export of main `f7143cadc` under the same interpreter: both trees return
+identity `1:ca537f3f…`; the old `_dispatch` answers the new envelope with `invalid-request`; the old
+`check_database_role` on a 0195 database raises `database-role: excessive-privilege` while the new
+one accepts it; the old `Job.model_validate` rejects `observe_stranded_activation`.
 
 ## Failure model
 
@@ -162,6 +200,7 @@ on the grant.
   `kdive_reconciler`.
 - A materialized activation refuses `authority_objects_present` while held; once the adapter reports
   the store absent, it settles, so the read's list covers settlement's.
+- The real remote-libvirt runtime refuses the job with `stranded_observation_unsupported`.
 - `preparing` admits the new operation; every other state in `_ADMITTED` denies it.
 
 ## Validation

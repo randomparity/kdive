@@ -16,9 +16,11 @@ from kdive.db.external_boot_activations import CasStatus
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.handlers.external_boot import stranded
+from kdive.providers.assembly.composition import build_remote_runtime
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityStrandedObservationResponseV1,
 )
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 _SYSTEM = uuid4()
 _ACTIVATION = uuid4()
@@ -151,6 +153,27 @@ def test_a_runtime_without_presence_is_unsupported(monkeypatch: pytest.MonkeyPat
 
     assert raised.value.details["reason"] == "stranded_observation_unsupported"
     assert raised.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_the_real_remote_runtime_refuses_by_name() -> None:
+    runtime = build_remote_runtime(secret_registry=SecretRegistry())
+
+    class Resolver:
+        async def binding_for_system(self, conn: Any, system_id: Any) -> Any:
+            return SimpleNamespace(runtime=runtime)
+
+    with pytest.raises(CategorizedError) as raised:
+        asyncio.run(
+            stranded.observe_stranded_activation_handler(
+                cast(Any, _Conn()),
+                _job(),
+                resolver=cast(Any, Resolver()),
+                incarnation_credential=SecretStr("credential"),
+            )
+        )
+
+    assert raised.value.details["reason"] == "stranded_observation_unsupported"
+    assert raised.value.terminal is True
 
 
 def test_no_resolver_is_unsupported() -> None:
