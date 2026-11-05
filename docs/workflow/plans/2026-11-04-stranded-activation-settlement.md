@@ -7,21 +7,21 @@ DEFINER` functions. A repository wraps them, and one service function is the `pl
 
 Tech stack: Python 3.14, psycopg, PostgreSQL, pytest with disposable Postgres.
 
-Expected implementation size: 420–560 changed lines (M) — migration, repository, service, real-DB tests and four window-list rows, from the file map below.
+Expected implementation size: 620–760 changed lines (M) — migration, repository, service, real-DB tests and four window-list rows, from the file map below.
 
 ## Global Constraints
 
 - Migration file is exactly `src/kdive/db/schema/0194_stranded_activation_settlement.sql`; ADR is `docs/adr/0816-stranded-activation-settlement.md`.
 - Forward-only (ADR-0015). Ruff line length 100. Prose avoids "critical", "robust", "comprehensive", "elegant", "Sprint".
 - No change to admission, routing, release or reconciler code. The only provider edit is one `accepted_function` entry in `host.py`.
-- Deferred to #3551: producing the observations, routing, fences, the tool, refusal auditing. Deferred to #3552: runbook and live proof.
+- Deferred to #3551: routing, the lease-expiry lane, fences, the tool, refusal auditing. Deferred to #3552: runbook and live proof. Producing the observations and removing objects the authority holds has no owner yet; the campaign orchestrator holds that follow-up.
 
 ## File map
 
 | File | Change | Owns |
 |---|---|---|
 | `src/kdive/db/schema/0194_stranded_activation_settlement.sql` | create | settlement table and functions (criteria 2, 3, 4) |
-| `src/kdive/db/external_boot_activations.py` | modify | `SettlementStatus` and four methods (criterion 5) |
+| `src/kdive/db/external_boot_activations.py` | modify | `SettlementStatus`, `settle_stranded`, `is_settled` (criterion 5) |
 | `src/kdive/services/external_boot/settlement.py` | create | `platform_admin` and reason gate (criterion 4) |
 | `tests/db/test_migration_0194_stranded_activation_settlement.py` | create | real-DB contracts (criteria 2, 3) |
 | `tests/services/external_boot/test_settlement.py` | create | service gate |
@@ -29,7 +29,7 @@ Expected implementation size: 420–560 changed lines (M) — migration, reposit
 | `tests/db/test_migrate.py`, `test_migration_0091_*`, `test_migration_0102_*`, `test_migration_0115_*` | modify | window rows |
 | `tests/db/test_worker_fence_authority.py`, `tests/db/test_external_boot_activation_migration.py` | modify | table inventories |
 
-No caller migration and no obsolete path. Migration 0192 is consumed and unused; #3535 holds 0193. If 0193 lands first, each window list also needs its row and one more K; check each by hand after a base refresh. 0194 must stay above main's highest migration.
+No caller migration and no obsolete path. Migration 0192 is consumed and unused; #3535 holds 0193. 0193 has landed on the base. Check each K by hand after any later base refresh. 0194 must stay above main's highest migration.
 
 ## Task 1: migration
 
@@ -360,7 +360,7 @@ GRANT EXECUTE ON FUNCTION public.settle_stranded_external_boot_activation(uuid,t
     TO kdive_server;
 ```
 
-4. Add the row `("0194", "0194_stranded_activation_settlement.sql")` to the end of each of the four lists and raise K by one (`-88` to `-89`, `-84` to `-85` twice, `-71` to `-72`).
+4. Add the row `("0194", "0194_stranded_activation_settlement.sql")` to the end of each of the four lists and raise K by one (`-89` to `-90`, `-85` to `-86` twice, `-72` to `-73`, with #3535's 0193 row already present).
 5. Add `'public.record_stranded_activation_authority_absence(uuid,text,text,text,text[])'::regprocedure` to `accepted_function` in `host.py`, add `external_boot_activation_settlements` to the `external_boot_%` table set in `test_external_boot_activation_migration.py`, and give it its own `SELECT`-only entry in `test_worker_fence_authority.py`, for the worker and the reconciler.
 6. Run both green commands plus `uv run python -m pytest tests/db/test_worker_fence_authority.py tests/db/test_external_boot_activation_migration.py tests/db/test_connected_authority_acceptance.py tests/db/test_external_boot_authority_head_inventory_migration.py -q`. Commit `feat(db): add stranded activation settlement primitive`.
 
@@ -381,14 +381,6 @@ Steps:
 3. In the repository module add `SettlementStatus(StrEnum)`, one member per status in the spec's Settlement order plus `APPLIED = "applied"` and `REPLAYED = "replayed"`, and export it. Add to `ExternalBootActivationRepository`, each a keyword-only wrapper over one `SELECT public.<function>(...)`, raising `RuntimeError` on no row:
 
 ```python
-async def record_settlement_authority_absence(
-    self, conn, *, activation_id: UUID, authority_instance: str, domain_name: str,
-    composite_state: str, absent_objects: tuple[str, ...],
-) -> CasStatus: ...
-async def record_settlement_worker_ownership(
-    self, conn, *, credential_hash: bytes, job_id: UUID, job_attempt: int,
-    activation_id: UUID, domain_name: str,
-) -> CasStatus: ...
 async def settle_stranded(
     self, conn, *, activation_id: UUID, principal: str, agent_session: str | None,
     actor: str, reason: str,

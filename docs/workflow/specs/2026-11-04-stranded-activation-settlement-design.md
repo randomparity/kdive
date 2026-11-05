@@ -26,8 +26,8 @@ and the worker holds its domain. The primitive provides that and nothing else.
 - `settle_stranded_external_boot_activation(activation, principal, agent_session, actor, reason)`
   returns one closed status. Role `kdive_server`.
 
-**Repository.** `ExternalBootActivationRepository` gains `record_settlement_authority_absence`,
-`record_settlement_worker_ownership`, `settle_stranded` and `is_settled`, plus `SettlementStatus`.
+**Repository.** `ExternalBootActivationRepository` gains `settle_stranded` and `is_settled`, plus
+`SettlementStatus`. The recorders get no Python wrapper until a producer exists.
 
 **Host readiness.** `check_database_role` in `providers/external_boot_authority/host.py` adds the
 authority recorder to `accepted_function`, or the grant fails authority readiness.
