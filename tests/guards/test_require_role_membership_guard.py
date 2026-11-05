@@ -86,6 +86,14 @@ _UNENVELOPED_PLATFORM_ROLE: dict[str, str] = {
         "a service with no tool yet; the #3551 handler must catch AuthorizationError and return "
         "ToolResponse.denied (ADR-0816)"
     ),
+    "services/external_boot/settlement.py::request_stranded_observation": (
+        "a service with no tool yet; the #3551 handler must catch AuthorizationError and return "
+        "ToolResponse.denied (ADR-0816)"
+    ),
+    "services/external_boot/settlement.py::read_stranded_observation": (
+        "a service with no tool yet; the #3551 handler must catch AuthorizationError and return "
+        "ToolResponse.denied (ADR-0816)"
+    ),
 }
 
 
