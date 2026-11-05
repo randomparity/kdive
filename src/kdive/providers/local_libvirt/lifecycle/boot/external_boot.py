@@ -3439,6 +3439,10 @@ class LocalLibvirtExternalBoot:
             receipt = self._io.read_cleanup_quarantine(binding.binding)
             if receipt is None:
                 raise ValueError("cleanup quarantine disappeared before adopt")
+            # The digest covers `managed`: an unmanaged expectation refuses a managed receipt,
+            # while a retry holding the managed digest re-adopts it as an idempotent no-op.
+            if self._quarantine_observation(receipt).observed_digest != expected_observed_digest:
+                raise ValueError("cleanup quarantine observation changed before adopt")
             self._io.adopt_cleanup_quarantine(receipt)
         return self.observe_object(binding, authority)
 

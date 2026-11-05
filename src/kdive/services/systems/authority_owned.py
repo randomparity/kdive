@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Literal
@@ -229,6 +230,7 @@ async def enqueue_preactivation_teardown(
     authorizing: Authorizing,
     *,
     recycle: queue.JobRecyclePolicy,
+    on_recycle: Callable[[Job], Awaitable[None]] | None = None,
 ) -> Job:
     """Enqueue the sole authority teardown and advance its ownership state atomically.
 
@@ -237,6 +239,10 @@ async def enqueue_preactivation_teardown(
     A ``failed`` prior job with the same marker (its retained-receipt budget is spent, #3530) is
     restarted only when ``recycle`` admits ``failed`` rows, i.e. on an operator request; automatic
     callers pass ``NEVER`` so the bound cannot be re-spent every sweep.
+
+    ``on_recycle`` runs in this transaction, once the admission succeeds, when this call restarted
+    a prior row. The signal comes from the restarting statement, so a caller that audits the
+    recycle cannot miss a row a worker failed between a separate pre-read and this call.
     """
     dedup_key = _teardown_dedup_key(system.id)
     operation_identity = (
@@ -269,10 +275,11 @@ async def enqueue_preactivation_teardown(
             "an ordinary teardown job cannot be replayed for an authority-owned System",
             category=ErrorCategory.CONFLICT,
         )
+    recycled = False
     if prior is not None and prior.state is not JobState.FAILED:
         job = prior
     else:
-        job = await queue.enqueue(
+        job, changed = await queue.enqueue_with_status(
             conn,
             JobKind.TEARDOWN,
             TeardownPayload(system_id=str(system.id), authority_system_v1=marker),
@@ -280,6 +287,7 @@ async def enqueue_preactivation_teardown(
             dedup_key,
             recycle=recycle,
         )
+        recycled = prior is not None and changed
     result = await (
         await conn.execute(
             "SELECT request_authority_system_preactivation_teardown(%s,%s,%s)",
@@ -291,6 +299,8 @@ async def enqueue_preactivation_teardown(
             "authority-owned System teardown admission conflicted",
             category=ErrorCategory.CONFLICT,
         )
+    if recycled and on_recycle is not None:
+        await on_recycle(job)
     return job
 
 

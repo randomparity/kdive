@@ -24,7 +24,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownReservationV1,
@@ -62,6 +62,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
 )
 from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import (
     VMLINUX_HEADROOM_BYTES,
+    GuestFreeSpaceRefusal,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import ProbeFailure, ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
@@ -6202,6 +6203,48 @@ def test_quarantine_port_reaches_an_unmanaged_receipt_after_teardown(
     _assert_disposed(root, point, disposition)
 
 
+@pytest.mark.parametrize("swap", ["other-proof", "already-managed"])
+def test_adopt_refuses_a_receipt_replaced_between_observe_and_the_pin(
+    tmp_path: Path, swap: str
+) -> None:
+    """#3518: the digest is rechecked inside the pin, as delete_recovery_object does."""
+    root = tmp_path / "recovery"
+    root.mkdir(mode=0o700)
+    point, receipt = _quarantined(root)
+    ports, scope = _production_ports(root, [], torn_down=True)
+    authority = OpaqueProviderRef(ref="authority/current")
+    observed = LocalLibvirtExternalBoot._quarantine_observation(receipt)
+    other = _cleanup_proof_for(point).model_copy(update={"journal_digest": "sha256:" + "8" * 64})
+    io = ports._io
+    real_open_pinned = io.open_pinned
+    pins: list[int] = []
+
+    def swapping_open_pinned(*args: Any) -> Any:
+        pins.append(1)
+        if len(pins) == 2:
+            with RecoveryMetadataStore(root) as store:
+                if swap == "other-proof":
+                    store.record_cleanup_quarantine(point, other)
+                else:
+                    store.adopt_cleanup_quarantine(receipt)
+        return real_open_pinned(*args)
+
+    setattr(io, "open_pinned", swapping_open_pinned)  # noqa: B010
+    with (
+        scope.issue(authority, _BINDING),
+        pytest.raises(ValueError, match="observation changed before adopt"),
+    ):
+        ports.adopt_object(observed.binding, authority, observed.observed_digest)
+
+    with RecoveryMetadataStore(root) as store:
+        kept = store.read_cleanup_quarantine(point.binding)
+    assert kept is not None
+    if swap == "other-proof":
+        assert not kept.managed and kept.proof == other
+    else:
+        assert kept.managed and kept.proof == receipt.proof
+
+
 def test_quarantine_port_observes_a_kept_managed_receipt_after_teardown(tmp_path: Path) -> None:
     """#3489: the receipt #3467 keeps is observable, not listable, and never deleted."""
     root = tmp_path / "recovery"
@@ -7388,7 +7431,7 @@ def test_activation_refuses_a_guest_without_room_for_the_artifact_before_uploadi
     )
     harness.guest.free_bytes = VMLINUX_HEADROOM_BYTES
 
-    with pytest.raises(CategorizedError) as caught:
+    with pytest.raises(GuestFreeSpaceRefusal) as caught:
         harness.activate()
 
     assert caught.value.category is ErrorCategory.INSTALL_FAILURE

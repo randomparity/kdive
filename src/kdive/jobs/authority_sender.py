@@ -23,6 +23,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityConflictResolutionRequestV1,
     AuthorityHealthAcknowledgementV1,
     AuthorityHealthRequestV1,
+    AuthorityInstallRefusalV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
@@ -107,6 +108,20 @@ def _failure(reason: str) -> CategorizedError:
     )
 
 
+def _install_failure(sizes: AuthorityInstallRefusalV1) -> CategorizedError:
+    """ADR-0814: terminal, because the commit requeues on the flag and not on the category."""
+    needed = sizes.vmlinux_bytes + sizes.headroom_bytes
+    return CategorizedError(
+        f"the guest filesystem has {sizes.free_bytes} bytes free but the "
+        f"{sizes.vmlinux_bytes}-byte vmlinux needs {needed} bytes including "
+        f"{sizes.headroom_bytes} bytes of headroom; enlarge the System root disk by at least "
+        f"{needed - sizes.free_bytes} bytes or build a smaller debuginfo",
+        category=ErrorCategory.INSTALL_FAILURE,
+        details={"install_refusal": sizes.model_dump(mode="json")},
+        terminal=True,
+    )
+
+
 def _decode_response[Value: BaseModel](payload: bytes, model: type[Value]) -> Value:
     try:
         if not payload or len(payload) > MAX_ENVELOPE_BYTES:
@@ -124,6 +139,14 @@ def _decode_response[Value: BaseModel](payload: bytes, model: type[Value]) -> Va
                 value["value"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
             ).encode()
             return model.model_validate_json(encoded)
+        if (
+            value.get("status") == "error"
+            and value.get("category") == "install-failure"
+            and set(value) == {"status", "category", "install_refusal"}
+        ):
+            raise _install_failure(
+                AuthorityInstallRefusalV1.model_validate(value["install_refusal"])
+            )
         if (
             value.get("status") == "error"
             and set(value) == {"status", "category"}

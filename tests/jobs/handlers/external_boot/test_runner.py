@@ -32,7 +32,7 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -42,7 +42,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.authority_sender import _failure
+from kdive.jobs.authority_sender import _failure, _install_failure
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.runner import (
     COMMITTABLE_ERROR_CATEGORIES,
@@ -61,6 +61,7 @@ from kdive.jobs.worker import _authority_binding_matches
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityInstallRefusalV1,
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
@@ -1375,6 +1376,62 @@ def test_bound_failure_carries_the_provider_conflict_mark(
         assert committed.state is JobState.QUEUED
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
+
+
+def test_an_install_refusal_ends_the_job_on_this_attempt_with_its_sizes(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    vehicle: Vehicle,
+) -> None:
+    """ADR-0814: the sizes from the wire reach the job row a `jobs.get` reader sees."""
+    sizes = {"vmlinux_bytes": 3, "free_bytes": 1, "headroom_bytes": 2}
+
+    def explode(_context: OperationContext) -> RunningKernelObservation:
+        raise _install_failure(AuthorityInstallRefusalV1.model_validate(sizes))
+
+    async def body(seed: AsyncConnection, conn: AsyncConnection) -> None:
+        case = await seed_case(seed, vehicle, purpose="activate")
+        ports = _ports(
+            case,
+            resolver=resolver_for(vehicle),
+            acknowledger=RecordingAcknowledger(authority_role_dsns("kdive_provider_authority")),
+        )
+
+        with pytest.raises(ExternalBootAuthorityFailure) as excinfo:
+            await _run(conn, case, ports=ports, call_port=explode)
+
+        result = excinfo.value.result.result
+        assert isinstance(result, _FailureResult)
+        assert result.error_category is ErrorCategory.INSTALL_FAILURE
+        assert result.terminal is True
+        assert result.failure_context.authority_reason is None
+        committed = await queue.fail_external_boot(
+            conn,
+            _job(case),
+            excinfo.value.result,
+            incarnation_credential=SecretStr(case.credential),
+        )
+        assert isinstance(committed, Job)
+        assert committed.state is JobState.FAILED
+        assert committed.error_category is ErrorCategory.INSTALL_FAILURE
+        assert committed.failure_context == {"phase": "provider-call", "install_refusal": sizes}
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
+
+
+def test_install_refusal_is_refused_on_another_category() -> None:
+    with pytest.raises(ValidationError, match="install refusal requires install failure"):
+        _FailureResult.model_validate(
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "fail",
+                "error_category": "infrastructure_failure",
+                "failure_context": {
+                    "install_refusal": {"vmlinux_bytes": 3, "free_bytes": 1, "headroom_bytes": 2}
+                },
+                "terminal": True,
+            }
+        )
 
 
 @pytest.mark.parametrize(

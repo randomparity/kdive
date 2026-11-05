@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 import psycopg
@@ -293,6 +294,87 @@ def test_preactivation_teardown_uses_immutable_authority_binding(migrated_url: s
             assert marker["operation"] == "preactivation-teardown"
             assert marker["authority_instance"] == "authority-a"
             assert row["state"] == "teardown-requested"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("worker_fails_mid_call", [False, True])
+def test_preactivation_teardown_recycle_keeps_first_principal_and_audits_requester(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, worker_fails_mid_call: bool
+) -> None:
+    """#3544, ADR-0447: a recycle leaves `authorizing` alone and audits the recycling caller.
+
+    ``worker_fails_mid_call`` dead-letters the job just before the service reads it, as a worker
+    finalizing under a different lock can; the audit must follow the restart, not an earlier read.
+    """
+    handlers = SystemProvisionHandlers(
+        systems_support.TEST_PROFILE_POLICY,
+        systems_support.TEST_COMPONENT_SOURCES,
+        lambda _root: None,
+        authority_route=lambda _kind, _name: "authority-a",
+    )
+    audit_sql = (
+        "SELECT principal FROM audit_log WHERE tool='systems.teardown' "
+        "AND transition='teardown:recycled' AND object_id=%s"
+    )
+
+    async def run() -> None:
+        first = systems_support.ctx(role=Role.ADMIN)
+        second = replace(first, principal="user-2")
+        async with systems_support.pool(migrated_url) as pool:
+            allocation_id = await systems_support.granted_allocation(pool)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE resources SET name='host-a' WHERE id=("
+                    "SELECT resource_id FROM allocations WHERE id=%s)",
+                    (allocation_id,),
+                )
+                await conn.execute(
+                    "INSERT INTO image_catalog "
+                    "(id,provider,name,arch,format,root_device,object_key,digest,provenance,"
+                    "visibility,state) VALUES "
+                    "(%s,'local-libvirt','authority-base','x86_64','qcow2','/dev/vda',"
+                    "'authority-base.qcow2',%s,%s,'public','registered')",
+                    (uuid4(), _DIGEST, Jsonb(_ROOT)),
+                )
+            provision = await handlers.provision_system(
+                pool, systems_support.ctx(), allocation_id=allocation_id, profile=_profile()
+            )
+            system_id = UUID(str(provision.data["system_id"]))
+            queued = await teardown_system(pool, first, str(system_id))
+            replayed = await teardown_system(pool, second, str(system_id))
+            async with pool.connection() as conn:
+                before = await (await conn.execute(audit_sql, (system_id,))).fetchall()
+            fail_job = (
+                "UPDATE jobs SET state='failed',attempt=max_attempts,"
+                "error_category='conflict' WHERE id=%s"
+            )
+            if worker_fails_mid_call:
+                real_dedup_job = authority_owned._dedup_job
+
+                async def dead_letter_then_read(conn: psycopg.AsyncConnection, key: str) -> object:
+                    with psycopg.connect(migrated_url, autocommit=True) as other:
+                        other.execute(fail_job, (queued.object_id,))
+                    return await real_dedup_job(conn, key)
+
+                monkeypatch.setattr(authority_owned, "_dedup_job", dead_letter_then_read)
+            else:
+                async with pool.connection() as conn:
+                    await conn.execute(fail_job, (queued.object_id,))
+            recycled = await teardown_system(pool, second, str(system_id))
+            async with pool.connection() as conn:
+                principal = await (
+                    await conn.execute(
+                        "SELECT authorizing->>'principal',state FROM jobs WHERE id=%s",
+                        (queued.object_id,),
+                    )
+                ).fetchone()
+                after = await (await conn.execute(audit_sql, (system_id,))).fetchall()
+        assert replayed.object_id == recycled.object_id == queued.object_id
+        assert recycled.status == "queued"
+        assert before == []
+        assert principal == ("user-1", "queued")
+        assert after == [("user-2",)]
 
     asyncio.run(run())
 

@@ -77,6 +77,39 @@ def test_configuration_refusal_uses_closed_wire_category() -> None:
     asyncio.run(exercise())
 
 
+def test_install_refusal_frame_carries_only_the_sizes() -> None:
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker")
+
+    class RefusingService:
+        async def execute_mutation(
+            self, peer: AuthenticatedPeer, request: protocol.AuthorityMutationRequestV1
+        ) -> protocol.AuthorityObservationV1:
+            del peer, request
+            raise AuthorityServiceError(
+                "install_failure",
+                install_refusal=protocol.AuthorityInstallRefusalV1(
+                    vmlinux_bytes=3, free_bytes=1, headroom_bytes=2
+                ),
+            )
+
+    async def exercise() -> None:
+        request = _mutation(_takeover())
+        response = await transport._dispatch(
+            encode_request_envelope(
+                "execute-mutation", request.model_dump(mode="json", by_alias=True), "worker"
+            ),
+            authenticate,
+            cast(Any, RefusingService()),
+        )
+        assert response == (
+            b'{"category":"install-failure","install_refusal":'
+            b'{"free_bytes":1,"headroom_bytes":2,"vmlinux_bytes":3},"status":"error"}'
+        )
+
+    asyncio.run(exercise())
+
+
 def test_identity_dispatch_authenticates_before_independent_service() -> None:
     called = False
 
