@@ -149,7 +149,11 @@ def _real_extract_baseline_kernel(  # pragma: no cover - live_vm (libguestfs)
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"base": str(base)},
             )
-        guest.mount_ro(roots[0], "/")
+        mountpoints = guest.inspect_get_mountpoints(roots[0])
+        guest.mount_ro(mountpoints.get("/", roots[0]), "/")
+        # /boot may be a separate filesystem or subvolume; its mount must succeed.
+        if "/boot" in mountpoints:
+            guest.mount_ro(mountpoints["/boot"], "/boot")
         kernel_name, initrd_name = select_kernel_and_initrd(guest.glob_expand("/boot/*"), hint)
         selected = BaselineKernel(
             kernel=dest_dir / "kernel",
