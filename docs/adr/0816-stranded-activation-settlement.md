@@ -63,6 +63,9 @@ fence changes on a settled row, never on activation state alone.
 - Nothing calls the recorders yet, so the primitive is unreachable in production. The recovery
   still needs a worker observation job, which `preparing` admission does not admit today, and an
   authority observation operation. Neither is in this change or in #3551's body.
+- This change writes only the success audit row. The #3551 tool must call `audit_platform_denial`
+  and return `ToolResponse.denied` for a role denial, and must audit each closed refusal the
+  primitive returns.
 - A settled activation stops restricting the System. The worker teardown refusal and the
   `allocations.release` fence still hold, but reconciler lease expiry does not: `_expire_one` calls
   only the admission guard, so a settled allocation can expire while the worker domain runs. #3551
