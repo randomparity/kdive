@@ -13,9 +13,13 @@ and the worker holds its domain. The primitive provides that and nothing else.
 **Migration `0194_stranded_activation_settlement.sql`**
 
 - Table `external_boot_activation_settlements`: one row per activation with authority columns,
-  worker columns and settlement columns. `kdive_server` may read it; nobody may write it directly.
-- `record_stranded_activation_authority_absence(activation, instance, composite_state, objects)`
-  returns `applied`, `superseded` or `not_found`. Role `kdive_provider_authority`.
+  worker columns and settlement columns. `kdive_server`, `kdive_worker` and `kdive_reconciler` may
+  read it, as with the other activation tables; nobody may write it directly.
+- `record_stranded_activation_authority_absence(activation, instance, domain_name,
+  composite_state, objects)` returns `applied`, `superseded` or `not_found`. Role
+  `kdive_provider_authority`. `domain_name` must equal `systems.domain_name`. `composite_state` is
+  the authority's digest of what it observed as absent; it becomes the terminal evidence's
+  `composite_state`. Each object must satisfy the ASCII subset of `OpaqueProviderRef`, else `22023`.
 - `record_stranded_activation_worker_ownership(credential_hash, job, attempt, activation,
   domain_name)` returns the same set. Role `kdive_worker`. The job must be `running`, leased by the
   active fence-protocol-4 incarnation, carry the System's id and no authority marker.
@@ -25,6 +29,9 @@ and the worker holds its domain. The primitive provides that and nothing else.
 **Repository.** `ExternalBootActivationRepository` gains `record_settlement_authority_absence`,
 `record_settlement_worker_ownership`, `settle_stranded` and `is_settled`, plus `SettlementStatus`.
 
+**Host readiness.** `check_database_role` in `providers/external_boot_authority/host.py` adds the
+authority recorder to `accepted_function`, or the grant fails authority readiness.
+
 **Service.** `kdive.services.external_boot.settlement.settle_stranded_activation` enforces
 `platform_admin` and a non-blank reason, and turns a refusal into a typed `CategorizedError`
 carrying `details["reason"]`.
@@ -33,6 +40,7 @@ carrying `details["reason"]`.
 
 Under the System advisory lock, with the activation, System and settlement rows locked:
 
+0. No such activation: `not_found`.
 1. Settled already: return `replayed`.
 2. Ownership row exists: `authority_owned`.
 3. Activation not `preparing`: `not_preparing`.
@@ -49,8 +57,9 @@ Under the System advisory lock, with the activation, System and settlement rows 
     with terminal evidence and `ordinary` cleanup evidence; supersede open authority rows; discharge
     remote-module obligations; mark settled; insert `platform_audit_log`.
 
-A failed authority `current` row does not refuse: teardown attempts on the stranded shape leave one.
-Step 5 and step 9 are what fence a live authority, and superseding the row fences a late mutation.
+Open or retired authority rows do not refuse: failed jobs retire theirs, and an interrupted attempt
+leaves one open. Step 5 and step 9 fence a live authority, and superseding the open rows fences a
+late mutation. Retired rows stay; the ADR states what that requires of #3551.
 
 A blank or oversize reason or a blank principal raises `22023`; those are caller defects, not
 refusals. Reason is 1 to 1024 bytes after trimming.
@@ -66,22 +75,25 @@ refusals. Reason is 1 to 1024 bytes after trimming.
    - Settlement and its audit row commit together or not at all.
    - Capacity: the reservation ends exactly once, through a release row.
 3. **Accepted failure classes**
-   - Authority refs with `"` or non-ASCII characters: the recorder refuses them with `22023`, since
-     SQL ordering must equal the Python canonical ordering. Refs are generated identifiers.
+   - An `OpaqueProviderRef` with non-ASCII characters or `"`: the recorder refuses it with `22023`,
+     since SQL ordering must equal the Python canonical ordering, and such a System stays stranded.
    - An untruthful observer: the recorders trust their database role, the same trust the journal
      functions place in it (ADR-0584).
    - A domain created or relocated after an observation and within the hour with no authority
      journal movement: an operator act outside the recovery, the same trust ADR-0752 records.
 4. **Covered elsewhere**
-   - Producing the observations, teardown routing, fence changes, the audited tool and refusal
-     auditing: #3551.
+   - Teardown routing, the lease-expiry lane, fence changes, the audited tool and refusal auditing:
+     #3551.
+   - Producing the observations and removing objects the authority still holds: no owner yet;
+     reported to the campaign as a follow-up.
    - Stranded-shape end-to-end test and live proof: #3552.
    - General `preparing` reconciliation: excluded by the operator.
 
 ## Threat model
 
 1. **Boundary inventory.** Added: `platform_admin` to the service; server to the settlement
-   function; worker and authority to their recorders. None is widened. Reason text enters from the
+   function; worker and authority to their recorders. Widened: the authority role's accepted
+   function list gains the recorder. Reason text enters from the
    operator and is stored verbatim.
 2. **Actor model.** A project user or a platform role below admin is untrusted. A compromised worker
    or authority credential is untrusted for the other owner's evidence. The trust is in database role
@@ -97,6 +109,9 @@ refusals. Reason is 1 to 1024 bytes after trimming.
 ## Success
 
 - Each refusal in the settlement order changes no row (test per status, against real Postgres).
+- `is_settled` is false before settlement and true after, for `kdive_server`, `kdive_worker` and
+  `kdive_reconciler`.
+- An object outside the `OpaqueProviderRef` subset is refused with `22023`, leaving no record.
 - A System with an ownership row and both records returns `authority_owned`.
 - Worker record alone returns `authority_evidence_missing`; authority record alone returns
   `worker_evidence_missing`.
@@ -111,5 +126,7 @@ refusals. Reason is 1 to 1024 bytes after trimming.
 
 Real-Postgres tests in `tests/db/test_migration_0194_stranded_activation_settlement.py`, service
 tests in `tests/services/external_boot/test_settlement.py`, the four migration window-list tests,
+the table inventories in `tests/db/test_worker_fence_authority.py` and
+`tests/db/test_external_boot_activation_migration.py`, the authority readiness tests,
 then `just lint`, `just type`, `just records` and the full gate through the pre-push hook. No live
 tier: nothing in production reaches the primitive until #3551, and #3552 owns the live proof.

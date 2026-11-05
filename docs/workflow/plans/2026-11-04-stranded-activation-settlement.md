@@ -13,7 +13,7 @@ Expected implementation size: 420–560 changed lines (M) — migration, reposit
 
 - Migration file is exactly `src/kdive/db/schema/0194_stranded_activation_settlement.sql`; ADR is `docs/adr/0816-stranded-activation-settlement.md`.
 - Forward-only (ADR-0015). Ruff line length 100. Prose avoids "critical", "robust", "comprehensive", "elegant", "Sprint".
-- No change to admission, routing, release, reconciler or provider code.
+- No change to admission, routing, release or reconciler code. The only provider edit is one `accepted_function` entry in `host.py`.
 - Deferred to #3551: producing the observations, routing, fences, the tool, refusal auditing. Deferred to #3552: runbook and live proof.
 
 ## File map
@@ -25,9 +25,11 @@ Expected implementation size: 420–560 changed lines (M) — migration, reposit
 | `src/kdive/services/external_boot/settlement.py` | create | `platform_admin` and reason gate (criterion 4) |
 | `tests/db/test_migration_0194_stranded_activation_settlement.py` | create | real-DB contracts (criteria 2, 3) |
 | `tests/services/external_boot/test_settlement.py` | create | service gate |
+| `src/kdive/providers/external_boot_authority/host.py` | modify | `accepted_function` entry for the authority recorder |
 | `tests/db/test_migrate.py`, `test_migration_0091_*`, `test_migration_0102_*`, `test_migration_0115_*` | modify | window rows |
+| `tests/db/test_worker_fence_authority.py`, `tests/db/test_external_boot_activation_migration.py` | modify | table inventories |
 
-No caller migration and no obsolete path. If #3535's 0193 lands first, each window list also needs its row and one more K; check each by hand after a base refresh.
+No caller migration and no obsolete path. Migration 0192 is consumed and unused; #3535 holds 0193. If 0193 lands first, each window list also needs its row and one more K; check each by hand after a base refresh. 0194 must stay above main's highest migration.
 
 ## Task 1: migration
 
@@ -42,14 +44,15 @@ Verification:
 
 Steps:
 
-1. Write the test file with these cases, seeding through `_seed_case` from `tests.db.external_boot_authority_support`, then forcing the stranded shape: `UPDATE external_boot_activations SET state='preparing', recovery_point=NULL`, set the marked job `failed`, set `systems.domain_name`, insert a `pending` reservation, and add a running job whose payload is `{"system_id": ...}` for the seeded incarnation. Call functions through `authority_role_dsns("kdive_server" | "kdive_worker" | "kdive_provider_authority")`.
+1. Write the test file with these cases, seeding through `_seed_case` from `tests.db.external_boot_authority_support`, then forcing the stranded shape: `UPDATE external_boot_activations SET state='preparing', recovery_point=NULL, materialization=NULL`, set the marked job `failed`, set `systems.domain_name`, insert a `pending` reservation, and add a running job whose payload is `{"system_id": ...}` for the seeded incarnation. `objects_unproven` sets a raw `materialization` carrying `artifacts`, kernel and modules refs. The applied case allocates a real authority row with `_allocate` before failing the job, and seeds one `remote_module_attempt_obligations` row. Call functions through `authority_role_dsns("kdive_server" | "kdive_worker" | "kdive_provider_authority")`.
    - `test_applied_settles_and_audits`: both records then settle gives `applied`; row is `abandoned`, `cleanup_complete`, reservation gone, release row exists, authority rows not open, obligations discharged, one audit row; replay gives `replayed` and still one audit row. The row validates through `validate_stored(ExternalBootActivation, row)` and the release through `ExternalBootReservationRelease`.
-   - `test_authority_owned_system_cannot_settle`: insert the ownership row through the `tests.db.authority_system_support` seeding, with both records present; settle gives `authority_owned` and nothing changes.
+   - `test_authority_owned_system_cannot_settle`: insert an `authority_system_ownership` row directly for the seeded System, with both records present; settle gives `authority_owned` and nothing changes.
    - `test_one_owner_is_not_evidence_for_the_other`, parametrized: worker only gives `authority_evidence_missing`; authority only gives `worker_evidence_missing`.
-   - `test_refusals_change_nothing`, parametrized over `not_preparing`, `system_ended`, `job_live`, `evidence_stale`, `authority_journal_moved`, `objects_unproven`, `reservation_missing`, each forcing its condition and asserting the status and an unchanged activation row.
+   - `test_refusals_change_nothing`, parametrized over `not_found`, `not_preparing`, `system_ended`, `job_live`, `evidence_stale`, `authority_journal_moved`, `objects_unproven`, `reservation_missing`, each forcing its condition and asserting the status and an unchanged activation row.
    - `test_role_separation`: `kdive_server` gets `42501` on both recorders; `kdive_worker` on the authority recorder and settle; `kdive_provider_authority` on the worker recorder and settle; `kdive_reconciler` on all three.
    - `test_worker_record_requires_its_own_live_unmarked_job`, parametrized: wrong credential, expired lease, marked job, other System's job, wrong domain each give `superseded`.
-   - `test_blank_reason_is_rejected`: `22023`.
+   - `test_invalid_input_is_rejected`, parametrized: a blank reason, and an object of `vol:x`, `/x`, `a//b`, `a/../b`, `a"b` or a non-ASCII ref, each give `22023`.
+   - `test_settled_is_readable_by_each_role`: `is_settled` false then true as `kdive_server`, `kdive_worker` and `kdive_reconciler`.
 2. Run the green command; expect `does not exist`.
 3. Create the migration:
 
@@ -62,6 +65,7 @@ CREATE TABLE public.external_boot_activation_settlements (
         REFERENCES public.external_boot_activations (id) ON DELETE RESTRICT,
     system_id uuid NOT NULL REFERENCES public.systems (id) ON DELETE RESTRICT,
     authority_instance text,
+    authority_domain_name text,
     authority_journal_sequence bigint,
     authority_journal_digest text,
     authority_composite_state text,
@@ -86,8 +90,8 @@ CREATE TABLE public.external_boot_activation_settlements (
 );
 
 CREATE FUNCTION public.record_stranded_activation_authority_absence(
-    p_activation_id uuid, p_authority_instance text, p_composite_state text,
-    p_absent_objects text[]
+    p_activation_id uuid, p_authority_instance text, p_domain_name text,
+    p_composite_state text, p_absent_objects text[]
 ) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE
     v_activation public.external_boot_activations%ROWTYPE;
@@ -99,7 +103,9 @@ BEGIN
     IF p_composite_state IS NULL OR p_composite_state !~ '^sha256:[0-9a-f]{64}$'
        OR p_absent_objects IS NULL OR array_position(p_absent_objects, NULL) IS NOT NULL
        OR EXISTS (SELECT 1 FROM unnest(p_absent_objects) AS ref
-                  WHERE ref !~ '^[\x20-\x7e]{1,1024}$' OR ref LIKE '%"%') THEN
+                  WHERE octet_length(ref) NOT BETWEEN 1 AND 1024
+                     OR ref !~ '^[\x20-\x7e]+$' OR ref ~ '["\\:@]'
+                     OR ref ~ '(^|/)\.{0,2}(/|$)') THEN
         RAISE EXCEPTION 'authority absence record is invalid' USING ERRCODE = '22023';
     END IF;
     SELECT * INTO v_activation FROM public.external_boot_activations WHERE id = p_activation_id;
@@ -119,19 +125,27 @@ BEGIN
                      AND job.payload #>> '{external_boot_authority_v1,authority_instance}'
                          = p_authority_instance)
     ) THEN RETURN 'superseded'; END IF;
+    IF NOT EXISTS (SELECT 1 FROM public.systems AS system
+                   WHERE system.id = v_activation.system_id
+                     AND system.domain_name = p_domain_name) THEN
+        RETURN 'superseded';
+    END IF;
     SELECT * INTO v_head FROM public.external_boot_authority_journal_heads
     WHERE authority_instance = p_authority_instance AND system_id = v_activation.system_id;
     INSERT INTO public.external_boot_activation_settlements AS settlement (
-        activation_id, system_id, authority_instance, authority_journal_sequence,
+        activation_id, system_id, authority_instance, authority_domain_name,
+        authority_journal_sequence,
         authority_journal_digest, authority_composite_state, authority_absent_objects,
         authority_recorded_at
     ) VALUES (
-        p_activation_id, v_activation.system_id, p_authority_instance, v_head.sequence,
+        p_activation_id, v_activation.system_id, p_authority_instance, p_domain_name,
+        v_head.sequence,
         v_head.digest, p_composite_state,
         ARRAY(SELECT DISTINCT ref FROM unnest(p_absent_objects) AS ref),
         clock_timestamp()
     ) ON CONFLICT (activation_id) DO UPDATE SET
         authority_instance = excluded.authority_instance,
+        authority_domain_name = excluded.authority_domain_name,
         authority_journal_sequence = excluded.authority_journal_sequence,
         authority_journal_digest = excluded.authority_journal_digest,
         authority_composite_state = excluded.authority_composite_state,
@@ -329,14 +343,15 @@ END $$;
 REVOKE ALL ON TABLE public.external_boot_activation_settlements
 FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness,
      kdive_provider_authority;
-GRANT SELECT ON TABLE public.external_boot_activation_settlements TO kdive_server;
+GRANT SELECT ON TABLE public.external_boot_activation_settlements
+    TO kdive_server, kdive_worker, kdive_reconciler;
 REVOKE ALL ON FUNCTION
-    public.record_stranded_activation_authority_absence(uuid,text,text,text[]),
+    public.record_stranded_activation_authority_absence(uuid,text,text,text,text[]),
     public.record_stranded_activation_worker_ownership(bytea,uuid,integer,uuid,text),
     public.settle_stranded_external_boot_activation(uuid,text,text,text,text)
 FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness,
      kdive_provider_authority;
-GRANT EXECUTE ON FUNCTION public.record_stranded_activation_authority_absence(uuid,text,text,text[])
+GRANT EXECUTE ON FUNCTION public.record_stranded_activation_authority_absence(uuid,text,text,text,text[])
     TO kdive_provider_authority;
 GRANT EXECUTE ON FUNCTION
     public.record_stranded_activation_worker_ownership(bytea,uuid,integer,uuid,text)
@@ -346,7 +361,8 @@ GRANT EXECUTE ON FUNCTION public.settle_stranded_external_boot_activation(uuid,t
 ```
 
 4. Add the row `("0194", "0194_stranded_activation_settlement.sql")` to the end of each of the four lists and raise K by one (`-88` to `-89`, `-84` to `-85` twice, `-71` to `-72`).
-5. Run both green commands. Commit `feat(db): add stranded activation settlement primitive`.
+5. Add `'public.record_stranded_activation_authority_absence(uuid,text,text,text,text[])'::regprocedure` to `accepted_function` in `host.py`, add `external_boot_activation_settlements` to the `external_boot_%` table set in `test_external_boot_activation_migration.py`, and give it its own `SELECT`-only entry in `test_worker_fence_authority.py`, for the worker and the reconciler.
+6. Run both green commands plus `uv run python -m pytest tests/db/test_worker_fence_authority.py tests/db/test_external_boot_activation_migration.py tests/db/test_connected_authority_acceptance.py tests/db/test_external_boot_authority_head_inventory_migration.py -q`. Commit `feat(db): add stranded activation settlement primitive`.
 
 ## Task 2: repository and service
 
@@ -362,105 +378,25 @@ Steps:
 
 1. Write the tests with `RequestContext` values and a stub repository for the gate cases, plus one real-DB case using the Task 1 seed for `applied`.
 2. Run them; expect the import error.
-3. Add to the repository module:
+3. In the repository module add `SettlementStatus(StrEnum)`, one member per status in the spec's Settlement order plus `APPLIED = "applied"` and `REPLAYED = "replayed"`, and export it. Add to `ExternalBootActivationRepository`, each a keyword-only wrapper over one `SELECT public.<function>(...)`, raising `RuntimeError` on no row:
 
 ```python
-class SettlementStatus(StrEnum):
-    """Closed result of the settlement function (ADR-0816)."""
-
-    APPLIED = "applied"
-    REPLAYED = "replayed"
-    NOT_FOUND = "not_found"
-    AUTHORITY_OWNED = "authority_owned"
-    NOT_PREPARING = "not_preparing"
-    SYSTEM_ENDED = "system_ended"
-    JOB_LIVE = "job_live"
-    AUTHORITY_EVIDENCE_MISSING = "authority_evidence_missing"
-    WORKER_EVIDENCE_MISSING = "worker_evidence_missing"
-    EVIDENCE_STALE = "evidence_stale"
-    AUTHORITY_JOURNAL_MOVED = "authority_journal_moved"
-    RESERVATION_MISSING = "reservation_missing"
-    OBJECTS_UNPROVEN = "objects_unproven"
+async def record_settlement_authority_absence(
+    self, conn, *, activation_id: UUID, authority_instance: str, domain_name: str,
+    composite_state: str, absent_objects: tuple[str, ...],
+) -> CasStatus: ...
+async def record_settlement_worker_ownership(
+    self, conn, *, credential_hash: bytes, job_id: UUID, job_attempt: int,
+    activation_id: UUID, domain_name: str,
+) -> CasStatus: ...
+async def settle_stranded(
+    self, conn, *, activation_id: UUID, principal: str, agent_session: str | None,
+    actor: str, reason: str,
+) -> SettlementStatus: ...
+async def is_settled(self, conn, activation_id: UUID) -> bool: ...
 ```
 
-and to `ExternalBootActivationRepository`:
-
-```python
-    async def _scalar(self, conn: AsyncConnection, query: LiteralString, args: tuple[Any, ...]) -> str:
-        row = await (await conn.execute(query, args)).fetchone()
-        if row is None:
-            raise RuntimeError("settlement function returned no status")
-        return str(row[0])
-
-    async def record_settlement_authority_absence(
-        self,
-        conn: AsyncConnection,
-        *,
-        activation_id: UUID,
-        authority_instance: str,
-        composite_state: str,
-        absent_objects: tuple[str, ...],
-    ) -> CasStatus:
-        """Record the authority's own absence observation (ADR-0816)."""
-        return CasStatus(
-            await self._scalar(
-                conn,
-                "SELECT public.record_stranded_activation_authority_absence(%s,%s,%s,%s)",
-                (activation_id, authority_instance, composite_state, list(absent_objects)),
-            )
-        )
-
-    async def record_settlement_worker_ownership(
-        self,
-        conn: AsyncConnection,
-        *,
-        credential_hash: bytes,
-        job_id: UUID,
-        job_attempt: int,
-        activation_id: UUID,
-        domain_name: str,
-    ) -> CasStatus:
-        """Record the worker's own ownership observation (ADR-0816)."""
-        return CasStatus(
-            await self._scalar(
-                conn,
-                "SELECT public.record_stranded_activation_worker_ownership(%s,%s,%s,%s,%s)",
-                (credential_hash, job_id, job_attempt, activation_id, domain_name),
-            )
-        )
-
-    async def settle_stranded(
-        self,
-        conn: AsyncConnection,
-        *,
-        activation_id: UUID,
-        principal: str,
-        agent_session: str | None,
-        actor: str,
-        reason: str,
-    ) -> SettlementStatus:
-        """Run the settlement primitive; a refusal changes no row (ADR-0816)."""
-        return SettlementStatus(
-            await self._scalar(
-                conn,
-                "SELECT public.settle_stranded_external_boot_activation(%s,%s,%s,%s,%s)",
-                (activation_id, principal, agent_session, actor, reason),
-            )
-        )
-
-    async def is_settled(self, conn: AsyncConnection, activation_id: UUID) -> bool:
-        """Return whether the primitive settled this activation; #3551 keys on this."""
-        row = await (
-            await conn.execute(
-                "SELECT 1 FROM external_boot_activation_settlements "
-                "WHERE activation_id = %s AND settled_at IS NOT NULL",
-                (activation_id,),
-            )
-        ).fetchone()
-        return row is not None
-```
-
-Add `SettlementStatus` to `__all__` and `LiteralString` to the `typing` import.
+`is_settled` selects the row with `settled_at IS NOT NULL`.
 
 4. Create the service:
 

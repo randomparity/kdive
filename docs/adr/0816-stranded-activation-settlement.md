@@ -31,8 +31,8 @@ Migration 0194 adds `external_boot_activation_settlements`, keyed by activation,
 `SECURITY DEFINER` functions. No role has direct write access to the table.
 
 - `record_stranded_activation_authority_absence`, for `kdive_provider_authority` only: the
-  authority states that its own daemon holds no domain for the System and lists its enumerated
-  absent store objects. The row captures the System's journal head.
+  authority states that its own daemon holds no domain named `systems.domain_name` and lists its
+  enumerated absent store objects. The row captures the System's journal head.
 - `record_stranded_activation_worker_ownership`, for `kdive_worker` only: a running, unmarked job
   of an active incarnation states that its own provider session found `systems.domain_name`.
 - `settle_stranded_external_boot_activation`, for `kdive_server` only: re-checks the shape, then
@@ -59,11 +59,19 @@ fence changes on a settled row, never on activation state alone.
 
 ## Consequences
 
-- Nothing calls the recorders yet. The operator path in #3551 must obtain one observation from the
-  worker and one from the authority; a worker job and an authority operation for this are not in
-  this change, so the primitive is unreachable in production until then.
-- A settled activation stops restricting the System, but its allocation stays held: the worker
-  teardown refusal and the release fence remain until #3551 narrows them.
+- Nothing calls the recorders yet, so the primitive is unreachable in production. The recovery
+  still needs a worker observation job, which `preparing` admission does not admit today, and an
+  authority observation operation. Neither is in this change or in #3551's body.
+- A settled activation stops restricting the System. The worker teardown refusal and the
+  `allocations.release` fence still hold, but reconciler lease expiry does not: `_expire_one` calls
+  only the admission guard, so a settled allocation can expire while the worker domain runs. #3551
+  must close that lane before its first call to the primitive.
+- `resolve_external_boot_system_teardown_dispatch_binding` still returns a route when a `retired`
+  authority row exists, and returns none otherwise. #3551 must check the settlement record before
+  that binding; an authority teardown that finalized here would mark the System `torn_down` with the
+  worker domain running.
+- Migration 0194 grants the authority role a new function, so `check_database_role` accepts it in
+  the same change. As with every such grant, the authority host deploys with the migration.
 - With the restriction gone, `runs.boot` is admitted again on a Resource that routes to the
   authority. A new activation is not settled, so the System is back in the fenced shape and the
   same recovery applies.
