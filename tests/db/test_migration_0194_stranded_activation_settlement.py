@@ -27,7 +27,9 @@ from kdive.security.authz.rbac import PlatformRole
 from kdive.serialization import validate_stored
 from kdive.services.external_boot.settlement import settle_stranded_activation
 from tests.db.external_boot_authority_support import (
+    _acknowledge,
     _allocate,
+    _Allocated,
     _AuthorityCase,
     _RoleDsns,
     _seed_case,
@@ -44,6 +46,7 @@ _SETTLE = "SELECT settle_stranded_external_boot_activation(%s,%s,%s,%s,%s)"
 class _Stranded:
     case: _AuthorityCase
     observer_job: UUID
+    authority: _Allocated | None
 
 
 def _strand(
@@ -69,9 +72,10 @@ def _strand(
             "VALUES (%s, %s, %s)",
             (case.system_id, case.run_id, "1" * 32),
         )
+    authority = None
     if allocate:
         with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
-            _allocate(worker, case)
+            authority = _allocate(worker, case)
     observer_job = uuid4()
     with psycopg.connect(migrated_url) as conn:
         conn.execute(
@@ -92,7 +96,7 @@ def _strand(
                 f"observer-{observer_job}",
             ),
         )
-    return _Stranded(case, observer_job)
+    return _Stranded(case, observer_job, authority)
 
 
 def _record_authority(
@@ -126,6 +130,7 @@ def _record_worker(
     *,
     credential: bytes | None = None,
     job_id: UUID | None = None,
+    attempt: int = 1,
     domain: str = _DOMAIN,
 ) -> str:
     case = stranded.case
@@ -135,7 +140,7 @@ def _record_worker(
             (
                 case.credential if credential is None else credential,
                 stranded.observer_job if job_id is None else job_id,
-                1,
+                attempt,
                 case.activation_id,
                 domain,
             ),
@@ -305,9 +310,26 @@ _SET_ABANDONED = (
 )
 _SET_SYSTEM_ENDED = "UPDATE systems SET state = 'torn_down' WHERE id = {system}"
 _SET_JOB_LIVE = "UPDATE jobs SET state = 'queued' WHERE id = {job}"
+_SET_JOB_RUNNING = (
+    "UPDATE jobs SET state = 'running', worker_id = {worker}, heartbeat_at = now(), "
+    "lease_expires_at = now() + interval '5 minutes' WHERE id = {job}"
+)
 _SET_STALE = (
     "UPDATE external_boot_activation_settlements "
     "SET worker_recorded_at = now() - interval '2 hours' WHERE activation_id = {activation}"
+)
+_SET_AUTHORITY_STALE = (
+    "UPDATE external_boot_activation_settlements "
+    "SET authority_recorded_at = now() - interval '2 hours' WHERE activation_id = {activation}"
+)
+_SET_SECOND_INSTANCE_ROW = (
+    "INSERT INTO external_boot_authorities (system_id, allocation_id, activation_id, run_id, "
+    "plan_identity, job_id, job_attempt, purpose, provider_kind, authority_instance, "
+    "worker_incarnation, operation, operation_identity, operation_digest, generation, state, "
+    "superseded_at) SELECT system_id, allocation_id, activation_id, run_id, plan_identity, job_id, "
+    "job_attempt, purpose, provider_kind, 'another-authority', worker_incarnation, operation, "
+    "operation_identity || '-other', operation_digest, generation + 1, 'superseded', now() "
+    "FROM external_boot_authorities WHERE activation_id = {activation}"
 )
 _SET_DOMAIN_CHANGED = "UPDATE systems SET domain_name = 'renamed' WHERE id = {system}"
 _SET_NO_RESERVATION = "DELETE FROM external_boot_reservations WHERE activation_id = {activation}"
@@ -338,8 +360,11 @@ _SET_JOURNAL_MOVED = (
         (_SET_ABANDONED, "not_preparing"),
         (_SET_SYSTEM_ENDED, "system_ended"),
         (_SET_JOB_LIVE, "job_live"),
+        (_SET_JOB_RUNNING, "job_live"),
         (_SET_STALE, "evidence_stale"),
+        (_SET_AUTHORITY_STALE, "evidence_stale"),
         (_SET_DOMAIN_CHANGED, "evidence_stale"),
+        (_SET_SECOND_INSTANCE_ROW, "authority_instance_mismatch"),
         (_SET_JOURNAL_MOVED, "authority_journal_moved"),
         (_SET_NO_RESERVATION, "reservation_missing"),
         (_SET_UNPROVEN, "objects_unproven"),
@@ -360,6 +385,7 @@ def test_refusals_change_nothing(
                     activation=f"'{case.activation_id}'",
                     system=f"'{case.system_id}'",
                     job=f"'{case.job_id}'",
+                    worker=f"'{case.worker_id}'",
                 ),
             )
         )
@@ -411,6 +437,73 @@ def test_absent_objects_cover_every_object_the_activation_names(
     assert _settle(authority_role_dsns, case.activation_id) == "applied"
 
 
+_SET_ALL_NAMED_OBJECTS = (
+    "UPDATE external_boot_activations SET materialization = jsonb_build_object("
+    "'schema', 'external-boot-materialization-v1', "
+    "'ownership', jsonb_build_object('system_id', system_id::text, 'run_id', run_id::text), "
+    "'plan_identity', plan_identity, 'artifacts', jsonb_build_object("
+    "'kernel', jsonb_build_object('ref', 'held/kernel'), "
+    "'modules', jsonb_build_object('ref', 'held/modules'), "
+    "'initrd', jsonb_build_object('ref', 'held/initrd'), "
+    "'debuginfo', jsonb_build_object('ref', 'held/debuginfo'))), "
+    "recovery_point = jsonb_build_object('schema', 'external-boot-recovery-v1', "
+    "'binding', jsonb_build_object('system_id', system_id::text, 'run_id', run_id::text, "
+    "'activation_id', id::text), 'plan_identity', plan_identity, "
+    "'recovery_ref', jsonb_build_object('ref', 'held/recovery-point')), "
+    "pre_recovery_evidence = jsonb_build_object("
+    "'schema', 'external-boot-pre-recovery-evidence-v1', 'activation_id', id::text, "
+    "'system_id', system_id::text, 'run_id', run_id::text, 'plan_identity', plan_identity, "
+    "'recovery_object', jsonb_build_object('ref', 'held/pre-recovery')) "
+    "WHERE id = {activation}"
+)
+_ALL_NAMED_OBJECTS = (
+    "held/kernel",
+    "held/modules",
+    "held/initrd",
+    "held/debuginfo",
+    "held/recovery-point",
+    "held/pre-recovery",
+)
+
+
+@pytest.mark.parametrize("missing", _ALL_NAMED_OBJECTS)
+def test_each_object_the_activation_names_must_be_proven_absent(
+    migrated_url: str, authority_role_dsns: _RoleDsns, missing: str
+) -> None:
+    stranded = _strand(migrated_url, authority_role_dsns)
+    case = stranded.case
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            cast(LiteralString, _SET_ALL_NAMED_OBJECTS.format(activation=f"'{case.activation_id}'"))
+        )
+    partial = tuple(item for item in _ALL_NAMED_OBJECTS if item != missing)
+    assert _record_authority(authority_role_dsns, stranded, objects=partial) == "applied"
+    assert _record_worker(authority_role_dsns, stranded) == "applied"
+
+    assert _settle(authority_role_dsns, case.activation_id) == "objects_unproven"
+
+
+def test_a_current_authority_row_ends_superseded(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    stranded = _strand(migrated_url, authority_role_dsns)
+    case = stranded.case
+    assert stranded.authority is not None
+    with psycopg.connect(migrated_url) as conn:
+        _acknowledge(conn, case, stranded.authority)
+    _record_authority(authority_role_dsns, stranded)
+    _record_worker(authority_role_dsns, stranded)
+
+    assert _settle(authority_role_dsns, case.activation_id) == "applied"
+
+    with psycopg.connect(migrated_url) as conn:
+        row = conn.execute(
+            "SELECT state FROM external_boot_authorities WHERE id = %s",
+            (stranded.authority.authority_id,),
+        ).fetchone()
+    assert row == ("superseded",)
+
+
 def test_unknown_activation_is_not_found(authority_role_dsns: _RoleDsns) -> None:
     assert _settle(authority_role_dsns, uuid4()) == "not_found"
 
@@ -446,7 +539,58 @@ def test_role_separation(
         conn.execute(cast(LiteralString, statement), args)
 
 
-@pytest.mark.parametrize("forged", ["credential", "lease", "marked", "other_system", "domain"])
+def _reassign_observer_job(migrated_url: str, stranded: _Stranded) -> None:
+    other = f"docker:other-{uuid4()}"
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "INSERT INTO worker_incarnations "
+            "(incarnation, authority_kind, authority_binding, credential_hash, fence_protocol) "
+            "VALUES (%s, 'docker', '{}'::jsonb, %s, 4)",
+            (other, b"o" * 32),
+        )
+        conn.execute("UPDATE jobs SET worker_id = %s WHERE id = %s", (other, stranded.observer_job))
+
+
+def _terminate_incarnation(migrated_url: str, incarnation: str) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "UPDATE worker_incarnations SET state = 'terminated', terminated_at = now(), "
+            "outcome = 'killed' WHERE incarnation = %s",
+            (incarnation,),
+        )
+
+
+def _lower_fence_protocol(migrated_url: str, incarnation: str) -> None:
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "ALTER TABLE worker_incarnations DISABLE TRIGGER "
+            "worker_incarnations_capture_protocol_floor"
+        )
+        conn.execute(
+            "UPDATE worker_incarnations SET fence_protocol = 3 WHERE incarnation = %s",
+            (incarnation,),
+        )
+        conn.execute(
+            "ALTER TABLE worker_incarnations ENABLE TRIGGER "
+            "worker_incarnations_capture_protocol_floor"
+        )
+
+
+@pytest.mark.parametrize(
+    "forged",
+    [
+        "credential",
+        "lease",
+        "marked",
+        "other_system",
+        "domain",
+        "job_state",
+        "job_worker",
+        "job_attempt",
+        "terminated_incarnation",
+        "old_fence_protocol",
+    ],
+)
 def test_worker_record_requires_its_own_live_unmarked_job(
     migrated_url: str, authority_role_dsns: _RoleDsns, forged: str
 ) -> None:
@@ -462,14 +606,22 @@ def test_worker_record_requires_its_own_live_unmarked_job(
             "WHERE id = %s"
         ),
     }
+    updates["job_state"] = "UPDATE jobs SET state = 'succeeded' WHERE id = %s"
     if forged in updates:
         with psycopg.connect(migrated_url) as conn:
             conn.execute(cast(LiteralString, updates[forged]), (stranded.observer_job,))
+    if forged == "job_worker":
+        _reassign_observer_job(migrated_url, stranded)
+    if forged == "terminated_incarnation":
+        _terminate_incarnation(migrated_url, stranded.case.worker_id)
+    if forged == "old_fence_protocol":
+        _lower_fence_protocol(migrated_url, stranded.case.worker_id)
 
     status = _record_worker(
         authority_role_dsns,
         stranded,
         credential=b"z" * 32 if forged == "credential" else None,
+        attempt=2 if forged == "job_attempt" else 1,
         domain="other-domain" if forged == "domain" else _DOMAIN,
     )
 
