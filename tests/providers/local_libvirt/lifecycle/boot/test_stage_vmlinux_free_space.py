@@ -10,6 +10,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import (
     VMLINUX_HEADROOM_BYTES,
+    GuestFreeSpaceRefusal,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     _GuestFS,
@@ -66,6 +67,7 @@ def test_one_block_short_refuses_without_uploading(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as caught:
         _stage(guest, tmp_path)
 
+    assert isinstance(caught.value, GuestFreeSpaceRefusal)
     assert caught.value.category is ErrorCategory.INSTALL_FAILURE
     assert "upload" not in guest.calls
 
@@ -73,9 +75,10 @@ def test_one_block_short_refuses_without_uploading(tmp_path: Path) -> None:
 def test_negative_statvfs_values_refuse_without_uploading(tmp_path: Path) -> None:
     guest = _Guest({"bavail": -5, "blocks": -1, "frsize": 4096})
 
-    with pytest.raises(CategorizedError, match="cannot be trusted"):
+    with pytest.raises(CategorizedError, match="cannot be trusted") as caught:
         _stage(guest, tmp_path)
 
+    assert not isinstance(caught.value, GuestFreeSpaceRefusal)
     assert "upload" not in guest.calls
 
 

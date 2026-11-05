@@ -104,6 +104,23 @@ class _ClosedValue(BaseModel):
         return self
 
 
+type _RefusalBytes = Annotated[int, Field(strict=True, ge=0, le=2**63 - 1)]
+
+
+class AuthorityInstallRefusalV1(_ClosedValue):
+    """A proven shortfall: the only provider facts an error frame carries (ADR-0814)."""
+
+    vmlinux_bytes: _RefusalBytes
+    free_bytes: _RefusalBytes
+    headroom_bytes: _RefusalBytes
+
+    @model_validator(mode="after")
+    def _is_a_shortfall(self) -> Self:
+        if self.free_bytes >= self.vmlinux_bytes + self.headroom_bytes:
+            raise ValueError("an install refusal must prove a shortfall")
+        return self
+
+
 class AuthorityOperation(StrEnum):
     MATERIALIZE = "materialize"
     PREPARE = "prepare"

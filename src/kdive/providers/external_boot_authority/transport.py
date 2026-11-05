@@ -444,6 +444,18 @@ def _error(category: str) -> bytes:
     return _canonical_json({"category": category, "status": "error"})
 
 
+def _service_error(exc: AuthorityServiceError) -> bytes:
+    if exc.install_refusal is None:
+        return _error(_service_category(exc.category))
+    return _canonical_json(
+        {
+            "category": _service_category(exc.category),
+            "install_refusal": exc.install_refusal.model_dump(mode="json"),
+            "status": "error",
+        }
+    )
+
+
 def _log_module_completion(operation: str, exc: CategorizedError) -> None:
     """Leave the cause on the authority journal; only the category crosses the wire.
 
@@ -465,6 +477,7 @@ def _service_category(category: str) -> str:
         "provider_conflict": "provider-conflict",
         "system_held": "system-held",
         "configuration_error": "configuration-error",
+        "install_failure": "install-failure",
     }.get(category, category)
 
 
@@ -534,7 +547,7 @@ async def _dispatch(
             result = await remote_module_service.execute_remote_module_lifecycle(peer, request)
             return _success(result)
         except AuthorityServiceError as exc:
-            return _error(_service_category(exc.category))
+            return _service_error(exc)
         except CategorizedError as exc:
             _log_module_completion(operation, exc)
             if exc.details.get("completion") == "failed-after-mutation":
@@ -554,7 +567,7 @@ async def _dispatch(
             result = await remote_module_service.execute_remote_module_preparation(peer, request)
             return _success(result)
         except AuthorityServiceError as exc:
-            return _error(_service_category(exc.category))
+            return _service_error(exc)
         except CategorizedError as exc:
             _log_module_completion(operation, exc)
             if exc.details.get("completion") == "failed-after-mutation":
@@ -573,7 +586,7 @@ async def _dispatch(
         try:
             return _success(await remote_module_service.open_remote_module_attempt(peer, request))
         except AuthorityServiceError as exc:
-            return _error(_service_category(exc.category))
+            return _service_error(exc)
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
             _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-conflict")
@@ -620,7 +633,7 @@ async def _dispatch(
             raise _TransportError("invalid-request")
         return _success(await service.execute_mutation(peer, request))
     except AuthorityServiceError as exc:
-        return _error(_service_category(exc.category))
+        return _service_error(exc)
     except Exception:  # noqa: BLE001 -- provider/service details never cross the boundary
         _log.exception("authority transport %s failed unexpectedly", operation)
         return _error("provider-conflict")
