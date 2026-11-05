@@ -237,3 +237,27 @@ of hash/copy callbacks must redden behavior tests. Existing supervisor idle/hard
 Validation Mode: task-test-not-applicable for explanatory README/runbook/proof prose only.
 Rebuild and verify the actual closed native image, then require separately authorized unchanged
 native carrier SHA/drgn/restoration/cleanup proof at matching final revisions; no diagnostic counts.
+
+## Collected-test support ownership correction
+
+The first full normal pre-push gate exposed imports from collected test modules in the
+ordinary carrier regression. The existing import-boundary guard is authoritative; it is not
+weakened or bypassed. Campaign root approved these exact non-collected owners on 2026-11-04:
+
+- `tests/integration/live_stack/authority_vmlinux.py` owns the existing carrier body/helpers.
+  `tests/integration/test_authority_vmlinux_live.py` retains the same marked pytest entrypoint
+  as a thin delegate, and the ordinary regression imports the non-collected owner.
+- `tests/integration/live_stack/spine_test_support.py` owns the shared synthetic kernel tree,
+  native bundle fixture and configuration constants. Both spine and carrier regressions import
+  that owner; the old helper definitions are removed rather than duplicated.
+
+Moved function bodies, guest programs, fixture data and configuration values remain unchanged.
+Validation combines AST/body preservation checks, the actual collected-import guard, the real
+inventory-to-activation-to-upload regression and the existing spine tests. AST comparison is
+relocation evidence, not a replacement for behavior tests or the native proof. The existing
+live selector and all generated-initrd/artifact/identity/resource/timeout guards remain intact.
+
+The honest revised implementation estimate is 1950–2050 changed lines, including the physical
+move of the baseline carrier and fixtures; the fixed complexity denominator remains M250.
+The earlier 1400–1550 estimate and its reviews remain historical. No production behavior,
+public API, persistence, dependency or architecture decision changes in this correction.

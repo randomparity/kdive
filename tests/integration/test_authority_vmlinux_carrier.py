@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.integration import test_authority_vmlinux_live as carrier
+from tests.integration.live_stack import authority_vmlinux as carrier
 from tests.integration.live_stack.scenario import CellRun
 from tests.live_vm.installed_remote_authority_support import (
     RemoteAuthorityInventory,
@@ -46,10 +46,10 @@ def test_carrier_uses_the_configured_remote_host_architecture(
         with pytest.raises(
             pytest.fail.Exception, match="unsupported remote authority architecture"
         ):
-            carrier.test_remote_authority_stages_the_uploaded_vmlinux(tmp_path)
+            carrier.run_remote_authority_vmlinux(tmp_path)
         assert entered == []
     else:
-        carrier.test_remote_authority_stages_the_uploaded_vmlinux(tmp_path)
+        carrier.run_remote_authority_vmlinux(tmp_path)
         assert len(entered) == 1
 
 
@@ -64,7 +64,7 @@ def test_power_inventory_reaches_real_activation_and_prebuilt_upload(
     from kdive.mcp.responses import ToolResponse
     from tests.integration.live_stack import spine
     from tests.integration.live_stack.authority_lane import AuthoritySystem
-    from tests.integration.live_stack.test_spine import (
+    from tests.integration.live_stack.spine_test_support import (
         _INITRD_CONFIG,
         _kernel_tree,
         _prebuilt_power_bundle,
@@ -158,7 +158,7 @@ def test_power_inventory_reaches_real_activation_and_prebuilt_upload(
             run.prove(assertion, {})
 
     monkeypatch.setattr(carrier, "on_authority_system", frame)
-    carrier.test_remote_authority_stages_the_uploaded_vmlinux(tmp_path)
+    carrier.run_remote_authority_vmlinux(tmp_path)
     assert len(inventory_reads) == 1
     created = next(args for name, args in calls if name == "runs.create")
     assert created["build_profile"] == {"schema_version": 1, "arch": "ppc64le"}
