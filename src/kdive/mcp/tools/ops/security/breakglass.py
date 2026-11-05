@@ -274,7 +274,9 @@ async def _teardown_locked(
             )
         # External-boot history takes `systems.teardown`'s authority route: the worker refuses an
         # ordinary job for it (#2966, #3007). No idempotency key: break-glass takes none.
-        routed = await route_external_boot_teardown(conn, ctx, system, str(uid), None, resolver)
+        routed = await route_external_boot_teardown(
+            conn, ctx, system, str(uid), None, resolver, audit_recycle=False
+        )
         if routed is not None:
             return routed
         # The matrix refuses SYSTEM_TEARDOWN before an authority System's first activation, so a

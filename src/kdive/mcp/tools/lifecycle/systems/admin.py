@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import partial
 from hashlib import sha256
 from typing import LiteralString
 from uuid import UUID
@@ -573,6 +574,8 @@ async def route_external_boot_teardown(
     system_id: str,
     idempotency_key: str | None,
     resolver: ProviderResolver | None,
+    *,
+    audit_recycle: bool = True,
 ) -> ToolResponse | None:
     """Route a System with any external-boot activation to its authority teardown, else ``None``.
 
@@ -583,7 +586,14 @@ async def route_external_boot_teardown(
     if activation is None:
         return None
     return await _enqueue_authority_teardown(
-        conn, ctx, system, activation, system_id, idempotency_key, resolver
+        conn,
+        ctx,
+        system,
+        activation,
+        system_id,
+        idempotency_key,
+        resolver,
+        audit_recycle=audit_recycle,
     )
 
 
@@ -614,12 +624,14 @@ async def _enqueue_preactivation_authority_teardown(
 ) -> ToolResponse:
     """Enqueue and bind one activation-free teardown to immutable ownership."""
     try:
+        # `job.authorizing` stays the first enqueuer's by design (ADR-0447); audit the requester.
         job = await enqueue_preactivation_teardown(
             conn,
             system,
             binding,
             job_authorizing(ctx, system.project),
             recycle=queue.JobRecyclePolicy.FAILED,
+            on_recycle=partial(_audit_authority_recycle, conn, ctx, system),
         )
     except CategorizedError as exc:
         if exc.category is not ErrorCategory.CONFLICT:
@@ -642,6 +654,29 @@ async def _enqueue_preactivation_authority_teardown(
             envelope=envelope,
         )
     return envelope
+
+
+async def _audit_authority_recycle(
+    conn: AsyncConnection, ctx: RequestContext, system: System, job: Job
+) -> None:
+    """Record who asked for an authority teardown recycle, in the recycle's transaction.
+
+    A recycled job keeps the ``authorizing`` principal of whoever first enqueued it (ADR-0447, with
+    ADR-0435 and ADR-0620), so the requester would otherwise leave no trace. The recycling caller
+    audits its own invocation; the row is written only when the job was actually restarted.
+    """
+    await audit.record(
+        conn,
+        ctx,
+        audit.AuditEvent(
+            tool="systems.teardown",
+            object_kind="systems",
+            object_id=system.id,
+            transition="teardown:recycled",
+            args={"system_id": str(system.id), "job_id": str(job.id)},
+            project=system.project,
+        ),
+    )
 
 
 async def _key_names_job(
@@ -678,6 +713,8 @@ async def _enqueue_authority_teardown(
     system_id: str,
     idempotency_key: str | None,
     resolver: ProviderResolver | None,
+    *,
+    audit_recycle: bool = True,
 ) -> ToolResponse:
     """Route every durable external-boot history through its exact authority marker."""
     if resolver is None:
@@ -763,7 +800,7 @@ async def _enqueue_authority_teardown(
         recycle = queue.JobRecyclePolicy.TERMINAL_OR_CANCELED
     else:
         recycle = queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED
-    job = await queue.enqueue(
+    job, changed = await queue.enqueue_with_status(
         conn,
         kind,
         payload,
@@ -771,6 +808,11 @@ async def _enqueue_authority_teardown(
         _teardown_dedup_key(system.id),
         recycle=recycle,
     )
+    # A recycle keeps the first enqueuer as `job.authorizing` (ADR-0447, ADR-0435, ADR-0620); the
+    # requester is audited here. Break-glass is already recorded in `platform_audit_log`, and
+    # its platform admin need not hold the System's project.
+    if prior is not None and changed and audit_recycle:
+        await _audit_authority_recycle(conn, ctx, system, job)
     envelope = job_envelope(job, "system_id", system.id)
     # A key already recorded for the replaced ordinary job names this same job row; recording it
     # again would raise and roll the replacement back behind a stale replay.
