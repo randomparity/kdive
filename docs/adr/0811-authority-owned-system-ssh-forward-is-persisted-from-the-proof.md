@@ -68,6 +68,33 @@ and neither authority protocol reported it.
   endpoint through `recorded_ssh_endpoint` and do not use the stored port. Remote-libvirt authority
   Systems keep their existing behaviour.
 
+### Amendment (2026-11-04): the SSH access tools carry the stored port (#3541)
+
+The `Not covered` consequence above is closed for local-libvirt.
+`systems.ssh_info`, `systems.authorize_ssh_key` and `systems.check_ssh_reachable` read the stored
+port through `authority_ssh_forward_port` and hand it to
+`Connector.recorded_ssh_endpoint(..., ssh_forward_port=)`, which behaves as decision 3 describes
+for `open_transport`, without the banner probe. Absence fails closed with the reasons in decision 4.
+The tools run in the server, so the existing binding serves them, and the preactivation fence and
+activation policy still run first: in ownership state `ready` only `ssh_info` reaches the endpoint.
+
+The worker runs the two job handlers and stays refused the binding. The server therefore carries the
+port in `AuthorizeSshKeyPayload` and `CheckSshReachablePayload`, as an optional field with the same
+strict range, written only for an authority-owned local System. `authorize_ssh_key_handler` refuses
+`system_not_ready` when a carried port meets a System that is no longer `ready`, because a stored
+port does not prove a domain exists as the XML read did.
+
+Upgrade workers before servers: an older worker forbids the new field and fails such a job with a
+payload validation error, and an identical key then replays that failure. No other job carries the
+field. The lifecycle identity does not move. No schema change. Remote-libvirt authority Systems keep
+their existing behaviour (#3547).
+
+Two alternatives were weighed. A port-only function granted to `kdive_worker` needs no payload field
+or deploy order. judgment: it adds a migration and widens what the worker role can read about
+authority ownership, for a value the server can hand over. Doing nothing was rejected: verified at
+`e7aa79a7d`, the five call sites raise `system_domain_not_found`, so an authority-owned System has
+no agent SSH path.
+
 ## Considered & rejected
 
 - **Give the server an authority route and ask the authority.** verified: the sender signs with the

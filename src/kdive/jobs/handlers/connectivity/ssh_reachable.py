@@ -210,7 +210,8 @@ async def check_ssh_reachable_handler(
     guest's liveness. A probe that *ran* — reachable or not — is a success; only an inability to run
     raises. ``checked_at`` is read from the module-level ``datetime`` (tests monkeypatch it). An
     unreachable verdict carries a bounded, redacted guest console tail so "did sshd start?" is
-    answerable from the verdict alone (ADR-0306).
+    answerable from the verdict alone (ADR-0306). An authority-owned local System's job carries the
+    port the server resolved, because the worker role is refused the authority binding (ADR-0811).
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` ``reason="system_not_ready"`` when the System is
@@ -231,7 +232,8 @@ async def check_ssh_reachable_handler(
         )
     binding = await resolver.binding_for_system(conn, system_id)
     endpoint = binding.runtime.connector.recorded_ssh_endpoint(
-        SystemHandle(system.domain_name or domain_name_for(system_id))
+        SystemHandle(system.domain_name or domain_name_for(system_id)),
+        ssh_forward_port=payload.ssh_forward_port,
     )
     if endpoint is None:
         raise CategorizedError(

@@ -677,6 +677,40 @@ def test_authorize_ssh_key_payload_serializes() -> None:
     }
 
 
+_SSH_SYSTEM_ID = "11111111-2222-3333-4444-555555555555"
+_SSH_PAYLOADS = [
+    pytest.param(
+        JobKind.AUTHORIZE_SSH_KEY,
+        {"system_id": _SSH_SYSTEM_ID, "public_key": "ssh-ed25519 AAAAC3Nz agent@host"},
+        id="authorize",
+    ),
+    pytest.param(JobKind.CHECK_SSH_REACHABLE, {"system_id": _SSH_SYSTEM_ID}, id="reachable"),
+]
+
+
+@pytest.mark.parametrize(("kind", "base"), _SSH_PAYLOADS)
+@pytest.mark.parametrize("port", [1024, 41234, 65535])
+def test_ssh_payload_keeps_an_in_range_forward_port(
+    kind: JobKind, base: dict[str, str], port: int
+) -> None:
+    dumped = dump_payload(kind, {**base, "ssh_forward_port": port})
+    assert dumped == {**base, "ssh_forward_port": port}
+
+
+@pytest.mark.parametrize(("kind", "base"), _SSH_PAYLOADS)
+@pytest.mark.parametrize("port", [1023, 65536, 0, -1, "41234", 41234.0, True])
+def test_ssh_payload_refuses_a_malformed_forward_port(
+    kind: JobKind, base: dict[str, str], port: object
+) -> None:
+    with pytest.raises(PayloadValidationError):
+        dump_payload(kind, {**base, "ssh_forward_port": port})
+
+
+@pytest.mark.parametrize(("kind", "base"), _SSH_PAYLOADS)
+def test_ssh_payload_omits_an_absent_forward_port(kind: JobKind, base: dict[str, str]) -> None:
+    assert dump_payload(kind, {**base, "ssh_forward_port": None}) == base
+
+
 def test_check_ssh_reachable_payload_serializes() -> None:
     from kdive.jobs.payloads import CheckSshReachablePayload
 
