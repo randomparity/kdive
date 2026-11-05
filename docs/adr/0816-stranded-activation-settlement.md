@@ -106,3 +106,59 @@ fence changes on a settled row, never on activation state alone.
   `system_state: Literal["torn_down"]`, and the System is not torn down at settlement.
 - **Keep evidence in separate tables.** judgment: complexity. One row per activation holds both
   proofs and the settlement key for #3551.
+
+### Amendment (2026-11-05): the evidence producers (#3574)
+
+This amendment corrects the first Consequence: the producers now exist, and both 0194 recorders
+are unchanged. Spec: [stranded activation observation](../workflow/specs/2026-11-05-stranded-activation-observation-design.md).
+
+**Decision.** One platform job, `observe_stranded_activation`, produces both records. It carries
+no authority marker, so it never trips settlement's `job_live` refusal, and it runs on the fixed
+worker. The worker asks its own daemon for `systems.domain_name` and records ownership. It then
+sends the authority a request naming only the activation. The authority reads every other fact
+through `read_stranded_activation_target`, added by migration 0195 for its role alone.
+
+The authority proves quiescence under the System lane lock: no failed lane, no active operation,
+and a local journal tail equal to the database head, or no journal at all. A non-terminal head
+does not refuse. A provider call dies with the single authority process, so an interrupted head is
+the shape being recovered. It then observes its own daemon and store, and records absence only when
+the domain is absent and `exact_recovery_absence` holds for the activation.
+
+The observation writes no journal record, adds no `AuthorityOperation`, and is a new transport
+operation beside `sweep-module-volumes`.
+
+Objects the authority holds refuse the job, naming them. Nothing removes them.
+`objects_unproven` needs a domain the authority once held, because
+`LocalExternalBootSessionFactory.open` looks the domain up before anything materializes.
+
+Only local-libvirt carries the producers. The runtime port and the authority collaborator are
+optional, so any other provider refuses by name.
+
+**Consequences.**
+
+- Upgrade order: migrate 0195 and deploy the authority host together, because the new grant fails
+  readiness on an older host; then deploy workers and servers. A newer worker against an older
+  authority gets `invalid-request` and the job fails closed. The lifecycle identity does not move:
+  `systemd_worker_contract.py` references neither `AuthorityOperation` nor job kinds.
+- `request_stranded_observation` in `kdive.services.external_boot.settlement` is the only Python
+  entry to the job. It requires `platform_admin`, writes no audit row, and has no MCP tool until
+  #3551 calls it. A stranded remote-libvirt System stays stranded.
+- `settle_stranded_external_boot_activation` and this read list the same six object paths;
+  the end-to-end test covers a materialized activation, so a drift fails it.
+
+**Considered & rejected.**
+
+- **Reuse `observe-authority`.** verified: `_observe_current` raises `superseded` without a current
+  bound authority, and the local `observe` opens a session whose `lookupByName` raises on a missing
+  domain (`service.py`, `session.py`, main `0ca61d7a3`).
+- **Journal the observation under a new `AuthorityOperation`.** judgment: complexity. It needs a
+  purpose and allocation path for an activation with no current authority, and the head moves for no
+  reader, since the recorder already pins the head it read.
+- **Let the worker send the domain and object list.** judgment: fit. A worker credential would then
+  choose what the authority testifies about, against this record's rule that each owner states only
+  its own facts.
+- **Two jobs, one per owner.** judgment: complexity. An authority-marked job trips `job_live`, and
+  the worker is the only route to the authority.
+- **Remove held objects here.** judgment: cost. A mutation must be journaled, which needs everything
+  the journaled observation does plus domain-free store cleanup, for a case the shape does not
+  reach. The issue accepts an actionable refusal.
