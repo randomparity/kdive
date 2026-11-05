@@ -93,7 +93,9 @@ class _FakeConnector:
     def close_transport(self, handle: TransportHandle) -> None:
         self.closed.append(str(handle))
 
-    def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
+    def recorded_ssh_endpoint(
+        self, system: SystemHandle, *, ssh_forward_port: int | None = None
+    ) -> tuple[str, int] | None:
         del system
         return ("127.0.0.1", 22022)
 

@@ -245,11 +245,17 @@ class Connector(Protocol):
         """
         ...
 
-    def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
+    def recorded_ssh_endpoint(
+        self, system: SystemHandle, *, ssh_forward_port: int | None = None
+    ) -> tuple[str, int] | None:
         """Return the recorded SSH ``(host, port)`` for ``system``, or ``None`` (ADR-0271).
 
         ``None`` means the System was not provisioned with an SSH forward, so no agent SSH is
         available. Providers without a local SSH endpoint to disclose return ``None``.
+
+        ``ssh_forward_port`` is the loopback SSH port an authority-owned System reported
+        (ADR-0811), for a domain this process cannot read. A provider that resolves the endpoint
+        itself ignores it.
 
         An implementation **may** distinguish a different configuration fault instead of
         collapsing it here — a System with no domain on the provider's connection, say — by

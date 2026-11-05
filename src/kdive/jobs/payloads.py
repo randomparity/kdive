@@ -45,6 +45,7 @@ from kdive.providers.ports.external_boot import ExternalBootPlan, RootSpecV1
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemMarkerV1,
     AuthoritySystemOperation,
+    SshForwardPort,
 )
 
 EXTERNAL_BOOT_AUTHORITY_MARKER_KEY: Final = "external_boot_authority_v1"
@@ -206,13 +207,23 @@ class SnapshotDeletePayload(SystemPayload):
 
 
 class AuthorizeSshKeyPayload(SystemPayload):
-    """A request to authorize an agent SSH public key in a System's guest (ADR-0271)."""
+    """A request to authorize an agent SSH public key in a System's guest (ADR-0271).
+
+    ``ssh_forward_port`` is set only for an authority-owned local System: the worker is refused
+    the authority binding, so the server resolves the port and carries it here (ADR-0811).
+    """
 
     public_key: str
+    ssh_forward_port: SshForwardPort | None = None
 
 
 class CheckSshReachablePayload(SystemPayload):
-    """A request to probe a ready System's guest sshd reachability (ADR-0298, #972)."""
+    """A request to probe a ready System's guest sshd reachability (ADR-0298, #972).
+
+    ``ssh_forward_port`` is set only for an authority-owned local System (ADR-0811).
+    """
+
+    ssh_forward_port: SshForwardPort | None = None
 
 
 class ConsoleRotatePayload(SystemPayload):

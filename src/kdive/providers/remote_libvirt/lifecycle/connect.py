@@ -119,7 +119,9 @@ class RemoteLibvirtConnect:
         if "://" in str(handle):
             TransportHandleData.decode(handle)
 
-    def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
+    def recorded_ssh_endpoint(
+        self, system: SystemHandle, *, ssh_forward_port: int | None = None
+    ) -> tuple[str, int] | None:
         """Return the recorded ``(ssh_addr, ssh_port)``, or ``None`` when SSH parity is inactive.
 
         Reads the per-System hostfwd port from the live domain XML over the mutual-TLS connection
