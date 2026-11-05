@@ -32,6 +32,7 @@ CREATE TABLE public.external_boot_activation_settlements (
 
 CREATE FUNCTION public.record_stranded_activation_authority_absence(
     p_activation_id uuid, p_authority_instance text, p_domain_name text,
+    p_observed_journal_sequence bigint, p_observed_journal_digest text,
     p_composite_state text, p_absent_objects text[]
 ) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE
@@ -74,6 +75,10 @@ BEGIN
     END IF;
     SELECT * INTO v_head FROM public.external_boot_authority_journal_heads
     WHERE authority_instance = p_authority_instance AND system_id = v_activation.system_id;
+    IF (v_head.sequence, v_head.digest) IS DISTINCT FROM
+       (p_observed_journal_sequence, p_observed_journal_digest) THEN
+        RETURN 'superseded';
+    END IF;
     INSERT INTO public.external_boot_activation_settlements AS settlement (
         activation_id, system_id, authority_instance, authority_domain_name,
         authority_journal_sequence,
@@ -165,7 +170,8 @@ BEGIN
         RAISE EXCEPTION 'server authority is required' USING ERRCODE = '42501';
     END IF;
     IF v_reason IS NULL OR octet_length(v_reason) NOT BETWEEN 1 AND 1024
-       OR p_principal IS NULL OR btrim(p_principal) = '' OR p_actor IS NULL THEN
+       OR p_principal IS NULL OR btrim(p_principal) = ''
+       OR p_actor IS NULL OR p_actor NOT IN ('operator-cli', 'agent', 'unknown') THEN
         RAISE EXCEPTION 'settlement requires a principal and a reason' USING ERRCODE = '22023';
     END IF;
     SELECT * INTO v_activation FROM public.external_boot_activations WHERE id = p_activation_id;
@@ -197,6 +203,16 @@ BEGIN
        OR v_settlement.authority_domain_name IS DISTINCT FROM v_system.domain_name
        OR v_settlement.worker_domain_name IS DISTINCT FROM v_system.domain_name THEN
         RETURN 'evidence_stale';
+    END IF;
+    IF EXISTS (SELECT 1 FROM public.external_boot_authorities AS authority
+               WHERE authority.activation_id = p_activation_id
+                 AND authority.authority_instance <> v_settlement.authority_instance)
+       OR EXISTS (SELECT 1 FROM public.jobs AS job
+                  WHERE job.payload #>> '{external_boot_authority_v1,activation_id}'
+                        = p_activation_id::text
+                    AND job.payload #>> '{external_boot_authority_v1,authority_instance}'
+                        <> v_settlement.authority_instance) THEN
+        RETURN 'authority_instance_mismatch';
     END IF;
     SELECT * INTO v_head FROM public.external_boot_authority_journal_heads
     WHERE authority_instance = v_settlement.authority_instance AND system_id = v_system.id
@@ -288,15 +304,20 @@ END $$;
 REVOKE ALL ON TABLE public.external_boot_activation_settlements
 FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness,
      kdive_provider_authority;
-GRANT SELECT ON TABLE public.external_boot_activation_settlements
-    TO kdive_server, kdive_worker, kdive_reconciler;
+GRANT SELECT ON TABLE public.external_boot_activation_settlements TO kdive_server;
+GRANT SELECT (activation_id, system_id, settled_at)
+    ON TABLE public.external_boot_activation_settlements TO kdive_worker, kdive_reconciler;
 REVOKE ALL ON FUNCTION
-    public.record_stranded_activation_authority_absence(uuid,text,text,text,text[]),
+    public.record_stranded_activation_authority_absence(
+        uuid,text,text,bigint,text,text,text[]
+    ),
     public.record_stranded_activation_worker_ownership(bytea,uuid,integer,uuid,text),
     public.settle_stranded_external_boot_activation(uuid,text,text,text,text)
 FROM PUBLIC, kdive_server, kdive_worker, kdive_reconciler, kdive_lifecycle_witness,
      kdive_provider_authority;
-GRANT EXECUTE ON FUNCTION public.record_stranded_activation_authority_absence(uuid,text,text,text,text[])
+GRANT EXECUTE ON FUNCTION public.record_stranded_activation_authority_absence(
+        uuid,text,text,bigint,text,text,text[]
+    )
     TO kdive_provider_authority;
 GRANT EXECUTE ON FUNCTION
     public.record_stranded_activation_worker_ownership(bytea,uuid,integer,uuid,text)

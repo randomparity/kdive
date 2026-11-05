@@ -13,11 +13,13 @@ and the worker holds its domain. The primitive provides that and nothing else.
 **Migration `0194_stranded_activation_settlement.sql`**
 
 - Table `external_boot_activation_settlements`: one row per activation with authority columns,
-  worker columns and settlement columns. `kdive_server`, `kdive_worker` and `kdive_reconciler` may
-  read it, as with the other activation tables; nobody may write it directly.
+  worker columns and settlement columns. `kdive_server` may read it whole; `kdive_worker` and `kdive_reconciler`
+  may read `activation_id`, `system_id` and `settled_at`, not the operator's text. Nobody may write
+  it directly.
 - `record_stranded_activation_authority_absence(activation, instance, domain_name,
-  composite_state, objects)` returns `applied`, `superseded` or `not_found`. Role
-  `kdive_provider_authority`. `domain_name` must equal `systems.domain_name`. `composite_state` is
+  observed_journal_sequence, observed_journal_digest, composite_state, objects)` returns `applied`, `superseded` or `not_found`. Role
+  `kdive_provider_authority`. `domain_name` must equal `systems.domain_name`, and the observed head, read before
+  the observation, must equal the current head. `composite_state` is
   the authority's digest of what it observed as absent; it becomes the terminal evidence's
   `composite_state`. At most 32 objects, each in the ASCII subset of `OpaqueProviderRef`, else
   `22023`.
@@ -39,7 +41,9 @@ carrying `details["reason"]`.
 
 ## Settlement order
 
-Under the System advisory lock, with the activation, System and settlement rows locked:
+The repository holds the Python System lock, which excludes the server's enqueues and verified
+module attempts. Under it the function takes the SQL System key and locks the activation, System
+and settlement rows:
 
 0. No such activation: `not_found`.
 1. Settled already: return `replayed`.
@@ -51,16 +55,18 @@ Under the System advisory lock, with the activation, System and settlement rows 
 7. No worker record: `worker_evidence_missing`.
 8. Either record older than one hour, or naming a domain other than `systems.domain_name`:
    `evidence_stale`.
-9. Journal head differs from the captured head: `authority_journal_moved`.
-10. No reservation row: `reservation_missing`.
-11. An object named by `materialization`, `recovery_point` or `pre_recovery_evidence` is not in the
+9. An authority row or marked job of the activation names another instance:
+   `authority_instance_mismatch`.
+10. Journal head differs from the captured head: `authority_journal_moved`.
+11. No reservation row: `reservation_missing`.
+12. An object named by `materialization`, `recovery_point` or `pre_recovery_evidence` is not in the
     absent list: `objects_unproven`.
-12. Apply: write the release row from the absent list and delete the reservation; set `abandoned`
+13. Apply: write the release row from the absent list and delete the reservation; set `abandoned`
     with terminal evidence and `ordinary` cleanup evidence; supersede open authority rows; discharge
     remote-module obligations; mark settled; insert `platform_audit_log`.
 
 Open or retired authority rows do not refuse: failed jobs retire theirs, and an interrupted attempt
-leaves one open. Step 5 and step 9 fence authority activity that moves the journal after the
+leaves one open. Step 5 and step 10 fence authority activity that moves the journal after the
 observation, and superseding the open rows fences a later journal write. Neither stops a provider
 call already running, so the authority must prove its lane quiescent before it records absence; a
 non-terminal head does not refuse, because an interrupted attempt is the shape being recovered. Retired rows stay; the ADR states what that requires of #3551.
@@ -98,8 +104,8 @@ refusals. Reason is 1 to 1024 bytes after trimming.
 1. **Boundary inventory.** Added: `platform_admin` to the service; server to the settlement
    function; worker and authority to their recorders. Widened: the authority role's accepted
    function list gains the recorder. Reason text enters from the
-   operator and is stored trimmed. `actor` enters from the caller; the #3551 tool must pass
-   `actor_for(ctx)`, the server-resolved value (ADR-0089).
+   operator and is stored trimmed. `actor` enters from the caller; the function refuses a value
+   outside the ADR-0089 set, and the #3551 tool must pass `actor_for(ctx)`.
 2. **Actor model.** A project user or a platform role below admin is untrusted. A compromised worker
    or authority credential is untrusted for the other owner's evidence. The trust is in database role
    separation and in the operator holding `platform_admin`.
@@ -115,7 +121,7 @@ refusals. Reason is 1 to 1024 bytes after trimming.
 
 - Each refusal in the settlement order changes no row (test per status, against real Postgres).
 - `is_settled` is false before settlement and true after, for `kdive_server`, `kdive_worker` and
-  `kdive_reconciler`.
+  `kdive_reconciler`; the last two cannot read `reason` or `principal`.
 - An object outside the `OpaqueProviderRef` subset is refused with `22023`, leaving no record.
 - A System with an ownership row and both records returns `authority_owned`.
 - Worker record alone returns `authority_evidence_missing`; authority record alone returns

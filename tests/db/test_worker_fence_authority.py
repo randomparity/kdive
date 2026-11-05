@@ -281,7 +281,6 @@ _WORKER_SELECT = {
     "artifacts",
     "budgets",
     "component_uploads",
-    "external_boot_activation_settlements",
     "cost_class_coefficients",
     "debug_sessions",
     "egress_probe_guests",
@@ -424,10 +423,7 @@ _EXPECTED_ROLE_TABLE_PRIVILEGES = {
         "INSERT": _SERVER_MUTATIONS["INSERT"] | {"external_boot_recovery_orphan_requests"},
     },
     "kdive_worker": {"SELECT": _WORKER_SELECT, **_WORKER_MUTATIONS},
-    "kdive_reconciler": {
-        "SELECT": _RECONCILER_SELECT | {"external_boot_activation_settlements"},
-        **_RECONCILER_MUTATIONS,
-    },
+    "kdive_reconciler": {"SELECT": _RECONCILER_SELECT, **_RECONCILER_MUTATIONS},
     "kdive_lifecycle_witness": {},
     "unprivileged": {},
 }

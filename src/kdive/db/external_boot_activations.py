@@ -55,6 +55,7 @@ class SettlementStatus(StrEnum):
     AUTHORITY_EVIDENCE_MISSING = "authority_evidence_missing"
     WORKER_EVIDENCE_MISSING = "worker_evidence_missing"
     EVIDENCE_STALE = "evidence_stale"
+    AUTHORITY_INSTANCE_MISMATCH = "authority_instance_mismatch"
     AUTHORITY_JOURNAL_MOVED = "authority_journal_moved"
     RESERVATION_MISSING = "reservation_missing"
     OBJECTS_UNPROVEN = "objects_unproven"
@@ -1052,13 +1053,22 @@ class ExternalBootActivationRepository:
         actor: str,
         reason: str,
     ) -> SettlementStatus:
-        """End a stranded activation on both owners' evidence; a refusal changes no row."""
-        row = await (
-            await conn.execute(
-                "SELECT public.settle_stranded_external_boot_activation(%s,%s,%s,%s,%s)",
-                (activation_id, principal, agent_session, actor, reason),
-            )
-        ).fetchone()
+        """End a stranded activation on both owners' evidence; a refusal changes no row.
+
+        The function's own lock is the SQL key; the System lock here is what excludes the
+        server's enqueues and the verified module attempts that hold the Python key.
+        """
+        async with conn.transaction():
+            activation = await self._get_row(conn, activation_id)
+            if activation is None:
+                return SettlementStatus.NOT_FOUND
+            async with advisory_xact_lock(conn, LockScope.SYSTEM, activation["system_id"]):
+                row = await (
+                    await conn.execute(
+                        "SELECT public.settle_stranded_external_boot_activation(%s,%s,%s,%s,%s)",
+                        (activation_id, principal, agent_session, actor, reason),
+                    )
+                ).fetchone()
         if row is None:
             raise RuntimeError("settlement returned no status")
         return SettlementStatus(row[0])

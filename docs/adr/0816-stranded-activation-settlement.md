@@ -32,11 +32,12 @@ Migration 0194 adds `external_boot_activation_settlements`, keyed by activation,
 
 - `record_stranded_activation_authority_absence`, for `kdive_provider_authority` only: the
   authority states that its own daemon holds no domain named `systems.domain_name` and lists its
-  enumerated absent store objects. The row captures the System's journal head.
+  enumerated absent store objects. It passes the journal head it read before observing, which
+  must still be current.
 - `record_stranded_activation_worker_ownership`, for `kdive_worker` only: a running, unmarked job
   of an active incarnation states that its own provider session found `systems.domain_name`.
 - `settle_stranded_external_boot_activation`, for `kdive_server` only: re-checks the shape, then
-  requires both records, each under one hour old, an unmoved journal head, and absent-object
+  requires both records, each under one hour old, one authority instance, an unmoved journal head, and absent-object
   coverage of every object the activation names.
 
 Each owner testifies only about its own daemon, through its own database role, in positive form.

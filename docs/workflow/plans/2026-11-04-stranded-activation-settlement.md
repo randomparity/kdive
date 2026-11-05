@@ -31,6 +31,8 @@ Expected implementation size: 620–760 changed lines (M) — migration, reposit
 
 No caller migration and no obsolete path. Migration 0192 is consumed and unused; #3535 holds 0193. 0193 has landed on the base. Check each K by hand after any later base refresh. 0194 must stay above main's highest migration.
 
+Review changed the build after this plan: the observed-head recorder arguments, `authority_instance_mismatch`, the object cap, column-level reads for the worker and reconciler, the Python System lock and the actor check. The migration and spec are current; the SQL below is the first draft.
+
 ## Task 1: migration
 
 Files: create the migration and its test; modify the four window-list tests.

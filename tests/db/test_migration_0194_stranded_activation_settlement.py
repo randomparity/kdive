@@ -17,6 +17,7 @@ from kdive.db.external_boot_activations import (
     ExternalBootActivationRepository,
     SettlementStatus,
 )
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.external_boot_activation import (
     ExternalBootActivation,
     ExternalBootReservationRelease,
@@ -34,7 +35,7 @@ from tests.db.external_boot_authority_support import (
 
 _DOMAIN = "kdive-stranded"
 _COMPOSITE = "sha256:" + "e" * 64
-_AUTHORITY_RECORD = "SELECT record_stranded_activation_authority_absence(%s,%s,%s,%s,%s)"
+_AUTHORITY_RECORD = "SELECT record_stranded_activation_authority_absence(%s,%s,%s,%s,%s,%s,%s)"
 _WORKER_RECORD = "SELECT record_stranded_activation_worker_ownership(%s,%s,%s,%s,%s)"
 _SETTLE = "SELECT settle_stranded_external_boot_activation(%s,%s,%s,%s,%s)"
 
@@ -45,7 +46,9 @@ class _Stranded:
     observer_job: UUID
 
 
-def _strand(migrated_url: str, role_dsns: _RoleDsns, *, suffix: str = "s") -> _Stranded:
+def _strand(
+    migrated_url: str, role_dsns: _RoleDsns, *, suffix: str = "s", allocate: bool = True
+) -> _Stranded:
     """Build the #3138 shape: a failed activate job over an unprepared activation."""
     with psycopg.connect(migrated_url) as conn:
         case = _seed_case(conn, worker_suffix=suffix)
@@ -66,8 +69,9 @@ def _strand(migrated_url: str, role_dsns: _RoleDsns, *, suffix: str = "s") -> _S
             "VALUES (%s, %s, %s)",
             (case.system_id, case.run_id, "1" * 32),
         )
-    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
-        _allocate(worker, case)
+    if allocate:
+        with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
+            _allocate(worker, case)
     observer_job = uuid4()
     with psycopg.connect(migrated_url) as conn:
         conn.execute(
@@ -97,12 +101,20 @@ def _record_authority(
     *,
     domain: str = _DOMAIN,
     objects: tuple[str, ...] = (),
+    observed_head: tuple[int | None, str | None] = (None, None),
 ) -> str:
     case = stranded.case
     with psycopg.connect(role_dsns("kdive_provider_authority"), autocommit=True) as conn:
         row = conn.execute(
             _AUTHORITY_RECORD,
-            (case.activation_id, case.authority_instance, domain, _COMPOSITE, list(objects)),
+            (
+                case.activation_id,
+                case.authority_instance,
+                domain,
+                *observed_head,
+                _COMPOSITE,
+                list(objects),
+            ),
         ).fetchone()
     assert row is not None
     return row[0]
@@ -424,7 +436,7 @@ def test_role_separation(
     if digest_args is None:
         args = (uuid4(), "p", None, "agent", "reason")
     elif digest_args:
-        args = (uuid4(), "authority", _DOMAIN, _COMPOSITE, [])
+        args = (uuid4(), "authority", _DOMAIN, None, None, _COMPOSITE, [])
     else:
         args = (b"x" * 32, uuid4(), 1, uuid4(), _DOMAIN)
     with (
@@ -472,9 +484,124 @@ def test_authority_record_requires_the_systems_domain_and_route(
     assert _record_authority(authority_role_dsns, stranded, domain="other") == "superseded"
     with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as conn:
         row = conn.execute(
-            _AUTHORITY_RECORD, (case.activation_id, "another-authority", _DOMAIN, _COMPOSITE, [])
+            _AUTHORITY_RECORD,
+            (case.activation_id, "another-authority", _DOMAIN, None, None, _COMPOSITE, []),
         ).fetchone()
     assert row == ("superseded",)
+
+
+def test_a_failed_job_with_no_authority_row_routes_through_its_marker(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    stranded = _strand(migrated_url, authority_role_dsns, allocate=False)
+    case = stranded.case
+    with psycopg.connect(authority_role_dsns("kdive_provider_authority"), autocommit=True) as conn:
+        row = conn.execute(
+            _AUTHORITY_RECORD,
+            (case.activation_id, "another-authority", _DOMAIN, None, None, _COMPOSITE, []),
+        ).fetchone()
+    assert row == ("superseded",)
+    assert _record_authority(authority_role_dsns, stranded) == "applied"
+    assert _record_worker(authority_role_dsns, stranded) == "applied"
+
+    assert _settle(authority_role_dsns, case.activation_id) == "applied"
+
+
+def _seed_head(migrated_url: str, stranded: _Stranded) -> tuple[int, str]:
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            cast(
+                LiteralString,
+                _SET_JOURNAL_MOVED.format(activation=f"'{stranded.case.activation_id}'"),
+            )
+        )
+    return 1, "sha256:" + "a" * 64
+
+
+def test_a_head_that_moved_before_the_record_refuses_the_record(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    stranded = _strand(migrated_url, authority_role_dsns)
+    head = _seed_head(migrated_url, stranded)
+
+    assert _record_authority(authority_role_dsns, stranded) == "superseded"
+    assert _record_authority(authority_role_dsns, stranded, observed_head=head) == "applied"
+
+
+def test_absence_from_one_instance_does_not_cover_another(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    stranded = _strand(migrated_url, authority_role_dsns)
+    case = stranded.case
+    assert _record_authority(authority_role_dsns, stranded) == "applied"
+    assert _record_worker(authority_role_dsns, stranded) == "applied"
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "INSERT INTO jobs (id, kind, payload, state, attempt, max_attempts, authorizing, "
+            "dedup_key) VALUES (%s, 'boot', %s, 'failed', 1, 3, %s, %s)",
+            (
+                uuid4(),
+                Jsonb(
+                    {
+                        "external_boot_authority_v1": {
+                            "activation_id": str(case.activation_id),
+                            "authority_instance": "another-authority",
+                        }
+                    }
+                ),
+                Jsonb({"principal": "p", "project": "proj"}),
+                f"other-{case.activation_id}",
+            ),
+        )
+
+    assert _settle(authority_role_dsns, case.activation_id) == "authority_instance_mismatch"
+
+
+def test_settlement_waits_for_the_python_system_lock(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    stranded = _strand(migrated_url, authority_role_dsns)
+    case = stranded.case
+
+    async def settle_while_locked() -> None:
+        dsn = authority_role_dsns("kdive_server")
+        async with (
+            await psycopg.AsyncConnection.connect(dsn) as holder,
+            await psycopg.AsyncConnection.connect(dsn, autocommit=True) as settler,
+        ):
+            await settler.execute("SET lock_timeout = '200ms'")
+            async with advisory_xact_lock(holder, LockScope.SYSTEM, case.system_id):
+                await ExternalBootActivationRepository().settle_stranded(
+                    settler,
+                    activation_id=case.activation_id,
+                    principal="admin",
+                    agent_session=None,
+                    actor="agent",
+                    reason="stranded",
+                )
+
+    with pytest.raises(psycopg.errors.LockNotAvailable):
+        asyncio.run(settle_while_locked())
+
+
+def test_worker_and_reconciler_cannot_read_the_operator_text(
+    authority_role_dsns: _RoleDsns,
+) -> None:
+    for role in ("kdive_worker", "kdive_reconciler"):
+        with (
+            psycopg.connect(authority_role_dsns(role), autocommit=True) as conn,
+            pytest.raises(psycopg.errors.InsufficientPrivilege),
+        ):
+            conn.execute("SELECT reason FROM external_boot_activation_settlements")
+
+
+def test_an_unknown_actor_is_rejected(migrated_url: str, authority_role_dsns: _RoleDsns) -> None:
+    stranded = _strand(migrated_url, authority_role_dsns)
+    with (
+        psycopg.connect(authority_role_dsns("kdive_server"), autocommit=True) as conn,
+        pytest.raises(psycopg.errors.InvalidParameterValue),
+    ):
+        conn.execute(_SETTLE, (stranded.case.activation_id, "p", None, "forged", "reason"))
 
 
 @pytest.mark.parametrize(
