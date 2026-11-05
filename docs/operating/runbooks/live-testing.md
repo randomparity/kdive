@@ -408,42 +408,53 @@ requirement; `qemu:///system` and root-process constraints also apply.
 ### Live authority lab
 
 Bringing up a local host with an installed authority has several steps whose failures do not name
-the cause. Each trap below lists what to do and how the miss shows. The host preparation itself is
-[Local composition without runner registration](#local-composition-without-runner-registration);
-the stack start-up is [live-stack section 4](live-stack.md#4-start-the-host-processes).
+the cause. Each trap below gives the action and, where the repository documents one, how the miss
+shows. The host preparation itself is
+[Local composition without runner registration](#local-composition-without-runner-registration)
+(Ubuntu 26.04 x86_64, an explicit operator user and a full candidate SHA); the stack start-up is
+[live-stack section 4](live-stack.md#4-start-the-host-processes).
 
 - **Prepare the host before starting the stack.** Run
   [installed-local-authority.yml](../../../deploy/ansible/playbooks/installed-local-authority.yml)
   first. It installs the authority, the fixed worker lifecycle and the client route that
   `stack-services.sh` (and `examples/local-libvirt/demo-up.sh`, which calls it) then start workers
   against.
-- **Keep `acl` on the host.** The authority package list in
-  `deploy/ansible/roles/live_vm_host/defaults/main.yml` (`live_vm_host_authority_packages`)
-  includes it. A play on a `connection: local` host that escalates to a *different* unprivileged
-  account needs `acl` there: ansible-core's fallback there is `setfacl`, which comes from that
-  package. The reason is recorded in
-  `deploy/ansible/roles/local_worker_host/tasks/boot_kernels.yml`. Install `acl` before re-running.
+- **Host packages and the Python that runs the play.** The authority play installs `acl` itself
+  (`live_vm_host_authority_packages` in `deploy/ansible/roles/live_vm_host/defaults/main.yml`). Only
+  a `connection: local` play run by an unprivileged user that escalates to a *different*
+  unprivileged account and installs no `acl` hits the problem: ansible-core falls back to
+  `setfacl`, which comes from that package (the reason is recorded in
+  `deploy/ansible/roles/local_worker_host/tasks/boot_kernels.yml`). Separately, under
+  `uv run --with ansible-core` a local-connection play resolves modules against an ephemeral
+  environment with no `lxml`, so `community.libvirt` fails in `libvirt_pool_net`
+  ([which interpreter the host play runs under](../providers/local-libvirt.md)).
+  `local-libvirt-host.yml` avoids this by pinning `ansible_python_interpreter: /usr/bin/python3`;
+  `installed-local-authority.yml` carries no such pin, so supply the same value for a
+  local-connection lane.
 - **The inventory entry must match the manifest.** The authority checks the request tuple
-  `(provider_kind, resource_name, authority_instance)` against its manifest and refuses a
-  mismatch with `local authority request is not bound to its manifest`
-  (`src/kdive/providers/local_libvirt/system_authority.py`). Name the `[[local_libvirt]]` entry
-  after the manifest's `resource_name` and give it the manifest's `authority_instance`, not only
-  one of the two.
+  `(provider_kind, resource_name, authority_instance)` against its manifest
+  (`src/kdive/providers/local_libvirt/system_authority.py`). A wrong resource name is refused with
+  `local authority request is not bound to its manifest`; a wrong `authority_instance` normally
+  stops earlier at the worker, as `authority: binding-mismatch`. Name the `[[local_libvirt]]`
+  entry after the manifest's `resource_name` and give it the manifest's `authority_instance`.
 - **Pick the right instance field.** `authority_instance` makes `systems.provision` take the
   authority-owned path. `relocated_authority_instance` is the fixture-lane declaration
   ([Authority-owned System frame](#authority-owned-system-frame-3184)); the two are mutually
   exclusive, and the frame's resource must carry no `authority_instance`. A file for the
   authority-owned path therefore uses `authority_instance`, and the fixture-lane copy replaces
   that one line with `relocated_authority_instance`.
-- **Register a staged image with its sidecar, then reconcile.** An image the server can provision
-  needs an `[[image]]` block in `systems.toml` built from the image's
-  `<name>.qcow2.provenance.json` sidecar, followed by `reconcile-systems`. Without the block the
-  catalog does not know the image. `examples/local-libvirt/build-image.sh` does all three steps
-  (build, block, reconcile); the manual form is in the
-  [local example](../../../examples/local-libvirt/README.md#optional-inventory-systemstoml).
-- **A stuck slot after a failed or interrupted start** is the wedged worker slot. Follow
-  [Recovering a wedged worker slot](live-stack.md#recovering-a-wedged-worker-slot); its documented
-  cause is a worker unit restarted outside the lifecycle contract.
+- **Register a staged image with its sidecar, then reconcile.** A catalog image for the authority
+  lane needs an `[[image]]` block in `systems.toml` built from the image's
+  `<name>.qcow2.provenance.json` sidecar, followed by `reconcile-systems`; its name and
+  architecture must also match a base in the installed manifest, or provisioning stops with
+  `local authority root source is not installed`.
+  `examples/local-libvirt/build-image.sh` does the build, the block and the reconcile; the manual
+  form is in the [local example](../../../examples/local-libvirt/README.md#optional-inventory-systemstoml).
+- **A stuck worker slot** after a unit restarted outside the lifecycle contract (a `needrestart`
+  sweep, an unattended upgrade, a manual `systemctl restart`) is documented in
+  [Recovering a wedged worker slot](live-stack.md#recovering-a-wedged-worker-slot). A stranded
+  allocation is a different problem: the `systems.teardown` then `allocations.release` steps at the
+  end of the [frame section](#authority-owned-system-frame-3184) clear it.
 
 ### Separate installed authority lanes
 
