@@ -919,6 +919,55 @@ crash-kernel boot), `introspect.from_vmcore`, `postmortem.crash`, and `vmcore.fe
 carried a host name or address. After the run, `demo-down.sh --wipe --yes` cleared the stack, the
 provider defined no `kdive-` domain, and its pool held only the base volumes.
 
+## 15. Remote authority vmlinux staging (#3512)
+
+The existing `tests/integration/test_authority_vmlinux_live.py` selects x86_64 or ppc64le from
+the configured remote authority's observed host architecture. The unfiltered invocation remains:
+
+```bash
+uv run python -m pytest -m live_stack -s tests/integration/test_authority_vmlinux_live.py
+```
+
+Configure the [installed remote authority lane](live-testing.md#remote-authority-branch-3209),
+including `KDIVE_LIVE_VM_REMOTE_AUTHORITY_CONFIG`, `KDIVE_SYSTEMS_TOML` and
+`KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`. Set `KDIVE_KERNEL_SRC` to a complete matching
+kernel tree with boot image, config, modules and unstripped DWARF `vmlinux`; its filesystem
+support must match the registered guest root (including `CONFIG_BTRFS_FS` for btrfs).
+On a foreign controller, set `KDIVE_PPC64LE_BUNDLE` to a native POWER-produced directory holding
+`kernel.tar.gz` and gzip `initrd.img`, built with `combined_kernel_tar` and `spine_initrd` in
+`tests.integration.live_stack.spine`. Copy the matching `.config`, unstripped `vmlinux` and
+`include/config/kernel.release` to the controller's `KDIVE_KERNEL_SRC`; the bundle supplies the
+boot image and modules. Its boot GNU build ID and module release must match that tree. Leave
+the bundle variable unset only when generating the artifacts on a matching native controller.
+For a Debian authority image build, the prerequisite role selects the installed running
+`vmlinuz-<release>` or `vmlinux-<release>` kernel. When the privileged direct libguestfs backend
+has been verified to provide network access under the existing host confinement, run the image
+playbook with `--skip-tags guest_image_prereqs_passt_relax` to preserve that policy. This skips
+only the existing global userns/passt relaxations; kernel and dependency preparation still run.
+The default role retains those blanket workarounds for other deployments. Record which
+selection and network proof were used.
+
+The guest needs drgn and a working guest agent. Authority and control-plane revisions must match
+the candidate. The frame rechecks architecture before allocation and owns lifecycle cleanup.
+
+The module appliance is a separately pinned immutable image: rebuild and install its fresh
+manifest after changing the producer, then verify the installed kernel/initramfs digests as
+well as both runtime revisions. Its repeated fixed `phase=accepted` advisory is throttled to
+five appliance-monotonic seconds while work completes or the bounded depmod child remains alive;
+it is not a durable phase or install proof. The 30-second console idle and 300-second invocation
+caps remain in force; depmod's per-child 300-second deadline cannot extend the invocation.
+A missing advisory or a blocked syscall can still produce an incomplete attempt. Preserve the
+failed job/checkpoint and use existing recovery/teardown rather than counting operator cleanup
+or a diagnostic image as a successful carrier.
+
+The proof checks the uploaded SHA-256 at `/lib/modules/<release>/vmlinux`, real default-search
+`drgn -k` resolution of `init_uts_ns`, restored absence after release and baseline boot, and
+unchanged authority inventory/capacity. Native ppc64le completion requires an observed POWER
+KVM-HV run; mocked boundary tests, a skipped lane or TCG do not establish it. Record the exact
+candidate, accelerator, kernel/config provenance, observations and cleanup. The
+[dated native proof](../../workflow/proofs/2026-11-04-remote-ppc-vmlinux-3512.md) records a pass at
+`7be2770516a81684ae5325179e54efbadae59361`; it does not claim a hardware rerun of later heads.
+
 ## SUSE native image proof
 
 On untouched first boot, record the completed JeOS marker, skipped wizard units,
