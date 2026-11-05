@@ -497,11 +497,13 @@ async def activate(
     kernel_tree: Path | None = None,
     evidence_dir: Path | None = None,
     with_vmlinux: bool = False,
+    guest_arch: str = "x86_64",
 ) -> ActivationJob:
     """Start one external boot; a remote one that fails is a recorded blocker, not a pass.
 
     ``kernel_tree`` defaults to ``KDIVE_KERNEL_SRC``; ``evidence_dir`` retains the upload record;
     ``with_vmlinux`` uploads the tree's ``vmlinux`` with the kernel.
+    ``guest_arch`` carries the frame-selected architecture into its build profile and upload.
     """
     remote = isinstance(system.config, RemoteAuthorityProofConfig)
     try:
@@ -514,6 +516,7 @@ async def activate(
             # Only the local fixture profile carries a crashkernel; only remote boot needs an
             # initrd (#3323).
             require_kdump=not remote,
+            guest_arch=guest_arch,
             kernel_tree=kernel_tree,
             evidence_dir=evidence_dir,
             with_initrd=remote,

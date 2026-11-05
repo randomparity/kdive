@@ -24,7 +24,7 @@ COPY --from=uv /uv /usr/local/bin/uv
 # pkg-config (AGENTS.md). These build-only deps stay in the builder stage and never
 # reach the final image, which carries just the runtime shared lib.
 #
-# On ppc64le several locked deps have no wheel and build from source, so the builder
+# ARM64 drgn and several ppc64le locked deps build from source, so the builder
 # needs a wider toolchain — arch-guarded so the amd64 layer's package set (and thus
 # image size/contents) is unchanged (ADR-0359). pydantic-core is NOT among them: it
 # publishes a cp314 ppc64le wheel, so no Rust toolchain is required. The source-builds
@@ -32,7 +32,7 @@ COPY --from=uv /uv /usr/local/bin/uv
 # BoringSSL has no ppc64le target, see the GRPC_* env below); drgn (compiles libdrgn against
 # elfutils, needs libelf-dev/libdw-dev + autotools); libvirt-python/pyyaml/markupsafe (C, gcc).
 # libkdumpfile-dev gives the source-built drgn kdump-core support: the amd64 wheel vendors
-# it, but a from-source drgn links the system lib, and without it ppc64le kdump capture
+# it, but a from-source drgn links the system lib, and without it ARM64/ppc64le kdump capture
 # silently fails (ADR-0355) — so it is a hard build dep here, not optional.
 ARG TARGETARCH
 # The base image's deb822 sources default to http://deb.debian.org; switch to https so the
@@ -42,7 +42,7 @@ ARG TARGETARCH
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
       gcc libc6-dev libvirt-dev pkg-config \
-    && if [ "${TARGETARCH}" = "ppc64le" ]; then \
+    && if [ "${TARGETARCH}" = "ppc64le" ] || [ "${TARGETARCH}" = "arm64" ]; then \
          apt-get install -y --no-install-recommends \
            g++ libelf-dev libdw-dev libkdumpfile-dev libssl-dev zlib1g-dev \
            autoconf automake libtool autoconf-archive make gawk; \
@@ -97,7 +97,7 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
       gcc make binutils gdb libvirt-clients openssh-client libseccomp2 \
       libelf1 libdw1 zlib1g \
       flex bison bc git rsync xz-utils libssl-dev libelf-dev \
-    && if [ "${TARGETARCH}" = "ppc64le" ]; then \
+    && if [ "${TARGETARCH}" = "ppc64le" ] || [ "${TARGETARCH}" = "arm64" ]; then \
          apt-get install -y --no-install-recommends libkdumpfile10; \
        fi \
     && rm -rf /var/lib/apt/lists/*

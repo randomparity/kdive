@@ -104,6 +104,7 @@ class _Volume:
 
     def download(self, stream: object, _offset: int, _length: int, flags: int) -> int:
         assert stream is self.stream
+        assert _offset == 0 and _length == SCRATCH_CAPACITY_BYTES
         self.download_flags = flags
         if self.expire is not None:
             self.expire()
@@ -226,6 +227,7 @@ class _ImageVolume:
 
     def download(self, stream: object, _offset: int, _length: int, flags: int) -> int:
         assert stream is self.stream
+        assert _offset == 0 and _length == SCRATCH_CAPACITY_BYTES
         self.flags = flags
         return 0
 
@@ -247,8 +249,9 @@ class _ImageStorage:
         return self.stream
 
 
+@pytest.mark.parametrize("physical_overhead", [None, 4096], ids=["sparse", "metadata-overhead"])
 def test_sparse_reader_extracts_real_ext4_without_dense_local_allocation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, physical_overhead: int | None
 ) -> None:
     image = tmp_path / "source-scratch.ext4"
     with image.open("wb") as handle:
@@ -271,6 +274,12 @@ def test_sparse_reader_extracts_real_ext4_without_dense_local_allocation(
 
     stream = _ImageStream(image, SCRATCH_CAPACITY_BYTES)
     storage = _ImageStorage(_ImageVolume(image, stream), stream)
+    if physical_overhead is not None:
+        monkeypatch.setattr(
+            storage.volume,
+            "info",
+            lambda: (0, SCRATCH_CAPACITY_BYTES, SCRATCH_CAPACITY_BYTES + physical_overhead),
+        )
     observed: dict[str, int] = {}
     original = remote_module_result_reader._read_debugfs
 
@@ -419,6 +428,64 @@ def test_debugfs_rejects_a_malformed_filesystem(tmp_path: Path) -> None:
         remote_module_result_reader._read_debugfs(image, 10.0, lambda: 0.0)
 
     assert exc_info.value.category is ErrorCategory.CONFLICT
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        (0, SCRATCH_CAPACITY_BYTES - 1, 8192),
+        (0, SCRATCH_CAPACITY_BYTES + 1, 8192),
+        (0, SCRATCH_CAPACITY_BYTES, -1),
+        (0, str(SCRATCH_CAPACITY_BYTES), 8192),
+        (0, float(SCRATCH_CAPACITY_BYTES), 8192),
+        (0, True, 8192),
+        (0, SCRATCH_CAPACITY_BYTES, "8192"),
+        (0, SCRATCH_CAPACITY_BYTES, 8192.5),
+        (0, SCRATCH_CAPACITY_BYTES, True),
+        (0, SCRATCH_CAPACITY_BYTES, None),
+        (0, SCRATCH_CAPACITY_BYTES),
+        None,
+    ],
+)
+def test_sparse_reader_rejects_invalid_geometry_before_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, info: object
+) -> None:
+    stream = _Stream([])
+    storage = _Storage(stream)
+    monkeypatch.setattr(storage.pool.volume, "info", lambda: info)
+    reader = SparseRemoteModuleResultReader(
+        storage=cast(StorageConn, storage),
+        work_dir=tmp_path,
+        executor=CompletionDeadlineExecutor(),
+    )
+
+    with pytest.raises(CategorizedError, match="scratch volume size is invalid") as caught:
+        reader.read_volume(_scratch())
+
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert storage.pool.volume.download_flags is None
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "events", [[SCRATCH_CAPACITY_BYTES + 1], [SCRATCH_CAPACITY_BYTES - 1, b"xx"]]
+)
+def test_sparse_reader_rejects_logical_overflow_and_removes_partial_image(
+    tmp_path: Path, events: list[bytes | int]
+) -> None:
+    stream = _Stream(events)
+    reader = SparseRemoteModuleResultReader(
+        storage=cast(StorageConn, _Storage(stream)),
+        work_dir=tmp_path,
+        executor=CompletionDeadlineExecutor(),
+    )
+
+    with pytest.raises(CategorizedError, match="durable result read failed") as caught:
+        reader.read_volume(_scratch())
+
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert stream.aborted and not stream.finished
+    assert not list(tmp_path.iterdir())
 
 
 def test_invalid_utf8_debugfs_stderr_with_exit_zero_is_not_success(

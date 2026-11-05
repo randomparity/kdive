@@ -242,9 +242,17 @@ class SparseRemoteModuleResultReader:
                     return None
                 raise
             info = self._call(volume.info, limit)
-            capacity, allocation = int(info[1]), int(info[2])
-            if capacity != scratch.capacity_bytes or allocation < 0 or allocation > capacity:
+            if (
+                not isinstance(info, (list, tuple))
+                or len(info) != 3
+                or type(info[1]) is not int
+                or type(info[2]) is not int
+                or info[1] != scratch.capacity_bytes
+                or info[2] < 0
+            ):
                 raise _conflict("remote module scratch volume size is invalid")
+            # libvirt allocation includes metadata overhead; capacity bounds the byte stream.
+            capacity = info[1]
             descriptor, raw_path = tempfile.mkstemp(
                 prefix="kdive-module-result-", suffix=".ext4", dir=self.work_dir
             )

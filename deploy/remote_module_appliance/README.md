@@ -105,6 +105,15 @@ old behaviour until the bundle is rebuilt and installed again. To rebuild:
 4. Confirm that the installed `manifest.json` on the authority host carries the new digest before
    relying on a PREPARE.
 
-Console contract: the appliance writes `phase=accepted` after reading its operation document and
-`error_code=<stable code>` for a failure, to the kernel console; nothing else. The host keeps only
-those whitelisted keys.
+Console contract: after validating its operation document, the appliance writes `phase=accepted`.
+Completed hash/copy chunks, metadata and sync steps may repeat that fixed advisory, throttled to
+at most one attempt per five seconds of appliance monotonic time for that operation. A live
+fixed depmod child also permits a throttled advisory between bounded waits; this is liveness,
+not completed work, a durable checkpoint or success. Child output remains discarded. Failures
+use `error_code=<stable code>`; the existing host whitelist is unchanged.
+
+The host still enforces 30 monotonic seconds without a nonempty console chunk and a fixed
+300-second invocation cap. A blocked syscall cannot emit a callback; idle expiry remains an
+incomplete attempt requiring existing recovery/retry. Depmod retains its separate 300-second
+monotonic deadline per child call; it never extends the host's earlier invocation deadline.
+Rebuild and pin the image after a producer change; source checkout alone does not deploy it.
