@@ -118,8 +118,9 @@ worker. The worker asks its own daemon for `systems.domain_name` and records own
 sends the authority a request naming only the activation. The authority reads every other fact
 through `read_stranded_activation_target`, added by migration 0195 for its role alone.
 
-The authority proves quiescence under the System lane lock: no failed lane, no active operation,
-and a local journal tail equal to the database head, or no journal at all. A non-terminal head
+The authority proves quiescence under the System lane lock: no active operation, and a local
+journal tail equal to the database head, or no journal at all. The tail comparison is the durable
+proof; the in-memory failed flag only refuses while another caller holds the lane. A non-terminal head
 does not refuse. A provider call dies with the single authority process, so an interrupted head is
 the shape being recovered. It then observes its own daemon and store, and records absence only when
 the domain is absent and `exact_recovery_absence` holds for the activation.
@@ -127,9 +128,12 @@ the domain is absent and `exact_recovery_absence` holds for the activation.
 The observation writes no journal record, adds no `AuthorityOperation`, and is a new transport
 operation beside `sweep-module-volumes`.
 
-Objects the authority holds refuse the job, naming them. Nothing removes them.
-`objects_unproven` needs a domain the authority once held, because
+A store not proven absent refuses the job, naming the recovery reference and the activation's
+objects. Nothing removes them. `objects_unproven` needs a domain the authority once held, because
 `LocalExternalBootSessionFactory.open` looks the domain up before anything materializes.
+
+The job kind stays platform-internal, so no job tool reads it. `read_stranded_observation` is the
+one read of its outcome.
 
 Only local-libvirt carries the producers. The runtime port and the authority collaborator are
 optional, so any other provider refuses by name.
@@ -140,14 +144,22 @@ optional, so any other provider refuses by name.
   readiness on an older host; then deploy workers and servers. A newer worker against an older
   authority gets `invalid-request` and the job fails closed. The lifecycle identity does not move:
   `systemd_worker_contract.py` references neither `AuthorityOperation` nor job kinds.
-- `request_stranded_observation` in `kdive.services.external_boot.settlement` is the only Python
-  entry to the job. It requires `platform_admin`, writes no audit row, and has no MCP tool until
-  #3551 calls it. A stranded remote-libvirt System stays stranded.
+- `request_stranded_observation` and `read_stranded_observation` in
+  `kdive.services.external_boot.settlement` are the only Python entries to the job. Both require
+  `platform_admin` and write no audit row, and neither has an MCP tool until #3551 calls them.
+  #3551 must return that read rather than `jobs.wait`, which answers `not_found` for this kind.
+  A stranded remote-libvirt System stays stranded.
+- A record stands for its hour. A later refusal does not withdraw it, so an operator who reads a
+  refusal must not settle on the earlier evidence.
+- After 0195 deploys, roll forward. A reverted authority host fails readiness on the grant.
 - `settle_stranded_external_boot_activation` and this read list the same six object paths;
   the end-to-end test covers a materialized activation, so a drift fails it.
 
 **Considered & rejected.**
 
+- **Add no producers.** verified: every settlement returns `authority_evidence_missing`
+  (`tests/db/test_migration_0194_stranded_activation_settlement.py`, main `0ca61d7a3`), which leaves
+  #3551 nothing to call.
 - **Reuse `observe-authority`.** verified: `_observe_current` raises `superseded` without a current
   bound authority, and the local `observe` opens a session whose `lookupByName` raises on a missing
   domain (`service.py`, `session.py`, main `0ca61d7a3`).
@@ -157,8 +169,9 @@ optional, so any other provider refuses by name.
 - **Let the worker send the domain and object list.** judgment: fit. A worker credential would then
   choose what the authority testifies about, against this record's rule that each owner states only
   its own facts.
-- **Two jobs, one per owner.** judgment: complexity. An authority-marked job trips `job_live`, and
-  the worker is the only route to the authority.
+- **Two jobs, one per owner.** judgment: complexity. A marked job trips `job_live`, and two unmarked
+  jobs give the operator two outcomes to read for one observation.
 - **Remove held objects here.** judgment: cost. A mutation must be journaled, which needs everything
-  the journaled observation does plus domain-free store cleanup, for a case the shape does not
-  reach. The issue accepts an actionable refusal.
+  the journaled observation does plus domain-free store cleanup, for a case that needs a domain the
+  authority once held (`session.py` `lookupByName`, main `0ca61d7a3`). The issue accepts an
+  actionable refusal.

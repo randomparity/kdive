@@ -44,18 +44,15 @@ Expected implementation size: 900–1300 changed lines (L) — the file map belo
 No ownership move. No obsolete path. Tests live beside their subjects; the four `migrations[-K:]`
 window lists take the new row and K+1.
 
-## Task 1: migration, job kind, payload
+## Task 1: migration
 
-**Interfaces.** Produces `JobKind.OBSERVE_STRANDED_ACTIVATION` and
-`ObserveStrandedActivationPayload(system_id: str, activation_id: str)`, schema
-`observe-stranded-activation-v1`, consumed by Tasks 2 and 3. Produces SQL
-`read_stranded_activation_target(uuid, text)`, consumed by Task 5.
+**Interfaces.** Produces SQL `read_stranded_activation_target(uuid, text)`, consumed by Task 3.
 
 **Verification.**
 
 - Contract: read function shape. Mode: focused-test. `tests/db/test_migration_0195_stranded_activation_observation.py`; red: `UndefinedFunction`; green: `uv run python -m pytest tests/db/test_migration_0195_stranded_activation_observation.py -q`.
 - Contract: role denial for server, worker, reconciler. Mode: focused-test. Same file; red: no `InsufficientPrivilege` raised; same green command.
-- Contract: job kind accepted. Mode: focused-test. `tests/domain/test_models.py`; red: the expected-kinds assertion fails; green: `uv run python -m pytest tests/domain/test_models.py -q`.
+- Contract: `jobs_kind_check` accepts the new kind. Mode: focused-test. Same file; red: `CheckViolation`; same green command.
 
 Steps:
 
@@ -134,93 +131,155 @@ GRANT EXECUTE ON FUNCTION public.read_stranded_activation_target(uuid, text)
     TO kdive_provider_authority;
 ```
 
-4. Add `OBSERVE_STRANDED_ACTIVATION = "observe_stranded_activation"` to `JobKind`, add it to `PLATFORM_INTERNAL_JOB_KINDS`, and add this payload beside `RemoteModuleVolumeReapPayload`, registering it in `ActivePayloadModel`, the `_ActivePayloadModel` union and `_ACTIVE_PAYLOAD_MODELS`:
+4. Add the row and K+1 to the four window lists.
+5. Run the focused commands; commit `feat(db): add stranded observation job and target read`.
 
-```python
-class ObserveStrandedActivationPayload(_PayloadBase):
-    """One stranded activation to observe (ADR-0816). It carries no authority marker."""
+## Task 2: wire contract
 
-    schema_: Literal["observe-stranded-activation-v1"] = Field(alias="schema")
-    system_id: str
-    activation_id: str
-```
-
-5. Add the row and K+1 to the four window lists, the kind to `tests/domain/test_models.py`, and `{"job_kind": "observe_stranded_activation", "writes": []}` to `tests/jobs/worker_write_baseline.json`.
-6. Run the focused commands; commit `feat(db): add stranded observation job and target read`.
-
-## Task 2: admission and the enqueue
-
-**Interfaces.** Consumes Task 1. Produces `ExternalBootOperation.OBSERVE_STRANDED_ACTIVATION` and
-`async def request_stranded_observation(conn, ctx, *, activation_id: UUID) -> Job`, which #3551 calls.
+**Interfaces.** Produces `AuthorityStrandedObservationRequestV1(activation_id: UUID)`,
+`AuthorityStrandedObservationResponseV1(disposition, objects: tuple[str, ...])`,
+transport operation `observe-stranded-activation`,
+`sender.observe_stranded_activation(request, *, deadline: float) -> AuthorityStrandedObservationResponseV1`.
 
 **Verification.**
 
-- Contract: matrix row. Mode: focused-test. `tests/services/external_boot/test_admission.py`; red: `preparing` denies; green: `uv run python -m pytest tests/services/external_boot/test_admission.py -q`.
-- Contract: service refusals and enqueue. Mode: focused-test. `tests/services/external_boot/test_stranded_observation.py`; red: `ImportError`; green: `uv run python -m pytest tests/services/external_boot/test_stranded_observation.py -q`.
+- Contract: closed models. Mode: focused-test. `tests/providers/external_boot_authority/test_protocol.py`; red: `ImportError`; green: `uv run python -m pytest tests/providers/external_boot_authority/test_protocol.py -q`. Cases: extra field refused; `objects` with `recorded` refused; `objects_present` without objects refused.
+- Contract: dispatch. Mode: focused-test. `tests/providers/external_boot_authority/test_transport.py`; red: `invalid-request`; green: `uv run python -m pytest tests/providers/external_boot_authority/test_transport.py -q`. Cases: routed; a service without the method answers `provider-not-configured`; a mismatched request model is refused at encode.
 
 Steps:
 
-1. Write tests: role denial before any database read; each of `not_found`, `authority_owned`, `not_preparing`, with no job row; a second request returns the same job while it is live; a request after a failed job requeues it.
-2. Add the operation and `ExternalBootActivationState.PREPARING: _ALWAYS_ADMITTED | {ExternalBootOperation.OBSERVE_STRANDED_ACTIVATION}`.
-3. Implement in `settlement.py`:
+1. Write tests; run them; expect the red above.
+2. Add to `protocol.py`:
 
 ```python
-async def request_stranded_observation(
-    conn: AsyncConnection, ctx: RequestContext, *, activation_id: UUID
-) -> Job:
-    """Enqueue the observation that produces both owners' settlement evidence (ADR-0816)."""
-    require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
-    activation = await _REPOSITORY.get(conn, activation_id)
-    if activation is None:
-        raise _observation_refused(activation_id, "not_found", ErrorCategory.NOT_FOUND)
-    system_id = activation.system_id
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        system = await SYSTEMS.get(conn, system_id)
-        if system is None:
-            raise _observation_refused(activation_id, "not_found", ErrorCategory.NOT_FOUND)
-        if await authority_system_binding(conn, system_id) is not None:
-            raise _observation_refused(activation_id, "authority_owned")
-        activation = await _REPOSITORY.get(conn, activation_id)
-        if activation is None or activation.state is not ExternalBootActivationState.PREPARING:
-            raise _observation_refused(activation_id, "not_preparing")
-        await check_external_boot_admission(
-            conn,
-            system_id,
-            ExternalBootOperation.OBSERVE_STRANDED_ACTIVATION,
-            project=system.project,
-        )
-        return await queue.enqueue(
-            conn,
-            JobKind.OBSERVE_STRANDED_ACTIVATION,
-            ObserveStrandedActivationPayload(
-                schema="observe-stranded-activation-v1",
-                system_id=str(system_id),
-                activation_id=str(activation_id),
-            ),
-            Authorizing(
-                principal=ctx.principal, agent_session=ctx.agent_session, project=system.project
-            ),
-            f"stranded-observation:{activation_id}",
-            recycle=JobRecyclePolicy.TERMINAL,
-        )
+class AuthorityStrandedObservationRequestV1(_ClosedValue):
+    """The activation to observe; the authority derives every other fact itself (ADR-0816)."""
 
-
-def _observation_refused(
-    activation_id: UUID, reason: str, category: ErrorCategory = ErrorCategory.CONFLICT
-) -> CategorizedError:
-    return CategorizedError(
-        f"stranded activation {activation_id} cannot be observed: {reason}",
-        category=category,
-        details={"reason": reason},
-        terminal=True,
+    schema_: Literal["external-boot-authority-stranded-observation-v1"] = Field(
+        "external-boot-authority-stranded-observation-v1", alias="schema"
     )
+    activation_id: UUID
+
+
+class AuthorityStrandedObservationResponseV1(_ClosedValue):
+    """A recorded absence, or the closed reason none was recorded."""
+
+    schema_: Literal["external-boot-authority-stranded-observation-response-v1"] = Field(
+        "external-boot-authority-stranded-observation-response-v1", alias="schema"
+    )
+    disposition: Literal["recorded", "domain_present", "objects_present"]
+    objects: Annotated[tuple[str, ...], Field(max_length=32)] = ()
+
+    @model_validator(mode="after")
+    def _objects_name_the_refusal(self) -> Self:
+        if bool(self.objects) != (self.disposition == "objects_present"):
+            raise ValueError("objects must be named exactly when the authority holds them")
+        return self
 ```
 
-4. Run the focused commands; commit `feat(external-boot): admit the stranded observation`.
+3. In `transport.py`: add the literal, a `_decode_operation_request` branch using `model_validate_json`, the type checks in `encode_request_envelope` and `_decode_envelope`, the allowed-operations set, an `AuthorityStrandedObservationService` runtime-checkable protocol, and a dispatch branch answering `provider-not-configured` for a service without it.
+4. Add the sender method to `authority_sender.py` in the shape of `resolve_recovery_orphan` and to the port in `providers/ports/authority.py`.
+5. Run the focused commands; commit `feat(authority): add the stranded observation wire contract`.
 
-## Task 3: worker evidence and handler
+## Task 3: authority observation
 
-**Interfaces.** Consumes Task 1 and Task 4's `sender.observe_stranded_activation`. Produces
+**Interfaces.** Consumes Tasks 1 and 2. Produces in `stranded.py`:
+`StrandedTarget(system_id, run_id, domain_name, object_refs, journal_sequence, journal_digest)`,
+`StrandedAuthorityFacts(domain_absent, store_absent, recovery_ref)`,
+`StrandedObservationRepository.read_target(activation_id) -> StrandedTarget | None`,
+`StrandedObservationRepository.record_absence(activation_id, target, composite_state) -> bool`,
+`stranded_composite_state(activation_id, target) -> str`. Produces
+`LocalExternalBootAuthorityAdapter.observe_stranded_absence(activation_id, target) -> StrandedAuthorityFacts`.
+
+**Verification.**
+
+- Contract: quiescence and dispositions. Mode: focused-test. `tests/providers/external_boot_authority/test_stranded_service.py`; red: `AttributeError`; green: `uv run python -m pytest tests/providers/external_boot_authority/test_stranded_service.py -q`. Cases: no repository; no peer; missing target; failed flag while another caller holds the lane; active operation; file tail differs from head; head with no file; no head with no file records; a non-terminal head records; domain present and objects present record nothing; a recorder refusal raises `superseded`; the lane lock is held across the provider read and the record.
+- Contract: digest. Mode: focused-test. Same file; two targets differing in one object differ in digest, and the value matches `^sha256:[0-9a-f]{64}$`.
+- Contract: local adapter. Mode: focused-test. `tests/providers/local_libvirt/test_external_boot_authority.py`; red: `AttributeError`; green: `uv run python -m pytest tests/providers/local_libvirt/test_external_boot_authority.py -q`. Cases: domain missing and store empty; domain defined; store holding a partial directory; a libvirt fault raises rather than reading as absent.
+- Contract: readiness. Mode: focused-test. The existing `check_database_role` real-role test; red: `unexpected` grant failure; green: `uv run python -m pytest tests/providers/external_boot_authority/test_host.py -q -k database_role`.
+
+Steps:
+
+1. Write the tests; run them; expect the red above.
+2. Write `stranded.py` with frozen dataclasses, the repository calling `SELECT * FROM public.read_stranded_activation_target(%s,%s)` and `SELECT public.record_stranded_activation_authority_absence(%s,%s,%s,%s,%s,%s,%s)`, and:
+
+```python
+def stranded_composite_state(activation_id: UUID, target: StrandedTarget) -> str:
+    """Name what the authority observed as absent; settlement copies it to terminal evidence."""
+    document = json.dumps(
+        {
+            "activation_id": str(activation_id),
+            "domain_name": target.domain_name,
+            "journal_digest": target.journal_digest,
+            "journal_sequence": target.journal_sequence,
+            "objects": sorted(target.object_refs),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return "sha256:" + hashlib.sha256(b"kdive-stranded-absence-v1\0" + document).hexdigest()
+```
+
+3. Add to `ExternalBootAuthorityService`: constructor keyword `stranded_observations: StrandedObservationRepository | None = None`, and:
+
+```python
+    async def observe_stranded_activation(
+        self, peer: AuthenticatedPeer | None, request: AuthorityStrandedObservationRequestV1
+    ) -> AuthorityStrandedObservationResponseV1:
+        """Prove this lane quiescent, read its own daemon and store, and record absence."""
+        if not self._accepting:
+            raise AuthorityServiceError("superseded")
+        repository = self._stranded_observations
+        if (
+            peer is None
+            or repository is None
+            or not isinstance(self._adapter, AuthorityStrandedObserver)
+        ):
+            raise AuthorityServiceError("provider_conflict")
+        probe = await repository.read_target(request.activation_id)
+        if probe is None:
+            raise AuthorityServiceError("superseded")
+        lane = self._lane(probe.system_id)
+
+        async def run() -> AuthorityStrandedObservationResponseV1:
+            try:
+                async with lane.lock:
+                    return await self._observe_stranded_locked(request, repository, lane, probe)
+            finally:
+                self._release_lane(probe.system_id, lane)
+
+        task = asyncio.create_task(run())
+        self._track_completion(task)
+        return await asyncio.shield(task)
+```
+
+`_observe_stranded_locked` follows the spec's steps 2 to 6. Add `stranded_lane_failed` and `stranded_head_mismatch` to `JournalConflictReason`, and log each refusal as `_resolve_recovery_orphan` does. For `objects_present` return `objects=(facts.recovery_ref, *target.object_refs)`. Its tail check compares `records[-1].sequence` and `record_digest(records[-1])` with the target's journal columns, and treats no records with both columns NULL as equal.
+
+4. Local adapter: make `_offload`'s request parameter `... | None` and skip the lease scope for `None`; add `observe_stranded_absence`, calling `LocalLibvirtExternalBoot.stranded_facts(binding, domain_name)`, which calls `RealLocalExternalBootIO.stranded_facts`:
+
+```python
+    def stranded_facts(
+        self, binding: ExternalBootActivationBinding, domain_name: str
+    ) -> StrandedAuthorityFacts:
+        with RecoveryMetadataStore(self._recovery_root) as store:
+            store_absent = store.exact_recovery_absence(binding)
+        return StrandedAuthorityFacts(
+            domain_absent=not self._session_factory.domain_is_defined(domain_name),
+            store_absent=store_absent,
+            recovery_ref=_recovery_ref(binding).ref,
+        )
+```
+
+Add `LocalExternalBootSessionFactory.domain_is_defined(name)`, using `self._connect()` and treating `VIR_ERR_NO_DOMAIN` as false.
+
+5. `host.py`: add `'public.read_stranded_activation_target(uuid,text)'::regprocedure` to `accepted_function`, and pass `stranded_observations=StrandedObservationRepository(connections, config.authority_instance)` in the local branch of `_build_mutation_service` only.
+6. Run the focused commands; commit `feat(authority): observe a stranded activation`.
+
+## Task 4: job kind, worker evidence and handler
+
+**Interfaces.** Consumes Task 2's `sender.observe_stranded_activation`. Produces
+`JobKind.OBSERVE_STRANDED_ACTIVATION`,
+`ObserveStrandedActivationPayload(system_id: str, activation_id: str)` (schema `observe-stranded-activation-v1`),
 `ExternalBootActivationRepository.record_stranded_worker_ownership(conn, *, credential_hash: bytes, job_id: UUID, job_attempt: int, activation_id: UUID, domain_name: str) -> CasStatus`,
 `class DomainPresence(Protocol): def is_defined(self, domain_name: str) -> bool`,
 `ProviderRuntime.domain_presence: DomainPresence | None = None`.
@@ -233,6 +292,17 @@ def _observation_refused(
 Steps:
 
 1. Write tests; run; expect `ImportError`.
+   Add `OBSERVE_STRANDED_ACTIVATION = "observe_stranded_activation"` to `JobKind` and to `PLATFORM_INTERNAL_JOB_KINDS`, add the kind to `tests/domain/test_models.py`, and add this payload beside `RemoteModuleVolumeReapPayload`, registering it in `ActivePayloadModel`, the `_ActivePayloadModel` union and `_ACTIVE_PAYLOAD_MODELS`:
+
+```python
+class ObserveStrandedActivationPayload(_PayloadBase):
+    """One stranded activation to observe (ADR-0816). It carries no authority marker."""
+
+    schema_: Literal["observe-stranded-activation-v1"] = Field(alias="schema")
+    system_id: str
+    activation_id: str
+```
+
 2. Add the repository method beside `is_settled`:
 
 ```python
@@ -258,7 +328,7 @@ Steps:
         return CasStatus(str(row[0]))
 ```
 
-3. Add `DomainPresence` to `providers/core/runtime.py` and the field after `authority`. Add `LibvirtDomainPresence(connect)` to `lifecycle/connect.py`, opening and closing one connection per call, and set `domain_presence=LibvirtDomainPresence(lambda: libvirt.open(configuration.uri))` in the local `ProviderRuntime`.
+3. Add `DomainPresence` to `providers/core/runtime.py` and the field after `authority`. Add `LibvirtDomainPresence(connect)` to `lifecycle/connect.py`, opening and closing one connection per call, and set `domain_presence=LibvirtDomainPresence(lambda: libvirt.open(config.require(LIBVIRT_URI)))` in the local `ProviderRuntime`.
 4. Write `src/kdive/jobs/handlers/external_boot/stranded.py`:
 
 ```python
@@ -338,156 +408,88 @@ async def observe_stranded_activation_handler(
     if response.disposition == "objects_present":
         raise _refuse(
             "authority_objects_present",
-            f"the authority still holds {', '.join(response.objects)} for activation "
-            f"{activation_id}; settlement stays refused until they are gone",
+            f"the authority's store is not proven absent for activation {activation_id}: "
+            f"{', '.join(response.objects)}; inspect these references on the authority host, "
+            "settlement stays refused until they are gone",
         )
     return json.dumps({"activation_id": str(activation_id), "disposition": "recorded"})
 ```
 
 with `_unsupported()` returning a terminal `CONFIGURATION_ERROR` naming `stranded_observation_unsupported`, and `register_handlers(registry, *, resolver, incarnation_credential)`. Register it in `assembly.py` beside `orphan.register_handlers`, passing `lambda: assembly.incarnation_credential`.
 
-5. Run the focused commands; commit `feat(jobs): add the stranded observation handler`.
+5. Add a security-definer entry for `external_boot_activation_settlements` to `tests/jobs/worker_write_baseline.json` in the shape of `teardown.remote-module-attempt-obligations.update`, list `tests/jobs/handlers/external_boot/test_stranded.py` in `tests/jobs/handlers/worker_role_inventory.json`, and approve `public.record_stranded_activation_worker_ownership(bytea,uuid,integer,uuid,text)` in `test_worker_role_inventory.py`.
+6. Run the focused commands plus `uv run python -m pytest tests/jobs/test_assembly.py tests/domain/test_models.py tests/jobs/handlers/test_worker_role_inventory.py -q`; commit `feat(jobs): add the stranded observation handler`.
 
-## Task 4: wire contract
+## Task 5: admission, enqueue and read
 
-**Interfaces.** Produces `AuthorityStrandedObservationRequestV1(activation_id: UUID)`,
-`AuthorityStrandedObservationResponseV1(disposition, objects: tuple[str, ...])`,
-transport operation `observe-stranded-activation`,
-`sender.observe_stranded_activation(request, *, deadline: float) -> AuthorityStrandedObservationResponseV1`.
-
-**Verification.**
-
-- Contract: closed models. Mode: focused-test. `tests/providers/external_boot_authority/test_protocol.py`; red: `ImportError`; green: `uv run python -m pytest tests/providers/external_boot_authority/test_protocol.py -q`. Cases: extra field refused; `objects` with `recorded` refused; `objects_present` without objects refused.
-- Contract: dispatch. Mode: focused-test. `tests/providers/external_boot_authority/test_transport.py`; red: `invalid-request`; green: `uv run python -m pytest tests/providers/external_boot_authority/test_transport.py -q`. Cases: routed; a service without the method answers `provider-not-configured`; a mismatched request model is refused at encode.
-
-Steps:
-
-1. Write tests; run them; expect the red above.
-2. Add to `protocol.py`:
-
-```python
-class AuthorityStrandedObservationRequestV1(_ClosedValue):
-    """The activation to observe; the authority derives every other fact itself (ADR-0816)."""
-
-    schema_: Literal["external-boot-authority-stranded-observation-v1"] = Field(
-        "external-boot-authority-stranded-observation-v1", alias="schema"
-    )
-    activation_id: UUID
-
-
-class AuthorityStrandedObservationResponseV1(_ClosedValue):
-    """A recorded absence, or the closed reason none was recorded."""
-
-    schema_: Literal["external-boot-authority-stranded-observation-response-v1"] = Field(
-        "external-boot-authority-stranded-observation-response-v1", alias="schema"
-    )
-    disposition: Literal["recorded", "domain_present", "objects_present"]
-    objects: Annotated[tuple[str, ...], Field(max_length=32)] = ()
-
-    @model_validator(mode="after")
-    def _objects_name_the_refusal(self) -> Self:
-        if bool(self.objects) != (self.disposition == "objects_present"):
-            raise ValueError("objects must be named exactly when the authority holds them")
-        return self
-```
-
-3. In `transport.py`: add the literal, a `_decode_operation_request` branch using `model_validate_json`, the type checks in `encode_request_envelope` and `_decode_envelope`, the allowed-operations set, an `AuthorityStrandedObservationService` runtime-checkable protocol, and a dispatch branch answering `provider-not-configured` for a service without it.
-4. Add the sender method to `authority_sender.py` in the shape of `resolve_recovery_orphan` and to the port in `providers/ports/authority.py`.
-5. Run the focused commands; commit `feat(authority): add the stranded observation wire contract`.
-
-## Task 5: authority observation
-
-**Interfaces.** Consumes Tasks 1 and 4. Produces in `stranded.py`:
-`StrandedTarget(system_id, run_id, domain_name, object_refs, journal_sequence, journal_digest)`,
-`StrandedAuthorityFacts(domain_absent, store_absent, recovery_ref)`,
-`StrandedObservationRepository.read_target(activation_id) -> StrandedTarget | None`,
-`StrandedObservationRepository.record_absence(activation_id, target, composite_state) -> bool`,
-`stranded_composite_state(activation_id, target) -> str`. Produces
-`LocalExternalBootAuthorityAdapter.observe_stranded_absence(activation_id, target) -> StrandedAuthorityFacts`.
+**Interfaces.** Consumes Task 4. Produces `ExternalBootOperation.OBSERVE_STRANDED_ACTIVATION` and
+`async def request_stranded_observation(conn, ctx, *, activation_id: UUID) -> Job`, and `async def read_stranded_observation(conn, ctx, *, activation_id: UUID) -> StrandedObservationOutcome | None`, which #3551 calls.
 
 **Verification.**
 
-- Contract: quiescence and dispositions. Mode: focused-test. `tests/providers/external_boot_authority/test_stranded_service.py`; red: `AttributeError`; green: `uv run python -m pytest tests/providers/external_boot_authority/test_stranded_service.py -q`. Cases: no repository; no peer; missing target; failed lane; active operation; file tail differs from head; head with no file; no head with no file records; a non-terminal head records; domain present and objects present record nothing; a recorder refusal raises `superseded`; the lane lock is held across the provider read and the record.
-- Contract: digest. Mode: focused-test. Same file; two targets differing in one object differ in digest, and the value matches `^sha256:[0-9a-f]{64}$`.
-- Contract: local adapter. Mode: focused-test. `tests/providers/local_libvirt/test_external_boot_authority.py`; red: `AttributeError`; green: `uv run python -m pytest tests/providers/local_libvirt/test_external_boot_authority.py -q`. Cases: domain missing and store empty; domain defined; store holding a partial directory; a libvirt fault raises rather than reading as absent.
-- Contract: readiness. Mode: focused-test. The existing `check_database_role` real-role test; red: `unexpected` grant failure; green: `uv run python -m pytest tests/providers/external_boot_authority/test_host.py -q -k database_role`.
+- Contract: matrix row. Mode: focused-test. `tests/services/external_boot/test_admission.py`; red: `preparing` denies; green: `uv run python -m pytest tests/services/external_boot/test_admission.py -q`.
+- Contract: service refusals and enqueue. Mode: focused-test. `tests/services/external_boot/test_stranded_observation.py`; red: `ImportError`; green: `uv run python -m pytest tests/services/external_boot/test_stranded_observation.py -q`.
 
 Steps:
 
-1. Write the tests; run them; expect the red above.
-2. Write `stranded.py` with frozen dataclasses, the repository calling `SELECT * FROM public.read_stranded_activation_target(%s,%s)` and `SELECT public.record_stranded_activation_authority_absence(%s,%s,%s,%s,%s,%s,%s)`, and:
+1. Write tests: role denial before any database read; each of `not_found`, `authority_owned`, `not_preparing`, with no job row; a second request returns the same job while it is live; a request after a failed job requeues it; the read returns `None` before a request, is role-gated, and returns a refused job's `reason` and `message`.
+2. Exempt the new operation from `set(GUARDED_TOOLS.values()) == set(ExternalBootOperation)` in `tests/services/external_boot/test_admission.py` with the reason that it has no tool until #3551, add its `_ADMITTING_STATES` row, and add both new functions to `_UNENVELOPED_PLATFORM_ROLE` in `tests/guards/test_require_role_membership_guard.py`. Add the operation and `ExternalBootActivationState.PREPARING: _ALWAYS_ADMITTED | {ExternalBootOperation.OBSERVE_STRANDED_ACTIVATION}`.
+3. Implement in `settlement.py`:
 
 ```python
-def stranded_composite_state(activation_id: UUID, target: StrandedTarget) -> str:
-    """Name what the authority observed as absent; settlement copies it to terminal evidence."""
-    document = json.dumps(
-        {
-            "activation_id": str(activation_id),
-            "domain_name": target.domain_name,
-            "journal_digest": target.journal_digest,
-            "journal_sequence": target.journal_sequence,
-            "objects": sorted(target.object_refs),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    return "sha256:" + hashlib.sha256(b"kdive-stranded-absence-v1\0" + document).hexdigest()
-```
-
-3. Add to `ExternalBootAuthorityService`: constructor keyword `stranded_observations: StrandedObservationRepository | None = None`, and:
-
-```python
-    async def observe_stranded_activation(
-        self, peer: AuthenticatedPeer | None, request: AuthorityStrandedObservationRequestV1
-    ) -> AuthorityStrandedObservationResponseV1:
-        """Prove this lane quiescent, read its own daemon and store, and record absence."""
-        if not self._accepting:
-            raise AuthorityServiceError("superseded")
-        repository = self._stranded_observations
-        if (
-            peer is None
-            or repository is None
-            or not isinstance(self._adapter, AuthorityStrandedObserver)
-        ):
-            raise AuthorityServiceError("provider_conflict")
-        probe = await repository.read_target(request.activation_id)
-        if probe is None:
-            raise AuthorityServiceError("superseded")
-        lane = self._lane(probe.system_id)
-
-        async def run() -> AuthorityStrandedObservationResponseV1:
-            try:
-                async with lane.lock:
-                    return await self._observe_stranded_locked(request, repository, lane, probe)
-            finally:
-                self._release_lane(probe.system_id, lane)
-
-        task = asyncio.create_task(run())
-        self._track_completion(task)
-        return await asyncio.shield(task)
-```
-
-`_observe_stranded_locked` follows the spec's steps 2 to 6. Its tail check compares `records[-1].sequence` and `record_digest(records[-1])` with the target's journal columns, and treats no records with both columns NULL as equal.
-
-4. Local adapter: make `_offload`'s request parameter `... | None` and skip the lease scope for `None`; add `observe_stranded_absence`, calling `LocalLibvirtExternalBoot.stranded_facts(binding, domain_name)`, which calls `RealLocalExternalBootIO.stranded_facts`:
-
-```python
-    def stranded_facts(
-        self, binding: ExternalBootActivationBinding, domain_name: str
-    ) -> StrandedAuthorityFacts:
-        with RecoveryMetadataStore(self._recovery_root) as store:
-            store_absent = store.exact_recovery_absence(binding)
-        return StrandedAuthorityFacts(
-            domain_absent=not self._session_factory.domain_is_defined(domain_name),
-            store_absent=store_absent,
-            recovery_ref=_recovery_ref(binding).ref,
+async def request_stranded_observation(
+    conn: AsyncConnection, ctx: RequestContext, *, activation_id: UUID
+) -> Job:
+    """Enqueue the observation that produces both owners' settlement evidence (ADR-0816)."""
+    require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
+    activation = await _REPOSITORY.get(conn, activation_id)
+    if activation is None:
+        raise _observation_refused(activation_id, "not_found", ErrorCategory.NOT_FOUND)
+    system_id = activation.system_id
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        system = await SYSTEMS.get(conn, system_id)
+        if system is None:
+            raise _observation_refused(activation_id, "not_found", ErrorCategory.NOT_FOUND)
+        if await authority_system_binding(conn, system_id) is not None:
+            raise _observation_refused(activation_id, "authority_owned")
+        activation = await _REPOSITORY.get(conn, activation_id)
+        if activation is None or activation.state is not ExternalBootActivationState.PREPARING:
+            raise _observation_refused(activation_id, "not_preparing")
+        await check_external_boot_admission(
+            conn,
+            system_id,
+            ExternalBootOperation.OBSERVE_STRANDED_ACTIVATION,
+            project=system.project,
         )
+        return await queue.enqueue(
+            conn,
+            JobKind.OBSERVE_STRANDED_ACTIVATION,
+            ObserveStrandedActivationPayload(
+                schema="observe-stranded-activation-v1",
+                system_id=str(system_id),
+                activation_id=str(activation_id),
+            ),
+            Authorizing(
+                principal=ctx.principal, agent_session=ctx.agent_session, project=system.project
+            ),
+            f"stranded-observation:{activation_id}",
+            recycle=JobRecyclePolicy.TERMINAL,
+        )
+
+
+def _observation_refused(
+    activation_id: UUID, reason: str, category: ErrorCategory = ErrorCategory.CONFLICT
+) -> CategorizedError:
+    return CategorizedError(
+        f"stranded activation {activation_id} cannot be observed: {reason}",
+        category=category,
+        details={"reason": reason},
+        terminal=True,
+    )
 ```
 
-Add `LocalExternalBootSessionFactory.domain_is_defined(name)`, using `self._connect()` and treating `VIR_ERR_NO_DOMAIN` as false.
-
-5. `host.py`: add `'public.read_stranded_activation_target(uuid,text)'::regprocedure` to `accepted_function`, and pass `stranded_observations=StrandedObservationRepository(connections, config.authority_instance)` in the local branch of `_build_mutation_service` only.
-6. Run the focused commands; commit `feat(authority): observe a stranded activation`.
+4. Add `StrandedObservationOutcome` (frozen dataclass: `job_id`, `state`, `reason`, `message`) and `read_stranded_observation`, requiring `platform_admin` and selecting the job by `dedup_key = f"stranded-observation:{activation_id}"`; `reason` and `message` come from `failure_context` keys `failure_detail_reason` and `failure_message`.
+5. Run the focused commands; commit `feat(external-boot): admit the stranded observation`.
 
 ## Task 6: end to end
 
@@ -495,16 +497,16 @@ Add `LocalExternalBootSessionFactory.domain_is_defined(name)`, using `self._conn
 
 **Verification.**
 
-- Contract: both producers reach settlement. Mode: focused-test. `tests/services/external_boot/test_stranded_observation.py`; red: settlement returns `authority_evidence_missing` before the handler is wired; green: `uv run python -m pytest tests/services/external_boot/test_stranded_observation.py -q`.
+- Contract: both producers reach settlement. Mode: focused-test. `tests/services/external_boot/test_stranded_observation.py`; red: the test fails until its arm's expectation is written against the wired producers; it is coverage over completed work; green: `uv run python -m pytest tests/services/external_boot/test_stranded_observation.py -q`.
 - Contract: generated job-kind surfaces. Mode: focused-test. `just docs-check` and `just cli-verbs-check`; red: drift reported; green: both exit 0.
 
 Steps:
 
-1. Extend the test file. Drive `request_stranded_observation` as `kdive_server`, claim the job as `kdive_worker` with a real incarnation, run the handler with a fake `DomainPresence`, and connect its sender to a real `ExternalBootAuthorityService` holding a `kdive_provider_authority` connection, a temporary journal and a fake adapter. Then call `settle_stranded_activation` and assert `applied`. Add the arms: owned System refused at each layer; authority domain present leaves `authority_evidence_missing`; worker domain absent leaves `worker_evidence_missing`; a materialized activation refuses while held and settles once the fake reports the store absent.
+1. Extend the test file. Drive `request_stranded_observation` as `kdive_server`, claim the job as `kdive_worker` with a real incarnation, run the handler with a fake `DomainPresence`, and connect its sender to a real `ExternalBootAuthorityService` holding a `kdive_provider_authority` connection, a temporary journal and a fake adapter. Then call `settle_stranded_activation` and assert `applied`. Add the arms: owned System refused at each layer; authority domain present leaves `authority_evidence_missing`; worker domain absent leaves an empty settlement row and `authority_evidence_missing`; an activation filling all six object paths refuses while held, reads back through `read_stranded_observation`, and settles once the fake reports the store absent.
 2. Regenerate with `just docs` and `just cli-verbs`.
 3. Commit `test(external-boot): drive stranded observation to settlement`.
 
-Rollback: revert the branch before the migration deploys. After deployment the migration is forward-only; the unused function and job kind are inert.
+Rollback: revert the branch before the migration deploys. After 0195 deploys, roll forward: the grant fails a reverted authority host's readiness, and a row of the new kind breaks a reverted reader.
 
 ## Deferrals
 

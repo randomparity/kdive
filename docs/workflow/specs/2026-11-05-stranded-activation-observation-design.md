@@ -39,6 +39,11 @@ terminal with `details["reason"]`, checked in this order:
 The dedup key is `stranded-observation:<activation>`, recycling terminal rows, so a failed or aged
 observation can run again.
 
+`read_stranded_observation(conn, ctx, *, activation_id) -> StrandedObservationOutcome | None`, also
+`platform_admin`, reads that job by its dedup key and returns `job_id`, `state`, `reason` and
+`message` from `failure_context`, or `None` when no observation was requested. It is the one read of
+the outcome, because job tools answer `not_found` for a platform-internal kind.
+
 **Runtime port.** `ProviderRuntime.domain_presence: DomainPresence | None`, with one method
 `is_defined(domain_name) -> bool`. Local-libvirt sets it over the worker's `libvirt.open` connection;
 `VIR_ERR_NO_DOMAIN` is `False` and any other libvirt fault raises.
@@ -54,11 +59,15 @@ observation can run again.
 4. Send `observe-stranded-activation` with a 60 s deadline.
 5. Map the response: `recorded` succeeds; `domain_present` refuses terminally with
    `authority_domain_present`; `objects_present` refuses terminally with
-   `authority_objects_present`, naming each object in the message.
+   `authority_objects_present`, naming the response's objects in the message.
+
+A service refusal keeps its retryable transport category and carries no reason on the wire; only the
+authority log says which refusal it was.
 
 **Transport.** Closed `AuthorityStrandedObservationRequestV1` carrying only `activation_id`, and
 `AuthorityStrandedObservationResponseV1` carrying `disposition` and `objects`, which is non-empty
-exactly for `objects_present`.
+exactly for `objects_present`. There it lists `recovery_ref`, then `object_refs`: the store check is
+one verdict over several locations, so the list says where to look, not which entry is held.
 
 **Authority.** `providers/external_boot_authority/stranded.py` holds `StrandedObservationRepository`
 (built with the connection factory and instance) and the composite digest.
@@ -67,15 +76,16 @@ exactly for `objects_present`.
 1. Refuse `superseded` when closing or when the target read returns no row; refuse
    `provider_conflict` with no peer, no repository, or an adapter without
    `observe_stranded_absence`.
-2. Under the System lane lock: refuse `journal_conflict` on a failed lane and `superseded` on an
-   active operation.
-3. Re-read the target, then refuse `journal_conflict` unless the lane's last record equals the
-   database head, or both are absent.
+2. Under the System lane lock: refuse `journal_conflict` (`stranded_lane_failed`) on a failed lane
+   and `superseded` on an active operation.
+3. Re-read the target, then refuse `journal_conflict` (`stranded_head_mismatch`) unless the lane's
+   last record equals the database head, or both are absent.
 4. Ask the adapter for `StrandedAuthorityFacts(domain_absent, store_absent, recovery_ref)`.
-5. Domain present returns `domain_present`. Store present returns `objects_present` naming
-   `object_refs`, or `recovery_ref` when that list is empty.
+5. Domain present returns `domain_present`. Store present returns `objects_present`.
 6. Record absence with the head from step 3. `applied` returns `recorded`; anything else refuses
    `superseded`.
+
+Each refusal is logged with its reason, as `_resolve_recovery_orphan` does.
 
 The local adapter reads the daemon without a session, through a new
 `LocalExternalBootSessionFactory.domain_is_defined`, and the store through
@@ -87,7 +97,8 @@ passes no repository.
 ## Upgrade order
 
 Migrate 0195 and deploy the authority host together, then workers and servers. The lifecycle
-identity does not move.
+identity does not move. After 0195 deploys, roll forward: a reverted authority host fails readiness
+on the grant.
 
 ## Failure model
 
@@ -102,16 +113,20 @@ identity does not move.
 3. **Accepted failure classes**
    - An authority with no mutation service answers `provider-not-configured`; the job fails naming
      it, because that host has no daemon session to observe.
-   - A failed lane stays refused until the authority restarts, because a failed lane has an unknown
-     head.
+   - The failed flag refuses only while another caller holds the lane. The durable proof is the
+     tail and head comparison; a tail that differs is repaired by an authority restart.
+   - A refusal message can lose its tail at the worker's 1000-character failure cap; the recovery
+     reference comes first.
    - A worker record with no authority record: settlement refuses until it ages out, by design.
-   - A domain created on the authority after the read and within the hour: ADR-0816's accepted class.
+   - A record stands for its hour. A later refusal does not withdraw it, for either owner, so an
+     operator who reads a refusal must not settle. A clearing recorder would change 0194.
    - The job fails after its worker record; a rerun replaces the record.
 4. **Covered elsewhere**
    - Teardown routing, the release fence, lease expiry, the tool, audit: #3551.
    - Runbook and live proof: #3552. No live tier runs here.
    - Removing held objects, and producers for remote-libvirt: reported to the campaign as
      follow-ups.
+   - Returning the outcome to an operator: #3551's tool, through `read_stranded_observation`.
 
 ## Threat model
 
@@ -134,8 +149,10 @@ identity does not move.
 - A request on the stranded shape enqueues one job; its handler, a real authority service, the real
   recorders and `settle_stranded_activation` end with `applied` (real Postgres).
 - The enumerated refusals each hold: `not_found`, `authority_owned`, `not_preparing`, each worker
-  refusal, each authority disposition, a failed lane, an active lane, a head mismatch.
-- After each refusal the settlement row holds no record for the refusing owner.
+  refusal, each authority disposition, a failed flag on a held lane, an active lane, a head mismatch.
+- After a refusal on an activation with no earlier record, the row holds no record for the refusing
+  owner.
+- `read_stranded_observation` returns the refusal's reason and objects, and `None` before a request.
 - A System with an ownership row is refused by the service, returns no row from the read, and
   returns `authority_owned` from settlement.
 - `read_stranded_activation_target` is denied to `kdive_server`, `kdive_worker` and
@@ -149,5 +166,6 @@ identity does not move.
 Real-Postgres tests in `tests/services/external_boot/test_stranded_observation.py` and
 `tests/db/test_migration_0195_stranded_activation_observation.py`; unit tests for the transport,
 service, handler and local adapter; the four migration window lists; `tests/domain/test_models.py`,
-`tests/jobs/worker_write_baseline.json`, the host readiness inventory; regenerated job-kind docs and
+`tests/jobs/worker_write_baseline.json`, `tests/jobs/handlers/worker_role_inventory.json`,
+`tests/guards/test_require_role_membership_guard.py`, the host readiness inventory; regenerated job-kind docs and
 CLI verbs; then `just lint`, `just type`, `just records` and the pre-push gate.
