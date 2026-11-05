@@ -802,6 +802,8 @@ async def check_database_role(connection: Any) -> None:
                 'public.advance_authority_system_journal_head(text,uuid,bigint,bigint,text,jsonb,'
                     'bytea)'::regprocedure,
                 'public.list_authority_system_journal_heads(text)'::regprocedure,
+                'public.record_stranded_activation_authority_absence(uuid,text,text,bigint,text,'
+                    'text,text[])'::regprocedure,
                 'public.authenticate_external_boot_authority_peer(bytea)'::regprocedure
             ])::oid AS oid
         ), accepted_public_function AS (

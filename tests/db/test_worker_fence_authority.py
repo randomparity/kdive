@@ -170,6 +170,7 @@ _PROTECTED_TABLES = {
     "capture_operation_cutoff",
     "capture_operations",
     "external_boot_acknowledged_retry_consumptions",
+    "external_boot_activation_settlements",
     "external_boot_authorities",
     "external_boot_authority_acknowledgements",
     "external_boot_authority_audit",
@@ -414,7 +415,11 @@ _EXPECTED_ROLE_TABLE_PRIVILEGES = {
     "kdive_server": {
         **_SERVER_MUTATIONS,
         "SELECT": _ORDINARY_TABLES
-        | {"external_boot_recovery_quarantine", "external_boot_recovery_orphan_requests"},
+        | {
+            "external_boot_activation_settlements",
+            "external_boot_recovery_quarantine",
+            "external_boot_recovery_orphan_requests",
+        },
         "INSERT": _SERVER_MUTATIONS["INSERT"] | {"external_boot_recovery_orphan_requests"},
     },
     "kdive_worker": {"SELECT": _WORKER_SELECT, **_WORKER_MUTATIONS},

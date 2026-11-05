@@ -81,7 +81,12 @@ _UNCOVERED_REQUIRE_ROLE: dict[str, str] = {
 # the same bare `AuthorizationError`, and `middleware/denial_audit.py` states the invariant that
 # every such denial "is audited by its own handler and must pass through here untouched"
 # (ADR-0043 §4). Nothing checked that. An uncaught one is the identical raw-`ToolError` escape.
-_UNENVELOPED_PLATFORM_ROLE: dict[str, str] = {}
+_UNENVELOPED_PLATFORM_ROLE: dict[str, str] = {
+    "services/external_boot/settlement.py::settle_stranded_activation": (
+        "a service with no tool yet; the #3551 handler must catch AuthorizationError and return "
+        "ToolResponse.denied (ADR-0816)"
+    ),
+}
 
 
 @dataclass(frozen=True)
