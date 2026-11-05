@@ -544,6 +544,15 @@ def test_serialized_request_is_capped_at_one_mib() -> None:
         _mutation(operation="x" * 1_048_576)
 
 
+def test_a_closed_value_refuses_a_serialized_form_past_one_mib() -> None:
+    class Oversize(protocol._ClosedValue):
+        text: str
+
+    Oversize(text="x")
+    with pytest.raises(ValidationError, match="exceeds 1048576 bytes"):
+        Oversize(text="x" * MAX_MESSAGE_BYTES)
+
+
 @pytest.mark.parametrize("value", [_takeover(), _mutation()])
 def test_raw_request_decoder_accepts_exact_canonical_bounded_bytes(
     value: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1,
