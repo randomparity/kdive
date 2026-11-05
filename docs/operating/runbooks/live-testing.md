@@ -414,29 +414,27 @@ shows. The host preparation itself is
 (Ubuntu 26.04 x86_64, an explicit operator user and a full candidate SHA); the stack start-up is
 [live-stack section 4](live-stack.md#4-start-the-host-processes).
 
-- **Prepare the host before starting the stack.** Run
-  [installed-local-authority.yml](../../../deploy/ansible/playbooks/installed-local-authority.yml)
-  first. It installs the authority, the fixed worker lifecycle and the client route that
-  `stack-services.sh` (and `examples/local-libvirt/demo-up.sh`, which calls it) then start workers
-  against.
-- **Host packages and the Python that runs the play.** The authority play installs `acl` itself
-  (`live_vm_host_authority_packages` in `deploy/ansible/roles/live_vm_host/defaults/main.yml`). Only
-  a `connection: local` play run by an unprivileged user that escalates to a *different*
-  unprivileged account and installs no `acl` hits the problem: ansible-core falls back to
-  `setfacl`, which comes from that package (the reason is recorded in
-  `deploy/ansible/roles/local_worker_host/tasks/boot_kernels.yml`). Separately, under
-  `uv run --with ansible-core` a local-connection play resolves modules against an ephemeral
-  environment with no `lxml`, so `community.libvirt` fails in `libvirt_pool_net`
-  ([which interpreter the host play runs under](../providers/local-libvirt.md)).
-  `local-libvirt-host.yml` avoids this by pinning `ansible_python_interpreter: /usr/bin/python3`;
-  `installed-local-authority.yml` carries no such pin, so supply the same value for a
-  local-connection lane.
+- **Order: backends and schema, then the authority play, then the stack.** Run
+  `just stack-backends` (backends, bucket and migrations, then stop). The play's one-shot readiness
+  probe connects with the authority DSN and fails `database/connection-failed` without a reachable,
+  migrated database. Then run
+  [installed-local-authority.yml](../../../deploy/ansible/playbooks/installed-local-authority.yml),
+  which installs the authority, the fixed worker lifecycle and the client route. Then run
+  `stack-services.sh` (or `examples/local-libvirt/demo-up.sh`, which calls it) to start the workers
+  against them.
+- **The authority play installs `acl` itself**
+  (`live_vm_host_authority_packages` in `deploy/ansible/roles/live_vm_host/defaults/main.yml`), so
+  the lane needs no extra step. A separate `connection: local` play that escalates to a different
+  unprivileged account needs the package on the host, because ansible-core falls back to `setfacl`
+  (reason recorded in `deploy/ansible/roles/local_worker_host/tasks/boot_kernels.yml`).
 - **The inventory entry must match the manifest.** The authority checks the request tuple
   `(provider_kind, resource_name, authority_instance)` against its manifest
-  (`src/kdive/providers/local_libvirt/system_authority.py`). A wrong resource name is refused with
-  `local authority request is not bound to its manifest`; a wrong `authority_instance` normally
-  stops earlier at the worker, as `authority: binding-mismatch`. Name the `[[local_libvirt]]`
-  entry after the manifest's `resource_name` and give it the manifest's `authority_instance`.
+  (`src/kdive/providers/local_libvirt/system_authority.py`). Name the `[[local_libvirt]]` entry
+  after the manifest's `resource_name` and give it the manifest's `authority_instance`. A wrong
+  `authority_instance` normally stops at the worker as `authority: binding-mismatch`. A wrong
+  resource name fails the job as `authority: provider-conflict`; the message
+  `local authority request is not bound to its manifest` appears only in the journal of
+  `kdive-external-boot-authority.service`.
 - **Pick the right instance field.** `authority_instance` makes `systems.provision` take the
   authority-owned path. `relocated_authority_instance` is the fixture-lane declaration
   ([Authority-owned System frame](#authority-owned-system-frame-3184)); the two are mutually
@@ -445,16 +443,19 @@ shows. The host preparation itself is
   that one line with `relocated_authority_instance`.
 - **Register a staged image with its sidecar, then reconcile.** A catalog image for the authority
   lane needs an `[[image]]` block in `systems.toml` built from the image's
-  `<name>.qcow2.provenance.json` sidecar, followed by `reconcile-systems`; its name and
-  architecture must also match a base in the installed manifest, or provisioning stops with
-  `local authority root source is not installed`.
+  `<name>.qcow2.provenance.json` sidecar, followed by `reconcile-systems`. Its name and
+  architecture (catalog base) or its SHA-256 (local base) must also match a base in the installed
+  manifest; otherwise the authority journal shows `local authority root source is not installed`
+  and the job fails as `authority: provider-conflict`.
   `examples/local-libvirt/build-image.sh` does the build, the block and the reconcile; the manual
   form is in the [local example](../../../examples/local-libvirt/README.md#optional-inventory-systemstoml).
 - **A stuck worker slot** after a unit restarted outside the lifecycle contract (a `needrestart`
   sweep, an unattended upgrade, a manual `systemctl restart`) is documented in
-  [Recovering a wedged worker slot](live-stack.md#recovering-a-wedged-worker-slot). A stranded
-  allocation is a different problem: the `systems.teardown` then `allocations.release` steps at the
-  end of the [frame section](#authority-owned-system-frame-3184) clear it.
+  [Recovering a wedged worker slot](live-stack.md#recovering-a-wedged-worker-slot). No runbook
+  documents recovering an allocation stranded by a failed authority-owned provision: the
+  teardown steps in the [frame section](#authority-owned-system-frame-3184) cover only a killed
+  fixture-mode run, and teardown of an authority-owned System is refused while its recorded binding
+  mismatches the manifest.
 
 ### Separate installed authority lanes
 
