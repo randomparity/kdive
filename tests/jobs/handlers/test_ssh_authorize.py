@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -26,6 +27,8 @@ from kdive.jobs.handlers.connectivity.ssh_authorize import (
     build_authorize_argv,
 )
 from kdive.jobs.handlers.connectivity.ssh_reachable import ReachResult
+from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
+from kdive.providers.ports.handles import SystemHandle
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import ensure_system_bootstrap_key
 
@@ -75,6 +78,31 @@ def _job_for(system_id: UUID, *, public_key: str = _KEY) -> Job:
         authorizing={"principal": "user", "agent_session": None, "project": "proj"},
         dedup_key="test",
     )
+
+
+def _authority_resolver() -> MagicMock:
+    """A real local connector whose domain read fails: the authority's domain is invisible."""
+
+    def invisible(_system: SystemHandle) -> tuple[str, int]:
+        raise AssertionError("a carried SSH forward must not read the local domain")
+
+    connector = LocalLibvirtConnect(
+        resolve_endpoint=lambda _s: ("127.0.0.1", 1234),
+        resolve_ssh_endpoint=invisible,
+        ssh_connect=lambda _host, _port: True,
+    )
+    binding = SimpleNamespace(runtime=SimpleNamespace(connector=connector))
+    resolver = MagicMock()
+    resolver.binding_for_system = AsyncMock(return_value=binding)
+    return resolver
+
+
+async def _assert_binding_is_refused(worker_pool: AsyncConnectionPool, system_id: UUID) -> None:
+    async with worker_pool.connection() as conn:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            await conn.execute(
+                "SELECT * FROM resolve_authority_system_control_binding(%s)", (system_id,)
+            )
 
 
 def _resolver(
@@ -285,6 +313,87 @@ async def _seed_system(conn: AsyncConnection) -> UUID:
         (system_id, allocation_id),
     )
     return system_id
+
+
+def _carried_forward_job(system_id: UUID, port: int) -> Job:
+    payload = {"system_id": str(system_id), "public_key": _KEY, "ssh_forward_port": port}
+    return _job_for(system_id).model_copy(update={"payload": payload})
+
+
+def test_handler_authorizes_over_the_carried_forward_as_the_worker_role(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+) -> None:
+    probed: list[tuple[str, int]] = []
+    recorded: list[list[str]] = []
+
+    async def _probe(host: str, port: int) -> ReachResult:
+        probed.append((host, port))
+        return ReachResult.ok()
+
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                system_id = await _seed_system(conn)
+                await ensure_system_bootstrap_key(conn, system_id, secret_registry=SecretRegistry())
+            async with AsyncConnectionPool(
+                authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+            ) as worker_pool:
+                await _assert_binding_is_refused(worker_pool, system_id)
+                async with worker_pool.connection() as conn:
+                    await authorize_ssh_key_handler(
+                        conn,
+                        _carried_forward_job(system_id, 41234),
+                        resolver=_authority_resolver(),
+                        secret_registry=SecretRegistry(),
+                        ssh_exec=lambda argv, _key: recorded.append(argv),
+                        probe=_probe,
+                    )
+
+    asyncio.run(_run())
+    assert probed == [("127.0.0.1", 41234)]
+    assert len(recorded) == 1
+    assert "root@127.0.0.1" in recorded[0] and "41234" in recorded[0]
+
+
+@pytest.mark.parametrize("state", ["failed", "torn_down"])
+def test_handler_refuses_a_carried_forward_when_the_system_left_ready(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    state: str,
+) -> None:
+    async def _unexpected_probe(_host: str, _port: int) -> ReachResult:
+        raise AssertionError("a System that left ready must not be probed")
+
+    def _unexpected_exec(_argv: list[str], _key: str) -> None:
+        raise AssertionError("a System that left ready must not be offered its bootstrap key")
+
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                system_id = await _seed_system(conn)
+                await conn.execute("UPDATE systems SET state=%s WHERE id=%s", (state, system_id))
+            async with (
+                AsyncConnectionPool(
+                    authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+                ) as worker_pool,
+                worker_pool.connection() as conn,
+            ):
+                with pytest.raises(CategorizedError) as caught:
+                    await authorize_ssh_key_handler(
+                        conn,
+                        _carried_forward_job(system_id, 41234),
+                        resolver=_authority_resolver(),
+                        secret_registry=SecretRegistry(),
+                        ssh_exec=_unexpected_exec,
+                        probe=_unexpected_probe,
+                    )
+                assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+                assert caught.value.details["reason"] == "system_not_ready"
+
+    asyncio.run(_run())
 
 
 def test_handler_authorizes_via_per_system_key_and_cleans_up_temp_key(
