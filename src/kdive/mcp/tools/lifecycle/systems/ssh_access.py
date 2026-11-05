@@ -95,8 +95,8 @@ async def ssh_info(
                     system_id, ErrorCategory.READINESS_FAILURE, detail=_NOT_READY_DETAIL
                 )
             try:
-                recorded, _ = await _recorded_endpoint(conn, resolver, system)
-                fenced = await ordinary_mutation_is_fenced(conn, uid)
+                recorded, forward = await _recorded_endpoint(conn, resolver, system)
+                fenced = forward is not None and await ordinary_mutation_is_fenced(conn, uid)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(system_id, exc)
     if recorded is None:
@@ -107,7 +107,7 @@ async def ssh_info(
             data={"reason": "ssh_not_provisioned"},
         )
     host, port = recorded
-    # A pre-first-activation authority System refuses both job tools.
+    # A local authority System refuses both job tools before its first activation.
     actions = visible_next_actions(
         ["systems.get"]
         if fenced

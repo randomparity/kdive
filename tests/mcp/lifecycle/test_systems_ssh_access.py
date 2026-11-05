@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import ExternalBootActivationState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
+from kdive.domain.operations.jobs import Job
+from kdive.jobs.handlers.connectivity.ssh_authorize import authorize_ssh_key_handler
+from kdive.jobs.handlers.connectivity.ssh_reachable import ReachResult, check_ssh_reachable_handler
 from kdive.mcp.tools.lifecycle.systems.ssh_access import (
     authorize_ssh_key,
     check_ssh_reachable,
@@ -21,6 +29,8 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.ports.handles import SystemHandle
 from kdive.security.authz.rbac import AuthorizationError, Role
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.system_bootstrap_key import ensure_system_bootstrap_key
 from tests.mcp.systems_support import TEST_DT as _DT
 from tests.mcp.systems_support import ctx as _ctx
 from tests.mcp.systems_support import granted_allocation as _granted_allocation
@@ -732,3 +742,108 @@ def test_other_systems_keep_the_provider_read_and_a_port_free_payload(
         assert key_payload == {"system_id": sys_id, "public_key": _GOOD_KEY}
 
     asyncio.run(_run())
+
+
+def test_ssh_info_keeps_its_next_actions_for_a_remote_authority_system(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _authority_system(pool, provider_kind="remote-libvirt")
+            connector = _FakeConnector(("192.0.2.1", 22022))
+            resp = await ssh_info(
+                pool, _ctx(), sys_id, resolver=_provider_resolver(connector=connector)
+            )
+        assert "systems.check_ssh_reachable" in resp.suggested_next_actions
+        assert "systems.authorize_ssh_key" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+async def _stored_job(pool, job_id: str) -> Job:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cursor:
+        await cursor.execute("SELECT * FROM jobs WHERE id=%s", (job_id,))
+        row = await cursor.fetchone()
+    assert row is not None
+    return Job.model_validate(row)
+
+
+async def _assert_worker_is_refused_the_binding(
+    worker_pool: AsyncConnectionPool, system_id: str
+) -> None:
+    async with worker_pool.connection() as conn:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            await conn.execute(
+                "SELECT * FROM resolve_authority_system_control_binding(%s)", (system_id,)
+            )
+
+
+def test_a_reachability_job_reaches_the_owned_system_as_the_worker_role(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    async def _handle(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(b"SSH-2.0-test\r\n")
+        await writer.drain()
+        writer.close()
+
+    async def _run() -> str | None:
+        server = await asyncio.start_server(_handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        resolver = _invisible_domain_resolver()
+        async with server, _pool(migrated_url) as pool:
+            sys_id = await _authority_system(
+                pool, state="activated", activation=_RECOVERED, ssh_forward_port=port
+            )
+            resp = await check_ssh_reachable(pool, _ctx(), sys_id, resolver=resolver)
+            job = await _stored_job(pool, resp.object_id)
+            async with AsyncConnectionPool(
+                authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+            ) as worker_pool:
+                await _assert_worker_is_refused_the_binding(worker_pool, sys_id)
+                async with worker_pool.connection() as conn:
+                    return await check_ssh_reachable_handler(
+                        conn, job, resolver=resolver, secret_registry=SecretRegistry()
+                    )
+
+    verdict = asyncio.run(_run())
+    assert verdict is not None
+    assert json.loads(verdict)["reachable"] is True
+
+
+def test_an_authorize_job_reaches_the_owned_system_as_the_worker_role(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
+) -> None:
+    probed: list[tuple[str, int]] = []
+    delivered: list[str] = []
+
+    async def _probe(host: str, port: int) -> ReachResult:
+        probed.append((host, port))
+        return ReachResult.ok()
+
+    async def _run() -> None:
+        resolver = _invisible_domain_resolver()
+        async with _pool(migrated_url) as pool:
+            sys_id = await _authority_system(
+                pool, state="activated", activation=_RECOVERED, ssh_forward_port=_FORWARD
+            )
+            async with pool.connection() as conn:
+                await ensure_system_bootstrap_key(
+                    conn, UUID(sys_id), secret_registry=SecretRegistry()
+                )
+            resp = await authorize_ssh_key(pool, _ctx(), sys_id, _GOOD_KEY, resolver=resolver)
+            job = await _stored_job(pool, resp.object_id)
+            async with AsyncConnectionPool(
+                authority_role_dsns("kdive_worker"), min_size=1, max_size=2, open=False
+            ) as worker_pool:
+                await _assert_worker_is_refused_the_binding(worker_pool, sys_id)
+                async with worker_pool.connection() as conn:
+                    await authorize_ssh_key_handler(
+                        conn,
+                        job,
+                        resolver=resolver,
+                        secret_registry=SecretRegistry(),
+                        ssh_exec=lambda _argv, key: delivered.append(key),
+                        probe=_probe,
+                    )
+
+    asyncio.run(_run())
+    assert probed == [("127.0.0.1", _FORWARD)]
+    assert delivered == [_GOOD_KEY]

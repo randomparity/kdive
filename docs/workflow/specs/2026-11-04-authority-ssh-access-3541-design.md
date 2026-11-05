@@ -27,8 +27,9 @@ storing the port the authority reports; these five call sites still do not read 
    non-authority job's stored payload is byte-identical to today's.
 4. Both handlers pass `payload.ssh_forward_port` to the connector. They do not read the binding:
    `resolve_authority_system_control_binding` is revoked from `kdive_worker` and stays revoked.
-5. `ssh_info` suggests only `systems.get` while `ordinary_mutation_is_fenced` is true, because the
-   two job tools refuse in that state. Otherwise its next actions are unchanged.
+5. `ssh_info` suggests only `systems.get` for a local authority System while
+   `ordinary_mutation_is_fenced` is true, because the two job tools refuse in that state. Otherwise
+   its next actions are unchanged.
 6. `authorize_ssh_key_handler` reads no System today. When the payload carries a port it now
    refuses with `reason=system_not_ready` unless the System is `ready`, the check
    `check_ssh_reachable_handler` already makes. The domain read was also a liveness check; a stored
