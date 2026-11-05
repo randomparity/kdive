@@ -24,7 +24,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownReservationV1,
@@ -62,6 +62,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
 )
 from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import (
     VMLINUX_HEADROOM_BYTES,
+    GuestFreeSpaceRefusal,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import ProbeFailure, ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
@@ -7388,7 +7389,7 @@ def test_activation_refuses_a_guest_without_room_for_the_artifact_before_uploadi
     )
     harness.guest.free_bytes = VMLINUX_HEADROOM_BYTES
 
-    with pytest.raises(CategorizedError) as caught:
+    with pytest.raises(GuestFreeSpaceRefusal) as caught:
         harness.activate()
 
     assert caught.value.category is ErrorCategory.INSTALL_FAILURE

@@ -3,25 +3,19 @@
 from __future__ import annotations
 
 import re
-from dataclasses import replace
 
 import psycopg
 import pytest
-from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
 from tests.db.external_boot_authority_support import (
     _COMMIT_SIGNATURE,
-    _JOURNAL,
-    _PLAN,
-    _QUIESCENCE,
-    _allocate,
-    _Allocated,
     _apply_through,
+    _attempt,
     _AuthorityCase,
+    _case,
+    _fail,
     _RoleDsns,
-    _seed_case,
-    _set_real_state,
 )
 
 _CONFLICT = {"phase": "commit", "authority_reason": "provider-conflict"}
@@ -29,100 +23,6 @@ _CONFLICT = {"phase": "commit", "authority_reason": "provider-conflict"}
 
 def _migration_sql() -> str:
     return next(m for m in migrate.discover_migrations() if m.version == "0170").sql
-
-
-def _acknowledge(conn: psycopg.Connection, case: _AuthorityCase, authority: _Allocated) -> None:
-    conn.execute(
-        "UPDATE external_boot_authorities SET state = 'current', acknowledged_at = now() "
-        "WHERE id = %s",
-        (authority.authority_id,),
-    )
-    conn.execute(
-        "INSERT INTO external_boot_authority_acknowledgements "
-        "(authority_id, system_id, generation, authority_instance, operation_identity, "
-        "operation_digest, journal_sequence, journal_digest, positive_quiescence_digest) "
-        "VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s)",
-        (
-            authority.authority_id,
-            case.system_id,
-            authority.generation,
-            case.authority_instance,
-            case.operation_identity,
-            authority.operation_digest,
-            _JOURNAL,
-            _QUIESCENCE,
-        ),
-    )
-
-
-def _case(migrated_url: str, suffix: str) -> _AuthorityCase:
-    with psycopg.connect(migrated_url) as seed:
-        case = _seed_case(seed, purpose="teardown", worker_suffix=suffix)
-        _set_real_state(seed, case, "prepared")
-    return case
-
-
-def _attempt(
-    migrated_url: str, role_dsns: _RoleDsns, case: _AuthorityCase, attempt: int
-) -> tuple[_AuthorityCase, _Allocated]:
-    """Claim ``attempt`` for the seeded job, then allocate and acknowledge its authority."""
-    claimed = replace(case, attempt=attempt)
-    if attempt > 1:
-        with psycopg.connect(migrated_url) as seed:
-            seed.execute(
-                "UPDATE jobs SET state = 'running', attempt = %s, worker_id = %s, "
-                "lease_expires_at = now() + interval '5 minutes', heartbeat_at = now() "
-                "WHERE id = %s",
-                (attempt, case.worker_id, case.job_id),
-            )
-    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
-        authority = _allocate(worker, claimed)
-    with psycopg.connect(migrated_url) as seed:
-        _acknowledge(seed, claimed, authority)
-    return claimed, authority
-
-
-def _fail(
-    role_dsns: _RoleDsns,
-    case: _AuthorityCase,
-    authority: _Allocated,
-    context: dict[str, str],
-    category: str = "infrastructure_failure",
-) -> tuple[str, str | None]:
-    result = {
-        "schema": "external-boot-authority-result-v1",
-        "operation": "fail",
-        "error_category": category,
-        "failure_context": context,
-        "terminal": False,
-    }
-    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as worker:
-        row = worker.execute(
-            "SELECT status, job_state FROM commit_external_boot_authority_result("
-            "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (
-                case.credential,
-                case.job_id,
-                case.attempt,
-                authority.authority_id,
-                authority.generation,
-                case.activation_id,
-                case.run_id,
-                case.system_id,
-                _PLAN,
-                case.purpose,
-                case.provider_kind,
-                case.authority_instance,
-                case.operation_identity,
-                authority.operation_digest,
-                1,
-                _JOURNAL,
-                "teardown",
-                Jsonb(result),
-            ),
-        ).fetchone()
-    assert row is not None
-    return row[0], row[1]
 
 
 def _fail_audit(migrated_url: str, case: _AuthorityCase) -> list[tuple[object, ...]]:

@@ -537,6 +537,12 @@ def _bound_failure(
         and exc.details.get("authority_reason") == "provider-conflict"
     ):
         failure_context["authority_reason"] = "provider-conflict"
+    if (
+        category is ErrorCategory.INSTALL_FAILURE
+        and isinstance(exc, CategorizedError)
+        and (sizes := exc.details.get("install_refusal")) is not None
+    ):
+        failure_context["install_refusal"] = sizes
     if mismatch is not None:
         redactor = Redactor(registry=context.secret_registry)
         failure_context["cmdline_mismatch"] = {

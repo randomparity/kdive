@@ -24,7 +24,10 @@ from kdive.domain.external_boot_activation import (
     ExternalBootTerminalEvidenceV1,
 )
 from kdive.domain.operations.jobs import Job, JobKind
-from kdive.providers.external_boot_authority.protocol import AuthorityTeardownResponseV1
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityInstallRefusalV1,
+    AuthorityTeardownResponseV1,
+)
 from kdive.providers.system_authority.protocol import AuthoritySystemResponseV1
 
 type _Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
@@ -197,6 +200,7 @@ class ExternalBootAuthorityFailureContext(_ClosedModel):
     next_action: Literal["systems.get", "jobs.wait", "jobs.get"] | None = None
     cmdline_mismatch: ExternalBootCmdlineMismatchV1 | None = None
     authority_reason: Literal["provider-conflict"] | None = None
+    install_refusal: AuthorityInstallRefusalV1 | None = None
 
     @model_validator(mode="after")
     def _reason_action_pair_is_closed(self) -> ExternalBootAuthorityFailureContext:
@@ -255,6 +259,15 @@ class _FailureResult(_ResultBase):
             and self.error_category is not ErrorCategory.INFRASTRUCTURE_FAILURE
         ):
             raise ValueError("authority reason requires infrastructure failure")
+        return self
+
+    @model_validator(mode="after")
+    def _install_refusal_is_install_failure(self) -> _FailureResult:
+        if (
+            self.failure_context.install_refusal is not None
+            and self.error_category is not ErrorCategory.INSTALL_FAILURE
+        ):
+            raise ValueError("install refusal requires install failure")
         return self
 
     @model_validator(mode="after")
