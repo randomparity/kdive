@@ -87,26 +87,6 @@ fence changes on a settled row, never on activation state alone.
 - The authority role is not per-instance, so `kdive_provider_authority` is trusted to name its
   instance truthfully; the function checks only that the instance matches the activation's route.
 
-## Considered & rejected
-
-- **Do nothing and leave recovery to lease expiry.** verified: `reconcile` skips the allocation
-  with "the external-boot admission guard refused the release; retried next pass"
-  (`src/kdive/reconciler/repairs/allocations.py`, main `e7aa79a7d`).
-- **Infer the shape from the database, using no ownership row plus an unmarked provision job.**
-  verified: ADR-0752 records that the fixture relocation writes no ownership row, so a relocated
-  System on the authority's daemon has the same rows.
-- **One function taking both evidence documents from the server.** verified: only `kdive_server`
-  would write both, and the server reaches neither daemon (ADR-0752), so the evidence would be one
-  party's assertion, not independent proof.
-- **Reuse the authority teardown as the absence proof.**
-  verified: `finalize_external_boot_authority_teardown` sets `systems.state = 'torn_down'`
-  (`src/kdive/db/schema/0147_external_boot_system_teardown.sql`), which would hide a running worker
-  domain, the #2865 defect.
-- **End the activation as `torn_down`.** verified: `ExternalBootTeardownEvidenceV1` carries
-  `system_state: Literal["torn_down"]`, and the System is not torn down at settlement.
-- **Keep evidence in separate tables.** judgment: complexity. One row per activation holds both
-  proofs and the settlement key for #3551.
-
 ### Amendment (2026-11-05): the evidence producers (#3574)
 
 This amendment corrects the first Consequence: the producers now exist, and both 0194 recorders
@@ -175,3 +155,23 @@ optional, so any other provider refuses by name.
   the journaled observation does plus domain-free store cleanup, for a case that needs a domain the
   authority once held (`session.py` `lookupByName`, main `0ca61d7a3`). The issue accepts an
   actionable refusal.
+
+## Considered & rejected
+
+- **Do nothing and leave recovery to lease expiry.** verified: `reconcile` skips the allocation
+  with "the external-boot admission guard refused the release; retried next pass"
+  (`src/kdive/reconciler/repairs/allocations.py`, main `e7aa79a7d`).
+- **Infer the shape from the database, using no ownership row plus an unmarked provision job.**
+  verified: ADR-0752 records that the fixture relocation writes no ownership row, so a relocated
+  System on the authority's daemon has the same rows.
+- **One function taking both evidence documents from the server.** verified: only `kdive_server`
+  would write both, and the server reaches neither daemon (ADR-0752), so the evidence would be one
+  party's assertion, not independent proof.
+- **Reuse the authority teardown as the absence proof.**
+  verified: `finalize_external_boot_authority_teardown` sets `systems.state = 'torn_down'`
+  (`src/kdive/db/schema/0147_external_boot_system_teardown.sql`), which would hide a running worker
+  domain, the #2865 defect.
+- **End the activation as `torn_down`.** verified: `ExternalBootTeardownEvidenceV1` carries
+  `system_state: Literal["torn_down"]`, and the System is not torn down at settlement.
+- **Keep evidence in separate tables.** judgment: complexity. One row per activation holds both
+  proofs and the settlement key for #3551.
