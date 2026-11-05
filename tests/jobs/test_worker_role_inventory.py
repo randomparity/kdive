@@ -14,6 +14,10 @@ from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS
 _ROOT = Path(__file__).resolve().parents[2]
 _INVENTORY = _ROOT / "tests/jobs/handlers/worker_role_inventory.json"
 _CLASSES = {"worker-act", "owner-only"}
+_APPROVED_DEFINERS = {
+    "public.discharge_system_mutation_obligations(uuid)",
+    "public.record_stranded_activation_worker_ownership(bytea,uuid,integer,uuid,text)",
+}
 _PRIVILEGES = {"INSERT", "UPDATE", "DELETE"}
 _ROUTES = {"direct", "security-definer"}
 
@@ -99,9 +103,7 @@ def _violations(inventory: object) -> list[str]:
             violations.append(f"{write_id} privilege is invalid")
         if route not in _ROUTES:
             violations.append(f"{write_id} route is invalid")
-        if route == "security-definer" and write["function"] != (
-            "public.discharge_system_mutation_obligations(uuid)"
-        ):
+        if route == "security-definer" and write["function"] not in _APPROVED_DEFINERS:
             violations.append(f"{write_id} function is not an approved signature")
     if coverage_ids != sorted(coverage_ids) or len(coverage_ids) != len(set(coverage_ids)):
         violations.append("worker write coverage ids must be unique and sorted")

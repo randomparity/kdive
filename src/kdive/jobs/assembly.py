@@ -32,7 +32,7 @@ from kdive.jobs.handlers.artifacts import rootfs_reclaim, vmcore
 from kdive.jobs.handlers.console import console_rotate
 from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
 from kdive.jobs.handlers.control import capture_traffic, control, diagnostic_sysrq, watch_for_crash
-from kdive.jobs.handlers.external_boot import orphan
+from kdive.jobs.handlers.external_boot import orphan, stranded
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.handlers.system_authority import AuthoritySystemWorkerPorts
 from kdive.jobs.models import HandlerRegistry
@@ -168,6 +168,11 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
     orphan.register_handlers(
         registry,
         resolver=assembly.resolver,
+    )
+    stranded.register_handlers(
+        registry,
+        resolver=assembly.resolver,
+        incarnation_credential=assembly.incarnation_credential,
     )
     systems.register_handlers(
         registry,
