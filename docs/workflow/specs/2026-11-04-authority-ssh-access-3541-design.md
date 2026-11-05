@@ -27,11 +27,9 @@ storing the port the authority reports; these five call sites still do not read 
    non-authority job's stored payload is byte-identical to today's.
 4. Both handlers pass `payload.ssh_forward_port` to the connector. They do not read the binding:
    `resolve_authority_system_control_binding` is revoked from `kdive_worker` and stays revoked.
-5. `authority_ssh_forward_port`'s refusal text stops saying "attach" and "reprovision", which an
-   authority-owned System refuses; it says to tear down and provision again. Reasons do not change.
-6. `ssh_info` suggests only `systems.get` while `ordinary_mutation_is_fenced` is true, because the
+5. `ssh_info` suggests only `systems.get` while `ordinary_mutation_is_fenced` is true, because the
    two job tools refuse in that state. Otherwise its next actions are unchanged.
-7. `authorize_ssh_key_handler` reads no System today. When the payload carries a port it now
+6. `authorize_ssh_key_handler` reads no System today. When the payload carries a port it now
    refuses with `reason=system_not_ready` unless the System is `ready`, the check
    `check_ssh_reachable_handler` already makes. The domain read was also a liveness check; a stored
    port is not, and a torn-down System's port can be reused.
@@ -96,6 +94,9 @@ compares the identity before and after.
 
 **Covered elsewhere**
 
+- `authority_ssh_forward_port`'s message still says to reprovision, which ADR-0623 refuses for an
+  authority-owned System. ADR-0811 decision 4 fixes that wording, and the function also serves
+  `debug.start_session`, so it stays; the reasons are correct. Follow-up candidate.
 - Remote-libvirt authority endpoint: #3547. Port immutability: #3546 (migration 0191).
 - Preactivation fence and active-activation denial, NULL-port backfill, relocated fixture Systems
   with no binding: operator.

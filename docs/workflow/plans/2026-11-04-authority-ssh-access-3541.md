@@ -166,14 +166,14 @@ Steps:
 1. Write the tests; run, confirm red.
 2. Add `_recorded_endpoint`; replace the three call sites. `check_ssh_reachable` and
    `authorize_ssh_key` pass `ssh_forward_port=forward` to the payload.
-3. Reword the `authority_ssh_forward_port` docstring to cover SSH access, and its message to:
-   `"this authority-owned System has no usable SSH forward: it left the reachable states, or it was
-   provisioned before the authority reported one. Tear it down and provision it again against an
-   upgraded authority."` In `ssh_info`, read `ordinary_mutation_is_fenced(conn, uid)` beside the
+3. Reword the `authority_ssh_forward_port` docstring to cover SSH access; its message stays, per the
+   spec's failure model. In `ssh_info`, read `ordinary_mutation_is_fenced(conn, uid)` beside the
    endpoint and pass `["systems.get"]` to `visible_next_actions` when true.
 4. In `registrar.py`, state for each of the three tools that an authority-owned local System uses
    its reported port and reports `authority_ssh_forward_unreported` or
-   `authority_system_not_attachable`; note the preactivation fence on the two job tools. Run `just docs`.
+   `authority_system_not_attachable`; note the preactivation fence on the two job tools. On `authorize_ssh_key`, add that its job can
+   fail `system_not_ready`, and that an authority-owned System cannot be reprovisioned, so only a
+   different key applies there. Run `just docs`.
 5. Green, commit `fix(mcp): resolve authority-owned SSH endpoints from the stored port`.
 
 ## Task 4: identity and gate
