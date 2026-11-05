@@ -31,6 +31,7 @@ from kdive.providers.external_boot_authority.stranded import (
 )
 from tests.providers.external_boot_authority.service_support import (
     _Adapter,
+    _interrupted_record,
     _Repository,
     _takeover,
 )
@@ -153,23 +154,9 @@ def _write_record(tmp_path: Path, system_id: UUID, record: JournalRecordV1) -> N
     journal.close()
 
 
-def _admitted_record(system_id: UUID) -> JournalRecordV1:
-    """A non-terminal head, the shape an interrupted attempt leaves."""
-    takeover = _takeover()
-    values = takeover.model_dump(mode="json", by_alias=True)
-    values |= {
-        "system_id": str(system_id),
-        "sequence": 1,
-        "previous_digest": "sha256:" + "0" * 64,
-        "phase": "watermark-installed",
-        "attempt_id": str(uuid4()),
-    }
-    return JournalRecordV1.model_validate(values)
-
-
 def test_a_non_terminal_head_equal_to_the_tail_records(tmp_path: Path) -> None:
     system_id = uuid4()
-    record = _admitted_record(system_id)
+    record = _interrupted_record(system_id)
     _write_record(tmp_path, system_id, record)
     target = replace(
         _target(system_id), journal_sequence=record.sequence, journal_digest=record_digest(record)
@@ -183,7 +170,7 @@ def test_a_non_terminal_head_equal_to_the_tail_records(tmp_path: Path) -> None:
 
 def test_a_tail_the_head_does_not_match_refuses_before_any_read(tmp_path: Path) -> None:
     system_id = uuid4()
-    record = _admitted_record(system_id)
+    record = _interrupted_record(system_id)
     _write_record(tmp_path, system_id, record)
     target = replace(_target(system_id), journal_sequence=9, journal_digest="sha256:" + "9" * 64)
     observations = _Observations(target)
@@ -198,7 +185,7 @@ def test_a_tail_the_head_does_not_match_refuses_before_any_read(tmp_path: Path) 
 
 def test_a_tail_with_no_head_refuses(tmp_path: Path) -> None:
     system_id = uuid4()
-    _write_record(tmp_path, system_id, _admitted_record(system_id))
+    _write_record(tmp_path, system_id, _interrupted_record(system_id))
     adapter = _Observer()
 
     refusal = _refusal(_service(tmp_path, _Observations(_target(system_id)), adapter))

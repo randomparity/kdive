@@ -31,6 +31,7 @@ from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityStrandedObservationRequestV1,
     AuthorityStrandedObservationResponseV1,
+    record_digest,
 )
 from kdive.providers.external_boot_authority.service import (
     AuthenticatedPeer,
@@ -54,6 +55,7 @@ from tests.db.external_boot_authority_support import _RoleDsns
 from tests.db.stranded_activation_support import _DOMAIN, _mark_authority_owned, _strand
 from tests.providers.external_boot_authority.service_support import (
     _Adapter,
+    _interrupted_record,
     _Repository,
     _takeover,
 )
@@ -247,6 +249,44 @@ def test_both_producers_settle_the_stranded_shape(
         assert past_preparing.value.details["reason"] == "not_preparing"
 
     asyncio.run(exercise())
+
+
+def test_a_real_journal_head_reaches_settlement(
+    migrated_url: str, authority_role_dsns: _RoleDsns, tmp_path: Path
+) -> None:
+    case = _strand(migrated_url, authority_role_dsns).case
+    record = _interrupted_record(case.system_id)
+    journal = FileAuthorityJournal(tmp_path, f"{case.system_id}.journal")
+    journal.append(record)
+    journal.close()
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "INSERT INTO external_boot_authority_journal_heads (authority_instance, system_id, "
+            "sequence, digest, phase, authority_id, generation, operation_identity, head_record) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, '{}')",
+            (
+                case.authority_instance,
+                case.system_id,
+                record.sequence,
+                record_digest(record),
+                record.phase.value,
+                record.authority_id,
+                record.generation,
+                record.operation_identity,
+            ),
+        )
+    service = _authority_service(
+        tmp_path, authority_role_dsns, case.authority_instance, _AuthorityDaemon()
+    )
+
+    async def exercise() -> SettlementStatus:
+        job = await _request(authority_role_dsns, case.activation_id)
+        await _run_job(
+            migrated_url, authority_role_dsns, job, case.worker_id, _WorkerDaemon(), service
+        )
+        return await _settle(authority_role_dsns, case.activation_id)
+
+    assert asyncio.run(exercise()) is SettlementStatus.APPLIED
 
 
 def test_a_second_request_while_live_returns_the_same_job(
