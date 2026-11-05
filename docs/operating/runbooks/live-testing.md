@@ -405,6 +405,58 @@ The mock-OIDC image selection note in the cross-platform guide covers the POWER 
 requirement; `qemu:///system` and root-process constraints also apply.
 
 
+### Live authority lab
+
+Bringing up a local host with an installed authority has several steps whose failures do not name
+the cause. Each trap below gives the action and, where the repository documents one, how the miss
+shows. The host preparation itself is
+[Local composition without runner registration](#local-composition-without-runner-registration)
+(Ubuntu 26.04 x86_64, an explicit operator user and a full candidate SHA); the stack start-up is
+[live-stack section 4](live-stack.md#4-start-the-host-processes).
+
+- **Order: backends and schema, then the authority play, then the stack.** Run
+  `just stack-backends` (backends, bucket and migrations, then stop). The play's one-shot readiness
+  probe fails `database/connection-failed` when the authority DSN's database is unreachable, and
+  `database-role/query-failed` when it is reachable but not migrated. Then run
+  [installed-local-authority.yml](../../../deploy/ansible/playbooks/installed-local-authority.yml),
+  which installs the authority, the fixed worker lifecycle and the client route. Then run
+  `stack-services.sh` (or `examples/local-libvirt/demo-up.sh`, which calls it) to start the workers
+  against them.
+- **The authority play installs `acl` itself**
+  (`live_vm_host_authority_packages` in `deploy/ansible/roles/live_vm_host/defaults/main.yml`), so
+  the lane needs no extra step. A separate `connection: local` play that escalates to a different
+  unprivileged account needs the package on the host, because ansible-core falls back to `setfacl`
+  (reason recorded in `deploy/ansible/roles/local_worker_host/tasks/boot_kernels.yml`).
+- **The inventory entry must match the manifest.** The authority checks the request tuple
+  `(provider_kind, resource_name, authority_instance)` against its manifest
+  (`src/kdive/providers/local_libvirt/system_authority.py`). Name the `[[local_libvirt]]` entry
+  after the manifest's `resource_name` and give it the manifest's `authority_instance`. A wrong
+  `authority_instance` normally stops at the worker as `authority: binding-mismatch`. A wrong
+  resource name fails the job as `authority: provider-conflict`; the message
+  `local authority request is not bound to its manifest` appears only in the journal of
+  `kdive-external-boot-authority.service`.
+- **Pick the right instance field.** `authority_instance` makes `systems.provision` take the
+  authority-owned path. `relocated_authority_instance` is the fixture-lane declaration
+  ([Authority-owned System frame](#authority-owned-system-frame-3184)); the two are mutually
+  exclusive, and the frame's resource must carry no `authority_instance`. A file for the
+  authority-owned path therefore uses `authority_instance`, and the fixture-lane copy replaces
+  that one line with `relocated_authority_instance`.
+- **Register a staged image with its sidecar, then reconcile.** A catalog image for the authority
+  lane needs an `[[image]]` block in `systems.toml` built from the image's
+  `<name>.qcow2.provenance.json` sidecar, followed by `reconcile-systems`. Its name and
+  architecture (catalog base) or its SHA-256 (local base) must also match a base in the installed
+  manifest; otherwise the authority journal shows `local authority root source is not installed`
+  and the job fails as `authority: provider-conflict`.
+  `examples/local-libvirt/build-image.sh` does the build, the block and the reconcile; the manual
+  form is in the [local example](../../../examples/local-libvirt/README.md#optional-inventory-systemstoml).
+- **A stuck worker slot** after a unit restarted outside the lifecycle contract (a `needrestart`
+  sweep, an unattended upgrade, a manual `systemctl restart`) is documented in
+  [Recovering a wedged worker slot](live-stack.md#recovering-a-wedged-worker-slot). No runbook
+  documents recovering an allocation stranded by a failed authority-owned provision: the
+  teardown steps in the [frame section](#authority-owned-system-frame-3184) cover only a killed
+  fixture-mode run, and teardown of an authority-owned System is refused while its recorded binding
+  mismatches the manifest.
+
 ### Separate installed authority lanes
 
 For #3183/#3152, assign an exclusive Ubuntu 26.04 x86_64 local-authority host and a
