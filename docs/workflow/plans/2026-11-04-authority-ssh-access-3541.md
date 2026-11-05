@@ -9,7 +9,7 @@ Spec: [design](../specs/2026-11-04-authority-ssh-access-3541-design.md).
 
 **Stack:** Python 3.14, pydantic, psycopg, pytest with disposable Postgres.
 
-Expected implementation size: 240–340 changed lines (M) — about 60 source lines over seven files plus the tests in the file map.
+Expected implementation size: 240–340 changed lines (M) — about 80 source lines over ten files plus the tests in the file map.
 
 ## Global Constraints
 
@@ -94,6 +94,7 @@ if ssh_forward_port is not None:
 - Real worker role reaches the carried port. Mode: focused-test.
   `tests/jobs/handlers/test_ssh_reachable.py::test_handler_probes_the_carried_forward_as_the_worker_role`
   and `test_ssh_authorize.py::test_handler_authorizes_over_the_carried_forward_as_the_worker_role`.
+  The reachability test uses the default `_real_probe` against the file's `_serve(b"SSH-2.0-t\r\n")`.
   Each opens `authority_role_dsns("kdive_worker")`, asserts
   `SELECT * FROM resolve_authority_system_control_binding(%s)` raises
   `psycopg.errors.InsufficientPrivilege` on a separate connection, then runs the handler with a
@@ -143,16 +144,19 @@ async def _recorded_endpoint(
 
 **Verification**, all Mode: focused-test in `tests/mcp/lifecycle/test_systems_ssh_access.py`, with
 `_mark_authority_owned(pool, sid, state=, ssh_forward_port=, provider_kind=)` extended; `activated`
-also sets `first_activation_id=gen_random_uuid()`. Red: `system_domain_not_found` from a fake
+sets `first_activation_id` to a real `external_boot_activations` row, because that column is a
+foreign key, and `state="activated"` with `restricting=True` leaves that row restricting. Red: `system_domain_not_found` from a fake
 connector that raises unless given the keyword. Green:
 `uv run python -m pytest tests/mcp/lifecycle/test_systems_ssh_access.py -q -k authority`.
 
-- `ssh_info`: `ready` and `activated` return the stored port; unreported returns
+- `ssh_info`: `ready` returns the stored port and only `systems.get` as a next action; `activated`,
+  with and without a restricting activation, returns the stored port; unreported returns
   `authority_ssh_forward_unreported`; `teardown-requested` returns `authority_system_not_attachable`.
-- `check_ssh_reachable`: `ready` stays fenced with no provider read; `activated` stores the port in
-  `job.payload`; unreported refused with no job.
-- `authorize_ssh_key`: `ready` keeps the admission denial; `activated` stores the port; a restricting
-  activation keeps `external_boot_restricted`; unreported refused with no job.
+- `check_ssh_reachable`: `ready` and `teardown-requested` stay fenced with no provider read;
+  `activated`, with and without a restricting activation, stores the port in `job.payload`;
+  unreported refused with no job.
+- `authorize_ssh_key`: `ready` and `teardown-requested` keep the admission denial; `activated` stores
+  the port; a restricting activation keeps `external_boot_restricted`; unreported refused with no job.
 - Non-authority and remote-libvirt: `authority_ssh_forward_port` is `None`, payload has no key, the
   connector gets `None`.
 - Tool docs. Mode: focused-test. `just docs-check` fails until regenerated.
@@ -162,7 +166,11 @@ Steps:
 1. Write the tests; run, confirm red.
 2. Add `_recorded_endpoint`; replace the three call sites. `check_ssh_reachable` and
    `authorize_ssh_key` pass `ssh_forward_port=forward` to the payload.
-3. Reword the `authority_ssh_forward_port` docstring to cover SSH access.
+3. Reword the `authority_ssh_forward_port` docstring to cover SSH access, and its message to:
+   `"this authority-owned System has no usable SSH forward: it left the reachable states, or it was
+   provisioned before the authority reported one. Tear it down and provision it again against an
+   upgraded authority."` In `ssh_info`, read `ordinary_mutation_is_fenced(conn, uid)` beside the
+   endpoint and pass `["systems.get"]` to `visible_next_actions` when true.
 4. In `registrar.py`, state for each of the three tools that an authority-owned local System uses
    its reported port and reports `authority_ssh_forward_unreported` or
    `authority_system_not_attachable`; note the preactivation fence on the two job tools. Run `just docs`.
@@ -175,4 +183,8 @@ Steps:
   on `origin/main` and on the branch; expected: identical strings.
 - Run `just lint`, `just type`, `just test-changed`, then the final `just ci > <file> 2>&1 < /dev/null`.
 
-Rollback: revert the branch. A job already carrying the port fails on a reverted worker; reissue.
+- No live arm runs here: no live test covers these tools and a lab grant is the campaign's. Say so in
+  the completion report.
+
+Rollback: revert the branch. A job already carrying the port fails on a reverted worker with a
+payload validation error; `check_ssh_reachable` reissues, `authorize_ssh_key` needs a different key.

@@ -68,23 +68,9 @@ and neither authority protocol reported it.
   endpoint through `recorded_ssh_endpoint` and do not use the stored port. Remote-libvirt authority
   Systems keep their existing behaviour.
 
-## Considered & rejected
+### Amendment (2026-11-04): the SSH access tools carry the stored port (#3541)
 
-- **Give the server an authority route and ask the authority.** verified: the sender signs with the
-  worker incarnation credential and the server has none. judgment: handing the web-facing process a
-  credential that can ask the authority about Systems widens a custody boundary for a value that
-  never changes after provision.
-- **A new authority operation resolved by the worker.** judgment: the worker is not on the attach
-  path, and the value would still need a place to live between calls.
-- **Derive the port from the System id.** judgment: the authority picks a free ephemeral port and
-  must be free to move it, and the server cannot know the authority's range.
-- **Keep the port outside the ownership row.** judgment: the row already carries the System's
-  immutable authority identity and is the one the binding function reads, so a second table adds a
-  join and a grant for one integer.
-
-## Amendment (2026-11-04): the SSH access tools and connectivity jobs
-
-The `Not covered` consequence above is closed for local-libvirt (#3541).
+The `Not covered` consequence above is closed for local-libvirt.
 `systems.ssh_info`, `systems.authorize_ssh_key` and `systems.check_ssh_reachable` read the stored
 port through `authority_ssh_forward_port` and hand it to
 `Connector.recorded_ssh_endpoint(..., ssh_forward_port=)`, which behaves as decision 3 describes
@@ -98,6 +84,27 @@ strict range, written only for an authority-owned local System. `authorize_ssh_k
 `system_not_ready` when a carried port meets a System that is no longer `ready`, because a stored
 port does not prove a domain exists as the XML read did.
 
-Upgrade workers before servers: an older worker forbids the new field. Only an authority-owned job
-carries it, and such a job already failed on that worker. The lifecycle identity does not move. No
-schema change. Remote-libvirt authority Systems keep their existing behaviour (#3547).
+Upgrade workers before servers: an older worker forbids the new field and fails such a job with a
+payload validation error, and an identical key then replays that failure. No other job carries the
+field. The lifecycle identity does not move. No schema change. Remote-libvirt authority Systems keep
+their existing behaviour (#3547).
+
+Two alternatives were weighed. A port-only function granted to `kdive_worker` needs no payload field
+or deploy order. judgment: it adds a migration and widens what the worker role can read about
+authority ownership, for a value the server can hand over. Doing nothing was rejected: verified at
+`e7aa79a7d`, the five call sites raise `system_domain_not_found`, so an authority-owned System has
+no agent SSH path.
+
+## Considered & rejected
+
+- **Give the server an authority route and ask the authority.** verified: the sender signs with the
+  worker incarnation credential and the server has none. judgment: handing the web-facing process a
+  credential that can ask the authority about Systems widens a custody boundary for a value that
+  never changes after provision.
+- **A new authority operation resolved by the worker.** judgment: the worker is not on the attach
+  path, and the value would still need a place to live between calls.
+- **Derive the port from the System id.** judgment: the authority picks a free ephemeral port and
+  must be free to move it, and the server cannot know the authority's range.
+- **Keep the port outside the ownership row.** judgment: the row already carries the System's
+  immutable authority identity and is the one the binding function reads, so a second table adds a
+  join and a grant for one integer.

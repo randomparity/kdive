@@ -27,7 +27,11 @@ storing the port the authority reports; these five call sites still do not read 
    non-authority job's stored payload is byte-identical to today's.
 4. Both handlers pass `payload.ssh_forward_port` to the connector. They do not read the binding:
    `resolve_authority_system_control_binding` is revoked from `kdive_worker` and stays revoked.
-5. `authorize_ssh_key_handler` reads no System today. When the payload carries a port it now
+5. `authority_ssh_forward_port`'s refusal text stops saying "attach" and "reprovision", which an
+   authority-owned System refuses; it says to tear down and provision again. Reasons do not change.
+6. `ssh_info` suggests only `systems.get` while `ordinary_mutation_is_fenced` is true, because the
+   two job tools refuse in that state. Otherwise its next actions are unchanged.
+7. `authorize_ssh_key_handler` reads no System today. When the payload carries a port it now
    refuses with `reason=system_not_ready` unless the System is `ready`, the check
    `check_ssh_reachable_handler` already makes. The domain read was also a liveness check; a stored
    port is not, and a torn-down System's port can be reused.
@@ -52,10 +56,11 @@ restricting activation reports the stored port, read-only, as a non-authority Sy
 
 ### Rolling deploy
 
-Upgrade workers first, then servers. `_PayloadBase` forbids extra fields, so an old worker refuses a
-payload carrying the port. Only an authority-owned job carries it, and such a job already fails on
-an old worker. A new worker with a new server's job works; a new worker with an old server's job
-sees no port and takes the domain read, which is today's behaviour.
+Upgrade workers first, then servers. `_PayloadBase` forbids extra fields, so an old worker fails a
+payload carrying the port with a payload validation error. Only an authority-owned job carries it,
+and an old server never enqueues one for a local authority System, because its tool fails on the
+domain read first. A new worker with an old server sees only port-free jobs and takes the domain
+read, which is today's behaviour.
 
 `LifecycleRequest` and `LifecycleResponse` reference no job payload model, so
 `lifecycle_protocol_identity()` does not move and the native runner needs no refresh. The build
@@ -79,8 +84,10 @@ compares the identity before and after.
 
 **Accepted failure classes**
 
-- A job queued by an old server for an authority System fails `system_domain_not_found`. Bounded to
-  the deploy window; the caller reissues.
+- A job carrying the port meets an older worker, if servers upgrade first or the workers roll back.
+  It fails with a payload validation error. Bounded to authority-owned Systems, which had no SSH
+  path before this change. `check_ssh_reachable` reissues; `authorize_ssh_key` takes the replay
+  class below.
 - An identical key whose job already failed replays that job. That is the existing, documented
   `authorize_ssh_key` contract; authorize a different key.
 - Between the handler's `ready` read and the probe the System can start teardown. Same window as
@@ -114,5 +121,9 @@ confidential: `ssh_info` discloses it to a VIEWER.
 
 Tool tests cover each table row, and non-authority plus remote-libvirt regressions. Handler tests
 run on a real `kdive_worker` connection that is first shown to be refused the binding function, with
-a real local connector whose domain read raises. Payload bounds and the connector branch get focused
-unit tests.
+a real local connector whose domain read raises; the reachability test uses the real probe against a
+local banner socket. Payload bounds and the connector branch get focused unit tests.
+
+No planned arm logs in to a real authority guest as the worker: `tests/live_vm` and
+`tests/live_stack` hold no SSH tool test, and a lab grant belongs to the campaign. The completion
+report states that gap.
