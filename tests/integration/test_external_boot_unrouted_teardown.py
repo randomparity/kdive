@@ -239,8 +239,11 @@ def test_routed_teardown_completes_and_releases(
         }
         assert provider.phases == []
         assert released.status == "released", released.model_dump()
+        # The residue case restarts a row twice (ordinary replaced, then lapsed final attempt);
+        # each restart audits its requester (#3544, ADR-0447).
+        recycles = ["teardown:recycled"] * 2 if residue == "tearing_down" else []
         prior = "tearing_down" if residue == "tearing_down" else "ready"
-        assert audit == {"transitions": [f"{prior}->torn_down"]}
+        assert audit == {"transitions": [*recycles, f"{prior}->torn_down"]}
 
     asyncio.run(body())
 
