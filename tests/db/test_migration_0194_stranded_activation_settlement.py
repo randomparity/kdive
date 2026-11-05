@@ -13,12 +13,18 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from kdive.db.external_boot_activations import ExternalBootActivationRepository
+from kdive.db.external_boot_activations import (
+    ExternalBootActivationRepository,
+    SettlementStatus,
+)
 from kdive.domain.external_boot_activation import (
     ExternalBootActivation,
     ExternalBootReservationRelease,
 )
+from kdive.security.authz.context import RequestContext
+from kdive.security.authz.rbac import PlatformRole
 from kdive.serialization import validate_stored
+from kdive.services.external_boot.settlement import settle_stranded_activation
 from tests.db.external_boot_authority_support import (
     _allocate,
     _AuthorityCase,
@@ -210,6 +216,33 @@ def test_applied_settles_and_audits(migrated_url: str, authority_role_dsns: _Rol
     assert _audit_rows(migrated_url, case.activation_id) == 1
 
 
+def test_settled_activation_no_longer_restricts_through_the_service(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    stranded = _strand(migrated_url, authority_role_dsns)
+    case = stranded.case
+    _record_authority(authority_role_dsns, stranded)
+    _record_worker(authority_role_dsns, stranded)
+    ctx = RequestContext(
+        principal="admin",
+        agent_session=None,
+        projects=(),
+        platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}),
+    )
+
+    async def settle() -> tuple[SettlementStatus, ExternalBootActivation | None]:
+        async with await psycopg.AsyncConnection.connect(
+            authority_role_dsns("kdive_server"), autocommit=True
+        ) as conn:
+            status = await settle_stranded_activation(
+                conn, ctx, activation_id=case.activation_id, actor="agent", reason="stranded"
+            )
+            repository = ExternalBootActivationRepository()
+            return status, await repository.get_restricting_for_system(conn, case.system_id)
+
+    assert asyncio.run(settle()) == (SettlementStatus.APPLIED, None)
+
+
 def test_authority_owned_system_cannot_settle(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
@@ -270,7 +303,11 @@ _SET_UNPROVEN = (
     "'schema', 'external-boot-materialization-v1', "
     "'ownership', jsonb_build_object('system_id', system_id::text, 'run_id', run_id::text), "
     "'plan_identity', plan_identity, "
-    "'artifacts', jsonb_build_object('kernel', jsonb_build_object('ref', 'held/kernel'))) "
+    "'artifacts', jsonb_build_object('kernel', jsonb_build_object('ref', 'held/kernel'))), "
+    "pre_recovery_evidence = jsonb_build_object("
+    "'schema', 'external-boot-pre-recovery-evidence-v1', 'activation_id', id::text, "
+    "'system_id', system_id::text, 'run_id', run_id::text, 'plan_identity', plan_identity, "
+    "'recovery_object', jsonb_build_object('ref', 'held/recovery')) "
     "WHERE id = {activation}"
 )
 _SET_JOURNAL_MOVED = (
@@ -327,6 +364,21 @@ def test_refusals_change_nothing(
     assert settled == (0,)
 
 
+def test_one_uncovered_object_of_several_refuses(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    stranded = _strand(migrated_url, authority_role_dsns)
+    case = stranded.case
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            cast(LiteralString, _SET_UNPROVEN.format(activation=f"'{case.activation_id}'"))
+        )
+    _record_authority(authority_role_dsns, stranded, objects=("held/kernel",))
+    _record_worker(authority_role_dsns, stranded)
+
+    assert _settle(authority_role_dsns, case.activation_id) == "objects_unproven"
+
+
 def test_absent_objects_cover_every_object_the_activation_names(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
@@ -336,7 +388,10 @@ def test_absent_objects_cover_every_object_the_activation_names(
         conn.execute(
             cast(LiteralString, _SET_UNPROVEN.format(activation=f"'{case.activation_id}'"))
         )
-    assert _record_authority(authority_role_dsns, stranded, objects=("held/kernel",)) == "applied"
+    assert (
+        _record_authority(authority_role_dsns, stranded, objects=("held/kernel", "held/recovery"))
+        == "applied"
+    )
     assert _record_worker(authority_role_dsns, stranded) == "applied"
 
     assert _settle(authority_role_dsns, case.activation_id) == "applied"

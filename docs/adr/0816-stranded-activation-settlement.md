@@ -77,6 +77,9 @@ fence changes on a settled row, never on activation state alone.
   same recovery applies.
 - Objects the authority still holds refuse settlement. The authority must remove them first, or
   the observation must wait for it.
+- Settlement accepts a non-terminal journal head, since an interrupted attempt is part of the
+  shape. Calling the authority recorder therefore also asserts that the authority's lane for the
+  System is quiescent; its producer must prove that first.
 - The authority role is not per-instance, so `kdive_provider_authority` is trusted to name its
   instance truthfully; the function checks only that the instance matches the activation's route.
 

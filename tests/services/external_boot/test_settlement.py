@@ -83,8 +83,8 @@ def test_a_lesser_platform_role_never_reaches_the_repository(
     assert repository.calls == []
 
 
-@pytest.mark.parametrize("reason", ["", "  \n"])
-def test_a_blank_reason_never_reaches_the_repository(
+@pytest.mark.parametrize("reason", ["", "  \n", "x" * 1025, "é" * 513])
+def test_an_invalid_reason_never_reaches_the_repository(
     monkeypatch: pytest.MonkeyPatch, reason: str
 ) -> None:
     repository = _bind(monkeypatch, SettlementStatus.APPLIED)

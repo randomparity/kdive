@@ -58,8 +58,10 @@ Under the System advisory lock, with the activation, System and settlement rows 
     remote-module obligations; mark settled; insert `platform_audit_log`.
 
 Open or retired authority rows do not refuse: failed jobs retire theirs, and an interrupted attempt
-leaves one open. Step 5 and step 9 fence a live authority, and superseding the open rows fences a
-late mutation. Retired rows stay; the ADR states what that requires of #3551.
+leaves one open. Step 5 and step 9 fence authority activity that moves the journal after the
+observation, and superseding the open rows fences a later journal write. Neither stops a provider
+call already running, so the authority must prove its lane quiescent before it records absence; a
+non-terminal head does not refuse, because an interrupted attempt is the shape being recovered. Retired rows stay; the ADR states what that requires of #3551.
 
 A blank or oversize reason or a blank principal raises `22023`; those are caller defects, not
 refusals. Reason is 1 to 1024 bytes after trimming.

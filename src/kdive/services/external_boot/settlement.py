@@ -15,6 +15,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, require_platform_role
 
 _REPOSITORY = ExternalBootActivationRepository()
+_REASON_MAX_BYTES = 1024
 
 
 async def settle_stranded_activation(
@@ -26,9 +27,9 @@ async def settle_stranded_activation(
     the success audit row in its own transaction.
     """
     require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
-    if not reason.strip():
+    if not 1 <= len(reason.strip().encode()) <= _REASON_MAX_BYTES:
         raise CategorizedError(
-            "settling a stranded activation requires a non-blank reason",
+            f"settling a stranded activation requires a reason of 1 to {_REASON_MAX_BYTES} bytes",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "reason_required"},
         )
