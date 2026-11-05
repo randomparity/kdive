@@ -31,6 +31,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
     ReadinessResult,
 )
+from kdive.providers.local_libvirt.lifecycle.connect import LibvirtDomainPresence
 from kdive.providers.local_libvirt.lifecycle.power import (
     clean_shutdown_bound_s,
     destroy_or_accept_shutoff,
@@ -1417,6 +1418,10 @@ class LocalExternalBootSessionFactory:
         self._baseline_dir_for = baseline_dir_for
         self._sleep = sleep
         self._clock = clock
+
+    def domain_is_defined(self, domain_name: str) -> bool:
+        """Answer without a lease: a stranded activation has no domain to open (ADR-0816)."""
+        return LibvirtDomainPresence(self._connect).is_defined(domain_name)
 
     def open(
         self,
