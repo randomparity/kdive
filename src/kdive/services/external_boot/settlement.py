@@ -23,8 +23,9 @@ async def settle_stranded_activation(
 ) -> SettlementStatus:
     """Settle one stranded activation, or raise naming the closed refusal reason.
 
-    The caller owns denial auditing, as the break-glass tools do; the settlement function writes
-    the success audit row in its own transaction.
+    A caller lacking `platform_admin` gets the bare ``AuthorizationError``: the tool handler
+    envelopes it with ``ToolResponse.denied`` and audits it, as the break-glass tools do. The
+    settlement function writes the success audit row in its own transaction.
     """
     require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
     reason = reason.strip()

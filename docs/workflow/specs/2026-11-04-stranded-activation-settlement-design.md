@@ -37,7 +37,8 @@ authority recorder to `accepted_function`, or the grant fails authority readines
 
 **Service.** `kdive.services.external_boot.settlement.settle_stranded_activation` enforces
 `platform_admin` and a non-blank reason, and turns a refusal into a typed `CategorizedError`
-carrying `details["reason"]`.
+carrying `details["reason"]`. A role denial stays a bare `AuthorizationError`, which the #3551 tool
+must envelope with `ToolResponse.denied`; the guard's exception list names that site.
 
 ## Settlement order
 
