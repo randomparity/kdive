@@ -29,6 +29,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
     AuthorityConflictResolutionRequestV1,
+    AuthorityInstallRefusalV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
@@ -80,6 +81,8 @@ _URL_USERINFO = re.compile(r"(?<=://)[^/\s]*@")
 _REFUSAL_OBSERVED_OPERATIONS = frozenset(
     {AuthorityOperation.ACTIVATE, AuthorityOperation.RECOVER, AuthorityOperation.RESOLVE_CONFLICT}
 )
+# ADR-0805, ADR-0814: the bounded categories a provider call's refusal is re-observed under.
+_REFUSAL_OBSERVED_CATEGORIES = frozenset({"provider_conflict", "install_failure"})
 # The (purpose, operation) pairs that delete recovery objects and so need cleanup evidence.
 # read_authorized_remote_module_cleanup_evidence (migration 0145) also admits ("recover",
 # "recover"), but a RECOVER of either purpose and a conflict resolution only restore the source
@@ -425,13 +428,18 @@ class AuthorityServiceError(RuntimeError):
             "provider_conflict",
             "system_held",
             "configuration_error",
+            "install_failure",
         ],
         *,
         reason: JournalConflictReason | None = None,
         telemetry_recorded: bool = False,
+        install_refusal: AuthorityInstallRefusalV1 | None = None,
     ):
+        if (category == "install_failure") is (install_refusal is None):
+            raise ValueError("install_failure and install_refusal are a pair")
         self.category = category
         self.reason = reason
+        self.install_refusal = install_refusal
         self.telemetry_recorded = telemetry_recorded
         super().__init__(category)
 
@@ -2104,7 +2112,7 @@ class ExternalBootAuthorityService:
                 except AuthorityServiceError as error:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.
-                    if not in_provider or error.category != "provider_conflict":
+                    if not in_provider or error.category not in _REFUSAL_OBSERVED_CATEGORIES:
                         raise
                     refusal = error
                 except Exception as error:
