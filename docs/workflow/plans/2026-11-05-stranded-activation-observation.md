@@ -9,7 +9,7 @@ proves its lane quiescent, observes its daemon and store, and records absence. S
 
 Tech stack: Python 3.14, psycopg, Postgres SQL migrations, pytest.
 
-Expected implementation size: 900–1300 changed lines (L) — the file map below: about 350 lines of source across 18 files plus 500–900 lines of tests.
+Expected implementation size: 900–1300 changed lines (L) — the file map below: about 350 lines of source across 21 files plus 500–900 lines of tests.
 
 ## Global Constraints
 
