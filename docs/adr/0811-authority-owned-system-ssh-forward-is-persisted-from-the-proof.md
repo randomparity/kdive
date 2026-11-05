@@ -81,3 +81,23 @@ and neither authority protocol reported it.
 - **Keep the port outside the ownership row.** judgment: the row already carries the System's
   immutable authority identity and is the one the binding function reads, so a second table adds a
   join and a grant for one integer.
+
+## Amendment (2026-11-04): the SSH access tools and connectivity jobs
+
+The `Not covered` consequence above is closed for local-libvirt (#3541).
+`systems.ssh_info`, `systems.authorize_ssh_key` and `systems.check_ssh_reachable` read the stored
+port through `authority_ssh_forward_port` and hand it to
+`Connector.recorded_ssh_endpoint(..., ssh_forward_port=)`, which behaves as decision 3 describes
+for `open_transport`, without the banner probe. Absence fails closed with the reasons in decision 4.
+The tools run in the server, so the existing binding serves them, and the preactivation fence and
+activation policy still run first: in ownership state `ready` only `ssh_info` reaches the endpoint.
+
+The worker runs the two job handlers and stays refused the binding. The server therefore carries the
+port in `AuthorizeSshKeyPayload` and `CheckSshReachablePayload`, as an optional field with the same
+strict range, written only for an authority-owned local System. `authorize_ssh_key_handler` refuses
+`system_not_ready` when a carried port meets a System that is no longer `ready`, because a stored
+port does not prove a domain exists as the XML read did.
+
+Upgrade workers before servers: an older worker forbids the new field. Only an authority-owned job
+carries it, and such a job already failed on that worker. The lifecycle identity does not move. No
+schema change. Remote-libvirt authority Systems keep their existing behaviour (#3547).
