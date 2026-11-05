@@ -19,7 +19,8 @@ and the worker holds its domain. The primitive provides that and nothing else.
   composite_state, objects)` returns `applied`, `superseded` or `not_found`. Role
   `kdive_provider_authority`. `domain_name` must equal `systems.domain_name`. `composite_state` is
   the authority's digest of what it observed as absent; it becomes the terminal evidence's
-  `composite_state`. Each object must satisfy the ASCII subset of `OpaqueProviderRef`, else `22023`.
+  `composite_state`. At most 32 objects, each in the ASCII subset of `OpaqueProviderRef`, else
+  `22023`.
 - `record_stranded_activation_worker_ownership(credential_hash, job, attempt, activation,
   domain_name)` returns the same set. Role `kdive_worker`. The job must be `running`, leased by the
   active fence-protocol-4 incarnation, carry the System's id and no authority marker.
@@ -48,7 +49,8 @@ Under the System advisory lock, with the activation, System and settlement rows 
 5. Queued or running job marked `external_boot_authority_v1` for the System: `job_live`.
 6. No authority record: `authority_evidence_missing`.
 7. No worker record: `worker_evidence_missing`.
-8. Either record older than one hour: `evidence_stale`.
+8. Either record older than one hour, or naming a domain other than `systems.domain_name`:
+   `evidence_stale`.
 9. Journal head differs from the captured head: `authority_journal_moved`.
 10. No reservation row: `reservation_missing`.
 11. An object named by `materialization`, `recovery_point` or `pre_recovery_evidence` is not in the
@@ -96,7 +98,8 @@ refusals. Reason is 1 to 1024 bytes after trimming.
 1. **Boundary inventory.** Added: `platform_admin` to the service; server to the settlement
    function; worker and authority to their recorders. Widened: the authority role's accepted
    function list gains the recorder. Reason text enters from the
-   operator and is stored verbatim.
+   operator and is stored trimmed. `actor` enters from the caller; the #3551 tool must pass
+   `actor_for(ctx)`, the server-resolved value (ADR-0089).
 2. **Actor model.** A project user or a platform role below admin is untrusted. A compromised worker
    or authority credential is untrusted for the other owner's evidence. The trust is in database role
    separation and in the operator holding `platform_admin`.

@@ -72,6 +72,16 @@ def test_admin_settles_with_their_identity(
     )
 
 
+def test_a_surrounding_whitespace_reason_fits_after_trimming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _bind(monkeypatch, SettlementStatus.APPLIED)
+
+    asyncio.run(_call(_ADMIN, "\n" + "x" * 1024))
+
+    assert repository.calls[0]["reason"] == "x" * 1024
+
+
 def test_a_lesser_platform_role_never_reaches_the_repository(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -83,7 +93,7 @@ def test_a_lesser_platform_role_never_reaches_the_repository(
     assert repository.calls == []
 
 
-@pytest.mark.parametrize("reason", ["", "  \n", "x" * 1025, "é" * 513])
+@pytest.mark.parametrize("reason", ["", "  \n", "x" * 1025, "é" * 513, "bad\0reason"])
 def test_an_invalid_reason_never_reaches_the_repository(
     monkeypatch: pytest.MonkeyPatch, reason: str
 ) -> None:

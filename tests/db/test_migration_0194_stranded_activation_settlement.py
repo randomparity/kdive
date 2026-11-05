@@ -297,6 +297,7 @@ _SET_STALE = (
     "UPDATE external_boot_activation_settlements "
     "SET worker_recorded_at = now() - interval '2 hours' WHERE activation_id = {activation}"
 )
+_SET_DOMAIN_CHANGED = "UPDATE systems SET domain_name = 'renamed' WHERE id = {system}"
 _SET_NO_RESERVATION = "DELETE FROM external_boot_reservations WHERE activation_id = {activation}"
 _SET_UNPROVEN = (
     "UPDATE external_boot_activations SET materialization = jsonb_build_object("
@@ -326,6 +327,7 @@ _SET_JOURNAL_MOVED = (
         (_SET_SYSTEM_ENDED, "system_ended"),
         (_SET_JOB_LIVE, "job_live"),
         (_SET_STALE, "evidence_stale"),
+        (_SET_DOMAIN_CHANGED, "evidence_stale"),
         (_SET_JOURNAL_MOVED, "authority_journal_moved"),
         (_SET_NO_RESERVATION, "reservation_missing"),
         (_SET_UNPROVEN, "objects_unproven"),
@@ -486,7 +488,25 @@ def test_authority_record_refuses_a_ref_outside_the_canonical_grammar(
         _record_authority(authority_role_dsns, stranded, objects=(ref,))
 
 
-@pytest.mark.parametrize("reason", ["", "   ", "x" * 1025])
+def test_authority_record_refuses_an_oversize_object_list(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    stranded = _strand(migrated_url, authority_role_dsns)
+    objects = tuple(f"object/{index}" for index in range(33))
+    with pytest.raises(psycopg.errors.InvalidParameterValue):
+        _record_authority(authority_role_dsns, stranded, objects=objects)
+
+
+def test_the_largest_object_list_settles(migrated_url: str, authority_role_dsns: _RoleDsns) -> None:
+    stranded = _strand(migrated_url, authority_role_dsns)
+    objects = tuple(f"{index:02d}/" + "o" * 1021 for index in range(32))
+    assert _record_authority(authority_role_dsns, stranded, objects=objects) == "applied"
+    assert _record_worker(authority_role_dsns, stranded) == "applied"
+
+    assert _settle(authority_role_dsns, stranded.case.activation_id) == "applied"
+
+
+@pytest.mark.parametrize("reason", ["", "   ", "\n\t", "x" * 1025])
 def test_invalid_reason_is_rejected(
     migrated_url: str, authority_role_dsns: _RoleDsns, reason: str
 ) -> None:

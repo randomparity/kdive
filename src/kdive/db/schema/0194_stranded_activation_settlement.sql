@@ -42,7 +42,8 @@ BEGIN
         RAISE EXCEPTION 'provider authority is required' USING ERRCODE = '42501';
     END IF;
     IF p_composite_state IS NULL OR p_composite_state !~ '^sha256:[0-9a-f]{64}$'
-       OR p_absent_objects IS NULL OR array_position(p_absent_objects, NULL) IS NOT NULL
+       OR p_absent_objects IS NULL OR cardinality(p_absent_objects) > 32
+       OR array_position(p_absent_objects, NULL) IS NOT NULL
        OR EXISTS (SELECT 1 FROM unnest(p_absent_objects) AS ref
                   WHERE octet_length(ref) NOT BETWEEN 1 AND 1024
                      OR ref !~ '^[\x20-\x7e]+$' OR ref ~ '["\\:@]'
@@ -158,11 +159,12 @@ DECLARE
     v_now text;
     v_release jsonb;
     v_release_identity text;
+    v_reason text := regexp_replace(p_reason, '^\s+|\s+$', '', 'g');
 BEGIN
     IF NOT pg_has_role(session_user, 'kdive_server', 'member') THEN
         RAISE EXCEPTION 'server authority is required' USING ERRCODE = '42501';
     END IF;
-    IF p_reason IS NULL OR octet_length(btrim(p_reason)) NOT BETWEEN 1 AND 1024
+    IF v_reason IS NULL OR octet_length(v_reason) NOT BETWEEN 1 AND 1024
        OR p_principal IS NULL OR btrim(p_principal) = '' OR p_actor IS NULL THEN
         RAISE EXCEPTION 'settlement requires a principal and a reason' USING ERRCODE = '22023';
     END IF;
@@ -191,7 +193,9 @@ BEGIN
     IF v_settlement.authority_recorded_at IS NULL THEN RETURN 'authority_evidence_missing'; END IF;
     IF v_settlement.worker_recorded_at IS NULL THEN RETURN 'worker_evidence_missing'; END IF;
     IF least(v_settlement.authority_recorded_at, v_settlement.worker_recorded_at)
-       < clock_timestamp() - interval '1 hour' THEN
+       < clock_timestamp() - interval '1 hour'
+       OR v_settlement.authority_domain_name IS DISTINCT FROM v_system.domain_name
+       OR v_settlement.worker_domain_name IS DISTINCT FROM v_system.domain_name THEN
         RETURN 'evidence_stale';
     END IF;
     SELECT * INTO v_head FROM public.external_boot_authority_journal_heads
@@ -266,7 +270,7 @@ BEGIN
     SET mutation_discharged_at = now(), mutation_discharge_reason = 'terminal_escape'
     WHERE system_id = v_system.id AND mutation_discharged_at IS NULL;
     UPDATE public.external_boot_activation_settlements
-    SET principal = p_principal, reason = btrim(p_reason), settled_at = clock_timestamp()
+    SET principal = p_principal, reason = v_reason, settled_at = clock_timestamp()
     WHERE activation_id = p_activation_id;
     INSERT INTO public.platform_audit_log (
         principal, agent_session, platform_role, tool, scope, args_digest, actor
@@ -274,7 +278,7 @@ BEGIN
         p_principal, p_agent_session, 'platform_admin',
         'external_boot.settle_stranded_activation', 'settled:' || p_activation_id::text,
         encode(sha256(convert_to(public.canonical_external_boot_authority_json(
-            jsonb_build_object('activation_id', p_activation_id::text, 'reason', btrim(p_reason))
+            jsonb_build_object('activation_id', p_activation_id::text, 'reason', v_reason)
         ), 'UTF8')), 'hex'),
         p_actor
     );

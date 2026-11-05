@@ -27,7 +27,8 @@ async def settle_stranded_activation(
     the success audit row in its own transaction.
     """
     require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
-    if not 1 <= len(reason.strip().encode()) <= _REASON_MAX_BYTES:
+    reason = reason.strip()
+    if "\0" in reason or not 1 <= len(reason.encode()) <= _REASON_MAX_BYTES:
         raise CategorizedError(
             f"settling a stranded activation requires a reason of 1 to {_REASON_MAX_BYTES} bytes",
             category=ErrorCategory.CONFIGURATION_ERROR,
