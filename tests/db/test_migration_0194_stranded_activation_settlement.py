@@ -11,6 +11,7 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.external_boot_activations import (
     ExternalBootActivationRepository,
@@ -21,6 +22,8 @@ from kdive.domain.external_boot_activation import (
     ExternalBootActivation,
     ExternalBootReservationRelease,
 )
+from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.ops.security import breakglass
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 from kdive.serialization import validate_stored
@@ -739,3 +742,42 @@ def test_the_reconciler_reads_a_settled_system_awaiting_teardown(
     _record_worker(authority_role_dsns, stranded)
     assert _settle(authority_role_dsns, case.activation_id) == "applied"
     assert asyncio.run(awaiting()) == case.system_id
+
+
+def test_the_recovery_tool_settles_once_through_the_real_primitive(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """`ops.recover_stranded_activation` end to end under the server role (#3551)."""
+    stranded = _strand(migrated_url, authority_role_dsns)
+    activation_id = stranded.case.activation_id
+    admin = RequestContext(
+        principal="admin",
+        agent_session="session",
+        projects=(),
+        platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}),
+    )
+
+    async def recover(step: str) -> ToolResponse:
+        async with AsyncConnectionPool(
+            authority_role_dsns("kdive_server"), min_size=1, max_size=2, open=False
+        ) as pool:
+            return await breakglass.recover_stranded_activation(
+                pool, admin, activation_id=str(activation_id), step=step, reason="stranded"
+            )
+
+    assert asyncio.run(recover("observe")).status == "observation_requested"
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "UPDATE jobs SET state = 'succeeded' WHERE dedup_key = %s",
+            (f"stranded-observation:{activation_id}",),
+        )
+    _record_authority(authority_role_dsns, stranded)
+    _record_worker(authority_role_dsns, stranded)
+
+    first = asyncio.run(recover("settle"))
+    second = asyncio.run(recover("settle"))
+
+    assert (first.status, second.status) == ("settled", "settled")
+    assert first.data["system_id"] == str(stranded.case.system_id)
+    assert _activation_row(migrated_url, activation_id)["state"] == "abandoned"
+    assert _audit_rows(migrated_url, activation_id) == 1

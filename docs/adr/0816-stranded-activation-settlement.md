@@ -179,7 +179,8 @@ settled shape. Four fences key on that row and nothing else:
 
 One `platform_admin` tool, `ops.recover_stranded_activation`, with a required reason, drives the
 observation and the settlement in two steps. It audits a role denial, the observe request and
-every refusal of either step; a settlement is audited once, by the primitive. It settles
+every refusal of either step; a settlement is audited once, by the primitive. A configuration
+error is not a refusal and is not audited, as in `ops.force_teardown`. It settles
 only on a succeeded latest observation, and returns every refusal reason unchanged, including
 `authority_objects_present` and `stranded_observation_unsupported`. Teardown and release stay with
 the existing tools.

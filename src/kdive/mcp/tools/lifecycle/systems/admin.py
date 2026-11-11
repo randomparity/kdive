@@ -64,7 +64,6 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
-from kdive.services.external_boot.settlement import settled_at
 from kdive.services.investigations.common import TERMINAL_INVESTIGATION_STATES
 from kdive.services.systems.admission import require_pinned_cpu_selectable
 from kdive.services.systems.authority_owned import (
@@ -593,7 +592,7 @@ async def route_external_boot_teardown(
     activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, system.id)
     if activation is None:
         return None
-    settled = await settled_at(conn, activation.id)
+    settled = await _EXTERNAL_BOOT_ACTIVATIONS.settled_at(conn, activation.id)
     if settled is not None:
         return await _route_settled_teardown(
             conn, ctx, system, system_id, idempotency_key, settled, audit_recycle=audit_recycle

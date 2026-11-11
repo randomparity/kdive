@@ -6,8 +6,8 @@ Branch `feat/settled-teardown-routing-3551`, base `main`. Guardrails: `just lint
 
 ## Task 1 — settled predicates
 
-`services/external_boot/settlement.py`: `activation_is_settled(conn, activation_id)` and
-`settled_system_awaiting_teardown(conn, allocation_id)`.
+`ExternalBootActivationRepository.settled_at(conn, activation_id)`, and
+`settled_system_awaiting_teardown(conn, allocation_id)` in `services/external_boot/settlement.py`.
 
 Verify: DB tests under each reading role (server, worker, reconciler) for settled, unsettled and
 missing rows; the allocation query ignores a `torn_down` System.

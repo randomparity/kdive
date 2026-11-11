@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -40,17 +39,6 @@ class StrandedObservationOutcome:
     state: JobState
     reason: str | None
     message: str | None
-
-
-async def settled_at(conn: AsyncConnection, activation_id: UUID) -> datetime | None:
-    """When ``activation_id`` was settled, or ``None``: the key every teardown fence reads."""
-    cursor = await conn.execute(
-        "SELECT settled_at FROM external_boot_activation_settlements "
-        "WHERE activation_id = %s AND settled_at IS NOT NULL",
-        (activation_id,),
-    )
-    row = await cursor.fetchone()
-    return None if row is None else row[0]
 
 
 async def settled_system_awaiting_teardown(

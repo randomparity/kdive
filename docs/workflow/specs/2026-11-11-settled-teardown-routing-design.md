@@ -14,10 +14,11 @@ returns a route for a `retired` authority row.
 
 ## The settled key
 
-One predicate, in `kdive.services.external_boot.settlement`:
+One predicate, on `ExternalBootActivationRepository`:
 
-- `activation_is_settled(conn, activation_id) -> bool`: the activation has a settlement row with
-  `settled_at` set.
+- `settled_at(conn, activation_id) -> datetime | None`: the settlement row's `settled_at`, or
+  `None`; the existing `is_settled` is defined on it. The lease-expiry query,
+  `settled_system_awaiting_teardown`, lives in `kdive.services.external_boot.settlement`.
 
 Migration 0194 already grants `SELECT (activation_id, system_id, settled_at)` to `kdive_worker`
 and `kdive_reconciler`, and the whole table to `kdive_server`, so no migration is needed.
@@ -99,9 +100,10 @@ settlement function's bound).
      with its message, which for held objects names the recovery reference and objects.
    A primitive refusal (`evidence_stale`, `job_live`, `objects_unproven`, ...) is returned with its
    reason unchanged. `applied` and `replayed` return `settled` with the System id and next actions
-   `ops.force_teardown`, `systems.teardown`.
+   `ops.force_teardown`, `systems.get`.
 5. Every refusal of either step writes one `platform_audit_log` row with scope
-   `refused:<reason>:<activation>`. A settlement writes only the primitive's own `settled:` row, so
+   `refused:<reason>:<activation>`. A configuration error (item 2) is not a refusal and is not
+   audited, as in `ops.force_teardown`. A settlement writes only the primitive's own `settled:` row, so
    an `applied` call is recorded once and a `replayed` call adds nothing.
 
 Settling only on a `succeeded` latest observation keeps the #3574 rule that an operator who reads a
@@ -152,6 +154,10 @@ a settled allocation and free its capacity while the worker domain still runs.
    - An authority-marked teardown canceled after a worker claimed it, and written after
      settlement, is replayed. Only an old server can write one; the upgrade order forbids using the
      tool before every server is upgraded.
+   - An old server still routes a settled System to the authority over its `retired` row, and
+     an authority teardown that finalizes would mark the System `torn_down` while the worker
+     domain runs. Only the upgrade order closes it; a database guard in the binding would need a
+     migration replacing that function, a cost this change does not take.
    - A settled System whose worker is gone keeps its allocation held; recovery is an operator
      action (excluded: ownership rewrite or manual SQL).
    - Lease expiry for a completed, unsettled external-boot activation is unchanged by this change.

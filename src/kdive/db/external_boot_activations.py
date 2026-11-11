@@ -1094,16 +1094,23 @@ class ExternalBootActivationRepository:
             raise RuntimeError("worker ownership record returned no status")
         return CasStatus(str(row[0]))
 
-    async def is_settled(self, conn: AsyncConnection, activation_id: UUID) -> bool:
-        """Return whether the settlement primitive ended this activation (ADR-0816)."""
+    async def settled_at(self, conn: AsyncConnection, activation_id: UUID) -> datetime | None:
+        """When the settlement primitive ended this activation, or ``None`` (ADR-0816).
+
+        The key every teardown fence reads; 0194 grants the column to the worker and reconciler.
+        """
         row = await (
             await conn.execute(
-                "SELECT 1 FROM external_boot_activation_settlements "
+                "SELECT settled_at FROM external_boot_activation_settlements "
                 "WHERE activation_id = %s AND settled_at IS NOT NULL",
                 (activation_id,),
             )
         ).fetchone()
-        return row is not None
+        return None if row is None else row[0]
+
+    async def is_settled(self, conn: AsyncConnection, activation_id: UUID) -> bool:
+        """Return whether the settlement primitive ended this activation (ADR-0816)."""
+        return await self.settled_at(conn, activation_id) is not None
 
     @staticmethod
     def _known_objects(activation_row: dict[str, Any]) -> set[str]:
