@@ -41,11 +41,15 @@ The operator decided this on 2026-11-04.
    which does not look at the provider kind. Migration 0191 (#3546) makes the value immutable once
    set. No migration, no new column, no receipt or payload shape change.
 3. **The server supplies the address.** The endpoint is the instance's configured `ssh_addr` and
-   the stored port. The receipt never carries an address. Before any network IO, the connector
-   requires the port to lie in the instance's own `ssh_port_min`..`ssh_port_max`, which the operator
-   sets to cover the authority manifest's ranges for that Resource; a port outside it fails with
-   `configuration_error`, `reason=authority_ssh_forward_invalid`. An instance with no SSH forward
-   configured keeps returning `None` (`ssh_not_provisioned`).
+   the stored port. The receipt never carries an address. The server cannot read the manifest, which
+   is private authority-host configuration (ADR-0623), so the instance's own
+   `ssh_port_min`..`ssh_port_max` is the server-side mirror of the manifest bounds: the operator
+   sets it to cover the manifest ranges for that Resource, and the authority still enforces the
+   manifest range itself (`_same_subject`). "Cover" is weaker than "equal" when entries have gaps
+   between their ranges; with the disjointness contract below, a gap port belongs to no other
+   guest. Before any network IO, the connector requires the port to lie in the instance range; a
+   port outside it fails with `configuration_error`, `reason=authority_ssh_forward_invalid`. An
+   instance with no SSH forward configured keeps returning `None` (`ssh_not_provisioned`).
 4. **The server path is ADR-0811's, widened to remote.** `authority_ssh_forward_port` returns the
    stored port for a remote-libvirt authority System too, and the three SSH tools carry it, in the
    same optional `AuthorizeSshKeyPayload` and `CheckSshReachablePayload` fields the #3541 amendment
@@ -59,26 +63,43 @@ The operator decided this on 2026-11-04.
 
 ## Consequences
 
-- **Upgrade order:** any order fails safe. An older server ignores a reported remote port and
-  keeps the failing domain read. An older worker ignores the carried port on the remote connector
-  and reads the domain, which returns `ssh_not_provisioned`. Workers first, then servers, then
-  authorities gives the full path soonest. The lifecycle identity does not move.
+- **Upgrade order:** given servers and workers at or after ADR-0811, any order fails safe. An older
+  server ignores a reported remote port and keeps the failing domain read. An older worker ignores
+  the carried port on the remote connector and reads the domain, which returns
+  `ssh_not_provisioned`. A server or worker older than ADR-0811 forbids the receipt field, so it
+  must be upgraded before follow-up 2's authority, as ADR-0811 already requires for local
+  authorities. Workers, then servers, then authorities gives the full path soonest. The lifecycle
+  identity does not move.
+- **Manifest floor:** after follow-up 2 a remote manifest with `ssh_port_min` below 1024 stops the
+  authority from starting, which stops every authority-lane operation on that host, not only SSH.
+  Check manifests before upgrading the authority.
 - **Existing Systems:** a remote authority System that reached `ready` before decision 1 has no
   stored port and keeps the interim refusal. Backfill is the operator's.
 - **Deployment contract:** the server instance's `ssh_addr` must reach the hostfwd the manifest
-  entry binds, and its range must cover the manifest ranges. Nothing checks the address; a wrong one
-  shows up as `systems.check_ssh_reachable` failing with `transport_failure`.
-- **Port contention:** the authority picks free ports from the domains its session daemon sees. It
-  cannot see the system daemon's domains, so ranges shared with ordinary Systems on the same host can
-  collide. A collision fails the second domain start; it cannot misroute a connection.
+  entry binds, its range must cover the manifest ranges, and the manifest ranges must be disjoint
+  from every other SSH range on that host. Nothing checks the address; a wrong one shows up as
+  `systems.check_ssh_reachable` failing with `transport_failure`.
+- **Port contention:** the authority picks free ports from the domains its session daemon sees
+  (`used_ssh_ports`), not the system daemon's. If the disjointness contract is broken, a collision
+  either fails a domain start or, while the authority System's domain is shut off, lets another
+  guest bind its stored port. The SSH tools then reach that guest: the reachability probe can report
+  it reachable, and bootstrap-key authentication fails.
+- **ADR-0811 claims this supersedes in part,** once the behaviour lands: decision 1's "The remote
+  authority does not", decision 3's "No other connector uses the argument", and the #3541
+  amendment's "written only for an authority-owned local System" and "Remote-libvirt authority
+  Systems keep their existing behaviour". Follow-up 1 appends the ADR-0811 amendment.
 - **Not covered:** gdbstub and guest-agent reads over the same TLS connection have the same
   invisibility. They are the operator's to decide and are unchanged here.
 - **Implementation follow-ups**, each one PR:
   1. *Server and worker:* widen `authority_ssh_forward_port` to remote-libvirt (the interim
      refusal), keep the drgn-live caller local-only, and make
-     `RemoteLibvirtConnect.recorded_ssh_endpoint` honour `ssh_forward_port` with the range check.
+     `RemoteLibvirtConnect.recorded_ssh_endpoint` honour `ssh_forward_port` with the range check;
+     update the local-only wording in `jobs/payloads.py` and `authority_owned.py`, and append the
+     ADR-0811 amendment above.
   2. *Authority:* report `ssh_forward_port` from the remote intent and refuse a manifest
-     `ssh_port_min` below 1024; update the receipt field's "loopback" wording.
+     `ssh_port_min` below 1024, in the authority and in the Ansible preflight
+     (`deploy/ansible/scripts/validate_authority_system_provisioning.py`); update the "loopback"
+     wording in `providers/system_authority/protocol.py`.
   3. *Operations:* document the deployment contract above and prove `systems.authorize_ssh_key`
      against a remote authority System on a lab host.
 
@@ -99,5 +120,11 @@ The operator decided this on 2026-11-04.
   src/kdive/db/schema/0189_authority_system_ssh_forward.sql` at `2fbc81af0` matches lines 88 and 92
   only, the binding function's column list; the receipt helper and the column check never read it,
   so 0189 already stores either kind.
+- **The server checks the port against the manifest itself.** verified: ADR-0623's Decision keeps
+  the manifest as operator-owned private host configuration that requests never carry, and no
+  server-side reader of `RemoteAuthoritySystemManifestV1` exists (`rg -ln
+  RemoteAuthoritySystemManifestV1 src/kdive` at `2fbc81af0` lists only `providers/system_authority/`
+  and `providers/external_boot_authority/host.py`). Shipping a copy to the server is the mirror
+  decision 3 already uses, in a second format.
 - **Bound the port only by the receipt's 1024-65535.** judgment: the instance range bounds the
   destination to ports the operator declared on that host, at the cost of keeping two ranges aligned.

@@ -93,7 +93,13 @@ With `p is None` the existing domain read runs, so ordinary remote Systems are u
      reachability probe. Bounded: the destination is still operator configuration.
    - Instance range does not cover the manifest range: refused as `authority_ssh_forward_invalid`;
      an operator configuration fix.
-   - Port contention with ordinary Systems on the same host: the second domain start fails.
+   - Manifest ranges not disjoint from other SSH ranges on the host (a broken deployment
+     contract): a domain start fails, or, while the authority System's domain is shut off, another
+     guest binds its stored port and the SSH tools reach that guest. Bootstrap-key authentication
+     then fails; the reachability probe can report it reachable. Held by the deployment contract
+     in follow-up 3.
+   - A port inside the instance range but between manifest ranges: only the authority can report
+     one, and it enforces its manifest range (`_same_subject`).
    - Remote Systems that reached `ready` before follow-up 2 keep the interim refusal; backfill is
      excluded.
 4. **Covered elsewhere**
@@ -111,8 +117,9 @@ With `p is None` the existing domain read runs, so ordinary remote Systems are u
 - **Controls:** receipt model and SQL helper range 1024-65535; 0191 immutability; binding returns the
   port only in `ready`/`activated`; connector range check against operator config; address never
   read from authority data.
-- **Out of scope:** a compromised authority choosing another in-range port on the same host. It
-  already controls the guests behind those ports.
+- **Out of scope:** a compromised authority choosing another in-range port on the same host.
+  Under the disjointness contract every port in the manifest ranges belongs to a guest that
+  authority controls; a host that breaks the contract is the accepted class above.
 
 ## Validation
 
@@ -125,16 +132,22 @@ Each follow-up proves its own contracts; this design PR changes documents only
 | 1 | the three table rows above | focused-test: connector unit tests with an injected connection asserting no open |
 | 1 | drgn-live attach on a remote authority System is unchanged | focused-test: no port is resolved |
 | 2 | facts and receipt carry the intent port | focused-test: provider facts and proof bytes |
-| 2 | manifest refuses `ssh_port_min < 1024` | focused-test: manifest parse |
+| 2 | manifest refuses `ssh_port_min < 1024` | focused-test: manifest parse and Ansible validator |
 | 3 | worker authorizes a key on a remote authority System | live proof on a lab host |
 
 ## Implementation follow-ups
 
 1. **Server and worker: remote authority SSH endpoint from the stored port.** Widen
    `authority_ssh_forward_port`, keep drgn-live local-only, honour `ssh_forward_port` in
-   `RemoteLibvirtConnect.recorded_ssh_endpoint`. Ships the interim refusal. Deploy workers first.
+   `RemoteLibvirtConnect.recorded_ssh_endpoint`. Ships the interim refusal. Updates the local-only
+   wording in `jobs/payloads.py` and `authority_owned.py`, and appends the ADR-0811 amendment
+   ADR-0815 names. Deploy workers first.
 2. **Authority: report the remote System's SSH port.** Facts carry `intent.ssh_port`; manifest
-   minimum 1024; receipt comment no longer says loopback.
+   minimum 1024 in the authority and in
+   `deploy/ansible/scripts/validate_authority_system_provisioning.py`; the "loopback" wording in
+   `providers/system_authority/protocol.py` covers remote. Requires servers and workers at or after
+   ADR-0811; check manifests before upgrading, since a sub-1024 range stops the authority.
 3. **Operations: remote authority SSH deployment contract and live proof.** Document that the
-   instance `ssh_addr`/`ssh_range` must reach and cover the manifest entries; run
-   `systems.authorize_ssh_key` against a remote authority System.
+   instance `ssh_addr`/`ssh_range` must reach and cover the manifest entries, and that manifest
+   ranges are disjoint from every other SSH range on the host; run `systems.authorize_ssh_key`
+   against a remote authority System.
