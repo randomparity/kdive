@@ -8,12 +8,14 @@ Campaign scope for issue #3547, token `q3547-cbcd412f`. This change is the desig
 and ADR-0815. The operator decided on 2026-11-04 that the remote authority receipt reports the
 allocated SSH port, the server's `config.ssh_addr` supplies the address, the manifest port bounds
 (`ssh_port_min`/`ssh_port_max`, 1024 and above) bound a reported port, and a typed refusal is
-allowed until the implementation lands. Approved exclusions: gdbstub and guest-agent reads over
+allowed until the implementation lands. On 2026-11-11 the operator clarified that the manifest
+bounds are the authority's check and the server applies only the receipt bound, 1024-65535
+(option B); the dispatch had read the first decision as a server-side manifest check. Approved exclusions: gdbstub and guest-agent reads over
 the same TLS connection (operator); implementation PRs (follow-up issues); backfilling existing
 remote Systems (operator).
 
-No implementation plan is written: the implementation is excluded, and the follow-ups below are
-its PR-sized decomposition, each to get its own design check when filed.
+No implementation plan is written: the issue is design only, and the operator confirmed on
+2026-11-11 that the PR-sized follow-ups below replace the plan.
 
 ## Problem
 
@@ -72,8 +74,10 @@ ssh_forward_port=p)`, when `p` is not `None`:
 | Instance config | `p` | Result |
 | --- | --- | --- |
 | no `ssh_addr` or range | any | `None` (`ssh_not_provisioned`), no IO |
-| range set | `ssh_port_min <= p <= ssh_port_max` | `(config.ssh_addr, p)`, no domain read |
-| range set | outside | `configuration_error`, `reason=authority_ssh_forward_invalid`, no IO |
+| `ssh_addr` set | `1024 <= p <= 65535` | `(config.ssh_addr, p)`, no domain read |
+| `ssh_addr` set | outside | `configuration_error`, `reason=authority_ssh_forward_invalid`, no IO |
+
+The instance's own `ssh_range` does not bound `p`; the authority enforces its manifest range.
 
 With `p is None` the existing domain read runs, so ordinary remote Systems are unchanged.
 
@@ -91,15 +95,10 @@ With `p is None` the existing domain read runs, so ordinary remote Systems are u
 3. **Accepted failure classes**
    - Server `ssh_addr` names the wrong host: unchecked; shows as `transport_failure` from the
      reachability probe. Bounded: the destination is still operator configuration.
-   - Instance range does not cover the manifest range: refused as `authority_ssh_forward_invalid`;
-     an operator configuration fix.
-   - Manifest ranges not disjoint from other SSH ranges on the host (a broken deployment
-     contract): a domain start fails, or, while the authority System's domain is shut off, another
-     guest binds its stored port and the SSH tools reach that guest. Bootstrap-key authentication
-     then fails; the reachability probe can report it reachable. Held by the deployment contract
-     in follow-up 3.
-   - A port inside the instance range but between manifest ranges: only the authority can report
-     one, and it enforces its manifest range (`_same_subject`).
+   - Manifest range overlapping another SSH range on the host: a domain start fails, or, while
+     the authority System's domain is shut off, another guest binds its stored port and the SSH
+     tools reach that guest. Bootstrap-key authentication then fails; the reachability probe can
+     report it reachable. Operators keep the ranges apart; nothing enforces it (ADR-0815).
    - Remote Systems that reached `ready` before follow-up 2 keep the interim refusal; backfill is
      excluded.
 4. **Covered elsewhere**
@@ -115,11 +114,10 @@ With `p is None` the existing domain read runs, so ordinary remote Systems are u
 - **Actors:** the authority host (trusted to sign receipts; already able to forge a whole provision
   result); a tenant agent calling the SSH tools (VIEWER or above, project-scoped as today).
 - **Controls:** receipt model and SQL helper range 1024-65535; 0191 immutability; binding returns the
-  port only in `ready`/`activated`; connector range check against operator config; address never
+  port only in `ready`/`activated`; connector re-check of 1024-65535; address never
   read from authority data.
-- **Out of scope:** a compromised authority choosing another in-range port on the same host.
-  Under the disjointness contract every port in the manifest ranges belongs to a guest that
-  authority controls; a host that breaks the contract is the accepted class above.
+- **Out of scope:** an authority reporting a port outside its manifest on the configured host. It
+  can already forge the whole provision result (ADR-0811); the server bounds only to 1024-65535.
 
 ## Validation
 
@@ -147,7 +145,6 @@ Each follow-up proves its own contracts; this design PR changes documents only
    `deploy/ansible/scripts/validate_authority_system_provisioning.py`; the "loopback" wording in
    `providers/system_authority/protocol.py` covers remote. Requires servers and workers at or after
    ADR-0811; check manifests before upgrading, since a sub-1024 range stops the authority.
-3. **Operations: remote authority SSH deployment contract and live proof.** Document that the
-   instance `ssh_addr`/`ssh_range` must reach and cover the manifest entries, and that manifest
-   ranges are disjoint from every other SSH range on the host; run `systems.authorize_ssh_key`
-   against a remote authority System.
+3. **Operations: remote authority SSH documentation and live proof.** Document that the instance
+   `ssh_addr` must reach the authority's hostfwd and that manifest SSH ranges should not overlap
+   other SSH ranges on the host; run `systems.authorize_ssh_key` against a remote authority System.
