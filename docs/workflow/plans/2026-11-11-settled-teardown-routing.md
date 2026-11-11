@@ -27,7 +27,16 @@ a settled one refuses.
 
 Verify: `systems.teardown` and `ops.force_teardown` on a settled System enqueue an ordinary
 `TeardownPayload` without consulting the binding; a failed authority-marked prior row is replaced;
-a running or claimed-canceled one is replayed; unsettled histories keep the authority route.
+a running one, or a claimed, canceled one written after `settled_at`, is replayed, and a claimed,
+canceled one written before it is replaced; unsettled histories keep the authority route.
+
+## Task 3b — stalled teardown repair
+
+`reconciler/repairs/systems.py`: the stalled `tearing_down` repair skips its external-boot warning
+for a settled latest activation and requeues.
+
+Verify: a settled `tearing_down` System with a failed ordinary row is requeued; an unsettled one
+still warns.
 
 ## Task 4 — lease expiry
 

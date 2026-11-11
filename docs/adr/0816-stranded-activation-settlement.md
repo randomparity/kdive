@@ -171,8 +171,9 @@ settled shape. Three fences key on that row and nothing else:
 - `route_external_boot_teardown` reads the settlement before
   `resolve_external_boot_system_teardown_dispatch_binding` and sends a settled System to the
   ordinary teardown, for both `systems.teardown` and `ops.force_teardown`. An authority-marked
-  prior teardown row that no attempt can still be running is replaced with an ordinary one; a live
-  one is replayed.
+  prior teardown row is replaced with an ordinary one unless it is live, or canceled after a
+  worker claimed it and written since settlement; those are replayed.
+- The stalled `tearing_down` repair requeues a settled System's ordinary teardown.
 - Reconciler lease expiry refuses an allocation with a settled System that is not `torn_down`. The
   release fence already holds it until teardown.
 
@@ -187,10 +188,11 @@ No migration: 0194 already grants the worker and reconciler the settlement colum
 
 **Consequences.**
 
-- The upgrade order above binds the tool: it ships in the server, the last step, and is the only
-  caller of `request_stranded_observation`. A reconciler still on the old code during the server
-  rollout can expire a settled allocation; the orphan sweep's ordinary teardown then reaches an
-  upgraded worker, so the domain is reclaimed rather than stranded.
+- Upgrade order: migrate, the authority host, every worker and the reconciler, then servers. The
+  tool ships in the server and is the only caller of `request_stranded_observation`. An old
+  reconciler would expire a settled allocation while the worker domain runs, so it upgrades before
+  any server. Do not use the tool until every server is upgraded: an old server routes a settled
+  System to the authority over its `retired` row.
 - A newer activation after settlement restores every fence, because each reads the latest
   activation; the lease-expiry fence matches any settled activation, which only holds more.
 - Lease expiry for a completed, unsettled external-boot history is unchanged: it still expires
@@ -202,7 +204,8 @@ No migration: 0194 already grants the worker and reconciler the settlement colum
   key routing on the settlement, and ADR-0752's relocated fixture has the same activation rows.
 - **One step that observes and settles.** judgment: fit. The observation is an asynchronous job,
   and a refused rerun must not fall back to the earlier hour-long records; an explicit `observe`
-  step is the only way to request fresh evidence.
+  step is the only way to request fresh evidence. `settle` reads the observation and settles under
+  one System lock, so a concurrent `observe` cannot slip between them.
 - **Let the tool also enqueue the teardown.** judgment: complexity. `ops.force_teardown` already
   carries the reason, audit, routing and dedup, and now routes a settled System to the worker.
 - **Apply the full release fence to lease expiry.** judgment: scope. It would also hold every

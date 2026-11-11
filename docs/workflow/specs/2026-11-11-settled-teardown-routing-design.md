@@ -47,9 +47,12 @@ both route the same way.
 `failed` one into an ordinary payload, while `enqueue_control_teardown` replays it unchanged. So
 for an authority-marked prior row, on a System that is neither `torn_down` nor `reprovisioning`:
 
-1. A `queued` or `running` row, or a `canceled` row a worker claimed, is replayed as its job
-   envelope: an authority attempt may still be running, as `_is_settled_ordinary_teardown`
-   reasons for the inverse case.
+1. A `queued` or `running` row is replayed as its job envelope. So is a `canceled` row a worker
+   claimed whose `updated_at` is not earlier than the activation's `settled_at`: that attempt may
+   still be running, as `_is_settled_ordinary_teardown` reasons for the inverse case. A claimed,
+   canceled row last written before settlement is not: settlement's authority evidence proved the
+   authority lane quiescent after it (the #3574 amendment), and `jobs.cancel` never clears
+   `worker_id`, so waiting would never release it.
 2. Otherwise the admission matrix runs (`ordinary_teardown_denial`) and the row is replaced with an
    ordinary `TeardownPayload` under `JobRecyclePolicy.TERMINAL_OR_CANCELED`. A replacement is
    audited as a recycle when the caller audits recycles, and the idempotency key is recorded unless
@@ -57,6 +60,11 @@ for an authority-marked prior row, on a System that is neither `torn_down` nor `
 
 A `torn_down` or `reprovisioning` System returns `None`, so each caller's own handling of those
 states answers.
+
+**Stalled teardown** (`reconciler/repairs/systems.py`, the stalled `tearing_down` repair). A
+settled System's ordinary teardown can dead-letter after setting `tearing_down`. The repair treats
+a settled latest activation as no activation and requeues the ordinary job, as for any worker
+System; an unsettled history keeps its warning.
 
 **Lease expiry** (`reconciler/repairs/allocations.py`, `_expire_one`). After the admission guard,
 `settled_system_awaiting_teardown(conn, allocation_id)` names a System of the allocation that is not
@@ -72,18 +80,21 @@ is refused by the admission guard anyway, and the wider match keeps the allocati
 settlement function's bound).
 
 1. A role denial calls `audit_platform_denial` and returns `ToolResponse.denied`.
-2. A malformed `activation_id`, blank or oversized `reason`, or unknown activation returns the
-   configuration error envelope.
+2. A malformed `activation_id` or a blank or oversized `reason` returns the configuration error
+   envelope. An unknown activation is the `not_found` refusal of either step.
 3. `observe` writes a `platform_audit_log` row (scope `observe:<activation>`) in its own committed
    transaction, then calls `request_stranded_observation`. It returns the job envelope, or the
    request's refusal with `details["reason"]` unchanged (`not_found`, `authority_owned`,
    `not_preparing`, `external_boot_restricted`). The next action is `step="settle"`, because
    `jobs.wait` answers `not_found` for this kind.
-4. `settle` reads `read_stranded_observation`. It calls `settle_stranded_activation` with
+4. `settle` resolves the activation (`not_found` if absent), then, in one transaction under the
+   System lock that `request_stranded_observation` and the settlement function also take, reads
+   `read_stranded_observation` and calls `settle_stranded_activation` with
    `actor_for(ctx)` only when the observation job `succeeded`; otherwise it refuses:
    - no observation: `observation_missing`;
    - `queued` or `running`: `observation_pending`, naming the job;
-   - `failed` or `canceled`: the job's own reason unchanged (`authority_objects_present`,
+   - `failed` or `canceled`: the job's own reason unchanged, or `observation_failed` /
+     `observation_canceled` when the job recorded none (`authority_objects_present`,
      `stranded_observation_unsupported`, `authority_domain_present`, `worker_domain_absent`, ...)
      with its message, which for held objects names the recovery reference and objects.
    A primitive refusal (`evidence_stale`, `job_live`, `objects_unproven`, ...) is returned with its
@@ -95,7 +106,8 @@ settlement function's bound).
 
 Settling only on a `succeeded` latest observation keeps the #3574 rule that an operator who reads a
 refusal must not settle on earlier evidence: a failed rerun leaves the earlier records standing for
-their hour, and the tool will not use them. A stale or refused settlement is retried by running
+their hour, and the tool will not use them. Holding the System lock across the read and the
+settlement stops a concurrent `observe` from recycling the job in between. A stale or refused settlement is retried by running
 `observe` again, which recycles the terminal job.
 
 The tool settles and stops. Teardown stays with `ops.force_teardown` or `systems.teardown`, which
@@ -110,17 +122,18 @@ campaign gets the tool's obligation under #3552, which owns the live proof.
 ## Upgrade order
 
 The tool is the only caller of `request_stranded_observation`, and it ships in the server. The order
-ADR-0816 sets stands: migrate, then the authority host, then every worker, then servers. No server
-exposes the tool until every worker can parse the job kind.
+is ADR-0816's with the reconciler added before the servers: migrate, then the authority host, then
+every worker and the reconciler, then servers. No server exposes the tool until every worker can
+parse the job kind and the reconciler holds a settled allocation. The tool must not be used until
+every server is upgraded: an old server still routes a settled System to the authority, which
+settlement leaves a `retired` route for.
 
 The worker narrowing ships with the workers, so it precedes any settlement. An old worker reached by
 a settled System's ordinary teardown refuses with #2966's reason and the job fails closed; a rerun
 recycles it.
 
-The reconciler fence ships with the reconciler, which deploys with or before the servers. A
-reconciler still on the old code during the server rollout can expire a settled allocation; the
-orphan sweep then enqueues an ordinary teardown, which an upgraded worker admits, so the domain is
-reclaimed and nothing is stranded. The window changes only which step ends the allocation.
+The reconciler fence ships with the reconciler, before any server: an old reconciler would expire
+a settled allocation and free its capacity while the worker domain still runs.
 
 ## Failure model
 
@@ -133,11 +146,12 @@ reclaimed and nothing is stranded. The window changes only which step ends the a
    - No authority teardown runs for a settled activation: routing reads the settlement before the
      binding.
    - An allocation with a settled, not-torn-down System stays held by release and by lease expiry.
-   - Every tool outcome is in `platform_audit_log`: denial, observe request, settle refusal,
-     settlement.
+   - `platform_audit_log` holds every role denial, observe request, settle refusal and
+     settlement. An observe refusal is covered by its request row.
 3. **Accepted failure classes**
-   - An authority-marked teardown that was canceled after a worker claimed it blocks the
-     replacement; the operator waits for the attempt's lease and retries, as for the inverse case.
+   - An authority-marked teardown canceled after a worker claimed it, and written after
+     settlement, is replayed. Only an old server can write one; the upgrade order forbids using the
+     tool before every server is upgraded.
    - A settled System whose worker is gone keeps its allocation held; recovery is an operator
      action (excluded: ownership rewrite or manual SQL).
    - Lease expiry for a completed, unsettled external-boot activation is unchanged by this change.
@@ -160,11 +174,14 @@ reclaimed and nothing is stranded. The window changes only which step ends the a
 ## Success
 
 - A settled, worker-owned System: `systems.teardown` and `ops.force_teardown` enqueue an ordinary
-  teardown, including over a failed authority-marked prior row, and the worker handler tears it
-  down to `torn_down` (real Postgres, fake provider).
+  teardown, including over a failed authority-marked prior row and a claimed, canceled one written
+  before settlement, and the worker handler tears it down to `torn_down` (real Postgres, fake
+  provider).
+- The stalled `tearing_down` repair requeues a settled System's dead-lettered ordinary teardown.
 - An unsettled `preparing`, `active` or completed activation keeps the authority route and the
   worker refusal, and a newer activation after a settled one restores both.
-- A live authority-marked prior row replays rather than being replaced.
+- A live authority-marked prior row, or a claimed, canceled one written after settlement, replays
+  rather than being replaced.
 - `_expire_one` keeps an allocation with a settled, not-torn-down System, and expires it once the
   System is `torn_down`.
 - The tool: denial audited and `denied`; each settle refusal audited with its reason and returned
