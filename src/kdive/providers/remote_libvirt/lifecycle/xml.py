@@ -9,6 +9,7 @@ from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.platform.arch_traits import arch_traits
 from kdive.profiles.provisioning import ProvisioningProfile, require_concrete_sizing
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
@@ -153,9 +154,10 @@ def render_domain_xml(
     os_el = ET.SubElement(domain, "os")
     ET.SubElement(os_el, "type", arch=profile.arch, machine=machine).text = "hvm"
     ET.SubElement(os_el, "boot", dev="hd")
-    features = ET.SubElement(domain, "features")
-    ET.SubElement(features, "acpi")
-    ET.SubElement(features, "vmcoreinfo", state="on")
+    if arch_traits(profile.arch).emit_acpi_features:
+        features = ET.SubElement(domain, "features")
+        ET.SubElement(features, "acpi")
+        ET.SubElement(features, "vmcoreinfo", state="on")
     devices = ET.SubElement(domain, "devices")
     disk = ET.SubElement(devices, "disk", type="file", device="disk")
     ET.SubElement(disk, "driver", name="qemu", type="qcow2")

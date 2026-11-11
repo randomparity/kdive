@@ -214,6 +214,12 @@ sudo zypper install gcc make pkg-config libvirt-devel python3-devel \
   libelf-devel ShellCheck shfmt git curl
 ```
 
+On ARM64 and POWER, the optional `live` group's drgn builds from source and requires
+`autoconf`, `automake`, and `libtool` (`libtoolize` on PATH), alongside the native headers
+listed above. Worker host preparation installs these packages for both architectures;
+the control-plane image carries matching build and runtime libraries. Rust requirements
+remain POWER-specific.
+
 On POWER, complete the [architecture-specific prerequisites](
 ../development/cross-platform.md#ppc64le-only), including Rust, before installing `just`/`prek`
 or syncing the environment. Then install [uv](https://docs.astral.sh/uv/) and the CLIs:
@@ -336,7 +342,7 @@ ANSIBLE_CONFIG=deploy/ansible/ansible.cfg uv run --with 'ansible-core==2.21.1' \
 | Family | Host-preparation status | Limits and proof strength |
 |---|---|---|
 | Debian / Ubuntu | Admitted, subject to the Python 3.14 guestfs binding check | Ubuntu 26.04 has a matching system binding. Other releases need the same check; no separate live apply is recorded here. |
-| Fedora | Admitted, subject to the Python 3.14 guestfs binding check | Fedora 44 has a matching system binding; no live apply is claimed here. |
+| Fedora | Admitted, subject to the Python 3.14 guestfs binding check | Fedora 44 has a matching system binding. The generic worker role also installs `guestfs-tools` for the mandatory `virt-inspector` step in remote `stage-volume`; this does not enable an ARM guest provider. |
 | RHEL / Rocky / AlmaLinux | EL10 admitted with matching-source binding build; other releases need an import check | EL10 packages Python 3.14 in AppStream but `python3-libguestfs` for system Python 3.12. Enable CRB/CodeReady Builder and a distribution source repository before host preparation. The role builds the 3.14 binding from the signed source RPM matching installed `libguestfs`, outside the recreated worker venv; the installer then verifies the linked import. A build failure stops preparation. See [local-libvirt](providers/local-libvirt.md#family-differences-that-matter) and the [support table](platform-support.md#host-and-guest-distributions) for live proof status. |
 | SLES / openSUSE Tumbleweed | Admitted, subject to the Python 3.14 guestfs binding check | Structurally checked; no live apply is claimed. openSUSE Leap is a cataloged guest, not an admitted worker host. |
 

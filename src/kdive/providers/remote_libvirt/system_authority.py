@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from kdive.components.references import CatalogComponentRef, LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import UtcDateTime
+from kdive.domain.platform.arch_traits import rendered_machine_alias
 from kdive.profiles.provisioning import require_concrete_sizing
 from kdive.providers.remote_libvirt.guest.bootstrap_key import RemoteBootstrapKeyInjector
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
@@ -487,6 +488,19 @@ def _domain_projection(domain_xml: str, *, live: bool = False) -> dict[str, obje
     backing_format = _one(backing, "./format", "root backing format")
     interfaces = root.findall("./devices/interface")
     devices = _one(root, "./devices", "device collection")
+    # Normalize only libvirt's implicit firmware notifier, preserving v2/x86 projection hashes.
+    panics = devices.findall("panic")
+    default_panic = panics[0] if len(panics) == 1 else None
+    if (
+        os_type.get("arch") != "ppc64le"
+        or rendered_machine_alias(os_type.get("arch"), os_type.get("machine") or "") != "pseries"
+        or default_panic is None
+        or default_panic.attrib != {"model": "pseries"}
+        or list(default_panic)
+        or default_panic.text not in (None, "")
+        or (default_panic.tail or "").strip(" \t\r\n")
+    ):
+        default_panic = None
     qemu_args = [
         argument.get("value")
         for argument in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
@@ -538,7 +552,8 @@ def _domain_projection(domain_xml: str, *, live: bool = False) -> dict[str, obje
         "unexpected_devices": sorted(
             child.tag
             for child in devices
-            if child.tag
+            if child is not default_panic
+            and child.tag
             not in {
                 "audio",
                 "channel",

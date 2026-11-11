@@ -15,6 +15,12 @@
   ansible.builtin.import_tasks: packages_suse.yml
   when: ansible_facts['os_family'] == 'Suse'
 
+- name: Install drgn source-build autotools on ARM64 and POWER
+  ansible.builtin.package:
+    name: [autoconf, automake, libtool]
+    state: present
+  when: ansible_facts['architecture'] in ['aarch64', 'ppc64le']
+
 - name: Install uv where root can resolve it (installer and venv-build prerequisite)
   ansible.builtin.import_tasks: uv.yml
 

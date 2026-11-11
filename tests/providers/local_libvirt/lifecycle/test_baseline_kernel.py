@@ -23,6 +23,10 @@ class _Guest:
     def __init__(self, entries: list[str]) -> None:
         self.entries = entries
         self.downloads: list[tuple[str, str]] = []
+        self.mountpoints = {"/": "/dev/sda1"}
+        self.mounted: dict[str, str] = {}
+        self.fail_mount: str | None = None
+        self.closed = False
 
     def add_drive_opts(self, *_args: object, **_kwargs: object) -> None:
         pass
@@ -33,10 +37,19 @@ class _Guest:
     def inspect_os(self) -> list[str]:
         return ["/dev/sda1"]
 
-    def mount_ro(self, *_args: object) -> None:
-        pass
+    def inspect_get_mountpoints(self, _root: str) -> dict[str, str]:
+        return self.mountpoints
+
+    def mount_ro(self, device: str, mountpoint: str) -> None:
+        if mountpoint == self.fail_mount:
+            raise RuntimeError("required filesystem unavailable")
+        self.mounted[mountpoint] = device
 
     def glob_expand(self, _pattern: str) -> list[str]:
+        if self.mounted.get("/") != self.mountpoints.get("/", self.inspect_os()[0]):
+            return []
+        if "/boot" in self.mountpoints and self.mounted.get("/boot") != self.mountpoints["/boot"]:
+            return []
         return self.entries
 
     def download(self, source: str, destination: str) -> None:
@@ -47,11 +60,75 @@ class _Guest:
         pass
 
     def close(self) -> None:
-        pass
+        self.closed = True
 
 
 def _install_guest(monkeypatch: pytest.MonkeyPatch, guest: _Guest) -> None:
     monkeypatch.setitem(sys.modules, "guestfs", SimpleNamespace(GuestFS=lambda **_kw: guest))
+
+
+@pytest.mark.parametrize("boot_device", ["/dev/sda2", "btrfsvol:/dev/sda2/boot"])
+def test_extraction_reads_kernel_from_inspected_boot_filesystem(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, boot_device: str
+) -> None:
+    guest = _Guest([f"/boot/vmlinuz-{_V}", f"/boot/initramfs-{_V}.img"])
+    guest.mountpoints["/boot"] = boot_device
+    _install_guest(monkeypatch, guest)
+    destination = tmp_path / "baseline"
+
+    result = _real_extract_baseline_kernel(tmp_path / "base.qcow2", destination)
+
+    assert result == BaselineKernel(destination / "kernel", destination / "initrd")
+    assert guest.downloads == [
+        (f"/boot/vmlinuz-{_V}", str(destination) + ".part/kernel"),
+        (f"/boot/initramfs-{_V}.img", str(destination) + ".part/initrd"),
+    ]
+    assert result.kernel.read_bytes() == b"kernel"
+    assert result.initrd is not None and result.initrd.read_bytes() == b"kernel"
+    assert guest.closed
+
+
+@pytest.mark.parametrize("mountpoints", [{}, {"/": "/dev/sda1"}, {"/": "btrfsvol:/dev/sda1/root"}])
+def test_extraction_uses_inspected_root_without_separate_boot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mountpoints: dict[str, str]
+) -> None:
+    guest = _Guest([f"/boot/vmlinuz-{_V}"])
+    guest.mountpoints = mountpoints
+    _install_guest(monkeypatch, guest)
+
+    result = _real_extract_baseline_kernel(tmp_path / "base.qcow2", tmp_path / "baseline")
+
+    assert result.kernel.read_bytes() == b"kernel"
+    assert result.initrd is None
+    assert set(guest.mounted) == {"/"}
+
+
+@pytest.mark.parametrize("mountpoint", ["/", "/boot"])
+def test_required_mount_failure_preserves_staging_and_skips_callback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mountpoint: str
+) -> None:
+    guest = _Guest([f"/boot/vmlinuz-{_V}"])
+    guest.mountpoints["/boot"] = "btrfsvol:/dev/sda2/boot"
+    guest.fail_mount = mountpoint
+    _install_guest(monkeypatch, guest)
+    destination = tmp_path / "baseline"
+    staging = tmp_path / "baseline.part"
+    staging.mkdir()
+    sentinel = staging / "sentinel"
+    sentinel.write_text("retained", encoding="utf-8")
+    observed: list[BaselineKernel] = []
+
+    with pytest.raises(CategorizedError) as exc:
+        _real_extract_baseline_kernel(
+            tmp_path / "base.qcow2", destination, before_extract=observed.append
+        )
+
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert isinstance(exc.value.__cause__, RuntimeError)
+    assert observed == [] and guest.downloads == []
+    assert sentinel.read_text(encoding="utf-8") == "retained"
+    assert not destination.exists()
+    assert guest.closed
 
 
 @pytest.mark.parametrize("with_initrd", [False, True])

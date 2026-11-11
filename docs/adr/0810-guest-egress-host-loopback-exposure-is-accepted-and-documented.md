@@ -206,6 +206,31 @@ On both hosts, started from a login session by `demo-up.sh`, QEMU ran in that se
 there was no stable cgroup to match in place of the uid. The boot-persistent
 `kdive-libvirtd-live.service` arrangement was not run.
 
+### Amendment (2026-11-04): the customization NIC stays open (#3513)
+
+This amendment closes the Consequences follow-up candidate "gating or constraining the `kdivebuild`
+NIC". The operator chose on 2026-11-04 to keep that NIC open. It does not change the decision: the
+exposure stays accepted, and the Decision paragraph's statement that an operator cannot opt out of
+the customization NIC through kdive stands. No code, schema or migration changes.
+
+**Why it stays open.** Both constraints recorded above apply to it. QEMU has no switch for
+libslirp's `disable_host_loopback`, so the only lever is `restrict=on`. That drops DNS and every
+guest-initiated TCP connection, and the customization boot installs packages from the distribution
+mirrors, so `restrict=on` would break image builds. The alternative that keeps builds working, an
+allowlisted proxy over `guestfwd`, carries the costs under "Considered & rejected" and was not
+adopted.
+
+**Compensating control.** The optional nftables rule from the previous amendment, documented in
+`docs/operating/runbooks/image-lifecycle.md`, covers this NIC. It is an operator control, not
+something kdive installs or checks. It keys on the uid QEMU runs as, so it holds only where no kdive
+service or client shares that uid; the limits in the previous amendment apply to it unchanged. The
+proof for this NIC is a domain with `user,id=kdivebuild,restrict=off` and no forward, run under a
+throwaway account's uid on both lab hosts: it connected to a loopback listener without the rule and failed with
+it. A real customization boot was not run. On the local provider the customization boot uses the
+same session daemon, so the same condition and DNS exemption apply. The remote authority arm remains
+unproven, as the previous amendment records; a remote authority System has no customization boot.
+Where the condition cannot be met, the exposure through this NIC is accepted as stated above.
+
 ## Considered & rejected
 
 - **libvirt passt backend.** Rejected: it does not mitigate. passt's default gateway mapping is the
