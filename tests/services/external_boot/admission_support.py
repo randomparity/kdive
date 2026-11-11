@@ -84,6 +84,10 @@ UNGUARDED_TOOLS: dict[str, str] = {
     "ops.reconcile_now": "operator break-glass reconcile; must run against a stuck activation",
     "ops.reconcile_systems": "operator break-glass reconcile; must run against a stuck activation",
     "ops.recover_build_use": "build-ledger repair; touches no System",
+    "ops.recover_stranded_activation": (
+        "operator break-glass for a stranded activation; its observe service checks the "
+        "OBSERVE_STRANDED_ACTIVATION row itself"
+    ),
     "ops.resolve_recovery_orphan": (
         "repairs quarantined recovery objects, which are not the activation the matrix keys on"
     ),

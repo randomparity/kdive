@@ -420,7 +420,8 @@ def test_every_registered_mutating_tool_is_guarded_or_exempt() -> None:
 
 def test_every_operation_the_matrix_decides_has_a_guarded_tool() -> None:
     """The forward half: a member added without a call site fails too."""
-    # OBSERVE_STRANDED_ACTIVATION has a service call site and no tool until #3551 adds one.
+    # OBSERVE_STRANDED_ACTIVATION is checked inside `request_stranded_observation`, behind the
+    # break-glass `ops.recover_stranded_activation`, which the matrix exempts (#3551).
     assert set(GUARDED_TOOLS.values()) == set(ExternalBootOperation) - {
         ExternalBootOperation.OBSERVE_STRANDED_ACTIVATION
     }
