@@ -100,7 +100,7 @@ settlement function's bound).
    A primitive refusal (`evidence_stale`, `job_live`, `objects_unproven`, ...) is returned with its
    reason unchanged. `applied` and `replayed` return `settled` with the System id and next actions
    `ops.force_teardown`, `systems.teardown`.
-5. Every `settle` call that does not settle writes one `platform_audit_log` row with scope
+5. Every refusal of either step writes one `platform_audit_log` row with scope
    `refused:<reason>:<activation>`. A settlement writes only the primitive's own `settled:` row, so
    an `applied` call is recorded once and a `replayed` call adds nothing.
 
@@ -147,7 +147,7 @@ a settled allocation and free its capacity while the worker domain still runs.
      binding.
    - An allocation with a settled, not-torn-down System stays held by release and by lease expiry.
    - `platform_audit_log` holds every role denial, observe request, settle refusal and
-     settlement. An observe refusal is covered by its request row.
+     settlement, and every refusal of either step with its reason.
 3. **Accepted failure classes**
    - An authority-marked teardown canceled after a worker claimed it, and written after
      settlement, is replayed. Only an old server can write one; the upgrade order forbids using the

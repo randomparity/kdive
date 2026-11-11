@@ -48,7 +48,8 @@ Verify: an elapsed allocation with a settled `ready` System stays `active`; once
 
 ## Task 5 — the tool
 
-`mcp/tools/ops/security/breakglass.py`: `recover_stranded_activation` and its registration.
+`mcp/tools/ops/security/breakglass.py`: `recover_stranded_activation` and its registration. The
+docstring names the upgrade order and that the tool is not used until every server is upgraded.
 `mcp/exposure.py`, `_docmeta.py` and the tool-doc and docmeta tests as their gates require.
 
 Verify: denial audited and `denied`; observe audited and enqueues; settle refusals

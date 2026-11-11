@@ -164,7 +164,7 @@ This amendment discharges the second, third and fourth Consequences and the #357
 binding on #3551. Spec: [settled teardown routing](../workflow/specs/2026-11-11-settled-teardown-routing-design.md).
 
 **Decision.** A System whose latest activation has a settlement row with `settled_at` set is the
-settled shape. Three fences key on that row and nothing else:
+settled shape. Four fences key on that row and nothing else:
 
 - The worker's ordinary teardown admits the settled shape. Every other activation history keeps
   the #2966 refusal unchanged.
@@ -179,7 +179,7 @@ settled shape. Three fences key on that row and nothing else:
 
 One `platform_admin` tool, `ops.recover_stranded_activation`, with a required reason, drives the
 observation and the settlement in two steps. It audits a role denial, the observe request and
-every settle call that does not settle; a settlement is audited once, by the primitive. It settles
+every refusal of either step; a settlement is audited once, by the primitive. It settles
 only on a succeeded latest observation, and returns every refusal reason unchanged, including
 `authority_objects_present` and `stranded_observation_unsupported`. Teardown and release stay with
 the existing tools.
