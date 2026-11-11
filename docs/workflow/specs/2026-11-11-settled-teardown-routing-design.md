@@ -168,8 +168,9 @@ a settled allocation and free its capacity while the worker domain still runs.
 ## Threat model
 
 1. **Boundary inventory.** Added: one `platform_admin` MCP tool. Widened: the worker's ordinary
-   teardown admits a settled activation; `systems.teardown` (project `admin`) reaches the ordinary
-   path for it.
+   teardown admits a settled activation; `systems.teardown` (project `admin`) and
+   `ops.force_teardown` reach the ordinary path for it; the reconciler's stalled repair requeues
+   its ordinary teardown and lease expiry holds its allocation.
 2. **Actor model.** A project admin is trusted for their own System but cannot settle; only the
    settlement record, written by `kdive_server` under `platform_admin` on both owners' evidence,
    opens the ordinary path. A worker cannot write `settled_at`.

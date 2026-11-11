@@ -27,6 +27,8 @@ from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.payloads import TeardownPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools._common import job_envelope
+from kdive.mcp.tools.lifecycle.support._idempotency import record_envelope
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
 from kdive.mcp.tools.ops.security import breakglass
 from kdive.reconciler.repairs.systems import repair_stalled_tearing_down_systems
@@ -347,5 +349,43 @@ def test_the_stalled_repair_requeues_only_a_settled_system(
             job = await _job(pool, system_id)
         assert requeued == (1 if settled else 0)
         assert job.state is (JobState.QUEUED if settled else JobState.FAILED)
+
+    asyncio.run(body())
+
+
+def test_a_keyed_replacement_is_audited_and_keeps_a_key_that_named_the_old_row(
+    migrated_url: str,
+) -> None:
+    """A key already recorded for the authority row names the same, now ordinary, row."""
+
+    async def body() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, _ = await _system_with_activation(pool, settled=True)
+            prior = await _prior_teardown(pool, system_id, state=JobState.FAILED)
+            async with pool.connection() as conn:
+                old = await queue.get_by_dedup_key(conn, f"{system_id}:teardown")
+                assert old is not None
+                await record_envelope(
+                    conn,
+                    principal=ctx(Role.ADMIN).principal,
+                    key="settled-retry",
+                    project="proj",
+                    kind="systems.teardown",
+                    envelope=job_envelope(old, "system_id", UUID(system_id)),
+                )
+            response = await teardown_system(
+                pool, ctx(Role.ADMIN), system_id, idempotency_key="settled-retry"
+            )
+            async with pool.connection() as conn:
+                cursor = await conn.execute(
+                    "SELECT count(*) FROM audit_log WHERE object_id = %s "
+                    "AND transition = 'teardown:recycled'",
+                    (system_id,),
+                )
+                recycled = await cursor.fetchone()
+            job = await _job(pool, system_id)
+        assert response.object_id == str(prior)
+        assert _is_ordinary(job) and job.state is JobState.QUEUED
+        assert recycled == (1,)
 
     asyncio.run(body())
