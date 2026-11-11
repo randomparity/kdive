@@ -200,8 +200,9 @@ async def force_teardown(
     non-blank ``reason`` + the always-written ``platform_audit_log`` row. Enqueues the same
     idempotent ``JobKind.TEARDOWN`` job as ``systems.teardown`` (same dedup key) under an
     authorizing context bound to the target's project; a System with external-boot activation
-    history gets the authority-marked teardown, which needs ``resolver`` (#3007). A terminal
-    System returns success idempotently.
+    history gets the authority-marked teardown, which needs ``resolver`` (#3007), unless its
+    latest activation was settled, which gets the ordinary teardown (#3551). A terminal System
+    returns success idempotently.
     """
     try:
         require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)

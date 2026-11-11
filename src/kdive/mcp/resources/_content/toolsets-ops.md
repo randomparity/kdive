@@ -32,6 +32,9 @@ and confirmation requirements named by each tool schema.
   worker-death witness.
 - `ops.resolve_recovery_orphan` resolves an external-boot recovery orphan and requires
   `platform_admin`.
+- `ops.recover_stranded_activation` observes, then settles, a fixed-worker external-boot
+  activation stranded in `preparing`, and requires `platform_admin` and a reason. Once settled,
+  `ops.force_teardown` tears the System down on the worker that owns its domain.
 - `ops.force_release` releases capacity through the break-glass path and requires
   `platform_admin` plus its explicit confirmation.
 - `ops.force_teardown` tears down a system through the break-glass path and requires
