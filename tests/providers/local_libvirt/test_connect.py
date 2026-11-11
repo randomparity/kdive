@@ -12,7 +12,10 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle import connect as connect_mod
-from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
+from kdive.providers.local_libvirt.lifecycle.connect import (
+    LibvirtDomainPresence,
+    LocalLibvirtConnect,
+)
 from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.ports.lifecycle import (
     DebugTransportKind,
@@ -691,4 +694,40 @@ def test_gdbstub_reservation_never_dials(
     assert TransportHandleData.decode(handle).port == 4444
     assert calls == []
     assert state == [initial_state]
+    assert conn.closed == 1
+
+
+class _Lookup:
+    def __init__(self, error_code: int | None = None) -> None:
+        self.error_code = error_code
+        self.closed = 0
+
+    def lookupByName(self, name: str) -> object:  # noqa: N802
+        if self.error_code is None:
+            return object()
+        raise libvirt_error(self.error_code)
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_domain_presence_finds_a_defined_domain() -> None:
+    conn = _Lookup()
+
+    assert LibvirtDomainPresence(lambda: conn).is_defined("kdive-a") is True
+    assert conn.closed == 1
+
+
+def test_domain_presence_reads_only_a_missing_domain_as_absent() -> None:
+    conn = _Lookup(libvirt.VIR_ERR_NO_DOMAIN)
+
+    assert LibvirtDomainPresence(lambda: conn).is_defined("kdive-a") is False
+    assert conn.closed == 1
+
+
+def test_domain_presence_raises_any_other_fault() -> None:
+    conn = _Lookup(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    with pytest.raises(libvirt.libvirtError):
+        LibvirtDomainPresence(lambda: conn).is_defined("kdive-a")
     assert conn.closed == 1

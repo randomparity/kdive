@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -141,6 +142,12 @@ class ResourceBindingCapabilities:
     rebind_for_resource: Callable[[str], ProviderRuntime]
 
 
+class DomainPresence(Protocol):
+    """Whether this runtime's own daemon defines a domain; a fault raises, never reads absent."""
+
+    def is_defined(self, domain_name: str) -> bool: ...
+
+
 def _require_capability_port_parity(
     *, advertised: bool, port: object | None, capability_name: str, port_name: str
 ) -> None:
@@ -194,6 +201,8 @@ class ProviderRuntime:
     external_boot_recovery_objects: ExternalBootRecoveryObjectPorts | None = None
     # Internal worker route, not an advertised provider operation (ADR-0606).
     authority: AuthorityCapability | None = None
+    # What this runtime's own daemon defines. Absent where no stranded observation runs (ADR-0816).
+    domain_presence: DomainPresence | None = None
 
     def __post_init__(self) -> None:
         _require_capability_port_parity(

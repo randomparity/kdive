@@ -299,6 +299,7 @@ async def test_sender_borrows_only_while_encoding_and_authenticates_active_incar
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert borrowed[-1] is owner.incarnation_credential
     assert {name for name in dir(sender) if not name.startswith("_")} == {
+        "observe_stranded_activation",
         "health",
         "acknowledge_takeover",
         "acknowledge_system_takeover",

@@ -87,6 +87,14 @@ class RemoteModuleVolumeReapPayload(_PayloadBase):
     schema_: Literal["remote-module-volume-reap-v1"] = Field(alias="schema")
 
 
+class ObserveStrandedActivationPayload(_PayloadBase):
+    """One stranded activation to observe (ADR-0816). It carries no authority marker."""
+
+    schema_: Literal["observe-stranded-activation-v1"] = Field(alias="schema")
+    system_id: str
+    activation_id: str
+
+
 class Authorizing(_PayloadBase):
     """Principal and project that authorized a durable job."""
 
@@ -627,6 +635,7 @@ type _ActivePayloadModel = (
     | type[TeardownPayload]
     | type[RemoteModuleVolumeReapPayload]
     | type[ResolveRecoveryOrphanPayload]
+    | type[ObserveStrandedActivationPayload]
 )
 type ActivePayloadModel = (
     SystemPayload
@@ -650,6 +659,7 @@ type ActivePayloadModel = (
     | TeardownPayload
     | RemoteModuleVolumeReapPayload
     | ResolveRecoveryOrphanPayload
+    | ObserveStrandedActivationPayload
 )
 _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.PROVISION: SystemPayload,
@@ -674,6 +684,7 @@ _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.RECLAIM_INVESTIGATION_ROOTFS: ReclaimInvestigationRootfsPayload,
     JobKind.REMOTE_MODULE_VOLUME_REAP: RemoteModuleVolumeReapPayload,
     JobKind.RESOLVE_RECOVERY_ORPHAN: ResolveRecoveryOrphanPayload,
+    JobKind.OBSERVE_STRANDED_ACTIVATION: ObserveStrandedActivationPayload,
 }
 _HISTORICAL_RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,

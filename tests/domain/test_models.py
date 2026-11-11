@@ -348,6 +348,8 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         "remote_module_volume_reap",
         # Platform-admin-only exact recovery-object quarantine disposition.
         "resolve_recovery_orphan",
+        # Platform-admin evidence for a stranded activation (ADR-0816).
+        "observe_stranded_activation",
     }
 
 
