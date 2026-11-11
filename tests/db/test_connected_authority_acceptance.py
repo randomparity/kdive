@@ -17,6 +17,7 @@ import pytest
 from pydantic import SecretStr
 
 import kdive.config as runtime_config
+from kdive.domain.errors import CategorizedError
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.providers.assembly import composition as provider_composition
 from kdive.providers.external_boot_authority import host, transport
@@ -29,6 +30,7 @@ from kdive.providers.external_boot_authority.network_client import _resolve_tls_
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     AuthorityMutationRequestV1,
+    AuthorityStrandedObservationRequestV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
@@ -454,6 +456,14 @@ async def test_typed_sender_reaches_constructed_sql_backed_authority_service(
             assert observation.category == "target"
             assert boundary.actions == ["activate-modules", "define-target"]
             assert received_credentials == [worker_credential.get_secret_value()] * 3
+
+            # `superseded` proves the host wired the stranded repository and the read ran under
+            # the authority role; an unwired host answers `provider-conflict`.
+            with pytest.raises(CategorizedError, match="authority: superseded"):
+                await sender.observe_stranded_activation(
+                    AuthorityStrandedObservationRequestV1(activation_id=uuid4()),
+                    deadline=deadline(),
+                )
 
             async def reject_role(_connection: object) -> None:
                 raise host.HostReadinessError("database", "role-check")

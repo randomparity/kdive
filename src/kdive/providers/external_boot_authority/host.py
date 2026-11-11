@@ -804,6 +804,7 @@ async def check_database_role(connection: Any) -> None:
                 'public.list_authority_system_journal_heads(text)'::regprocedure,
                 'public.record_stranded_activation_authority_absence(uuid,text,text,bigint,text,'
                     'text,text[])'::regprocedure,
+                'public.read_stranded_activation_target(uuid,text)'::regprocedure,
                 'public.authenticate_external_boot_authority_peer(bytea)'::regprocedure
             ])::oid AS oid
         ), accepted_public_function AS (
@@ -1667,6 +1668,7 @@ def _build_mutation_service(
         AuthorityAdapterCloser,
         ExternalBootAuthorityService,
     )
+    from kdive.providers.external_boot_authority.stranded import StrandedObservationRepository
     from kdive.providers.local_libvirt.settings import LIBVIRT_RECOVERY_ROOT
     from kdive.providers.system_authority.manifest import RemoteAuthoritySystemManifestV1
 
@@ -1728,6 +1730,9 @@ def _build_mutation_service(
             adapter=binding.adapter,
             recovery_orphans=recovery_orphans,
             proof_checkpoint=proof_checkpoint,
+            stranded_observations=StrandedObservationRepository(
+                connections, config.authority_instance
+            ),
             system_service=system_service,
         )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
@@ -23,6 +24,8 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
+    AuthorityStrandedObservationRequestV1,
+    AuthorityStrandedObservationResponseV1,
     AuthorityTakeoverRequestV1,
     AuthorityTeardownMutationRequestV1,
     AuthorityTeardownResponseV1,
@@ -740,3 +743,32 @@ def test_release_authority_permits_derived_recover_phase() -> None:
 
     assert request.purpose == "release"
     assert request.operation is AuthorityOperation.RECOVER
+
+
+_STRANDED = "00000000-0000-4000-8000-000000000003"
+
+
+def test_a_stranded_observation_request_names_only_the_activation() -> None:
+    with pytest.raises(ValidationError):
+        AuthorityStrandedObservationRequestV1.model_validate(
+            {"activation_id": _STRANDED, "domain_name": "chosen-by-the-peer"}
+        )
+
+
+@pytest.mark.parametrize(
+    ("disposition", "objects"),
+    [("recorded", ("held",)), ("domain_present", ("held",)), ("objects_present", ())],
+)
+def test_stranded_objects_are_named_exactly_when_held(
+    disposition: Literal["recorded", "domain_present", "objects_present"],
+    objects: tuple[str, ...],
+) -> None:
+    with pytest.raises(ValidationError):
+        AuthorityStrandedObservationResponseV1(disposition=disposition, objects=objects)
+
+
+def test_stranded_response_bounds_its_objects() -> None:
+    with pytest.raises(ValidationError):
+        AuthorityStrandedObservationResponseV1(
+            disposition="objects_present", objects=tuple(f"ref-{n}" for n in range(33))
+        )

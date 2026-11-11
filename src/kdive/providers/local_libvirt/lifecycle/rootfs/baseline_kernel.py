@@ -14,6 +14,7 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.rootfs.baseline import VMLINUZ_PREFIX as _VMLINUZ_PREFIX
@@ -149,7 +150,8 @@ def _real_extract_baseline_kernel(  # pragma: no cover - live_vm (libguestfs)
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"base": str(base)},
             )
-        mountpoints = guest.inspect_get_mountpoints(roots[0])
+        # python_return_dict=True selects the dict arm of the binding's declared union.
+        mountpoints = cast(dict[str, str], guest.inspect_get_mountpoints(roots[0]))
         guest.mount_ro(mountpoints.get("/", roots[0]), "/")
         # /boot may be a separate filesystem or subvolume; its mount must succeed.
         if "/boot" in mountpoints:
