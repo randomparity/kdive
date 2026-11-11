@@ -77,7 +77,9 @@ ssh_forward_port=p)`, when `p` is not `None`:
 | `ssh_addr` set | `1024 <= p <= 65535` | `(config.ssh_addr, p)`, no domain read |
 | `ssh_addr` set | outside | `configuration_error`, `reason=authority_ssh_forward_invalid`, no IO |
 
-The instance's own `ssh_range` does not bound `p`; the authority enforces its manifest range.
+The instance config requires `ssh_addr` and `ssh_range` together (`remote_libvirt/config.py`), so
+the first row's gate is unchanged; the instance's `ssh_range` does not bound `p`, and the authority
+enforces its manifest range.
 
 With `p is None` the existing domain read runs, so ordinary remote Systems are unchanged.
 
@@ -138,13 +140,15 @@ Each follow-up proves its own contracts; this design PR changes documents only
 1. **Server and worker: remote authority SSH endpoint from the stored port.** Widen
    `authority_ssh_forward_port`, keep drgn-live local-only, honour `ssh_forward_port` in
    `RemoteLibvirtConnect.recorded_ssh_endpoint`. Ships the interim refusal. Updates the local-only
-   wording in `jobs/payloads.py` and `authority_owned.py`, and appends the ADR-0811 amendment
-   ADR-0815 names. Deploy workers first.
+   and loopback wording on every `ssh_forward_port` reader (`jobs/payloads.py`,
+   `authority_owned.py`, `ssh_access.py`, `providers/ports/lifecycle.py`, the debug attach
+   docstring, the connectivity handlers' error text), and appends the ADR-0811 amendment ADR-0815
+   names. Deploy workers first.
 2. **Authority: report the remote System's SSH port.** Facts carry `intent.ssh_port`; manifest
    minimum 1024 in the authority and in
    `deploy/ansible/scripts/validate_authority_system_provisioning.py`; the "loopback" wording in
    `providers/system_authority/protocol.py` covers remote. Requires servers and workers at or after
    ADR-0811; check manifests before upgrading, since a sub-1024 range stops the authority.
 3. **Operations: remote authority SSH documentation and live proof.** Document that the instance
-   `ssh_addr` must reach the authority's hostfwd and that manifest SSH ranges should not overlap
+   declares `ssh_addr` (with an `ssh_range`, which config requires), that `ssh_addr` must reach the authority's hostfwd and that manifest SSH ranges should not overlap
    other SSH ranges on the host; run `systems.authorize_ssh_key` against a remote authority System.

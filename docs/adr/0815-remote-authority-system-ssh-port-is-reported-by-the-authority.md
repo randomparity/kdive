@@ -50,7 +50,9 @@ authority's check, and the server applies only the receipt bound.
    connector before any network IO as the local connector does; a port outside it fails with
    `configuration_error`, `reason=authority_ssh_forward_invalid`. The manifest range is enforced
    by the authority alone, when it allocates and when it adopts an intent (`_same_subject`). An
-   instance with no SSH forward configured keeps returning `None` (`ssh_not_provisioned`).
+   instance with no SSH forward configured keeps returning `None` (`ssh_not_provisioned`). The
+   instance config requires `ssh_addr` and `ssh_range` together (`remote_libvirt/config.py`), so the
+   instance still declares a range, which is not a bound on the reported port.
 4. **The server path is ADR-0811's, widened to remote.** `authority_ssh_forward_port` returns the
    stored port for a remote-libvirt authority System too, and the three SSH tools carry it, in the
    same optional `AuthorizeSshKeyPayload` and `CheckSshReachablePayload` fields the #3541 amendment
@@ -98,15 +100,16 @@ authority's check, and the server applies only the receipt bound.
   1. *Server and worker:* widen `authority_ssh_forward_port` to remote-libvirt (the interim
      refusal), keep the drgn-live caller local-only, and make
      `RemoteLibvirtConnect.recorded_ssh_endpoint` honour `ssh_forward_port` with the 1024-65535
-     check;
-     update the local-only wording in `jobs/payloads.py` and `authority_owned.py`, and append the
-     ADR-0811 amendment above.
+     check; update the local-only and loopback wording on every `ssh_forward_port` reader
+     (`jobs/payloads.py`, `authority_owned.py`, `ssh_access.py`, `providers/ports/lifecycle.py`, the
+     debug attach docstring, and the connectivity handlers' error text), and append the ADR-0811
+     amendment above.
   2. *Authority:* report `ssh_forward_port` from the remote intent and refuse a manifest
      `ssh_port_min` below 1024, in the authority and in the Ansible preflight
      (`deploy/ansible/scripts/validate_authority_system_provisioning.py`); update the "loopback"
      wording in `providers/system_authority/protocol.py`.
   3. *Operations:* document the address and port-contention consequences above for remote
-     authority hosts, and prove `systems.authorize_ssh_key` against a remote authority System on a
+     authority hosts, including that the instance declares `ssh_addr` with an `ssh_range`, and prove `systems.authorize_ssh_key` against a remote authority System on a
      lab host.
 
 ## Considered & rejected
