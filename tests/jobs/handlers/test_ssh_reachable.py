@@ -263,7 +263,7 @@ def test_handler_serializes_reachable_verdict(
                 resolver.binding_for_system.assert_awaited_once_with(conn, system_id)
                 connector = resolver.binding_for_system.return_value.runtime.connector
                 connector.recorded_ssh_endpoint.assert_called_once_with(
-                    SystemHandle(domain_name_for(system_id))
+                    SystemHandle(domain_name_for(system_id)), ssh_forward_port=None
                 )
                 return verdict
 
@@ -520,7 +520,7 @@ def test_handler_propagates_absent_domain_distinctly(
                 resolver.binding_for_system.assert_awaited_once_with(conn, system_id)
                 connector = resolver.binding_for_system.return_value.runtime.connector
                 connector.recorded_ssh_endpoint.assert_called_once_with(
-                    SystemHandle(domain_name_for(system_id))
+                    SystemHandle(domain_name_for(system_id)), ssh_forward_port=None
                 )
 
     asyncio.run(_run())

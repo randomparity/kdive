@@ -15,6 +15,8 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
+from kdive.db.repositories import SYSTEMS
+from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.connectivity.ssh_reachable import ProbeFn, ReachResult, _real_probe
@@ -194,6 +196,21 @@ async def _attach_console_tail(
         exc.details["console_tail"] = tail
 
 
+async def _require_ready(conn: AsyncConnection, system_id: UUID) -> None:
+    """Refuse a carried port once its System left ``ready``.
+
+    The domain read proves the domain exists; a stored port does not, and a torn-down System's
+    port can be reused by another System's forward (ADR-0811).
+    """
+    system = await SYSTEMS.get(conn, system_id)
+    if system is None or system.state is not SystemState.READY:
+        raise CategorizedError(
+            "system is no longer ready; cannot authorize a key over its reported SSH forward",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "system_not_ready"},
+        )
+
+
 async def authorize_ssh_key_handler(
     conn: AsyncConnection,
     job: Job,
@@ -209,11 +226,13 @@ async def authorize_ssh_key_handler(
     long append retry: an unreachable guest fails in seconds with a named reason instead of a
     multi-minute ``running``. On a guest ``TRANSPORT_FAILURE`` — the pre-flight fast-fail or the
     append itself — attaches a bounded, redacted console tail so "did sshd start?" is answerable
-    from the failed job alone (ADR-0306).
+    from the failed job alone (ADR-0306). An authority-owned local System's job carries the port the
+    server resolved, because the worker role is refused the authority binding (ADR-0811).
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` ``reason="ssh_not_provisioned"`` when the System
-            has no recorded SSH forward, or when it has no bootstrap key; the provider's own
+        CategorizedError: ``CONFIGURATION_ERROR`` ``reason="system_not_ready"`` when a job carrying
+            a port meets a System that left ``ready``; ``reason="ssh_not_provisioned"`` when the
+            System has no recorded SSH forward, or when it has no bootstrap key; the provider's own
             ``reason="system_domain_not_found"`` propagates unchanged when the System has no
             libvirt domain on the worker's connection, which is a different fault with a different
             fix (ADR-0658). The worker prefixes detail keys, so a client reads these as
@@ -222,9 +241,11 @@ async def authorize_ssh_key_handler(
     """
     payload = load_payload(job, AuthorizeSshKeyPayload)
     system_id = UUID(payload.system_id)
+    if payload.ssh_forward_port is not None:
+        await _require_ready(conn, system_id)
     binding = await resolver.binding_for_system(conn, system_id)
     endpoint = binding.runtime.connector.recorded_ssh_endpoint(
-        SystemHandle(domain_name_for(system_id))
+        SystemHandle(domain_name_for(system_id)), ssh_forward_port=payload.ssh_forward_port
     )
     if endpoint is None:
         # The local-libvirt forward is always rendered now (ADR-0281, #937); a None endpoint means
