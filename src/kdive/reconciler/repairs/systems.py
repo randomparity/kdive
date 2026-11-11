@@ -425,7 +425,10 @@ async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
                     _warn_marked_stalled_teardown(system_id, existing)
                     continue
                 activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, system_id)
-                if activation is not None:
+                # A settled activation's ordinary teardown is the worker's (ADR-0816, #3551).
+                if activation is not None and not await _EXTERNAL_BOOT_ACTIVATIONS.is_settled(
+                    conn, activation.id
+                ):
                     _warn_stalled_teardown_once(
                         system_id,
                         "external_boot_history",

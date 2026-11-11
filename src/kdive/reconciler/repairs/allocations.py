@@ -32,6 +32,7 @@ from kdive.services.accounting import ledger as accounting
 from kdive.services.allocation import promotion as allocation_promotion
 from kdive.services.allocation import release as allocation_release
 from kdive.services.allocation.admission.metrics import AdmissionMetrics
+from kdive.services.external_boot.settlement import settled_system_awaiting_teardown
 
 _log = logging.getLogger(__name__)
 
@@ -241,6 +242,17 @@ async def _expire_one(conn: AsyncConnection, allocation_id: UUID, project: str) 
                 allocation_id,
                 denied,
                 denied.details,
+            )
+            return False
+        # The admission guard no longer restricts a settled activation, but its worker domain runs
+        # until teardown, so the allocation stays held as release holds it (ADR-0816, #3551).
+        settled_system = await settled_system_awaiting_teardown(conn, allocation_id)
+        if settled_system is not None:
+            _log.warning(
+                "reconciler: allocation %s not expired — System %s has a settled external-boot "
+                "activation and is not torn down; run ops.force_teardown, retried next pass",
+                allocation_id,
+                settled_system,
             )
             return False
         alloc = await accounting.stamp_active_ended(conn, alloc, datetime.now(UTC))

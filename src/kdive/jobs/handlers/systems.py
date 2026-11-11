@@ -714,7 +714,9 @@ async def teardown_handler(
     ``conflict`` rather than burning attempts; ``systems.teardown`` re-runs it after the
     reprovision settles (#2928). Any external-boot activation, restricting or completed, refuses
     the same way: the authority still owns the host domain, and only the authority-marked teardown
-    that ``systems.teardown`` enqueues may destroy it (ADR-0620, #2966).
+    that ``systems.teardown`` enqueues may destroy it (ADR-0620, #2966). The one exception is a
+    latest activation the stranded-activation settlement ended: both owners proved the domain is
+    this worker's, so the ordinary teardown reclaims it (ADR-0816 amendment, #3551).
     """
     system_id = UUID(load_payload(job, TeardownPayload).system_id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
@@ -722,7 +724,9 @@ async def teardown_handler(
         if system is None:
             return None
         activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, system_id)
-        if activation is not None:
+        if activation is not None and not await _EXTERNAL_BOOT_ACTIVATIONS.is_settled(
+            conn, activation.id
+        ):
             raise CategorizedError(
                 "ordinary teardown is fenced by external-boot authority: the provider-host "
                 "authority owns this System's host domain (ADR-0620); run systems.teardown",
