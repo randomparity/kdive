@@ -120,6 +120,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
         "tests/services/external_boot/test_recovery_requests.py",
         "tests/jobs/handlers/external_boot/test_orphan_resolution.py",
     ),
+    "ops.recover_stranded_activation": ("tests/mcp/ops/test_stranded_recovery.py",),
     "ops.jobs_list": ("tests/mcp/ops/test_queue_tools.py",),
     "ops.build_uses_list": ("tests/mcp/ops/test_build_use_recovery.py",),
     "ops.recover_build_use": ("tests/mcp/ops/test_build_use_recovery.py",),

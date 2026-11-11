@@ -24,7 +24,10 @@ from kdive.domain.external_boot_activation import (
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 from kdive.serialization import validate_stored
-from kdive.services.external_boot.settlement import settle_stranded_activation
+from kdive.services.external_boot.settlement import (
+    settle_stranded_activation,
+    settled_system_awaiting_teardown,
+)
 from tests.db.external_boot_authority_support import (
     _acknowledge,
     _RoleDsns,
@@ -716,3 +719,23 @@ def test_settled_is_readable_by_each_role(
     _record_worker(authority_role_dsns, stranded)
     assert _settle(authority_role_dsns, activation_id) == "applied"
     assert asyncio.run(is_settled()) is True
+
+
+def test_the_reconciler_reads_a_settled_system_awaiting_teardown(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    """The lease-expiry fence runs under the reconciler role's column grant (#3551)."""
+    stranded = _strand(migrated_url, authority_role_dsns)
+    case = stranded.case
+
+    async def awaiting() -> UUID | None:
+        async with await psycopg.AsyncConnection.connect(
+            authority_role_dsns("kdive_reconciler"), autocommit=True
+        ) as conn:
+            return await settled_system_awaiting_teardown(conn, case.allocation_id)
+
+    assert asyncio.run(awaiting()) is None
+    _record_authority(authority_role_dsns, stranded)
+    _record_worker(authority_role_dsns, stranded)
+    assert _settle(authority_role_dsns, case.activation_id) == "applied"
+    assert asyncio.run(awaiting()) == case.system_id

@@ -68,6 +68,7 @@ from kdive.services.allocation.release import (
     breakglass_release_allocation,
 )
 from kdive.services.external_boot.settlement import (
+    SETTLEMENT_REASON_MAX_BYTES,
     request_stranded_observation,
     settle_observed_stranded_activation,
     settlement_reason,
@@ -474,7 +475,11 @@ def register(
         ],
         reason: Annotated[
             str,
-            Field(description="Mandatory justification, 1 to 1024 bytes (audited)."),
+            Field(
+                description=(
+                    f"Mandatory justification, 1 to {SETTLEMENT_REASON_MAX_BYTES} bytes (audited)."
+                )
+            ),
         ],
     ) -> ToolResponse:
         """Recover a fixed-worker activation stranded on the external-boot authority.

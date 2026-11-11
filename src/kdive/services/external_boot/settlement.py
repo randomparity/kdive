@@ -29,7 +29,7 @@ from kdive.services.external_boot.admission import (
 from kdive.services.systems.authority_owned import authority_system_binding
 
 _REPOSITORY = ExternalBootActivationRepository()
-_REASON_MAX_BYTES = 1024
+SETTLEMENT_REASON_MAX_BYTES = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +71,7 @@ async def settled_system_awaiting_teardown(
 def settlement_reason(reason: str) -> str | None:
     """The trimmed reason when it fits the settlement function's bound, else ``None``."""
     reason = reason.strip()
-    if "\0" in reason or not 1 <= len(reason.encode()) <= _REASON_MAX_BYTES:
+    if "\0" in reason or not 1 <= len(reason.encode()) <= SETTLEMENT_REASON_MAX_BYTES:
         return None
     return reason
 
@@ -172,7 +172,8 @@ async def settle_stranded_activation(
     normalized = settlement_reason(reason)
     if normalized is None:
         raise CategorizedError(
-            f"settling a stranded activation requires a reason of 1 to {_REASON_MAX_BYTES} bytes",
+            "settling a stranded activation requires a reason of 1 to "
+            f"{SETTLEMENT_REASON_MAX_BYTES} bytes",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "reason_required"},
         )
