@@ -191,19 +191,23 @@ async def _session_count(pool: AsyncConnectionPool) -> int:
 
 
 async def _mark_authority_owned(
-    pool: AsyncConnectionPool, system_id: str, *, ssh_forward_port: int | None = None
+    pool: AsyncConnectionPool,
+    system_id: str,
+    *,
+    ssh_forward_port: int | None = None,
+    provider_kind: str = "local-libvirt",
 ) -> None:
     async with pool.connection() as conn:
         await conn.execute(
             "INSERT INTO authority_system_ownership "
             "(system_id,allocation_id,resource_id,provider_kind,resource_name,"
             "authority_instance,profile_identity,root_identity,state,ssh_forward_port) "
-            "SELECT system.id,system.allocation_id,allocation.resource_id,'local-libvirt',"
+            "SELECT system.id,system.allocation_id,allocation.resource_id,%s,"
             "'host-a','authority-a','sha256:' || repeat('a',64),"
             "'sha256:' || repeat('b',64),'ready',%s "
             "FROM systems AS system JOIN allocations AS allocation "
             "ON allocation.id=system.allocation_id WHERE system.id=%s",
-            (ssh_forward_port, system_id),
+            (provider_kind, ssh_forward_port, system_id),
         )
 
 
@@ -1643,6 +1647,7 @@ class _DomainHandleConnector(_FakeConnector):
     ) -> TransportHandle:
         self.opened.append((str(system), kind))
         if kind == "drgn-live":
+            self.forwards.append(ssh_forward_port)
             return TransportHandle(str(system))
         return super().open_transport(system, kind)
 
@@ -1916,6 +1921,38 @@ def test_start_session_authority_system_without_a_reported_forward_fails_closed(
             assert "Reprovision" in (resp.detail or "")
             assert connector.opened == []
             assert await _session_count(pool) == 0
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("stored_port", [None, 41234], ids=["unreported", "reported"])
+def test_start_session_drgn_live_on_a_remote_authority_system_keeps_the_guest_agent_path(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, stored_port: int | None
+) -> None:
+    # ADR-0815 decision 4: remote drgn-live rides the guest agent, so the SSH refusal never applies.
+    async def _run() -> None:
+        await _admit_authority_owned(monkeypatch)
+        async with open_pool(migrated_url) as pool:
+            alloc_id = await granted_allocation(pool)
+            sys_id = await _seed_profiled_system(pool, alloc_id, _remote_profile())
+            run_id = await seed_run(pool, sys_id)
+            await _mark_authority_owned(
+                pool, sys_id, ssh_forward_port=stored_port, provider_kind="remote-libvirt"
+            )
+            connector = _DomainHandleConnector()
+
+            resp = await _start_session(
+                pool,
+                request_context(),
+                run_id=run_id,
+                transport="drgn-live",
+                connector=connector,
+                profile_policy=_REMOTE_POLICY,
+            )
+
+            assert resp.status == "live"
+            assert connector.opened == [("kdive-x", "drgn-live")]
+            assert connector.forwards == [None]
 
     asyncio.run(_run())
 
