@@ -60,10 +60,11 @@ refusal is written to the platform audit log, and a settlement writes its own ro
    with cleanup complete, and its reservation is released.
 
    The `runs.boot` that stranded the System usually leaves its `boot` job `running` after its
-   last attempt: the reconciler does not dead-letter an exhausted boot job whose authority row is
-   still current. Settlement then refuses with `job_live`. When that job's `attempt` equals its
-   `max_attempts` and its lease has lapsed, no worker holds it: cancel it with `jobs.cancel`
-   (project `contributor`), then run `observe` and `settle` again.
+   last attempt: unless the authority acknowledged a retry with no mutation, the reconciler does
+   not dead-letter an exhausted boot job whose authority row is still current. Settlement then
+   refuses with `job_live`. When that job's `attempt` equals its `max_attempts` and its lease
+   has lapsed, no worker holds it: cancel it with `jobs.cancel` (project `contributor`), then run
+   `observe` and `settle` again.
 3. **Tear down on the worker.** Run `ops.force_teardown` for that System; from the CLI,
    `kdivectl ops force-teardown <system-id> --reason "<why>" --force`. A settled System's
    teardown runs on the worker that holds the domain, not on the authority. Wait for the job
@@ -86,9 +87,10 @@ refusal is written to the platform audit log, and a settlement writes its own ro
 
 ## Refusals
 
-A refusal returns `status: error`, names the reason in `data.reason`, changes nothing and is
-audited. Evidence stands for one hour. A later refusal does not withdraw it, so after any refusal
-run `observe` again rather than `settle` on the older evidence.
+A refusal returns `status: error`, names the reason in `data.reason` and is audited. It releases
+nothing and changes no activation, System or Allocation state. Evidence stands for one hour. A
+later refusal does not withdraw it, so after any refusal run `observe` again rather than `settle`
+on the older evidence.
 
 | `data.reason` | Step | Meaning and action |
 |---|---|---|

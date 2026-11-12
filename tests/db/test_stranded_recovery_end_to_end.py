@@ -23,6 +23,7 @@ from kdive.domain.operations.jobs import Job
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.jobs import cancel_job
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import release_allocation
 from kdive.mcp.tools.ops.security import breakglass
 from kdive.security.authz.context import RequestContext
@@ -211,3 +212,44 @@ def test_a_domain_in_the_wrong_place_refuses_and_changes_nothing(
     assert lab.activation_state() == "preparing"
     assert lab.system_state() == "ready"
     assert lab.allocation_state() == "active"
+
+
+def test_an_exhausted_boot_job_refuses_until_it_is_canceled(
+    migrated_url: str, authority_role_dsns: _RoleDsns, tmp_path: Path
+) -> None:
+    """The live strand leaves its marked boot job running after its last attempt (#3552).
+
+    The reconciler leaves it there while its authority row is current, so settlement refuses
+    ``job_live`` until the runbook's ``jobs.cancel`` ends it.
+    """
+    lab = _Lab(
+        migrated_url,
+        authority_role_dsns,
+        tmp_path,
+        authority=_AuthorityDaemon(),
+        worker=_WorkerDaemon(),
+    )
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "UPDATE jobs SET state = 'running', attempt = max_attempts, worker_id = %s, "
+            "heartbeat_at = now() - interval '10 minutes', "
+            "lease_expires_at = now() - interval '5 minutes', "
+            # The fixture's row predates the stored-Job contract that jobs.cancel reads.
+            "authorizing = authorizing || '{\"agent_session\": null}' WHERE id = %s",
+            (lab.case.worker_id, lab.case.job_id),
+        )
+
+    async def body() -> None:
+        async with _server_pool(lab) as pool:
+            await lab.observe(pool)
+            refused = await lab.recover(pool, "settle")
+            assert refused.data["reason"] == "job_live"
+            canceled = await cancel_job(pool, ctx(Role.CONTRIBUTOR), str(lab.case.job_id))
+            assert canceled.status == "canceled"
+            await lab.observe(pool)
+            settled = await lab.recover(pool, "settle")
+            assert settled.status == "settled"
+
+    asyncio.run(body())
+
+    assert lab.activation_state() == "abandoned"
