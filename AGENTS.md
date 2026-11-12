@@ -407,6 +407,15 @@ and constraint an agent must know, and does not invite a pattern the behavior di
 - **Releasing** — see [`docs/development/releasing.md`](docs/development/releasing.md) and
   [ADR-0041](docs/adr/0041-versioning-release-process.md) (SemVer, milestone→minor,
   tag-driven release).
+- **`verification:<arch>` labels are a completion gate.** An issue labelled
+  `verification:ppc64le` is not complete until its change has been exercised on a real ppc64le
+  CPU (POWER/PowerVM) and that run is recorded on the issue; `verification:x86` means the same
+  for a real x86_64 CPU. Merged code, green CI and TCG emulation do not satisfy the label: a PR
+  that lands the code without the hardware run must not close the issue, and the issue stays
+  open until the run is recorded. An issue carrying both labels needs both runs. Schedule a
+  labelled issue in the Milestone of the architecture arm whose hardware it waits on — a
+  `verification:ppc64le` issue belongs to the ppc64le release Milestone, not an x86-only one,
+  even when its code is architecture-neutral.
 - **Doc-style guard** (no check enforces it, but the prose rule is project-wide): use
   **Milestone**, never "Sprint"; keep prose plain and factual —
   avoid "critical", "robust", "comprehensive", "elegant". This applies to ADRs, specs,
