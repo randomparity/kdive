@@ -602,6 +602,11 @@ test-ansible:
     TIMEFORMAT='run-authority-tls-expiry.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-authority-tls-expiry.py
     TIMEFORMAT='run-authority-tls-renewal.py: %3R seconds'; time uv run --with 'ansible-core==2.21.1' python3 deploy/ansible/tests/run-authority-tls-renewal.py
 
+# Seconds actionlint may run before lint-workflows fails it. A stall (0 CPU, blocked writing to a
+# shellcheck pipe, #3583) otherwise hangs the pre-push gate with no output. No retry: a retry would
+# hide the stall.
+actionlint_timeout := "300"
+
 # Lint and security-scan the GitHub Actions workflows.
 # actionlint-py bundles a prebuilt actionlint and upstream ships no ppc64le binary, so its
 # install fails there. On ppc64le use a PATH actionlint (build from Go source:
@@ -609,7 +614,11 @@ test-ansible:
 # pinned wrapper for a reproducible version.
 lint-workflows:
     uv run --with 'zizmor==1.25.2' zizmor .github/workflows
-    if [ "$(uname -m)" = "ppc64le" ]; then actionlint; else uv run --with 'actionlint-py==1.7.12.24' actionlint; fi
+    rc=0; \
+    if [ "$(uname -m)" = "ppc64le" ]; then timeout {{actionlint_timeout}} actionlint || rc=$?; \
+    else timeout {{actionlint_timeout}} uv run --with 'actionlint-py==1.7.12.24' actionlint || rc=$?; fi; \
+    if [ "$rc" -eq 124 ]; then echo "lint-workflows: actionlint stalled past {{actionlint_timeout}}s; capture pstree -p and a SIGQUIT goroutine dump, then see #3583" >&2; fi; \
+    exit "$rc"
 
 # Resolve relative markdown links in tracked *.md against the filesystem.
 docs-links:
