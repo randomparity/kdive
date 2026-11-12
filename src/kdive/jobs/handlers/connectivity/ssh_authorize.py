@@ -1,7 +1,7 @@
 """Worker handler: append an agent public key to a guest's root authorized_keys (ADR-0271).
 
 The worker loads the System's per-System SSH bootstrap private key (ADR-0289, #963) and can
-root-SSH that guest over the loopback forward (ADR-0218). This handler uses that identity to
+root-SSH that guest over its SSH forward (ADR-0218). This handler uses that identity to
 append the agent's validated public key to ``/root/.ssh/authorized_keys`` — a flock-serialized,
 idempotent append — so the agent can then SSH in with its own private key. KDIVE never holds the
 agent's private key.
@@ -226,8 +226,9 @@ async def authorize_ssh_key_handler(
     long append retry: an unreachable guest fails in seconds with a named reason instead of a
     multi-minute ``running``. On a guest ``TRANSPORT_FAILURE`` — the pre-flight fast-fail or the
     append itself — attaches a bounded, redacted console tail so "did sshd start?" is answerable
-    from the failed job alone (ADR-0306). An authority-owned local System's job carries the port the
-    server resolved, because the worker role is refused the authority binding (ADR-0811).
+    from the failed job alone (ADR-0306). An authority-owned System's job, local or remote,
+    carries the port the server resolved, because the worker role is refused the authority binding
+    (ADR-0811, ADR-0815).
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` ``reason="system_not_ready"`` when a job carrying
@@ -249,11 +250,11 @@ async def authorize_ssh_key_handler(
     )
     if endpoint is None:
         # The local-libvirt forward is always rendered now (ADR-0281, #937); a None endpoint means
-        # the System's provider exposes no loopback SSH forward (a defensive guard for
-        # remote/fault-inject — the server tool already rejects before enqueue).
+        # the System's provider exposes no SSH forward (a defensive guard for a remote instance
+        # without SSH parity or fault-inject — the server tool already rejects before enqueue).
         raise CategorizedError(
-            "This System's provider exposes no loopback SSH forward; direct SSH to a System is a "
-            "local-libvirt capability",
+            "This System's provider exposes no SSH forward; a remote-libvirt instance needs "
+            "ssh_addr and ssh_range for direct SSH",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "ssh_not_provisioned"},
         )

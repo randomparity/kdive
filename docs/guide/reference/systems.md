@@ -25,8 +25,8 @@ Reports ``ssh_not_provisioned`` when the System's provider exposes no SSH forwar
 libvirt connection this server reads — an endpoint or liveness fault, not a provisioning
 gap.
 
-An **authority-owned local-libvirt** System is reached on its stored port, and only after
-its first activation: before that the call reports
+An **authority-owned** System is reached on its stored port, and only after its first
+activation: before that the call reports
 ``authority_system_preactivation_mutation_fenced``. It reports
 ``authority_ssh_forward_unreported`` when no port was stored, and its job fails
 ``system_not_ready`` if the System leaves ``ready`` first. It cannot be reprovisioned, so
@@ -57,8 +57,8 @@ re-poll rather than reuse an old result. The probe tolerates the brief window af
 forward; reports ``ssh_not_provisioned`` otherwise, or ``system_domain_not_found`` when a
 **local-libvirt** System has no libvirt domain on the libvirt connection this server reads.
 
-An **authority-owned local-libvirt** System is probed on its stored port, and only after its
-first activation: before that the call reports
+An **authority-owned** System is probed on its stored port, and only after its first
+activation: before that the call reports
 ``authority_system_preactivation_mutation_fenced``. It reports
 ``authority_ssh_forward_unreported`` when no port was stored.
 
@@ -448,8 +448,9 @@ libvirt domain on the libvirt connection this server reads reports
 gap. For a remote System the endpoint is read live from the host, so an unreachable host
 surfaces as a transport failure rather than a cached value.
 
-An **authority-owned local-libvirt** System reports the port its authority stored, with no
-libvirt read, from its first provision. It reports ``authority_ssh_forward_unreported`` when
+An **authority-owned** System reports the port its authority stored, with no libvirt
+read, from its first provision: on loopback for local-libvirt, on the instance's
+``ssh_addr`` for remote-libvirt. It reports ``authority_ssh_forward_unreported`` when
 no port was stored and ``authority_system_not_attachable`` once ownership leaves ``ready``
 and ``activated``.
 

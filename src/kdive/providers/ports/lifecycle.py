@@ -223,9 +223,9 @@ class Connector(Protocol):
     ) -> TransportHandle:
         """Open a debug transport and return an opaque handle.
 
-        ``ssh_forward_port`` is the loopback SSH port an authority-owned System reported
-        (ADR-0811) for a drgn-live attach whose domain this process cannot read. A provider that
-        resolves the endpoint itself ignores it.
+        ``ssh_forward_port`` is the loopback SSH port an authority-owned local System reported
+        (ADR-0811) for a drgn-live attach whose domain this process cannot read. Only that attach
+        passes it; a provider that resolves the endpoint itself ignores it.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for an unknown transport kind,
@@ -253,9 +253,9 @@ class Connector(Protocol):
         ``None`` means the System was not provisioned with an SSH forward, so no agent SSH is
         available. Providers without a local SSH endpoint to disclose return ``None``.
 
-        ``ssh_forward_port`` is the loopback SSH port an authority-owned System reported
-        (ADR-0811), for a domain this process cannot read. A provider that resolves the endpoint
-        itself ignores it.
+        ``ssh_forward_port`` is the SSH port an authority-owned System reported, for a domain this
+        process cannot read: a loopback forward on local-libvirt (ADR-0811), a port on the
+        instance's ``ssh_addr`` on remote-libvirt (ADR-0815). It replaces the provider's own read.
 
         An implementation **may** distinguish a different configuration fault instead of
         collapsing it here — a System with no domain on the provider's connection, say — by

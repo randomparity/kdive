@@ -217,8 +217,9 @@ class SnapshotDeletePayload(SystemPayload):
 class AuthorizeSshKeyPayload(SystemPayload):
     """A request to authorize an agent SSH public key in a System's guest (ADR-0271).
 
-    ``ssh_forward_port`` is set only for an authority-owned local System: the worker is refused
-    the authority binding, so the server resolves the port and carries it here (ADR-0811).
+    ``ssh_forward_port`` is set only for an authority-owned System, local or remote: the worker is
+    refused the authority binding, so the server resolves the port and carries it here (ADR-0811,
+    ADR-0815).
     """
 
     public_key: str
@@ -228,7 +229,8 @@ class AuthorizeSshKeyPayload(SystemPayload):
 class CheckSshReachablePayload(SystemPayload):
     """A request to probe a ready System's guest sshd reachability (ADR-0298, #972).
 
-    ``ssh_forward_port`` is set only for an authority-owned local System (ADR-0811).
+    ``ssh_forward_port`` is set only for an authority-owned System, local or remote (ADR-0811,
+    ADR-0815).
     """
 
     ssh_forward_port: SshForwardPort | None = None

@@ -467,8 +467,8 @@ def test_handler_dead_letters_when_no_forward(
                 assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
                 assert excinfo.value.details["reason"] == "ssh_not_provisioned"
                 assert str(excinfo.value) == (
-                    "This System's provider exposes no loopback SSH forward; direct SSH to a "
-                    "System is a local-libvirt capability"
+                    "This System's provider exposes no SSH forward; a remote-libvirt instance "
+                    "needs ssh_addr and ssh_range for direct SSH"
                 )
 
     asyncio.run(_run())
