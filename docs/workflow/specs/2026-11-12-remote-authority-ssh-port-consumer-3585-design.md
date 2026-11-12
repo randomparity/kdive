@@ -22,9 +22,9 @@ domain the server's TLS daemon cannot see and report `ssh_not_provisioned`.
 - `ssh_access.py`, the two connectivity handlers and the payloads are unchanged in logic: they
   already carry the port for any authority System.
 - Wording: drop "local"/"loopback" on the `ssh_forward_port` readers named in ADR-0815 follow-up
-  1, the `ssh_not_provisioned` texts, and the three tool descriptions in `registrar.py`
-  (regenerating `docs/guide/reference/systems.md`). Append an ADR-0811 amendment.
-- No ownership transition: a clean extension of the ADR-0811 path.
+  1, the `ssh_not_provisioned` texts and the three tool descriptions in `registrar.py`
+  (regenerating `docs/guide/reference/systems.md`). Append an ADR-0811 amendment. No ownership
+  transition: a clean extension of the ADR-0811 path.
 
 ### Failure model
 
