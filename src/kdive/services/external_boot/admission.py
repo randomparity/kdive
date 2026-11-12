@@ -18,6 +18,7 @@ from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.services.systems.authority_owned import (
+    authority_system_binding,
     ordinary_mutation_is_fenced,
     preactivation_absence_is_proven,
     torn_down_after_activation,
@@ -143,6 +144,21 @@ def _teardown_exits(state: ExternalBootActivationState) -> tuple[str, ...]:
     return ()
 
 
+async def _recovery_exits(
+    conn: AsyncConnection, system_id: UUID, state: ExternalBootActivationState
+) -> tuple[str, ...]:
+    """The stranded-activation recovery where its observation is admitted (ADR-0816).
+
+    The tool refuses an authority-owned System, so only a System with no ownership row is pointed
+    at it. ADR-0261 filtering drops it for a caller without platform_admin.
+    """
+    if ExternalBootOperation.OBSERVE_STRANDED_ACTIVATION not in _ADMITTED[state]:
+        return ()
+    if await authority_system_binding(conn, system_id) is not None:
+        return ()
+    return ("ops.recover_stranded_activation",)
+
+
 def _escalation_hint(state: ExternalBootActivationState) -> str:
     """Say in words what breadcrumb filtering hides from a caller without project ADMIN.
 
@@ -220,6 +236,7 @@ async def check_external_boot_admission(
         return
     next_actions = (
         *_STATE_NEXT_ACTIONS.get(activation.state, ()),
+        *await _recovery_exits(conn, system_id, activation.state),
         *_teardown_exits(activation.state),
     )
     raise ExternalBootDenied(
