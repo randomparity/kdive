@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import partial
 from hashlib import sha256
 from typing import LiteralString
@@ -102,6 +102,11 @@ _SYSTEM_TEARDOWN_AUTHORITY_SQL: LiteralString = (
     "SELECT activation_id, run_id, plan_identity, provider_kind, authority_instance "
     "FROM resolve_external_boot_system_teardown_dispatch_binding(%s)"
 )
+
+
+# `jobs.cancel` never clears `worker_id`, so a claimed, canceled row's last write is compared with
+# the settlement that proved the authority lane quiescent (ADR-0816 amendment, #3551).
+_WRITTEN_SINCE_SQL: LiteralString = "SELECT updated_at >= %s FROM jobs WHERE id = %s"
 
 
 def _teardown_dedup_key(system_id: UUID) -> str:
@@ -581,10 +586,17 @@ async def route_external_boot_teardown(
 
     The caller holds the System advisory lock. Shared by `systems.teardown` and break-glass
     `ops.force_teardown` (#3007): the worker refuses an ordinary teardown for such a System (#2966).
+    A latest activation the stranded-activation settlement ended is read first, before the
+    authority binding, and goes to the worker's ordinary teardown (ADR-0816 amendment, #3551).
     """
     activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, system.id)
     if activation is None:
         return None
+    settled = await _EXTERNAL_BOOT_ACTIVATIONS.settled_at(conn, activation.id)
+    if settled is not None:
+        return await _route_settled_teardown(
+            conn, ctx, system, system_id, idempotency_key, settled, audit_recycle=audit_recycle
+        )
     return await _enqueue_authority_teardown(
         conn,
         ctx,
@@ -595,6 +607,71 @@ async def route_external_boot_teardown(
         resolver,
         audit_recycle=audit_recycle,
     )
+
+
+async def _route_settled_teardown(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    system: System,
+    system_id: str,
+    idempotency_key: str | None,
+    settled: datetime,
+    *,
+    audit_recycle: bool,
+) -> ToolResponse | None:
+    """Send a settled System to its worker's ordinary teardown; ``None`` is the caller's own path.
+
+    Each caller's ordinary path handles a missing or ordinary prior row and a `torn_down` or
+    `reprovisioning` System, but they differ on an authority-marked row, so it is decided here: a
+    live one, or one canceled after a worker claimed it and written since settlement, may still be
+    running and replays; any other is replaced with the ordinary payload.
+    """
+    key = _teardown_dedup_key(system.id)
+    prior = await queue.get_by_dedup_key(conn, key)
+    if (
+        prior is None
+        or not _is_authority_marked(prior)
+        or system.state in {SystemState.TORN_DOWN, SystemState.REPROVISIONING}
+    ):
+        return None
+    if prior.state in _LIVE_JOB_STATES or (
+        prior.state is JobState.CANCELED
+        and prior.worker_id is not None
+        and await _written_since(conn, prior.id, settled)
+    ):
+        return job_envelope(prior, "system_id", system.id)
+    denial = await ordinary_teardown_denial(conn, ctx, system, system_id)
+    if denial is not None:
+        return denial
+    job, changed = await queue.enqueue_with_status(
+        conn,
+        JobKind.TEARDOWN,
+        TeardownPayload(system_id=str(system.id)),
+        job_authorizing(ctx, system.project),
+        key,
+        recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+    )
+    if changed and audit_recycle:
+        await _audit_authority_recycle(conn, ctx, system, job)
+    envelope = job_envelope(job, "system_id", system.id)
+    if idempotency_key is not None and not await _key_names_job(
+        conn, ctx, idempotency_key, envelope.object_id
+    ):
+        await record_envelope(
+            conn,
+            principal=ctx.principal,
+            key=idempotency_key,
+            project=system.project,
+            kind=_TEARDOWN_KIND,
+            envelope=envelope,
+        )
+    return envelope
+
+
+async def _written_since(conn: AsyncConnection, job_id: UUID, moment: datetime) -> bool:
+    cursor = await conn.execute(_WRITTEN_SINCE_SQL, (moment, job_id))
+    row = await cursor.fetchone()
+    return row is not None and bool(row[0])
 
 
 async def ordinary_teardown_denial(
@@ -688,6 +765,10 @@ async def _key_names_job(
     return stored is not None and stored.object_id == job_id
 
 
+def _is_authority_marked(job: Job) -> bool:
+    return _AUTHORITY_MARKER in job.payload or "authority_system_v1" in job.payload
+
+
 def _is_settled_ordinary_teardown(job: Job | None) -> bool:
     """Whether ``job`` is an unmarked teardown no worker attempt can still be running.
 
@@ -696,8 +777,7 @@ def _is_settled_ordinary_teardown(job: Job | None) -> bool:
     """
     return (
         job is not None
-        and _AUTHORITY_MARKER not in job.payload
-        and "authority_system_v1" not in job.payload
+        and not _is_authority_marked(job)
         and (
             job.state is JobState.FAILED
             or (job.state is JobState.CANCELED and job.worker_id is None)

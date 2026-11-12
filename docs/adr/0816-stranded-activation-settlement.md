@@ -158,6 +158,61 @@ optional, so any other provider refuses by name.
   authority once held (`session.py` `lookupByName`, main `0ca61d7a3`). The issue accepts an
   actionable refusal.
 
+### Amendment (2026-11-11): settled teardown routing and the recovery tool (#3551)
+
+This amendment discharges the second, third and fourth Consequences and the #3574 amendment's
+binding on #3551. Spec: [settled teardown routing](../workflow/specs/2026-11-11-settled-teardown-routing-design.md).
+
+**Decision.** A System whose latest activation has a settlement row with `settled_at` set is the
+settled shape. Four fences key on that row and nothing else:
+
+- The worker's ordinary teardown admits the settled shape. Every other activation history keeps
+  the #2966 refusal unchanged.
+- `route_external_boot_teardown` reads the settlement before
+  `resolve_external_boot_system_teardown_dispatch_binding` and sends a settled System to the
+  ordinary teardown, for both `systems.teardown` and `ops.force_teardown`. An authority-marked
+  prior teardown row is replaced with an ordinary one unless it is live, or canceled after a
+  worker claimed it and written since settlement; those are replayed.
+- The stalled `tearing_down` repair requeues a settled System's ordinary teardown.
+- Reconciler lease expiry refuses an allocation with a settled System that is not `torn_down`. The
+  release fence already holds it until teardown.
+
+One `platform_admin` tool, `ops.recover_stranded_activation`, with a required reason, drives the
+observation and the settlement in two steps. It audits a role denial, the observe request and
+every refusal of either step; a settlement is audited once, by the primitive. A configuration
+error is not a refusal and is not audited, as in `ops.force_teardown`. It settles
+only on a succeeded latest observation, and returns every refusal reason unchanged, including
+`authority_objects_present` and `stranded_observation_unsupported`. Teardown and release stay with
+the existing tools.
+
+No migration: 0194 already grants the worker and reconciler the settlement columns they read.
+
+**Consequences.**
+
+- Upgrade order: migrate, the authority host, every worker and the reconciler, then servers. The
+  tool ships in the server and is the only caller of `request_stranded_observation`. An old
+  reconciler would expire a settled allocation while the worker domain runs, so it upgrades before
+  any server. Do not use the tool until every server is upgraded: an old server routes a settled
+  System to the authority over its `retired` row.
+- A newer activation after settlement restores every fence, because each reads the latest
+  activation; the lease-expiry fence matches any settled activation, which only holds more.
+- Lease expiry for a completed, unsettled external-boot history is unchanged: it still expires
+  and its orphan teardown is still refused by the worker. That is outside this record.
+
+**Considered & rejected.**
+
+- **Infer worker ownership from activation state.** verified: the issue and this record's Decision
+  key routing on the settlement, and ADR-0752's relocated fixture has the same activation rows.
+- **One step that observes and settles.** judgment: fit. The observation is an asynchronous job,
+  and a refused rerun must not fall back to the earlier hour-long records; an explicit `observe`
+  step is the only way to request fresh evidence. `settle` reads the observation and settles under
+  one System lock, so a concurrent `observe` cannot slip between them.
+- **Let the tool also enqueue the teardown.** judgment: complexity. `ops.force_teardown` already
+  carries the reason, audit, routing and dedup, and now routes a settled System to the worker.
+- **Apply the full release fence to lease expiry.** judgment: scope. It would also hold every
+  completed authority history, a behaviour change for genuine authority Systems this issue
+  excludes.
+
 ## Considered & rejected
 
 - **Do nothing and leave recovery to lease expiry.** verified: `reconcile` skips the allocation

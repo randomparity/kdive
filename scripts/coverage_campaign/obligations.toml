@@ -161,6 +161,13 @@ authority = true
 "systems.resolve_external_boot_conflict" = "Wait for conflict resolution and verify authoritative provider and database state agree."
 
 [[groups]]
+owner = 3552
+execution = "provider"
+authority = true
+[groups.tools]
+"ops.recover_stranded_activation" = "Settle a stranded activation on both owners' evidence and verify its worker teardown reclaims the domain."
+
+[[groups]]
 owner = 3062
 execution = "provider"
 [groups.tools]

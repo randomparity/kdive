@@ -85,7 +85,9 @@ Break-glass release of a stuck cross-project Allocation. Requires platform_admin
 Break-glass teardown of a stuck cross-project System. Requires platform_admin.
 
 A System with external-boot activation history gets the authority-marked teardown that
-systems.teardown enqueues, never an ordinary job the worker would refuse.
+systems.teardown enqueues, never an ordinary job the worker would refuse. The exception is
+a System whose latest activation ops.recover_stranded_activation settled: it gets the
+ordinary teardown on the worker that owns its domain.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -192,6 +194,36 @@ reference clock; an empty or oversized field is refused without deletion.
 | `holder` | string | yes | Exact worker incarnation recorded on that use row; max 512 bytes in UTF-8 encoding. The byte limit has no clock and applies to this field in one recovery request; an empty or oversized value is refused without recovery, so retry with the exact bounded holder from ops.build_uses_list in ops.recover_build_use. |
 | `reason` | string | yes | Operator justification retained in the recovery ledger; max 512 bytes in UTF-8 encoding. The byte limit has no clock and applies to this field in one recovery request; an empty or oversized value is refused without recovery, so retry with a concise reason in ops.recover_build_use. |
 | `use_id` | string | yes | Exact stranded build-use UUID. |
+
+## `ops.recover_stranded_activation`
+
+`implemented` · `destructive`
+
+Recover a fixed-worker activation stranded on the external-boot authority.
+
+Requires platform_admin; a denial is audited. Run step='observe' first: the fixed worker
+confirms its daemon holds the System's domain and the authority confirms its own daemon
+and store hold nothing for the activation. Then run step='settle', which also reports a
+pending observation. It settles only when the latest observation succeeded and returns
+any refusal unchanged in data.reason, such as authority_objects_present (whose detail
+names the objects the authority still holds) or stranded_observation_unsupported (a
+provider without the observation). Evidence is valid for one hour; after a refusal run
+'observe' again rather than settling. Each observe request and each refusal is written
+to the platform audit log; a settlement writes its own row.
+
+A settled System's teardown then runs on its worker: call ops.force_teardown, and once
+the System is torn_down, release the allocation. Until then neither lease expiry nor
+release ends the allocation.
+
+Upgrade order: migrate, the authority host, every worker and the reconciler, then
+servers. Do not use this tool until every server is upgraded: an older server still
+routes a settled System's teardown to the authority.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `activation_id` | string | yes | The stranded `preparing` external-boot activation. |
+| `reason` | string | yes | Mandatory justification, 1 to 1024 bytes (audited). |
+| `step` | `observe`, `settle` | yes | 'observe' asks both owners for fresh evidence; 'settle' reads that observation and settles the activation only if it succeeded. |
 
 ## `ops.resolve_recovery_orphan`
 

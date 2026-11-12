@@ -214,6 +214,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "ops.force_release": _PLAT_ADMIN,
     "ops.force_teardown": _PLAT_ADMIN,
     "ops.resolve_recovery_orphan": _PLAT_ADMIN,
+    "ops.recover_stranded_activation": _PLAT_ADMIN,
     "ops.reconcile_systems": _PLAT_ADMIN,
     # postmortem
     "postmortem.crash": _CONTRIBUTOR,

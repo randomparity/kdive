@@ -42,6 +42,8 @@ DESTRUCTIVE_TOOLS = frozenset(
         "ops.force_release",
         # Its promoted behavior deletes or adopts quarantined recovery objects (#2117, #2118).
         "ops.resolve_recovery_orphan",
+        # Settling ends an external-boot activation and lifts its teardown fence (#3551).
+        "ops.recover_stranded_activation",
         "ops.reconcile_systems",
         "resources.drain",
         "resources.deregister",

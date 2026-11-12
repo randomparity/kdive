@@ -38,6 +38,7 @@ def test_destructive_tools_set_is_the_reviewed_set() -> None:
                 "ops.force_teardown",
                 "ops.force_release",
                 "ops.resolve_recovery_orphan",
+                "ops.recover_stranded_activation",
                 "ops.reconcile_systems",
                 "resources.drain",
                 "resources.deregister",

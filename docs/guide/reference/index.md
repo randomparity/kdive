@@ -81,6 +81,7 @@
 | [`ops.reconcile_now`](ops.md#opsreconcile_now) | `implemented` |
 | [`ops.reconcile_systems`](ops.md#opsreconcile_systems) | `implemented` |
 | [`ops.recover_build_use`](ops.md#opsrecover_build_use) | `implemented` |
+| [`ops.recover_stranded_activation`](ops.md#opsrecover_stranded_activation) | `implemented` |
 | [`ops.resolve_recovery_orphan`](ops.md#opsresolve_recovery_orphan) | `implemented` |
 | [`ops.set_cost_class_coeff`](ops.md#opsset_cost_class_coeff) | `implemented` |
 | [`ops.set_host_capacity`](ops.md#opsset_host_capacity) | `implemented` |

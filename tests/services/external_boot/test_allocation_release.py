@@ -259,3 +259,47 @@ def test_reconciler_reclaim_retains_a_failed_system_with_external_boot_history(
             assert outcome.category is ErrorCategory.CONFLICT
 
     asyncio.run(body())
+
+
+def test_expiry_holds_an_allocation_whose_settled_system_still_runs(
+    migrated_url: str, seeded_activation: SeedActivation, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A settlement lifts the admission guard, not the worker domain (ADR-0816, #3551)."""
+
+    async def body() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            seeded = await seeded_activation(
+                conn, state=ExternalBootActivationState.ABANDONED, cleanup_complete=True
+            )
+            await conn.execute(
+                "INSERT INTO external_boot_activation_settlements (activation_id, system_id, "
+                "authority_composite_state, authority_absent_objects, authority_recorded_at, "
+                "worker_domain_name, worker_recorded_at, principal, reason, settled_at) "
+                "VALUES (%s, %s, %s, '{}', now(), 'kdive-d', now(), 'admin', 'stranded', now())",
+                (seeded.activation.id, seeded.system_id, "sha256:" + "e" * 64),
+            )
+            cursor = await conn.execute(
+                "UPDATE allocations SET state = 'active', lease_expiry = now() - interval '1s' "
+                "WHERE id = (SELECT allocation_id FROM systems WHERE id = %s) RETURNING id",
+                (seeded.system_id,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            allocation_id = row[0]
+
+            with caplog.at_level(logging.INFO, logger=allocation_repairs.__name__):
+                assert await sweep_expired_allocations(conn) == 0
+            held = _repair_records(caplog, logging.WARNING)
+            assert len(held) == 1
+            assert str(seeded.system_id) in held[0].getMessage()
+
+            await conn.execute(
+                "UPDATE systems SET state = 'torn_down' WHERE id = %s", (seeded.system_id,)
+            )
+            assert await sweep_expired_allocations(conn) == 1
+            state = await conn.execute(
+                "SELECT state FROM allocations WHERE id = %s", (allocation_id,)
+            )
+            assert await state.fetchone() == ("expired",)
+
+    asyncio.run(body())

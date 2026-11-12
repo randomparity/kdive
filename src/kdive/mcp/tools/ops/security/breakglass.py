@@ -22,7 +22,7 @@ a rolled-back or failed release never rolls back the accountability record.
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastmcp import FastMCP
@@ -32,7 +32,7 @@ from pydantic import Field
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -67,6 +67,12 @@ from kdive.services.allocation.release import (
     ReleaseOutcome,
     breakglass_release_allocation,
 )
+from kdive.services.external_boot.settlement import (
+    SETTLEMENT_REASON_MAX_BYTES,
+    request_stranded_observation,
+    settle_observed_stranded_activation,
+    settlement_reason,
+)
 from kdive.services.systems.authority_owned import (
     enqueue_control_teardown,
     ordinary_mutation_is_fenced,
@@ -76,6 +82,8 @@ _log = logging.getLogger(__name__)
 
 _FORCE_RELEASE_TOOL = "ops.force_release"
 _FORCE_TEARDOWN_TOOL = "ops.force_teardown"
+_RECOVER_STRANDED_TOOL = "ops.recover_stranded_activation"
+StrandedStep = Literal["observe", "settle"]
 
 
 def _blank(reason: str) -> bool:
@@ -192,8 +200,9 @@ async def force_teardown(
     non-blank ``reason`` + the always-written ``platform_audit_log`` row. Enqueues the same
     idempotent ``JobKind.TEARDOWN`` job as ``systems.teardown`` (same dedup key) under an
     authorizing context bound to the target's project; a System with external-boot activation
-    history gets the authority-marked teardown, which needs ``resolver`` (#3007). A terminal
-    System returns success idempotently.
+    history gets the authority-marked teardown, which needs ``resolver`` (#3007), unless its
+    latest activation was settled, which gets the ordinary teardown (#3551). A terminal System
+    returns success idempotently.
     """
     try:
         require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
@@ -297,6 +306,111 @@ async def _teardown_locked(
     return job_envelope(job, "system_id", uid)
 
 
+async def recover_stranded_activation(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    activation_id: str,
+    step: str,
+    reason: str,
+) -> ToolResponse:
+    """Observe, then settle, a stranded fixed-worker activation (``platform_admin``, ADR-0816).
+
+    Every outcome reaches ``platform_audit_log``: a role denial, each observe request (written
+    before it runs), each refusal of either step under scope ``refused:<reason>:<activation>``,
+    and a settlement through the settlement function's own row.
+    """
+    try:
+        require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
+    except AuthorizationError:
+        await audit_platform_denial(
+            pool,
+            ctx,
+            tool=_RECOVER_STRANDED_TOOL,
+            scope=f"denied:{activation_id}",
+            args={"activation_id": activation_id, "step": step},
+        )
+        return ToolResponse.denied(activation_id, missing_roles=[PlatformRole.PLATFORM_ADMIN])
+    with bind_context(principal=ctx.principal):
+        uid = _as_uuid(activation_id)
+        normalized = settlement_reason(reason)
+        if uid is None or normalized is None or step not in ("observe", "settle"):
+            return _config_error(activation_id)
+        try:
+            if step == "observe":
+                return await _observe_stranded(pool, ctx, uid, normalized)
+            async with pool.connection() as conn:
+                system_id = await settle_observed_stranded_activation(
+                    conn, ctx, activation_id=uid, actor=actor_for(ctx), reason=normalized
+                )
+        except CategorizedError as exc:
+            return await _stranded_refusal(pool, ctx, uid, step, normalized, exc)
+    return ToolResponse.success(
+        str(uid),
+        "settled",
+        suggested_next_actions=["ops.force_teardown", "systems.get"],
+        data={"system_id": str(system_id)},
+    )
+
+
+async def _observe_stranded(
+    pool: AsyncConnectionPool, ctx: RequestContext, uid: UUID, reason: str
+) -> ToolResponse:
+    await _record_stranded(
+        pool, ctx, scope=f"observe:{uid}", uid=uid, step="observe", reason=reason
+    )
+    async with pool.connection() as conn:
+        job = await request_stranded_observation(conn, ctx, activation_id=uid)
+    # `jobs.wait` answers `not_found` for this platform-internal kind; `settle` reads it.
+    return ToolResponse.success(
+        str(uid),
+        "observation_requested",
+        suggested_next_actions=[_RECOVER_STRANDED_TOOL],
+        data={"job_id": str(job.id), "job_state": job.state.value},
+    )
+
+
+async def _stranded_refusal(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    uid: UUID,
+    step: str,
+    reason: str,
+    exc: CategorizedError,
+) -> ToolResponse:
+    refusal = str(exc.details.get("reason") or exc.category.value)
+    await _record_stranded(
+        pool, ctx, scope=f"refused:{refusal}:{uid}", uid=uid, step=step, reason=reason
+    )
+    return ToolResponse.failure_from_error(
+        str(uid), exc, suggested_next_actions=[_RECOVER_STRANDED_TOOL, "systems.get"]
+    )
+
+
+async def _record_stranded(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    scope: str,
+    uid: UUID,
+    step: str,
+    reason: str,
+) -> None:
+    async with pool.connection() as conn, conn.transaction():
+        await audit.record_platform(
+            conn,
+            principal=ctx.principal,
+            agent_session=ctx.agent_session,
+            event=audit.PlatformAuditEvent(
+                tool=_RECOVER_STRANDED_TOOL,
+                scope=scope,
+                args={"activation_id": str(uid), "step": step, "reason": reason},
+                platform_role=held_platform_roles(ctx),
+                actor=actor_for(ctx),
+            ),
+        )
+
+
 def register(
     app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver | None = None
 ) -> None:
@@ -334,10 +448,63 @@ def register(
         """Break-glass teardown of a stuck cross-project System. Requires platform_admin.
 
         A System with external-boot activation history gets the authority-marked teardown that
-        systems.teardown enqueues, never an ordinary job the worker would refuse.
+        systems.teardown enqueues, never an ordinary job the worker would refuse. The exception is
+        a System whose latest activation ops.recover_stranded_activation settled: it gets the
+        ordinary teardown on the worker that owns its domain.
         """
         return await force_teardown(
             pool, current_context(), system_id=system_id, reason=reason, resolver=resolver
+        )
+
+    @app.tool(
+        name=_RECOVER_STRANDED_TOOL,
+        annotations=_docmeta.destructive(),
+        meta={"maturity": "implemented"},
+    )
+    async def ops_recover_stranded_activation(
+        activation_id: Annotated[
+            str, Field(description="The stranded `preparing` external-boot activation.")
+        ],
+        step: Annotated[
+            StrandedStep,
+            Field(
+                description=(
+                    "'observe' asks both owners for fresh evidence; 'settle' reads that "
+                    "observation and settles the activation only if it succeeded."
+                )
+            ),
+        ],
+        reason: Annotated[
+            str,
+            Field(
+                description=(
+                    f"Mandatory justification, 1 to {SETTLEMENT_REASON_MAX_BYTES} bytes (audited)."
+                )
+            ),
+        ],
+    ) -> ToolResponse:
+        """Recover a fixed-worker activation stranded on the external-boot authority.
+
+        Requires platform_admin; a denial is audited. Run step='observe' first: the fixed worker
+        confirms its daemon holds the System's domain and the authority confirms its own daemon
+        and store hold nothing for the activation. Then run step='settle', which also reports a
+        pending observation. It settles only when the latest observation succeeded and returns
+        any refusal unchanged in data.reason, such as authority_objects_present (whose detail
+        names the objects the authority still holds) or stranded_observation_unsupported (a
+        provider without the observation). Evidence is valid for one hour; after a refusal run
+        'observe' again rather than settling. Each observe request and each refusal is written
+        to the platform audit log; a settlement writes its own row.
+
+        A settled System's teardown then runs on its worker: call ops.force_teardown, and once
+        the System is torn_down, release the allocation. Until then neither lease expiry nor
+        release ends the allocation.
+
+        Upgrade order: migrate, the authority host, every worker and the reconciler, then
+        servers. Do not use this tool until every server is upgraded: an older server still
+        routes a settled System's teardown to the authority.
+        """
+        return await recover_stranded_activation(
+            pool, current_context(), activation_id=activation_id, step=step, reason=reason
         )
 
     @app.tool(
