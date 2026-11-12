@@ -29,8 +29,7 @@ from the stranded shape to a released allocation.
    reconciler and authority run this build; CI runs the real-DB test.
 2. Invariants: no allocation is released while a domain of its System is on either daemon,
    and a settled System's teardown runs only on the worker holding its domain.
-3. Accepted: a remote-libvirt System stays stranded (`stranded_observation_unsupported`,
-   ADR-0816); the runbook names it.
+3. Accepted: remote-libvirt Systems stay stranded (`stranded_observation_unsupported`).
 4. Covered elsewhere: authority-owned provision strands (#3584); held-object removal (#3587).
 
 ## Success
