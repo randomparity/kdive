@@ -57,5 +57,4 @@ domain the server's TLS daemon cannot see and report `ssh_not_provisioned`.
   case asserting no refusal.
 - Success 4: focused-test, `tests/providers/remote_libvirt/lifecycle/test_connect.py` bound and
   no-IO cases with an `open_connection` that fails if called.
-- Wording, ADR amendment: task-test-not-applicable; prose only, and the generated reference is
-  checked by `just docs` drift.
+- Wording, ADR amendment: task-test-not-applicable; prose only (`just docs` checks the reference).
