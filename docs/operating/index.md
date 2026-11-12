@@ -46,6 +46,7 @@ Step-by-step procedures for live runs and operational tasks.
 | [Diagnostic verification](runbooks/doctor-exit-criterion.md) | Seeded-fault evidence and the limits of doctor checks |
 | [Stuck `tearing_down` System](runbooks/stuck-tearing-down-system.md) | Ending a `tearing_down` System with external-boot history through the authority teardown |
 | [Exhausted authority System provision](runbooks/exhausted-authority-system-provision.md) | Discharging a never-activated System whose final provision attempt lost its worker |
+| [Stranded activation recovery](runbooks/stranded-activation-recovery.md) | Releasing an Allocation stranded by a fixed-worker System routed to the external-boot authority |
 | [Live testing](runbooks/live-testing.md) | How to run each live test tier (`live_stack`, `live_vm`, `live_vm_tcg`) and its environment contract |
 
 ## Investigation
