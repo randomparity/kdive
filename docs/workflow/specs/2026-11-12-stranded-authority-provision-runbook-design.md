@@ -45,6 +45,6 @@ mismatches the manifest. Neither claim has been checked on a live lab.
 
 - Contract: runbook sequences (Success 1, 2, 4). Mode: task-test-not-applicable — the changed
   surface is operator prose with no executable consumer; the proof is the private live run whose
-  command log and DB/daemon snapshots are recorded in the PR body.
-- Contract: links and anchors (Success 3). Mode: focused-test — `just docs-links` (scripts/check-doc-links.sh)
-  fails red on a missing target or heading anchor; green after the fix.
+  command log and DB/daemon snapshots are summarized, public-safe, in the PR body.
+- Contract: links and anchors (Success 3). Mode: focused-test — `just docs-links`
+  (`scripts/check-doc-links.sh`) fails red on a missing target or heading anchor; green after the fix.
