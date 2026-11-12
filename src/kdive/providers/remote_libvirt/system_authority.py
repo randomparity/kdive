@@ -1250,6 +1250,7 @@ class RemoteAuthoritySystemProvider:
             bootstrap_ready=bootstrap_ready,
             quarantine_retained=not complete,
             completed_at=intent.completed_at if complete else None,
+            ssh_forward_port=intent.ssh_port if complete else None,
         )
 
     def _manifest_entry_for_intent(
