@@ -16,7 +16,8 @@ mismatches the manifest. Neither claim has been checked on a live lab.
   and adds only what the live run observed beyond it.
 - If the mismatch shape has no operator exit, the entry says so and names lab rollback; the
   missing exit is reported as a follow-up candidate, not fixed.
-- `live-stack.md` gets one pointer line near the wedged-slot section.
+- `live-stack.md` gets one pointer line near the wedged-slot section. The subsection links
+  `stranded-activation-recovery.md` for a System the fixed worker provisioned (not restated).
 - Evidence: one live run on an Ubuntu 26.04 local-authority lab at `c6d63e671`. Induction:
   matching inventory with an image whose root the manifest does not install (matches); an
   inventory `authority_instance` the manifest does not carry (mismatches); worker killed while
@@ -39,7 +40,7 @@ mismatches the manifest. Neither claim has been checked on a live lab.
    not-reproduced statement with its reason.
 2. The binding-mismatch sentence matches what the lab observed and names the real exit, or
    states none exists and names lab rollback.
-3. `live-stack.md` links the new subsection.
+3. `live-stack.md` links the new subsection; the subsection links both sibling runbooks.
 4. No sequence in the new text is presented as proven unless the lab run executed it.
 
 ## Validation
