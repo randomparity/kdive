@@ -46,7 +46,8 @@ collision checks, any `gdb_port_min` floor.
    there (ADR-0815 accepted this). The runtime check and the preflight must agree on 1024 so a
    deploy that passes preflight starts.
 3. **Accepted failure classes** — an intent persisted before this change with a port below
-   1024 cannot reach the new facts: the floor refuses that manifest at startup. A remote
+   1024 cannot reach the new facts: the floor refuses that manifest at startup, and after the
+   operator raises the range, `_same_subject` refuses the old intent as a CONFLICT. A remote
    System completed before this change keeps no stored port (backfill excluded, ADR-0815).
 4. **Covered elsewhere** — the port's range on the server side and its 1024-65535 recheck
    (#3585); storage immutability (migration 0191); port contention across daemons
