@@ -18,12 +18,13 @@ All of these hold:
 - The System is not authority-owned: the fixed worker provisioned it. The usual cause is an
   `authority_instance` added to a Resource after the worker provisioned Systems on it
   ([ADR-0752](../../adr/0752-admit-authority-run-routing-by-resource-route.md) Consequences), or a
-  `relocated_authority_instance` fixture whose relocation never ran.
+  Resource declared with `relocated_authority_instance` in the inventory before its Systems were
+  moved to the authority.
 - The System's provider is local-libvirt. Any other provider refuses with
   `stranded_observation_unsupported`, and no tool recovers it.
-- The System is neither `tearing_down` nor `torn_down`, and no authority-marked job is queued or
-  running for it. Do not run `systems.teardown` or `ops.force_teardown` before the settlement:
-  either one puts the System in a state that settlement refuses.
+- The System is neither `tearing_down` nor `torn_down`. Do not run `systems.teardown` or
+  `ops.force_teardown` before the settlement: either one puts the System in a state that
+  settlement refuses.
 
 An authority-owned System that failed to provision is a different shape, with a different
 recovery: see [Exhausted authority System provision](exhausted-authority-system-provision.md).
@@ -57,18 +58,25 @@ refusal is written to the platform audit log, and a settlement writes its own ro
    `observation_pending` with the job id. Run `settle` again after a few seconds. On success the
    status is `settled` and `data.system_id` names the System. The activation is now `abandoned`
    with cleanup complete, and its reservation is released.
-3. **Tear down on the worker.** Run `ops.force_teardown` for that System (`kdivectl ops
-   force-teardown <system-id> --reason "<why>" --force`). A settled System's teardown runs on the
-   worker that holds the domain, not on the authority. Wait for the job with `jobs.wait` until
-   `systems.get` reports `torn_down`. Run no `runs.boot` on the System before this step. A new
-   activation is unsettled, so every fence returns and the recovery starts over.
+
+   The `runs.boot` that stranded the System usually leaves its `boot` job `running` after its
+   last attempt: the reconciler does not dead-letter an exhausted boot job whose authority row is
+   still current. Settlement then refuses with `job_live`. When that job's `attempt` equals its
+   `max_attempts` and its lease has lapsed, no worker holds it: cancel it with `jobs.cancel`
+   (project `contributor`), then run `observe` and `settle` again.
+3. **Tear down on the worker.** Run `ops.force_teardown` for that System; from the CLI,
+   `kdivectl ops force-teardown <system-id> --reason "<why>" --force`. A settled System's
+   teardown runs on the worker that holds the domain, not on the authority. Wait for the job
+   with `jobs.wait` until `systems.get` reports `torn_down`. Run no `runs.boot` on the System
+   before this step. A new activation is unsettled, so every fence returns and the recovery
+   starts over.
 4. **Release.** Run `allocations.release` (project `contributor`) or `ops.force_release`
    (`platform_admin`). Release refuses with `external_boot_system_teardown_required` until the
    System is `torn_down`.
 
 ## Confirm the domain and the Allocation are gone
 
-- `allocations.get` reports the Allocation `released`, and `systems.get` reports the System
+- `allocations.list` reports the Allocation `released`, and `systems.get` reports the System
   `torn_down`.
 - On the worker host, the worker's daemon (the Resource's `host_uri`) has no `kdive-<system-id>`
   domain: `virsh -c '<host_uri>' list --all`.
@@ -88,7 +96,7 @@ run `observe` again rather than `settle` on the older evidence.
 | `authority_owned` | either | The System has an authority ownership row, so the authority owns it. This tool does not apply. |
 | `not_preparing` | observe, settle | The activation has left `preparing`. Read it with `runs.get`. A settled replay returns `settled` again. |
 | `system_ended` | settle | The System is `tearing_down` or `torn_down`, so a teardown ran before settlement. See [Stuck `tearing_down` System](stuck-tearing-down-system.md). |
-| `job_live` | settle | An authority-marked job for the System is queued or running. Wait for it to end, then `observe` again. |
+| `job_live` | settle | An authority-marked job for the System is queued or running. Cancel an exhausted `boot` job with a lapsed lease as step 2 describes; wait for any other job to end. Then `observe` again. |
 | `observation_missing` | settle | No observation was requested. Run `observe` first. |
 | `observation_pending` | settle | The observation job is still queued or running. Run `settle` again. |
 | `worker_domain_absent` | settle | The worker's daemon holds no domain named for the System, so this is not the worker-owned shape. Check whether a relocation moved it to the authority. |
