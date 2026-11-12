@@ -43,10 +43,11 @@ refusal is written to the platform audit log, and a settlement writes its own ro
 
    ```sh
    kdivectl ops recover-stranded-activation --activation-id <activation-id> \
-     --step observe --reason "<why>" --force
+     --step observe --reason "<why>" --yes
    ```
 
-   The CLI requires `--force` because the tool is destructive.
+   The CLI asks for typed confirmation of this destructive call; `--yes` skips the prompt for
+   non-interactive use.
 
    The response is `observation_requested`. Its `data.job_id` is a platform-internal job. Do not
    pass it to `jobs.wait`, which answers `not_found` for this kind. In the job, the fixed worker
@@ -56,11 +57,11 @@ refusal is written to the platform audit log, and a settlement writes its own ro
    `observation_pending` with the job id. Run `settle` again after a few seconds. On success the
    status is `settled` and `data.system_id` names the System. The activation is now `abandoned`
    with cleanup complete, and its reservation is released.
-3. **Tear down on the worker.** Run `ops.force_teardown` (`kdivectl ops force-teardown`) for that
-   System. A settled System's teardown runs on the worker that holds the domain, not on the
-   authority. Wait for the job with `jobs.wait` until `systems.get` reports `torn_down`. Run no
-   `runs.boot` on the System before this step. A new activation is unsettled, so every fence
-   returns and the recovery starts over.
+3. **Tear down on the worker.** Run `ops.force_teardown` for that System (`kdivectl ops
+   force-teardown <system-id> --reason "<why>" --force`). A settled System's teardown runs on the
+   worker that holds the domain, not on the authority. Wait for the job with `jobs.wait` until
+   `systems.get` reports `torn_down`. Run no `runs.boot` on the System before this step. A new
+   activation is unsettled, so every fence returns and the recovery starts over.
 4. **Release.** Run `allocations.release` (project `contributor`) or `ops.force_release`
    (`platform_admin`). Release refuses with `external_boot_system_teardown_required` until the
    System is `torn_down`.

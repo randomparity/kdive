@@ -126,7 +126,9 @@ async def _worker_teardown(lab: _Lab, pool: AsyncConnectionPool) -> FakeProvisio
     assert job is not None
     assert set(job.payload) == {"system_id"}, "a settled System's teardown is the ordinary one"
     provisioner = FakeProvisioning()
-    async with await psycopg.AsyncConnection.connect(lab.url, autocommit=True) as conn:
+    async with await psycopg.AsyncConnection.connect(
+        lab.role_dsns("kdive_worker"), autocommit=True
+    ) as conn:
         await systems_handlers.teardown_handler(
             conn,
             job,
