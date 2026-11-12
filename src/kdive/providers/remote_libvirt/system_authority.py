@@ -69,6 +69,7 @@ from kdive.providers.system_authority import (
     AuthoritySystemProvisionFacts,
     AuthoritySystemProvisionSnapshot,
 )
+from kdive.providers.system_authority.protocol import SSH_FORWARD_PORT_MIN
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,254}\Z")
@@ -163,6 +164,8 @@ class RemoteAuthoritySystemManifestEntry:
         ):
             if type(low) is not int or type(high) is not int or not 1 <= low <= high <= 65535:
                 raise ValueError(f"authority {label} port range is invalid")
+        if self.ssh_port_min < SSH_FORWARD_PORT_MIN:
+            raise ValueError(f"authority ssh port range starts below {SSH_FORWARD_PORT_MIN}")
         if self.gdb_port_min == self.gdb_port_max:
             raise ValueError("authority gdb range must reserve one probe port and one guest port")
         if (
