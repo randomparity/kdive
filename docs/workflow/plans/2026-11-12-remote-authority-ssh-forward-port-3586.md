@@ -40,7 +40,11 @@ Verification:
 - facts port. Mode: focused-test. In `test_provider_implements_fixed_port_and_persists_intent_before_mutation`
   add `assert facts.ssh_forward_port == 47100`; in `test_observe_complete_provision_changes_no_private_or_libvirt_state`
   add `assert facts.ssh_forward_port == 47100`; in `test_absent_observation_is_read_only` add
-  `assert facts.ssh_forward_port is None`. Red: the two complete-path asserts fail with `None == 47100`.
+  `assert facts.ssh_forward_port is None`; in `test_interrupted_definition_reuses_overlay_ports_and_retained_deadline`,
+  right after `assert first["phase"] == "overlay-ready"`, add
+  `partial = await provider.observe_system_provision(_request(), _context(), _snapshot())` and
+  `assert not partial.complete and partial.ssh_forward_port is None` (a present but incomplete
+  intent reports no port). Red: the two complete-path asserts fail with `None == 47100`.
   Green: `uv run pytest tests/providers/remote_libvirt/test_system_authority.py -q`.
 
 Steps:
@@ -61,7 +65,8 @@ def test_remote_entry_refuses_ssh_range_below_receipt_floor(
 ) -> None:
     path = tmp_path / "manifest.json"
     document = _remote_document()
-    document["entries"][0]["ssh_port_min"] = ssh_port_min
+    # Keep the ssh range clear of the fixture's gdb range (31000-31002) on the same address.
+    document["entries"][0].update(ssh_port_min=ssh_port_min, ssh_port_max=ssh_port_min + 2)
     _write_manifest(path, document)
 
     if accepted:
@@ -72,7 +77,7 @@ def test_remote_entry_refuses_ssh_range_below_receipt_floor(
         load_authority_system_manifest(path, owner_uid=os.getuid(), owner_gid=os.getgid())
 ```
 
-  Red: the 1023 case does not raise. Green:
+  Red: the 1023 case loads (no floor yet). Green:
   `uv run pytest tests/providers/system_authority/test_manifest.py -q`.
 
 Steps:
@@ -98,7 +103,10 @@ Verification:
 def test_system_provisioning_validator_refuses_remote_ssh_range_below_1024(
     tmp_path: Path, ssh_port_min: int, accepted: bool
 ) -> None:
-    value = _remote_validator_input(tmp_path, ssh_port_min=ssh_port_min)
+    # Keep the ssh range clear of the fixture's gdb range (31000-31002) on the same address.
+    value = _remote_validator_input(
+        tmp_path, ssh_port_min=ssh_port_min, ssh_port_max=ssh_port_min + 2
+    )
 
     assert (_run_system_provisioning_validator(value).returncode == 0) is accepted
 ```

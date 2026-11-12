@@ -64,11 +64,14 @@ collision checks, any `gdb_port_min` floor.
 ## Validation
 
 - facts port — `focused-test`: `tests/providers/remote_libvirt/test_system_authority.py`, extend
-  the complete-provision and absent-observation tests; red: `facts.ssh_forward_port is None`.
+  the complete-provision, absent-observation, and interrupted (incomplete-intent) tests; red:
+  `facts.ssh_forward_port is None` on the complete path.
 - runtime floor — `focused-test`: `tests/providers/system_authority/test_manifest.py`
-  parametrized 1023 refused / 1024 accepted; red: 1023 loads.
+  parametrized 1023 refused / 1024 accepted, with `ssh_port_max = ssh_port_min + 2` so the range
+  stays clear of the fixture's gdb range; red: 1023 loads.
 - preflight floor — `focused-test`: `tests/deploy/test_provider_authority_local_provisioning.py`
-  parametrized 1023 / 1024 through `_remote_validator_input`; red: 1023 exits 0.
+  parametrized 1023 / 1024 through `_remote_validator_input`, same `ssh_port_max`; red: 1023
+  exits 0.
 - comment wording — `task-test-not-applicable`: prose comment, no executable consumer.
 - lifecycle identity — `focused-test`: `lifecycle_protocol_identity()` printed on `origin/main`
   and on the branch must be identical strings.
