@@ -16,11 +16,11 @@ mismatches the manifest. Neither claim has been checked on a live lab.
   and adds only what the live run observed beyond it.
 - If the mismatch shape has no operator exit, the entry says so and names lab rollback; the
   missing exit is reported as a follow-up candidate, not fixed.
-- `live-stack.md` gets one pointer line near the wedged-slot section;
-  `stranded-activation-recovery.md` is already linked from the new text and is not edited unless
-  its cross-reference becomes wrong.
-- Evidence comes from one live run on an Ubuntu 26.04 local-authority lab at the merge base.
-  A shape the run cannot reproduce is labelled not reproduced, with the reason.
+- `live-stack.md` gets one pointer line near the wedged-slot section.
+- Evidence: one live run on an Ubuntu 26.04 local-authority lab at `c6d63e671`. Induction:
+  matching inventory with an image whose root the manifest does not install (matches); an
+  inventory `authority_instance` the manifest does not carry (mismatches); worker killed while
+  the final provision attempt runs (worker died). An unreproduced shape is labelled so, with why.
 
 ### Failure model
 
@@ -37,7 +37,8 @@ mismatches the manifest. Neither claim has been checked on a live lab.
 
 1. Each of the three shapes has an entry whose sequence ran on the lab, or an explicit
    not-reproduced statement with its reason.
-2. The binding-mismatch sentence matches what the lab observed and names the real exit.
+2. The binding-mismatch sentence matches what the lab observed and names the real exit, or
+   states none exists and names lab rollback.
 3. `live-stack.md` links the new subsection.
 4. No sequence in the new text is presented as proven unless the lab run executed it.
 
@@ -45,7 +46,8 @@ mismatches the manifest. Neither claim has been checked on a live lab.
 
 - Contract: runbook sequences (Success 1, 2, 4). Mode: task-test-not-applicable — the changed
   surface is operator prose with no executable consumer; the proof is the private live run whose
-  command log and DB/daemon snapshots are summarized, public-safe, in the PR body.
+  command log and DB/daemon snapshots are kept in private scratch and summarized,
+  public-safe, in the PR body.
 - Contract: links and anchors (Success 3). Mode: focused-test — `just docs-links`
   (`scripts/check-doc-links.sh`) fails red on a missing target or heading anchor; green after
   the fix.
