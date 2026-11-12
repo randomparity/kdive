@@ -11,12 +11,14 @@ from __future__ import annotations
 import hashlib
 from uuid import uuid4
 
+from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing as job_authorizing
@@ -39,7 +41,10 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
-from kdive.services.systems.authority_owned import ordinary_mutation_is_fenced
+from kdive.services.systems.authority_owned import (
+    authority_ssh_forward_port,
+    ordinary_mutation_is_fenced,
+)
 
 _SSH_USER = "root"
 _NOT_READY_DETAIL = "System is not ready; SSH is available only on a ready System."
@@ -50,6 +55,22 @@ _UNPROVISIONED_DETAIL = (
     "This System's provider exposes no loopback SSH forward; direct SSH to a System is a "
     "local-libvirt capability."
 )
+
+
+async def _recorded_endpoint(
+    conn: AsyncConnection, resolver: ProviderResolver, system: System
+) -> tuple[tuple[str, int] | None, int | None]:
+    """The System's SSH endpoint, and the authority-reported port a job must carry (ADR-0811).
+
+    The port is ``None`` unless the System is authority-owned and local. An owned System that
+    reported none raises instead of falling back to a domain this process cannot read.
+    """
+    forward = await authority_ssh_forward_port(conn, system.id)
+    binding = await resolver.binding_for_system(conn, system.id)
+    endpoint = binding.runtime.connector.recorded_ssh_endpoint(
+        SystemHandle(system.domain_name or str(system.id)), ssh_forward_port=forward
+    )
+    return endpoint, forward
 
 
 async def ssh_info(
@@ -74,10 +95,8 @@ async def ssh_info(
                     system_id, ErrorCategory.READINESS_FAILURE, detail=_NOT_READY_DETAIL
                 )
             try:
-                binding = await resolver.binding_for_system(conn, uid)
-                recorded = binding.runtime.connector.recorded_ssh_endpoint(
-                    SystemHandle(system.domain_name or str(system.id))
-                )
+                recorded, forward = await _recorded_endpoint(conn, resolver, system)
+                fenced = forward is not None and await ordinary_mutation_is_fenced(conn, uid)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(system_id, exc)
     if recorded is None:
@@ -88,8 +107,11 @@ async def ssh_info(
             data={"reason": "ssh_not_provisioned"},
         )
     host, port = recorded
+    # A local authority System refuses both job tools before its first activation.
     actions = visible_next_actions(
-        ["systems.check_ssh_reachable", "systems.authorize_ssh_key", "systems.get"],
+        ["systems.get"]
+        if fenced
+        else ["systems.check_ssh_reachable", "systems.authorize_ssh_key", "systems.get"],
         ctx,
         system.project,
     )
@@ -152,10 +174,7 @@ async def authorize_ssh_key(
             except ExternalBootDenied as exc:
                 return _external_boot_denial(system_id, exc, ctx)
             try:
-                binding = await resolver.binding_for_system(conn, uid)
-                recorded = binding.runtime.connector.recorded_ssh_endpoint(
-                    SystemHandle(system.domain_name or str(system.id))
-                )
+                recorded, forward = await _recorded_endpoint(conn, resolver, system)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(system_id, exc)
             if recorded is None:
@@ -191,7 +210,9 @@ async def authorize_ssh_key(
                 job = await queue.enqueue(
                     conn,
                     JobKind.AUTHORIZE_SSH_KEY,
-                    AuthorizeSshKeyPayload(system_id=system_id, public_key=normalized),
+                    AuthorizeSshKeyPayload(
+                        system_id=system_id, public_key=normalized, ssh_forward_port=forward
+                    ),
                     job_authorizing(ctx, system.project),
                     dedup_key,
                 )
@@ -227,10 +248,7 @@ async def check_ssh_reachable(
                         data={"reason": "authority_system_preactivation_mutation_fenced"},
                     )
             try:
-                binding = await resolver.binding_for_system(conn, uid)
-                recorded = binding.runtime.connector.recorded_ssh_endpoint(
-                    SystemHandle(system.domain_name or str(system.id))
-                )
+                recorded, forward = await _recorded_endpoint(conn, resolver, system)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(system_id, exc)
             if recorded is None:
@@ -247,7 +265,7 @@ async def check_ssh_reachable(
             job = await queue.enqueue(
                 conn,
                 JobKind.CHECK_SSH_REACHABLE,
-                CheckSshReachablePayload(system_id=system_id),
+                CheckSshReachablePayload(system_id=system_id, ssh_forward_port=forward),
                 job_authorizing(ctx, system.project),
                 f"{system_id}:check_ssh_reachable:{uuid4().hex}",
             )

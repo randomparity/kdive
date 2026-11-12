@@ -113,7 +113,10 @@ async def authority_system_binding(
 
 
 async def authority_ssh_forward_port(conn: AsyncConnection, system_id: UUID) -> int | None:
-    """The loopback SSH port a local authority-owned System reported, for drgn-live attach.
+    """The loopback SSH port a local authority-owned System reported, for every server SSH path.
+
+    Debug attach and the SSH access tools read it here. Only a server role can: the worker is
+    refused the binding, so a job that needs the port carries it.
 
     ``None`` means the System is not authority-owned or is not local-libvirt, so the provider
     resolves the forward itself (ADR-0811). An authority-owned local System that cannot be

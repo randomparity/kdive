@@ -579,6 +579,21 @@ def test_recorded_ssh_endpoint_returns_host_port() -> None:
     assert connector.recorded_ssh_endpoint(SystemHandle("sys-1")) == ("127.0.0.1", 22022)
 
 
+def test_recorded_endpoint_uses_a_reported_forward_without_the_domain_read() -> None:
+    connector = _forward_connector(_FakeSshConnect(result=True))
+    endpoint = connector.recorded_ssh_endpoint(SystemHandle("sys-1"), ssh_forward_port=41234)
+    assert endpoint == ("127.0.0.1", 41234)
+
+
+@pytest.mark.parametrize("port", [0, 22, 1023, 65536, -1, True])
+def test_recorded_endpoint_refuses_an_out_of_range_reported_forward(port: int) -> None:
+    connector = _forward_connector(_FakeSshConnect(result=True))
+    with pytest.raises(CategorizedError) as caught:
+        connector.recorded_ssh_endpoint(SystemHandle("sys-1"), ssh_forward_port=port)
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details["reason"] == "authority_ssh_forward_invalid"
+
+
 def test_recorded_ssh_endpoint_none_when_not_provisioned() -> None:
     def _raise(_s):
         raise CategorizedError(

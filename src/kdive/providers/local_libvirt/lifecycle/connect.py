@@ -178,18 +178,26 @@ class LocalLibvirtConnect:
         """Validate the handle, then no-op for these connectionless transports."""
         TransportHandleData.decode(handle)
 
-    def recorded_ssh_endpoint(self, system: SystemHandle) -> tuple[str, int] | None:
+    def recorded_ssh_endpoint(
+        self, system: SystemHandle, *, ssh_forward_port: int | None = None
+    ) -> tuple[str, int] | None:
         """Return the recorded loopback SSH ``(host, port)``, or ``None`` if there is no forward.
 
         ``None`` means exactly one thing: the domain was read and records no loopback SSH forward
         (ADR-0298, narrowed by ADR-0658). Local-libvirt renders the forward on every domain
         (ADR-0281), so ``None`` means a domain defined before that change.
 
+        ``ssh_forward_port`` is the port an authority-owned System reported (ADR-0811): it replaces
+        the domain read, because the authority's domain is invisible to this process, and it is
+        bounded here again because it crossed a trust boundary.
+
         A System with no libvirt domain on this connection is a different fault with a different
         fix, so its `CONFIGURATION_ERROR` propagates carrying ``reason=system_domain_not_found``
         rather than collapsing here — that collapse is what misdiagnosed #2480. Any other fault
         propagates too (ADR-0271).
         """
+        if ssh_forward_port is not None:
+            return _LOOPBACK_HOST, _checked_reported_port(ssh_forward_port)
         try:
             return self._resolve_ssh_endpoint(system)
         except CategorizedError as exc:

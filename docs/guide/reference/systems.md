@@ -25,6 +25,13 @@ Reports ``ssh_not_provisioned`` when the System's provider exposes no SSH forwar
 libvirt connection this server reads — an endpoint or liveness fault, not a provisioning
 gap.
 
+An **authority-owned local-libvirt** System is reached on its stored port, and only after
+its first activation: before that the call reports
+``authority_system_preactivation_mutation_fenced``. It reports
+``authority_ssh_forward_unreported`` when no port was stored, and its job fails
+``system_not_ready`` if the System leaves ``ready`` first. It cannot be reprovisioned, so
+after a failed job only a different key applies.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `public_key` | string | yes | The agent SSH public key to authorize in the guest root account. |
@@ -49,6 +56,11 @@ re-poll rather than reuse an old result. The probe tolerates the brief window af
 ``true`` on a repeat call. Available on any ready System whose provider exposes an SSH
 forward; reports ``ssh_not_provisioned`` otherwise, or ``system_domain_not_found`` when a
 **local-libvirt** System has no libvirt domain on the libvirt connection this server reads.
+
+An **authority-owned local-libvirt** System is probed on its stored port, and only after its
+first activation: before that the call reports
+``authority_system_preactivation_mutation_fenced``. It reports
+``authority_ssh_forward_unreported`` when no port was stored.
 
 ``reachable`` confirms sshd is answering, not that your key is authorized — the probe
 sends no handshake and attempts no login. Call ``systems.authorize_ssh_key`` if a real
@@ -435,6 +447,11 @@ libvirt domain on the libvirt connection this server reads reports
 ``system_domain_not_found`` instead — an endpoint or liveness fault, not a provisioning
 gap. For a remote System the endpoint is read live from the host, so an unreachable host
 surfaces as a transport failure rather than a cached value.
+
+An **authority-owned local-libvirt** System reports the port its authority stored, with no
+libvirt read, from its first provision. It reports ``authority_ssh_forward_unreported`` when
+no port was stored and ``authority_system_not_attachable`` once ownership leaves ``ready``
+and ``activated``.
 
 ``host_scope`` is a locality signal for ``host``/``port``. ``worker_loopback`` means the
 coordinates are the worker host's own loopback — reachable only from a caller co-located
