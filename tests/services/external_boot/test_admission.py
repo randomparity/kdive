@@ -102,6 +102,14 @@ def _ordinary_system(monkeypatch: pytest.MonkeyPatch) -> None:
         return False
 
     monkeypatch.setattr(admission_module, "ordinary_mutation_is_fenced", _not_fenced)
+    _authority_owned(monkeypatch, owned=False)
+
+
+def _authority_owned(monkeypatch: pytest.MonkeyPatch, *, owned: bool) -> None:
+    async def _binding(_conn: AsyncConnection, _system_id: UUID) -> object | None:
+        return object() if owned else None
+
+    monkeypatch.setattr(admission_module, "authority_system_binding", _binding)
 
 
 def _restricted_by(
@@ -270,7 +278,13 @@ def test_no_restricting_activation_admits_every_operation(
         ),
         (_STATE.RECOVERY_CONFLICT, _OP.SYSTEM_POWER, ["runs.get", "systems.teardown"]),
         (_STATE.RECOVERY_FAILED, _OP.RUN_CREATE, ["runs.get", "systems.teardown"]),
-        (_STATE.PREPARING, _OP.RUN_BOOT, ["runs.get", "systems.teardown"]),
+        # A fixed-worker System stranded in `preparing` is recovered by the break-glass tool
+        # (ADR-0816); ADR-0261 filtering drops it for a caller without platform_admin.
+        (
+            _STATE.PREPARING,
+            _OP.RUN_BOOT,
+            ["runs.get", "ops.recover_stranded_activation", "systems.teardown"],
+        ),
         (_STATE.ABANDONED, _OP.ALLOCATION_RELEASE, ["runs.get", "systems.teardown"]),
     ],
 )
@@ -282,6 +296,15 @@ def test_denial_carries_the_state_s_next_actions_off_details(
 ) -> None:
     denied = _denial(monkeypatch, state, operation)
     assert denied.next_actions == next_actions
+
+
+def test_an_authority_owned_preparing_system_is_not_pointed_at_the_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tool refuses an authority-owned System, so its denial does not name it (#3552)."""
+    _authority_owned(monkeypatch, owned=True)
+    denied = _denial(monkeypatch, _STATE.PREPARING, _OP.ALLOCATION_RELEASE)
+    assert denied.next_actions == ["runs.get", "systems.teardown"]
 
 
 @pytest.mark.parametrize("state", sorted(_EVERY_RESTRICTED_STATE, key=str))
