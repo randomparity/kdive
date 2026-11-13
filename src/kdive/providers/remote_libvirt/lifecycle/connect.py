@@ -29,6 +29,7 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     recorded_ssh_port_strict,
 )
 from kdive.providers.shared.debug_common.gdbmi.policy.hostpolicy import allow_acl_remote
+from kdive.providers.system_authority.protocol import SSH_FORWARD_PORT_MAX, SSH_FORWARD_PORT_MIN
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
@@ -41,6 +42,18 @@ type _OpenConnection = Callable[[str], Any]
 
 def _config_error(message: str) -> CategorizedError:
     return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR)
+
+
+def _checked_reported_port(port: int) -> int:
+    """Refuse a reported forward outside the receipt bound (ADR-0815 decision 3)."""
+    if type(port) is not int or not SSH_FORWARD_PORT_MIN <= port <= SSH_FORWARD_PORT_MAX:
+        raise CategorizedError(
+            "the authority reported an SSH forward outside the allowed port range; refusing to "
+            "use it",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "authority_ssh_forward_invalid"},
+        )
+    return port
 
 
 class RemoteLibvirtConnect:
@@ -129,15 +142,25 @@ class RemoteLibvirtConnect:
         path), **not** a ``live_vm`` stub. Only the socket ``open`` is the live seam; parsing and
         orchestration are unit-tested with an injected connection.
 
+        ``ssh_forward_port`` is the port a remote authority-owned System reported (ADR-0815). The
+        authority's domain lives on a daemon this TLS connection cannot see, so the port replaces
+        the domain read and no connection is opened; the address is still the instance's
+        ``ssh_addr``. The port crossed a trust boundary, so it is bounded here again first.
+
         Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` for missing operator config;
+            CategorizedError: ``CONFIGURATION_ERROR`` for missing operator config, or with
+                ``reason=authority_ssh_forward_invalid`` for a carried port outside 1024-65535;
                 ``INFRASTRUCTURE_FAILURE`` for a libvirt fault reading the domain (other than the
                 domain being absent, which is ``None``); ``TRANSPORT_FAILURE`` when the TLS connect
                 fails.
         """
+        if ssh_forward_port is not None:
+            ssh_forward_port = _checked_reported_port(ssh_forward_port)
         config = self._config_factory()
         if config.ssh_addr is None or config.ssh_port_min is None:
             return None
+        if ssh_forward_port is not None:
+            return config.ssh_addr, ssh_forward_port
         port = self._read_ssh_port(config, str(system))
         return None if port is None else (config.ssh_addr, port)
 

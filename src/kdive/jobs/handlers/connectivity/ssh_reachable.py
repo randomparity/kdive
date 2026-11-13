@@ -1,7 +1,7 @@
 """SSH-reachability probe primitives for the check_ssh_reachable worker job (ADR-0298, #972).
 
-The probe opens a bounded, connection-retried TCP connection to a System's recorded loopback SSH
-forward and reads the server banner. It sends nothing (sshd banners first; no handshake, no auth)
+The probe opens a bounded, connection-retried TCP connection to a System's recorded SSH forward
+and reads the server banner. It sends nothing (sshd banners first; no handshake, no auth)
 and never echoes the raw banner — the guest banner is external output, so it is classified into a
 fixed vocabulary. The bounded retry tolerates the ~46 ms readiness (sshd-bind) race that
 authorize_ssh_key also retries for (ADR-0289), so the probe is not more pessimistic than the op it
@@ -40,7 +40,7 @@ _BANNER_MAX_BYTES = 255
 _BACKOFF_S = 0.5
 
 # Ordered lowest → highest: the only two layers the banner-only probe can observe (ADR-0303).
-# "tcp_connect" = a connection to the recorded loopback SSH forward was accepted; "ssh_banner"
+# "tcp_connect" = a connection to the recorded SSH forward was accepted; "ssh_banner"
 # = the server sent an ``SSH-`` identification string. "forward bound" is not a separate layer
 # because a pure TCP connect cannot distinguish it from "connected but guest refused".
 type ProbeLayer = Literal["tcp_connect", "ssh_banner"]
@@ -210,12 +210,13 @@ async def check_ssh_reachable_handler(
     guest's liveness. A probe that *ran* — reachable or not — is a success; only an inability to run
     raises. ``checked_at`` is read from the module-level ``datetime`` (tests monkeypatch it). An
     unreachable verdict carries a bounded, redacted guest console tail so "did sshd start?" is
-    answerable from the verdict alone (ADR-0306). An authority-owned local System's job carries the
-    port the server resolved, because the worker role is refused the authority binding (ADR-0811).
+    answerable from the verdict alone (ADR-0306). An authority-owned System's job, local or remote,
+    carries the port the server resolved, because the worker role is refused the authority binding
+    (ADR-0811, ADR-0815).
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` ``reason="system_not_ready"`` when the System is
-            no longer ready, or ``reason="ssh_not_provisioned"`` when it has no loopback forward.
+            no longer ready, or ``reason="ssh_not_provisioned"`` when it has no SSH forward.
             The provider's own ``reason="system_domain_not_found"`` propagates unchanged when the
             System has no libvirt domain on the worker's connection — a different fault with a
             different fix (ADR-0658). The worker prefixes detail keys, so a client reads these as
@@ -237,8 +238,8 @@ async def check_ssh_reachable_handler(
     )
     if endpoint is None:
         raise CategorizedError(
-            "This System's provider exposes no loopback SSH forward; direct SSH to a System is a "
-            "local-libvirt capability",
+            "This System's provider exposes no SSH forward; a remote-libvirt instance needs "
+            "ssh_addr and ssh_range for direct SSH",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "ssh_not_provisioned"},
         )
