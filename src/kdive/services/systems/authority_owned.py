@@ -94,7 +94,7 @@ def _binding(row: dict[str, object]) -> AuthoritySystemBinding:
 
 
 def _forward_port(value: object) -> int | None:
-    """The reported loopback SSH port, or ``None``; a value outside the range is malformed."""
+    """The reported SSH port, or ``None``; a value outside the range is malformed."""
     if value is None:
         return None
     if type(value) is not int or not SSH_FORWARD_PORT_MIN <= value <= SSH_FORWARD_PORT_MAX:
@@ -112,19 +112,24 @@ async def authority_system_binding(
     return None if row is None else _binding(dict(row))
 
 
-async def authority_ssh_forward_port(conn: AsyncConnection, system_id: UUID) -> int | None:
-    """The loopback SSH port a local authority-owned System reported, for every server SSH path.
+async def authority_ssh_forward_port(
+    conn: AsyncConnection, system_id: UUID, *, local_only: bool = False
+) -> int | None:
+    """The SSH port an authority-owned System reported, for every server SSH path.
 
     Debug attach and the SSH access tools read it here. Only a server role can: the worker is
-    refused the binding, so a job that needs the port carries it.
+    refused the binding, so a job that needs the port carries it. A local System's port is a
+    loopback forward; a remote System's is reached at the instance's ``ssh_addr`` (ADR-0815).
 
-    ``None`` means the System is not authority-owned or is not local-libvirt, so the provider
-    resolves the forward itself (ADR-0811). An authority-owned local System that cannot be
-    attached to raises ``CONFIGURATION_ERROR`` instead of falling back: the server's own libvirt
-    endpoint cannot see the authority's domain, and a guessed port would be a forged endpoint.
+    ``None`` means the System is not authority-owned, or is remote-libvirt and ``local_only`` is
+    set, so the provider resolves the endpoint itself (ADR-0811). drgn-live attach sets it: a
+    remote drgn-live attach rides the guest agent, not SSH. An authority-owned System that cannot
+    be attached to raises ``CONFIGURATION_ERROR`` instead of falling back: the server's own
+    libvirt endpoint cannot see the authority's domain, and a guessed port would be a forged
+    endpoint.
     """
     binding = await authority_system_binding(conn, system_id)
-    if binding is None or binding.provider_kind != "local-libvirt":
+    if binding is None or (local_only and binding.provider_kind != "local-libvirt"):
         return None
     if binding.ssh_forward_port is None:
         reason = (

@@ -167,10 +167,10 @@ def test_handler_unprovisioned_is_configuration_error() -> None:
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert excinfo.value.details["reason"] == "ssh_not_provisioned"
     # Provider-capability wording, not a stale reprovision remedy (ADR-0281): the local forward is
-    # always rendered now, so a None endpoint means the provider exposes no loopback SSH forward.
+    # always rendered now, so a None endpoint means the provider exposes no SSH forward.
     assert str(excinfo.value) == (
-        "This System's provider exposes no loopback SSH forward; direct SSH to a "
-        "System is a local-libvirt capability"
+        "This System's provider exposes no SSH forward; a remote-libvirt instance needs "
+        "ssh_addr and ssh_range for direct SSH"
     )
     assert "reprovision" not in str(excinfo.value).lower()
 

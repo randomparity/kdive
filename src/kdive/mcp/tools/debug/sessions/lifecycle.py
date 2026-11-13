@@ -407,14 +407,16 @@ class DebugSessionHandlers:
     ) -> int | None | ToolResponse:
         """The SSH port an authority-owned local System reported, else ``None`` (ADR-0811).
 
-        Only a drgn-live attach rides the SSH forward. An authority-owned System that reported none
-        fails closed with a configuration error rather than falling back to the server's own libvirt
-        endpoint, which cannot see the authority's domain.
+        Only a drgn-live attach rides the SSH forward, and only on local-libvirt: a remote drgn-live
+        attach rides the guest agent, so a remote authority System keeps ``None`` (ADR-0815). An
+        authority-owned local System that reported none fails closed with a configuration error
+        rather than falling back to the server's own libvirt endpoint, which cannot see the
+        authority's domain.
         """
         if transport != _DRGN_LIVE:
             return None
         try:
-            return await authority_ssh_forward_port(conn, system.id)
+            return await authority_ssh_forward_port(conn, system.id, local_only=True)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(str(system.id), exc)
 

@@ -95,6 +95,24 @@ authority ownership, for a value the server can hand over. Doing nothing was rej
 `e7aa79a7d`, the five call sites raise `system_domain_not_found`, so an authority-owned System has
 no agent SSH path.
 
+### Amendment (2026-11-12): remote-libvirt authority Systems use the stored port too (#3585)
+
+[ADR-0815](0815-remote-authority-system-ssh-port-is-reported-by-the-authority.md) supersedes in
+part decision 1's "The remote authority does not", decision 3's "No other connector uses the
+argument", and the #3541 amendment's "written only for an authority-owned local System" and
+"Remote-libvirt authority Systems keep their existing behaviour".
+
+`authority_ssh_forward_port` now returns the stored port, or the decision-4 refusals, for a
+remote-libvirt authority System as well. The three SSH tools carry it exactly as the #3541
+amendment describes, and `RemoteLibvirtConnect.recorded_ssh_endpoint` uses it in place of the
+domain-XML read: the address is the instance's `ssh_addr`, the port is re-checked against
+1024-65535 before any network IO (`authority_ssh_forward_invalid` outside it), and an instance with
+no SSH forward configured still returns `None`. The drgn-live attach path keeps asking only for a
+local-libvirt System, because a remote drgn-live attach rides the guest agent. Until the remote
+authority reports a port, a remote authority System is refused with
+`authority_ssh_forward_unreported` in place of `ssh_not_provisioned`. No schema or payload change;
+the lifecycle identity does not move.
+
 ## Considered & rejected
 
 - **Give the server an authority route and ask the authority.** verified: the sender signs with the
