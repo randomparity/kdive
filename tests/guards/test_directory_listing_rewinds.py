@@ -3,7 +3,9 @@
 ``os.listdir(fd)`` misses entries on btrfs, so every ``os.listdir``/``os.scandir`` call goes
 through ``list_directory_descriptor`` or a named allowlist entry. The allowlist names the two
 listings excluded from #3601 by operator approval: a descriptor listed right after it is
-opened, and a path scan.
+opened, and a path scan. The scan sees calls spelled ``os.listdir``/``os.scandir`` or through a
+name imported from ``os``; an aliased module, ``posix.listdir``, or a stored function reference is
+left to code review.
 """
 
 from __future__ import annotations

@@ -78,7 +78,10 @@ rewound is missing from the next listing. tmpfs and ext4 return it. With `TMPDIR
    the default `TMPDIR`.
 2. `rg -n "os\.(listdir|scandir)\(" src/` lists only the helper module and the two excluded
    sites.
-3. The guard fails when a bare `os.listdir(<descriptor>)` is added to any `src/kdive` module.
+3. The guard fails when a call written as `os.listdir(...)`, `os.scandir(...)`, or a name imported
+   from `os` for either is added to a `src/kdive` module outside the allowlisted functions. An
+   aliased module (`import os as x`), `posix.listdir`, or a stored function reference is not
+   detected and is left to code review.
 
 ## Validation
 
