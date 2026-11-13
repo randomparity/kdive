@@ -615,8 +615,9 @@ def test_ssh_info_reports_the_stored_port(
             {"state": "teardown-requested", "ssh_forward_port": _FORWARD},
             "authority_system_not_attachable",
         ),
+        ({"state": "provisioning"}, "authority_system_not_attachable"),
     ],
-    ids=["ready", "activated", "teardown-requested"],
+    ids=["ready", "activated", "teardown-requested", "provisioning"],
 )
 def test_ssh_info_refuses_a_system_with_no_usable_forward(
     migrated_url: str, authority_kind: str, ownership: dict[str, Any], reason: str
