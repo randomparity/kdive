@@ -30,6 +30,7 @@ runbooks ~20, ADR amendment ~30.
 | `src/kdive/services/systems/authority_owned.py` | preactivation teardown admission | drop short-circuit; refuse terminal policies |
 | `src/kdive/mcp/tools/lifecycle/systems/admin.py` | `systems.teardown` routing | preactivation branch passes `FAILED_OR_LAPSED_EXHAUSTED` |
 | `tests/services/systems/test_authority_admission.py` | preactivation admission tests | two new tests |
+| `tests/services/systems/test_teardown_recycle_policy.py` | per-caller policy pin | `systems.teardown` row expects `FAILED_OR_LAPSED_EXHAUSTED` (necessary consequence, same commit) |
 | `docs/adr/0620-authority-owned-system-teardown.md` | teardown decisions | append amendment |
 | `docs/operating/runbooks/exhausted-authority-system-provision.md` | operator recovery | rewrite the "Authority unavailable" limit |
 | `docs/operating/runbooks/live-testing.md` | #3611 subsection | replace "nothing restarts it" |

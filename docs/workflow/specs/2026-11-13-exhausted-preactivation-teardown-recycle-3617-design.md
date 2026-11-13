@@ -82,9 +82,10 @@ same job (`replay`), and release still waits for the consumed absence receipt.
    - a live final attempt is never restarted under a worker that still holds its lease;
    - automatic callers never re-spend the attempt budget.
 3. Accepted failure classes:
-   - an operator who calls `systems.teardown` before fixing the cause spends another three
-     attempts and must call it again; bounded by `max_attempts` per request, as for the #3530
-     `failed` recycle;
+   - an operator who calls `systems.teardown` before fixing the cause spends another budget and
+     must call it again. Each restart adds the job's current `max_attempts` (queue behavior from
+     #2889), so the budget doubles on each repeat: three, six, twelve attempts. Bounded per
+     request; the runbook says to fix the cause first;
    - the final attempt recorded a `preactivation-absent` receipt and died before finalizing it,
      and the reconciler's teardown repair has not consumed it yet (for example it reports
      "still has core cleanup"). The row matches the recycle predicate. The recycled row is
