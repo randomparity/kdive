@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:17
+    image: postgres:17@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317  # 17
     environment:
       POSTGRES_USER: kdive
       POSTGRES_PASSWORD: kdive # pragma: allowlist secret — local proof only
@@ -18,7 +18,7 @@ services:
       - ${COMPOSE_PROOF_REPO_ROOT}/deploy/compose/bootstrap-migration-owner.sql:/docker-entrypoint-initdb.d/010-migration-owner.sql:ro
 
   role-bootstrap:
-    image: postgres:17
+    image: postgres:17@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317  # 17
     profiles: ["bootstrap"]
     entrypoint: ["/bin/bash", "/bootstrap/bootstrap-runtime-roles.sh"]
     environment:

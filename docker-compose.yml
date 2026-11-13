@@ -55,7 +55,7 @@ x-backends: &backends
 
 services:
   postgres:
-    image: postgres:17
+    image: postgres:17@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317  # 17
     # Policed like the app tier: without this, a recreate that outlives the backend leaves
     # the app services restarting against something that can never answer. `on-failure`
     # rather than `unless-stopped` — it matches the units' `Restart=on-failure` (ADR-0114
@@ -188,7 +188,7 @@ services:
   # capability roles. This one-shot runs after migrations create those capabilities and before any
   # runtime process authenticates.
   role-bootstrap:
-    image: postgres:17
+    image: postgres:17@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317  # 17
     entrypoint: ["/bin/bash", "/bootstrap/bootstrap-runtime-roles.sh"]
     environment:
       KDIVE_LOCAL_ROLE_BOOTSTRAP: ${KDIVE_LOCAL_ROLE_BOOTSTRAP:-1}
