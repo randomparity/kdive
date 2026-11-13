@@ -467,8 +467,8 @@ and the job stays `running`. It is retried each time its lease lapses, about eve
 minutes, until `attempt` equals `max_attempts` (3).
 
 While the cause remains, the `teardown` job that `systems.teardown` queues fails and is retried
-the same way. After its last attempt, nothing restarts it. `systems.teardown` and `ops.force_teardown` return
-the same job, and `jobs.cancel` refuses it with
+the same way. After its last attempt, nothing restarts it. `systems.teardown` and
+`ops.force_teardown` return the same job, and `jobs.cancel` refuses it with
 `authority_system_preactivation_teardown_not_cancelable`. **Find and fix the cause before you
 run `systems.teardown`.** The `<reason>` in the worker journal names the shape. Lines ending
 `authority System: attempt-superseded` or `authority System: attempt-busy` follow a teardown
@@ -497,24 +497,24 @@ takeover and name no shape; read the job's earliest `authority: <reason>` line:
   correcting the inventory does not change the recorded binding. Re-running the play with only
   `live_vm_host_authority_instance` and the manifest changed to the recorded value fails the
   authority's start-up check with `tls-health: handshake-failed`: the server certificate was
-  issued for the original instance, whose name `authority_server_name` derives. In the lab run
-  the authority stayed down until it was restored with the original inputs: the first re-run
-  also failed that check, and the service started after `systemctl reset-failed` and
-  `systemctl start` on the unit, after which a further re-run succeeded. Reissuing the
-  certificates for the recorded instance
+  issued for the original instance, whose name `authority_server_name` derives. The authority
+  stays down: in the lab run, restoring it took the original inputs, a `systemctl reset-failed`
+  and `systemctl start` of the unit, and one more play run. Reissuing the certificates for the
+  recorded instance
   ([renew-local-authority-tls.yml](../../../deploy/ansible/playbooks/renew-local-authority-tls.yml),
   which also requires `live_vm_host_worker_authority_instance` to match) has not been tried, so
-  no exit is proven. Roll the lab host back to a
-  clean snapshot and bring the lane up again. To prevent it, check the inventory entry against
-  the manifest before provisioning (the inventory trap above).
+  no exit is proven. Roll the lab host back to a clean snapshot and bring the lane up again. To
+  prevent it, check the inventory entry against the manifest before provisioning (the inventory
+  trap above).
 - **The worker died during the final provision attempt.** The authority wrote no terminal
   receipt, and the job keeps `running` with `attempt` equal to `max_attempts` and a lapsed lease.
   Follow [Exhausted authority System provision](exhausted-authority-system-provision.md). The
-  lab run did not kill a worker: stopping a fixed worker unit outside its lifecycle wedges the
-  slot ([wedged worker slot](live-stack.md#recovering-a-wedged-worker-slot)). It reached the same
-  job row (`running`, `attempt` equal to `max_attempts`, lapsed lease, no terminal receipt)
-  through the root-not-installed shape above, and its sequence matched that runbook: `systems.teardown`, `torn_down`,
-  `allocations.release`, then the reconciler canceled the provision job.
+  lab run did not kill a worker, because restarting a fixed worker unit outside its lifecycle
+  wedges the slot ([wedged worker slot](live-stack.md#recovering-a-wedged-worker-slot)). It
+  reached the same job row (`running`, `attempt` equal to `max_attempts`, lapsed lease, no
+  terminal receipt) through the root-not-installed shape above, and its sequence matched that
+  runbook: `systems.teardown`, `torn_down`, `allocations.release`, then the reconciler canceled
+  the provision job.
 
 A System that the fixed worker provisioned on its own daemon, and whose later Run was routed to
 the authority, is a different shape:
