@@ -26,6 +26,7 @@ Stdlib, ``pyyaml`` and pytest: this reads the tree, not the project.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -149,4 +150,56 @@ def test_stack_postgres_images_match_the_pinned_fixture() -> None:
         "(tests/db/conftest.py::_POSTGRES_IMAGE), so an upstream re-tag cannot change the "
         "Postgres minor version a fresh database migrates on (#3610). Update all references "
         f"together. Drifted: {drift}"
+    )
+
+
+def _unpinned_container_calls() -> tuple[int, list[str]]:
+    """Scan ``tests/**/*.py`` for ``PostgresContainer(...)`` calls.
+
+    Returns the call-site count and a description of each call whose image argument is neither
+    the ``_POSTGRES_IMAGE`` constant (bare or as a module attribute) nor a string literal
+    carrying an ``@sha256:<64 hex>`` digest.
+    """
+    sites = 0
+    unpinned: list[str] = []
+    for path in sorted(_TESTS.rglob("*.py")):
+        if path == Path(__file__).resolve():
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")) != (
+                "PostgresContainer"
+            ):
+                continue
+            sites += 1
+            arg = node.args[0] if node.args else None
+            if isinstance(arg, ast.Name) and arg.id == "_POSTGRES_IMAGE":
+                continue
+            if isinstance(arg, ast.Attribute) and arg.attr == "_POSTGRES_IMAGE":
+                continue
+            if (
+                isinstance(arg, ast.Constant)
+                and isinstance(arg.value, str)
+                and _DIGEST_PIN.search(arg.value)
+            ):
+                continue
+            unpinned.append(f"{path.relative_to(_ROOT)}:{node.lineno}")
+    return sites, unpinned
+
+
+def test_postgres_container_call_sites_are_discoverable() -> None:
+    # The db conftest session fixture and the URL-fixture roundtrip test; fewer means the scan
+    # stopped seeing them and the pin assertion below is vacuous.
+    sites, _ = _unpinned_container_calls()
+    assert sites >= 2, f"expected at least 2 PostgresContainer call sites, found {sites}"
+
+
+def test_postgres_containers_use_the_pinned_image() -> None:
+    _, unpinned = _unpinned_container_calls()
+    assert not unpinned, (
+        "every PostgresContainer in tests/ must start from tests/db/conftest.py::_POSTGRES_IMAGE "
+        "(or a literal with an @sha256:<64 hex> digest); a bare tag such as postgres:17 shifts "
+        f"on upstream re-tag and broke fresh migrations (#3610). Unpinned: {unpinned}"
     )
