@@ -20,8 +20,9 @@ mismatches the manifest. Neither claim has been checked on a live lab.
   `stranded-activation-recovery.md` for a System the fixed worker provisioned (not restated).
 - Evidence: one live run on an Ubuntu 26.04 local-authority lab at `c6d63e671`. Induction:
   matching inventory with an image whose root the manifest does not install (matches); an
-  inventory `authority_instance` the manifest does not carry (mismatches); worker killed while
-  the final provision attempt runs (worker died). An unreproduced shape is labelled so, with why.
+  inventory `authority_instance` the manifest does not carry (mismatches); for worker died, the
+  same exhausted job row reached through the first shape (a worker kill wedges its slot). An
+  unreproduced shape is labelled so, with why.
 
 ### Failure model
 

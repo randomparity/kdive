@@ -492,17 +492,21 @@ run `systems.teardown`.** The `<reason>` in the worker journal names the shape:
 - **`authority: binding-mismatch`.** The inventory's `authority_instance` for the Resource did
   not match the installed authority's when the System was provisioned. The System recorded that
   value, and the recorded binding never changes. The teardown fails with the same reason, and
-  correcting the inventory does not change the recorded binding. Re-running the play with the
-  recorded value as `live_vm_host_authority_instance` does not help: the authority fails its
-  start-up check with `tls-health: handshake-failed`, because its server certificate names a DNS
-  name derived from the installed instance (`authority_server_name`). No tool recovers this
-  System. Roll the lab host back to a clean snapshot and bring the lane up again. To prevent it,
-  check the inventory entry against the manifest before provisioning (the inventory trap above).
+  correcting the inventory does not change the recorded binding. Re-running the play with only
+  `live_vm_host_authority_instance` and the manifest changed to the recorded value fails the
+  authority's start-up check with `tls-health: handshake-failed`: the server certificate was
+  issued for the original instance, whose name `authority_server_name` derives. The authority
+  stays down until the play is re-run with the original inputs. Reissuing the certificates for
+  the recorded instance has not been tried, so no exit is proven. Roll the lab host back to a
+  clean snapshot and bring the lane up again. To prevent it, check the inventory entry against
+  the manifest before provisioning (the inventory trap above).
 - **The worker died during the final provision attempt.** The authority wrote no terminal
   receipt, and the job keeps `running` with `attempt` equal to `max_attempts` and a lapsed lease.
   Follow [Exhausted authority System provision](exhausted-authority-system-provision.md). The
-  lab run reached that job state through the root-not-installed shape above, not by killing a
-  worker, and its sequence matched that runbook: `systems.teardown`, `torn_down`,
+  lab run did not kill a worker: stopping a fixed worker unit outside its lifecycle wedges the
+  slot ([wedged worker slot](live-stack.md#recovering-a-wedged-worker-slot)). It reached the same
+  job row (`running`, `attempt` equal to `max_attempts`, lapsed lease, no terminal receipt)
+  through the root-not-installed shape above, and its sequence matched that runbook: `systems.teardown`, `torn_down`,
   `allocations.release`, then the reconciler canceled the provision job.
 
 A System that the fixed worker provisioned on its own daemon, and whose later Run was routed to
