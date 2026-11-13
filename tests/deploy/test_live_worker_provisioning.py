@@ -9,7 +9,6 @@ import shlex
 import socket
 import stat
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any, cast
 
@@ -2761,9 +2760,9 @@ def _stale_unix_socket(path: Path) -> None:
     path.chmod(0o770)
 
 
-def test_installer_clears_only_proven_stale_selected_tuple(tmp_path: Path) -> None:
-    socket_path = tmp_path / "libvirt-sock"
-    pid_path = tmp_path / "libvirtd.pid"
+def test_installer_clears_only_proven_stale_selected_tuple(short_socket_dir: Path) -> None:
+    socket_path = short_socket_dir / "libvirt-sock"
+    pid_path = short_socket_dir / "libvirtd.pid"
     _stale_unix_socket(socket_path)
     pid_path.write_text("999999999\n", encoding="utf-8")
 
@@ -2848,14 +2847,14 @@ _FAKE_COMMANDS = {
 
 
 def _run_fake_libvirt_start(
-    tmp_path: Path, *, init_delay: float, failure: str = ""
+    short_socket_dir: Path, *, init_delay: float, failure: str = ""
 ) -> subprocess.CompletedProcess[str]:
-    # The daemon socket lives under the runtime root, and a pytest-xdist tmp_path pushes it past
-    # the 108-byte AF_UNIX path limit, so the runtime root gets a short directory of its own.
-    with tempfile.TemporaryDirectory(prefix="kdive-") as short_root:
-        return _start_fake_libvirt(
-            tmp_path, Path(short_root) / "live-libvirt", init_delay=init_delay, failure=failure
-        )
+    return _start_fake_libvirt(
+        short_socket_dir,
+        short_socket_dir / "live-libvirt",
+        init_delay=init_delay,
+        failure=failure,
+    )
 
 
 def _start_fake_libvirt(
@@ -2921,16 +2920,16 @@ _start_libvirt_daemon "$2" "$3" op "$4" "$5" "$4"
 
 
 def test_installer_relocks_the_runtime_only_after_the_daemon_finishes_init(
-    tmp_path: Path,
+    short_socket_dir: Path,
 ) -> None:
-    result = _run_fake_libvirt_start(tmp_path, init_delay=1.0)
+    result = _run_fake_libvirt_start(short_socket_dir, init_delay=1.0)
 
     assert result.returncode == 0, result.stderr
     assert "runtime locked before the daemon was ready" not in result.stderr
 
 
-def test_installer_fails_fast_with_the_daemon_log_when_init_fails(tmp_path: Path) -> None:
-    result = _run_fake_libvirt_start(tmp_path, init_delay=0.5, failure="FAKE_INIT_FAILS")
+def test_installer_fails_fast_with_the_daemon_log_when_init_fails(short_socket_dir: Path) -> None:
+    result = _run_fake_libvirt_start(short_socket_dir, init_delay=0.5, failure="FAKE_INIT_FAILS")
 
     assert result.returncode != 0
     assert "exited during initialization" in result.stderr
@@ -2938,16 +2937,16 @@ def test_installer_fails_fast_with_the_daemon_log_when_init_fails(tmp_path: Path
     assert "Driver state initialization failed" in result.stderr
 
 
-def test_installer_fails_when_a_live_daemon_never_becomes_ready(tmp_path: Path) -> None:
-    result = _run_fake_libvirt_start(tmp_path, init_delay=0.5, failure="FAKE_NEVER_READY")
+def test_installer_fails_when_a_live_daemon_never_becomes_ready(short_socket_dir: Path) -> None:
+    result = _run_fake_libvirt_start(short_socket_dir, init_delay=0.5, failure="FAKE_NEVER_READY")
 
     assert result.returncode != 0
     assert "was not ready within 2s" in result.stderr
     assert "did not produce a complete live tuple" in result.stderr
 
 
-def test_installer_reports_the_daemon_journal_when_launch_fails(tmp_path: Path) -> None:
-    result = _run_fake_libvirt_start(tmp_path, init_delay=0, failure="FAKE_LAUNCH_FAILS")
+def test_installer_reports_the_daemon_journal_when_launch_fails(short_socket_dir: Path) -> None:
+    result = _run_fake_libvirt_start(short_socket_dir, init_delay=0, failure="FAKE_LAUNCH_FAILS")
 
     assert result.returncode != 0
     assert "failed to start" in result.stderr
@@ -2997,9 +2996,9 @@ _await_libvirt_daemon_ready "$2" op qemu+unix:///session 1
     assert "was not ready within 1s" in result.stderr
 
 
-def test_installer_adopts_complete_matching_live_tuple(tmp_path: Path) -> None:
-    socket_path = tmp_path / "libvirt-sock"
-    pid_path = tmp_path / "libvirtd.pid"
+def test_installer_adopts_complete_matching_live_tuple(short_socket_dir: Path) -> None:
+    socket_path = short_socket_dir / "libvirt-sock"
+    pid_path = short_socket_dir / "libvirtd.pid"
     daemon = Path(f"/proc/{os.getpid()}/comm").read_text(encoding="utf-8").strip()
     with socket.socket(socket.AF_UNIX) as listener:
         listener.bind(str(socket_path))
@@ -3015,9 +3014,9 @@ def test_installer_adopts_complete_matching_live_tuple(tmp_path: Path) -> None:
     assert pid_path.exists()
 
 
-def test_installer_leaves_contradictory_live_tuple_untouched(tmp_path: Path) -> None:
-    socket_path = tmp_path / "libvirt-sock"
-    pid_path = tmp_path / "libvirtd.pid"
+def test_installer_leaves_contradictory_live_tuple_untouched(short_socket_dir: Path) -> None:
+    socket_path = short_socket_dir / "libvirt-sock"
+    pid_path = short_socket_dir / "libvirtd.pid"
     with socket.socket(socket.AF_UNIX) as listener:
         listener.bind(str(socket_path))
         listener.listen()
@@ -3033,9 +3032,9 @@ def test_installer_leaves_contradictory_live_tuple_untouched(tmp_path: Path) -> 
     assert pid_path.exists()
 
 
-def test_installer_leaves_wrong_authority_residue_untouched(tmp_path: Path) -> None:
-    socket_path = tmp_path / "libvirt-sock"
-    pid_path = tmp_path / "libvirtd.pid"
+def test_installer_leaves_wrong_authority_residue_untouched(short_socket_dir: Path) -> None:
+    socket_path = short_socket_dir / "libvirt-sock"
+    pid_path = short_socket_dir / "libvirtd.pid"
     _stale_unix_socket(socket_path)
     socket_path.chmod(0o777)
     pid_path.write_text("999999999\n", encoding="utf-8")
@@ -3049,9 +3048,9 @@ def test_installer_leaves_wrong_authority_residue_untouched(tmp_path: Path) -> N
     assert pid_path.exists()
 
 
-def test_installer_does_not_partially_remove_changed_stale_tuple(tmp_path: Path) -> None:
-    socket_path = tmp_path / "libvirt-sock"
-    pid_path = tmp_path / "libvirtd.pid"
+def test_installer_does_not_partially_remove_changed_stale_tuple(short_socket_dir: Path) -> None:
+    socket_path = short_socket_dir / "libvirt-sock"
+    pid_path = short_socket_dir / "libvirtd.pid"
     _stale_unix_socket(socket_path)
     pid_path.write_text("999999999\n", encoding="utf-8")
     replace_socket = """
@@ -3099,9 +3098,9 @@ _remove_stale_libvirt_tuple "$2" "$3"
     assert socket_path.exists()
 
 
-def test_installer_stops_when_first_stale_unlink_fails(tmp_path: Path) -> None:
-    socket_path = tmp_path / "libvirt-sock"
-    pid_path = tmp_path / "libvirtd.pid"
+def test_installer_stops_when_first_stale_unlink_fails(short_socket_dir: Path) -> None:
+    socket_path = short_socket_dir / "libvirt-sock"
+    pid_path = short_socket_dir / "libvirtd.pid"
     _stale_unix_socket(socket_path)
     pid_path.write_text("999999999\n", encoding="utf-8")
     command = r"""
@@ -3137,9 +3136,9 @@ fi
     assert socket_path.exists()
 
 
-def test_installer_rechecks_listener_before_stale_unlink(tmp_path: Path) -> None:
-    socket_path = tmp_path / "libvirt-sock"
-    pid_path = tmp_path / "libvirtd.pid"
+def test_installer_rechecks_listener_before_stale_unlink(short_socket_dir: Path) -> None:
+    socket_path = short_socket_dir / "libvirt-sock"
+    pid_path = short_socket_dir / "libvirtd.pid"
     pid_path.write_text("999999999\n", encoding="utf-8")
     with socket.socket(socket.AF_UNIX) as listener:
         listener.bind(str(socket_path))
