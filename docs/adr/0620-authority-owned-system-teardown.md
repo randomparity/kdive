@@ -591,15 +591,17 @@ This qualifies the #3617 amendment above: its "One case is accepted" paragraph a
 case, its "No schema change". A final attempt that recorded a `preactivation-absent` receipt and
 died before finalizing it is no longer restarted.
 
-Migration 0196 adds `authority_system_preactivation_receipt_pending(system_id)`, a
+Migration 0196 adds `authority_system_preactivation_receipt_pending(system_id, job_id)`, a
 `SECURITY DEFINER` function only `kdive_server` may execute. It takes the System's SQL advisory
-lock (`'kdive:system:'`, 2125), then answers whether the System's current attempt is `terminal`,
+lock (`'kdive:system:'`, 2125), then answers whether the System's current attempt belongs to
+that teardown job and is `terminal`,
 unconsumed, `preactivation-absent`, with ownership `teardown-requested` at the attempt's
 terminal head: the receipt clauses of `list_authority_system_teardown_repairs`.
 `enqueue_preactivation_teardown` calls it when a prior row exists and the policy is not `NEVER`,
 and downgrades the policy to `NEVER` when it is true. `systems.teardown` and `ops.force_teardown`
 then replay the row unchanged and the reconciler repair consumes the receipt and marks the job
-`succeeded`. Every other exhausted, lapsed final attempt still restarts. The lock is the one every
+`succeeded`; a guarded `failed` row stays `failed` because the repair marks only a `running` job,
+while the System still reaches `torn_down`. Every other exhausted, lapsed final attempt still restarts. The lock is the one every
 receipt writer and the repair take first and is held to commit, so no receipt is written or
 consumed between the read and the recycle `UPDATE`. The server still cannot read
 `authority_system_attempts`.
@@ -610,5 +612,7 @@ Rejected for this amendment:
   job kind and would gain authority-table knowledge and a server read path for one caller.
 - **Grant the server `SELECT` on `authority_system_attempts`.** judgment: it exposes receipt bytes
   and every attempt's fencing state for a single boolean.
-- **Keep the accepted case and the runbook check.** judgment: it leaves the operator to read a log
-  line that names an attempt id no tool maps to a System.
+- **Keep the accepted case and the runbook check.** judgment: the operator must rule out a pending
+  receipt before every retry from a log line naming an attempt id no tool maps to a System, and a
+  miss leaves a teardown that is claimed and refused. With the guard the log matters only when the
+  repair itself stalls.

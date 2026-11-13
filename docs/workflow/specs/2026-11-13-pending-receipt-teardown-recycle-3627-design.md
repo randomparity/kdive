@@ -20,17 +20,19 @@ The server role cannot read `authority_system_attempts`, so the service cannot s
 ## Design
 
 1. **Migration `0196_authority_system_receipt_pending.sql`** adds
-   `authority_system_preactivation_receipt_pending(p_system_id uuid) RETURNS boolean`,
+   `authority_system_preactivation_receipt_pending(p_system_id uuid, p_job_id uuid)
+   RETURNS boolean`,
    `plpgsql`, `SECURITY DEFINER`, `SET search_path = ''`, volatile. It:
    - raises `42501` unless `session_user` is a member of `kdive_server`;
    - takes `pg_advisory_xact_lock(hashtextextended('kdive:system:' || id, 2125))`, the lock
      every receipt writer (`advance_authority_system_journal_head`), the worker finalizer and
      the teardown repair take first;
-   - returns whether the System's current attempt (`ownership.current_attempt_id`) is
+   - returns whether the System's current attempt (`ownership.current_attempt_id`) belongs to
+     the teardown job (`attempt.job_id = p_job_id`, `operation = 'preactivation-teardown'`) and is
      `state = 'terminal'`, `consumed_at IS NULL`, `receipt_disposition = 'preactivation-absent'`,
      with `ownership.state = 'teardown-requested'` and the ownership journal head equal to the
      attempt's terminal head. These are the receipt clauses of the repair candidate predicate,
-     copied verbatim. The repair's job-liveness disjunct is omitted: the recycle only admits a
+     copied verbatim, bound to the job the recycle would restart. The repair's job-liveness disjunct is omitted: the recycle only admits a
      `failed` row or one whose lease lapsed, and either satisfies that disjunct.
    - `REVOKE ALL` from `PUBLIC` and every kdive role, then `GRANT EXECUTE` to `kdive_server`
      only. Every caller passing a policy other than `NEVER` runs as the server
@@ -38,7 +40,7 @@ The server role cannot read `authority_system_attempts`, so the service cannot s
      `NEVER` and never call it.
 2. **`enqueue_preactivation_teardown`**, after the marker check and before
    `queue.enqueue_with_status`: when a prior row exists and `recycle` is not `NEVER`, call the
-   function; when it returns true, set `recycle = NEVER`. The queue then returns the row
+   function with the prior row's id; when it returns true, set `recycle = NEVER`. The queue then returns the row
    unchanged, `request_authority_system_preactivation_teardown` returns `replay`, `changed` is
    false, and `on_recycle` does not run. `queue.py` stays free of authority tables.
 3. **Lock order.** The caller already holds the Python System lock; the function adds the SQL
@@ -53,22 +55,25 @@ The server role cannot read `authority_system_attempts`, so the service cannot s
    operator to watch the reconciler log before running `systems.teardown`.
 
 Both `ops.force_teardown` (`FAILED`) and `systems.teardown` inherit the guard; neither caller's
-policy changes. A `failed` row with a pending receipt is also left for the repair.
+policy changes. A `failed` row with a pending receipt is also left for the repair, which marks only
+a `running` job `succeeded`: that row stays `failed` while the System reaches `torn_down`.
 
 ## Success
 
 - S1: an exhausted, lapsed `running` preactivation teardown whose current attempt holds an
   unconsumed `preactivation-absent` receipt at the ownership head is returned unchanged by
   `systems.teardown` (state, attempt, `max_attempts`), writes no `teardown:recycled` audit, and
-  the reconciler repair then settles it `succeeded` with the System `torn_down`.
+  the reconciler repair then settles it `succeeded` with the System `torn_down`. The same holds
+  for a `failed` row, which stays `failed`.
 - S2: the same row with no such receipt still restarts (`queued`, `max_attempts` 3 → 6), as in
   #3617's existing test.
 - S3: the function answers false for each single deviation from the predicate (consumed
   receipt, other disposition, ownership not `teardown-requested`, head mismatch, not the current
-  attempt, unknown System).
-- S4: only `kdive_server` may execute it; `kdive_worker`, `kdive_reconciler` and
-  `kdive_provider_authority` get `InsufficientPrivilege`.
-- S5: the function blocks while another transaction holds the System's SQL lock.
+  attempt, another job's attempt, unknown System).
+- S4: of the test-provisioned role logins, only `kdive_server` may execute it; `kdive_worker`,
+  `kdive_reconciler` and `kdive_provider_authority` get `InsufficientPrivilege`.
+- S5: the function waits for another transaction holding the System's SQL lock and answers from
+  the state that transaction committed (a receipt consumed under the lock reads as not pending).
 
 ## Failure model
 
@@ -86,8 +91,11 @@ policy changes. A `failed` row with a pending receipt is also left for the repai
      check. Accepted: no receipt existed when the operator asked, so the restart is #3617's
      intended behaviour; the repair still consumes the late receipt and the restarted row is
      refused against the `torn-down` owner, the outcome #3617 already accepted.
-   - The function blocks behind a long-held SQL System lock. Bounded: the same lock is already
-     taken later in this transaction by `request_authority_system_preactivation_teardown`.
+   - The function blocks behind a long-held SQL System lock. No new exposure: the same lock is
+     already taken later in this transaction by `request_authority_system_preactivation_teardown`.
+   - The repair cannot settle the replayed row (core cleanup pending, `superseded`, reconciler
+     down). Accepted: before this change the restarted row could not finish either; the row is
+     the reconciler's to settle, and the runbook names its log lines.
 4. **Covered elsewhere**
    - `ops.force_teardown` lapsed recycle: rejected by ADR-0620; #3628 documents it.
    - The repair settling a `queued` row: out of scope per the frozen charter.
