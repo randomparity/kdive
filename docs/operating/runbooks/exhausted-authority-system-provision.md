@@ -50,12 +50,13 @@ holds the absence receipt digest. The job keeps its attempt count and receives n
   `running` and nothing retries it. Restore the authority service, then run `systems.teardown`
   again. It restarts the same job and adds the job's current `max_attempts` to its budget, so
   each restart grants as many attempts as the job already had: three, then six, then twelve.
-  Fix the cause first. Also check the reconciler log for
-  `authority System teardown attempt <id> still has core cleanup` or
-  `authority System teardown repair failed for attempt <id>`. The `<id>` is an authority attempt,
-  not the System, and no MCP tool maps it to a System, so treat either line as possibly this
-  System's: the authority may already have proved absence and the reconciler may hold the
-  receipt. Fix that cleanup and wait for a reconciler pass that no longer logs it before you run
+  `ops.force_teardown` does not restart it; it replays the stuck job unchanged. Fix the cause
+  first. Also check the reconciler log for
+  `authority System teardown attempt <id> still has core cleanup (System <system-id>)` or
+  `authority System teardown repair failed for attempt <id> (System <system-id>)`. The `<id>` is
+  an authority attempt; match the line to this System by its `<system-id>`. Such a line means the
+  authority may already have proved absence and the reconciler may hold the receipt. Fix that
+  cleanup and wait for a reconciler pass that no longer logs it before you run
   `systems.teardown`; a restarted teardown cannot finish while such a receipt is pending. See
   [Recovering an allocation stranded by a failed authority-owned provision](live-testing.md#recovering-an-allocation-stranded-by-a-failed-authority-owned-provision).
   Do not edit job or System rows by hand.

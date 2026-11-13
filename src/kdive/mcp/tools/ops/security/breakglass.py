@@ -202,7 +202,9 @@ async def force_teardown(
     authorizing context bound to the target's project; a System with external-boot activation
     history gets the authority-marked teardown, which needs ``resolver`` (#3007), unless its
     latest activation was settled, which gets the ordinary teardown (#3551). A terminal System
-    returns success idempotently.
+    returns success idempotently. The enqueue keeps ``JobRecyclePolicy.FAILED``, so an exhausted
+    preactivation authority teardown comes back unchanged; ``systems.teardown`` restarts it
+    (ADR-0620).
     """
     try:
         require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
@@ -450,7 +452,8 @@ def register(
         A System with external-boot activation history gets the authority-marked teardown that
         systems.teardown enqueues, never an ordinary job the worker would refuse. The exception is
         a System whose latest activation ops.recover_stranded_activation settled: it gets the
-        ordinary teardown on the worker that owns its domain.
+        ordinary teardown on the worker that owns its domain. It does not restart an exhausted
+        preactivation authority teardown, which it returns unchanged; systems.teardown does.
         """
         return await force_teardown(
             pool, current_context(), system_id=system_id, reason=reason, resolver=resolver
