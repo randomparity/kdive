@@ -13,6 +13,11 @@ Tech stack: Python 3.14, stdlib `os` and `ast`, pytest.
 Expected implementation size: 150–210 changed lines (M) — helper ~20, its test ~35, guard ~85,
 13 one-line site edits plus 9 import lines, one test-helper edit.
 
+Amendment 2026-11-13: the operator withdrew the exclusion of `system_authority/journal.py`
+`_check_evidence_bounds` (it lists a descriptor). That site also routes through the helper, and
+its entry is removed from the guard allowlist; the tasks below predate the amendment and are
+otherwise unchanged.
+
 ## Global Constraints
 
 - No new dependency; stdlib only.

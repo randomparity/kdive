@@ -28,17 +28,16 @@ rewound is missing from the next listing. tmpfs and ext4 return it. With `TMPDIR
   (projection residue), `external_boot.py` (five sites), `remote_libvirt/external_boot_authority.py`
   (three `self._root_fd` sites), `remote_libvirt/system_authority.py` (`_scan`),
   `external_boot_authority/host.py` (journal lanes), `system_authority/journal.py` (the
-  `system-operations` listing), `jobs/capture_operations/storage/spool.py`
-  (`_remove_spool_entries`).
-- Excluded (operator approval 2026-11-12): `system_authority/journal.py`
-  `_check_evidence_bounds` and `jobs/handlers/artifacts/rootfs_reclaim.py`
-  `_live_writer_holds_a_partial`. The first lists a descriptor `_open_abandoned` opens
-  immediately before the listing, with no entry created through it in between; the second
-  scans a path. Both stay unchanged and are named
-  allowlist entries in the guard.
+  `system-operations` listing and `_check_evidence_bounds`),
+  `jobs/capture_operations/storage/spool.py` (`_remove_spool_entries`).
+- Excluded (operator approval 2026-11-12, amended 2026-11-13):
+  `jobs/handlers/artifacts/rootfs_reclaim.py` `_live_writer_holds_a_partial` scans a path, stays
+  unchanged, and is the guard's one allowlist entry. The 2026-11-12 exclusion of `journal.py`
+  `_check_evidence_bounds` was withdrawn on 2026-11-13 (it lists a descriptor), so it routes
+  through the helper and the guard exempts no descriptor.
 - Guard test `tests/guards/test_directory_listing_rewinds.py`: an AST scan of `src/kdive`
   fails on any `os.listdir`/`os.scandir` call (attribute form or a name imported from `os`)
-  outside the helper module, except the two allowlisted `(file, enclosing function)` pairs. An
+  outside the helper module, except the allowlisted `(file, enclosing function)` pair. An
   allowlist entry that no longer matches a call also fails, so the list cannot go stale.
 - Test helper `_store_names` in `tests/providers/remote_libvirt/test_external_boot_authority.py`
   uses the helper, so remote store assertions do not under-report on btrfs.
@@ -76,8 +75,8 @@ rewound is missing from the next listing. tmpfs and ext4 return it. With `TMPDIR
 1. With `TMPDIR` on btrfs, `test_session.py`, `test_materializer.py` and
    `test_external_boot_authority.py` (the 22 failures on `main`) pass, and they still pass with
    the default `TMPDIR`.
-2. `rg -n "os\.(listdir|scandir)\(" src/` lists only the helper module and the two excluded
-   sites.
+2. `rg -n "os\.(listdir|scandir)\(" src/` lists only the helper module and the excluded
+   `rootfs_reclaim.py` path scan.
 3. The guard fails when a call written as `os.listdir(...)`, `os.scandir(...)`, or a name imported
    from `os` for either is added to a `src/kdive` module outside the allowlisted functions. An
    aliased module (`import os as x`), `posix.listdir`, or a stored function reference is not
