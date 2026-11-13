@@ -45,8 +45,20 @@ holds the absence receipt digest. The job keeps its attempt count and receives n
 
 ## Limits
 
-- **Authority unavailable.** The teardown job waits for the provider authority. Restore the
-  authority service and let the teardown retry. Do not edit job or System rows by hand.
+- **Authority unavailable.** The teardown job retries each time its lease lapses, about every
+  five minutes, until `attempt` equals `max_attempts` (three for a new job). It then stays
+  `running` and nothing retries it. Restore the authority service, then run `systems.teardown`
+  again. It restarts the same job and adds the job's current `max_attempts` to its budget, so
+  each restart grants as many attempts as the job already had: three, then six, then twelve.
+  Fix the cause first. Also check the reconciler log for
+  `authority System teardown attempt <id> still has core cleanup` or
+  `authority System teardown repair failed for attempt <id>`. The `<id>` is an authority attempt,
+  not the System, and no MCP tool maps it to a System, so treat either line as possibly this
+  System's: the authority may already have proved absence and the reconciler may hold the
+  receipt. Fix that cleanup and wait for a reconciler pass that no longer logs it before you run
+  `systems.teardown`; a restarted teardown cannot finish while such a receipt is pending. See
+  [Recovering an allocation stranded by a failed authority-owned provision](live-testing.md#recovering-an-allocation-stranded-by-a-failed-authority-owned-provision).
+  Do not edit job or System rows by hand.
 - **Retained quarantine.** If the authority cannot prove absence, it retains the System in
   quarantine and the teardown retries. Release stays refused until absence is proven.
 - **Another System on the Allocation.** Release checks every System the Allocation ever held.

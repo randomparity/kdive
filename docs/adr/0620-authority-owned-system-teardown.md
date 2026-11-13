@@ -544,3 +544,43 @@ its durable phase (ADR-0585 retry table) or refuses with no further write, and a
 is never replaced, and a failed reap completion is still refused. The host restore runs under the
 deadline of the call that runs it rather than the deadline staged by the first call, which had
 usually expired by the time of a retry. No schema change.
+
+## Amendment (2026-11-13): An exhausted preactivation teardown restarts on request (#3617)
+
+An authority-owned System's preactivation teardown that fails without a terminal receipt stays
+`running`: the worker logs the failure and leaves the row, and `claim_worker_job` reclaims a lapsed
+row only while `attempt < max_attempts` (migration 0112). After the last attempt nothing restarted
+it. `enqueue_preactivation_teardown` returned every prior row that was not `failed` unchanged, so
+`systems.teardown` and `ops.force_teardown` replayed it, `jobs.cancel` refuses it, and release
+stayed fenced with the System and its Allocation stranded even after the cause was fixed.
+
+`systems.teardown` on a System without an activation now passes `FAILED_OR_LAPSED_EXHAUSTED`, as
+the post-activation teardown does (#2889 amendment). `enqueue_preactivation_teardown` no longer
+decides recyclability itself: after the marker check it always calls the queue with the caller's
+policy, so the recycling `UPDATE` alone judges the row on the database clock. A final attempt
+whose lease lapsed restarts with its attempt counter kept and another `max_attempts` budget; a
+live final attempt, and every `queued`, `succeeded` or `canceled` row, comes back unchanged. The
+function refuses `TERMINAL` and `TERMINAL_OR_CANCELED`, which could restart a `succeeded`
+teardown whose receipt was consumed. The `jobs.cancel` fence, the reconciler orphan repair and
+investigation force-close keep `NEVER`; `ops.force_teardown` keeps `FAILED`. A dead attempt
+cannot commit once its lease lapsed (`finalize_authority_system_attempt` requires a live lease),
+and release still waits for the consumed absence receipt. No schema change.
+
+One case is accepted: a final attempt that recorded a `preactivation-absent` receipt and died
+before finalizing it also matches. The claim fence holds the restarted row `queued` until the
+reconciler's teardown repair consumes that receipt, and the repair marks only a `running` job
+`succeeded`, so the restarted row is later claimed and refused against the `torn-down` owner.
+Release follows the repair. The server cannot read `authority_system_attempts`, so excluding that
+case needs a migration; the runbook tells the operator to check the reconciler log first.
+
+Rejected for this amendment:
+
+- **A reconciler lane that fails the exhausted teardown.** judgment: the #2889 amendment rejected
+  terminalizing lapsed marked jobs in the reconciler, and a `failed` teardown would still need the
+  same operator request.
+- **Let `jobs.cancel` end it.** verified: `cancel_job` refuses the marker with
+  `authority_system_preactivation_teardown_not_cancelable` (`src/kdive/mcp/tools/jobs.py`, commit
+  221364fcd), because a canceled stable dedup row leaves no teardown the queue admits.
+- **Also recycle from `ops.force_teardown`.** judgment: its policy reaches the preactivation branch
+  through `enqueue_control_teardown`, whose one `recycle` argument also governs ordinary teardown
+  rows; `systems.teardown` is the supported path.

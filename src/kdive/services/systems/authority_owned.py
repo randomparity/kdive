@@ -13,7 +13,7 @@ from psycopg.rows import dict_row
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
-from kdive.domain.operations.jobs import Job, JobKind, JobState
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import (
     EXTERNAL_BOOT_AUTHORITY_MARKER_KEY,
@@ -218,6 +218,15 @@ def authority_owned_preactivation_teardown_system_id(job: Job) -> UUID | None:
         ) from exc
 
 
+_PREACTIVATION_RECYCLE_POLICIES = frozenset(
+    {
+        queue.JobRecyclePolicy.NEVER,
+        queue.JobRecyclePolicy.FAILED,
+        queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED,
+    }
+)
+
+
 def _teardown_dedup_key(system_id: UUID) -> str:
     return f"{system_id}:teardown"
 
@@ -242,14 +251,19 @@ async def enqueue_preactivation_teardown(
 
     The caller holds the System transaction lock. A dedup collision with any ordinary teardown is
     a conflict: an authority-owned System must never let a worker dispatch an unmarked teardown.
-    A ``failed`` prior job with the same marker (its retained-receipt budget is spent, #3530) is
-    restarted only when ``recycle`` admits ``failed`` rows, i.e. on an operator request; automatic
-    callers pass ``NEVER`` so the bound cannot be re-spent every sweep.
+    The queue's own statement decides whether a prior job with the same marker restarts: a
+    ``failed`` one (its retained-receipt budget is spent, #3530) under ``FAILED``, and also a
+    ``running`` one whose final attempt's lease lapsed without a receipt under
+    ``FAILED_OR_LAPSED_EXHAUSTED`` (ADR-0620, #3617). Operator requests pass one of those;
+    automatic callers pass ``NEVER`` so the bound cannot be re-spent every sweep. A terminal
+    policy is refused: it could restart a ``succeeded`` teardown whose receipt was consumed.
 
     ``on_recycle`` runs in this transaction, once the admission succeeds, when this call restarted
     a prior row. The signal comes from the restarting statement, so a caller that audits the
     recycle cannot miss a row a worker failed between a separate pre-read and this call.
     """
+    if recycle not in _PREACTIVATION_RECYCLE_POLICIES:
+        raise ValueError(f"preactivation teardown cannot recycle with policy {recycle.value!r}")
     dedup_key = _teardown_dedup_key(system.id)
     operation_identity = (
         "sha256:"
@@ -281,19 +295,15 @@ async def enqueue_preactivation_teardown(
             "an ordinary teardown job cannot be replayed for an authority-owned System",
             category=ErrorCategory.CONFLICT,
         )
-    recycled = False
-    if prior is not None and prior.state is not JobState.FAILED:
-        job = prior
-    else:
-        job, changed = await queue.enqueue_with_status(
-            conn,
-            JobKind.TEARDOWN,
-            TeardownPayload(system_id=str(system.id), authority_system_v1=marker),
-            authorizing,
-            dedup_key,
-            recycle=recycle,
-        )
-        recycled = prior is not None and changed
+    job, changed = await queue.enqueue_with_status(
+        conn,
+        JobKind.TEARDOWN,
+        TeardownPayload(system_id=str(system.id), authority_system_v1=marker),
+        authorizing,
+        dedup_key,
+        recycle=recycle,
+    )
+    recycled = prior is not None and changed
     result = await (
         await conn.execute(
             "SELECT request_authority_system_preactivation_teardown(%s,%s,%s)",
@@ -320,8 +330,8 @@ async def enqueue_control_teardown(
     """Route a System-locked control teardown through its current ownership contract.
 
     ``recycle`` governs the ordinary ``{uid}:teardown`` row only; each caller states its policy
-    (ADR-0435). The preactivation-authority branch restarts a ``failed`` same-marker row only when
-    it admits one; any other authority-marked prior row replays (#2917, ADR-0620).
+    (ADR-0435). The preactivation-authority branch restarts a same-marker row only when the queue
+    admits it under that policy; any other authority-marked prior row replays (#2917, ADR-0620).
     """
     binding = await authority_system_binding(conn, system.id)
     if binding is not None and binding.ownership_state != "activated":

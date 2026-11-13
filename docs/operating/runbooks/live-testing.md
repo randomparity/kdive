@@ -482,10 +482,16 @@ and the job stays `running`. It is retried each time its lease lapses, about eve
 minutes, until `attempt` equals `max_attempts` (3).
 
 While the cause remains, the `teardown` job that `systems.teardown` queues fails and is retried
-the same way. After its last attempt, nothing restarts it. `systems.teardown` and
-`ops.force_teardown` return the same job, and `jobs.cancel` refuses it with
-`authority_system_preactivation_teardown_not_cancelable`. **Find and fix the cause before you
-run `systems.teardown`.** The `<reason>` in the worker journal names the shape. Lines ending
+the same way. After its last attempt it stays `running` and nothing retries it on its own.
+`ops.force_teardown` returns the same job, and `jobs.cancel` refuses it with
+`authority_system_preactivation_teardown_not_cancelable`. Once the cause is fixed, run
+`systems.teardown` again: it restarts the same job and adds its current `max_attempts` to the
+budget (three more for a job never restarted, doubling on each restart). If the reconciler log
+reports `authority System teardown attempt <id> still has core cleanup`, fix that cleanup first;
+the `<id>` is an authority attempt rather than the System, and the authority may already have
+proved absence (see the
+[exhausted authority System provision runbook](exhausted-authority-system-provision.md#limits)).
+**Find and fix the cause before you run `systems.teardown`.** The `<reason>` in the worker journal names the shape. Lines ending
 `authority System: attempt-superseded` or `authority System: attempt-busy` follow a teardown
 takeover and name no shape; read the job's earliest `authority: <reason>` line:
 
