@@ -480,6 +480,18 @@ def test_system_provisioning_validator_gates_remote_entry_egress_and_network(
     assert (_run_system_provisioning_validator(value).returncode == 0) is accepted
 
 
+@pytest.mark.parametrize(("ssh_port_min", "accepted"), ((1023, False), (1024, True)))
+def test_system_provisioning_validator_refuses_remote_ssh_range_below_1024(
+    tmp_path: Path, ssh_port_min: int, accepted: bool
+) -> None:
+    # Keep the ssh range clear of the fixture's gdb range (31000-31002) on the same address.
+    value = _remote_validator_input(
+        tmp_path, ssh_port_min=ssh_port_min, ssh_port_max=ssh_port_min + 2
+    )
+
+    assert (_run_system_provisioning_validator(value).returncode == 0) is accepted
+
+
 def test_local_mutation_installs_owner_only_root_tools_and_s3_credentials() -> None:
     defaults = _yaml(ROLE / "defaults" / "main.yml")
     local_packages = cast(dict[str, list[str]], defaults["provider_authority_host_local_packages"])
