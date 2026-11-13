@@ -118,9 +118,11 @@ The "Address" consequence above misnames the failing tool. The #3594 live run
 (`docs/workflow/proofs/2026-11-13-remote-authority-ssh-port-3594.md`) pointed the instance
 `ssh_addr` at the wrong host and, separately, ran with the host firewall closed to the port range.
 In both cases `systems.check_ssh_reachable` did not fail: its job succeeded with
-`reachable: false` at `layer: tcp_connect`. `systems.authorize_ssh_key` is the tool that fails
-with `transport_failure`. The code agrees: `check_ssh_reachable_handler` raises only when it cannot
-run the probe (`system_not_ready`, `ssh_not_provisioned`) and otherwise returns the probe's verdict
+`reachable: false` at `layer: tcp_connect`. With the wrong address, `systems.authorize_ssh_key`
+failed with `transport_failure`; the run did not call it with the range closed, but its pre-flight
+reachability check fails the same way for any unreachable endpoint. The code agrees:
+`check_ssh_reachable_handler` raises only when it cannot run the probe (for example
+`system_not_ready` or `ssh_not_provisioned`) and otherwise returns the probe's verdict
 (`jobs/handlers/connectivity/ssh_reachable.py`), while the authorize handler raises
 `TRANSPORT_FAILURE` when the guest endpoint cannot be reached
 (`jobs/handlers/connectivity/ssh_authorize.py`). So a wrong `ssh_addr` or a closed range shows up
