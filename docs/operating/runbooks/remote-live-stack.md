@@ -227,8 +227,9 @@ entry's `ssh_port_min`..`ssh_port_max`, binds the forward to the entry's `ssh_ad
 the port with the provision result. The SSH tools use the instance's `ssh_addr` with that stored
 port ([ADR-0815](../../adr/0815-remote-authority-system-ssh-port-is-reported-by-the-authority.md)).
 
-- **Address.** The instance's `ssh_addr` must reach the forward the manifest entry binds; use the
-  entry's `ssh_addr`. Nothing checks this. With a wrong address, `systems.authorize_ssh_key` fails
+- **Address.** The instance's `ssh_addr` must reach the forward the manifest entry binds: the
+  entry's `ssh_addr` when it is a routable host address, or an authority-host address the workers
+  can reach when the entry binds a wildcard. Nothing checks this. With a wrong address, `systems.authorize_ssh_key` fails
   `transport_failure` (`guest SSH endpoint is unreachable`), and the `systems.check_ssh_reachable`
   job succeeds with `reachable: false`, `detail: unreachable`, `layer: tcp_connect`. A firewall
   that blocks the range shows the same way.
@@ -244,9 +245,10 @@ port ([ADR-0815](../../adr/0815-remote-authority-system-ssh-port-is-reported-by-
   off, as another guest bound to its stored port: the SSH tools then reach that guest,
   `systems.check_ssh_reachable` can report it reachable, and bootstrap-key authentication fails.
 - **Systems from before the change.** A System that reached `ready` before the authority reported
-  ports (#3586) has no stored port. The SSH tools refuse it with `configuration_error`,
+  ports (#3586) has no stored port. `systems.ssh_info` refuses it with `configuration_error`,
   `reason=authority_ssh_forward_unreported` (`authority_system_not_attachable` once it leaves
-  `ready` and `activated`). kdive does not backfill the port; that is the operator's call, for
+  `ready` and `activated`). The two job tools report the first-activation fence below until the
+  System's first activation, and `authority_ssh_forward_unreported` after it. kdive does not backfill the port; that is the operator's call, for
   example a teardown and a new System on the upgraded authority.
 - **Order.** `systems.ssh_info` answers from the first provision. `systems.authorize_ssh_key` and
   `systems.check_ssh_reachable` refuse with `authority_system_preactivation_mutation_fenced` until

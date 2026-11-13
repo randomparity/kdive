@@ -30,7 +30,7 @@ issuer. It read `authority_system_ownership` and `jobs` with the harness databas
 
 | Arm | Observation |
 |---|---|
-| Provision (Systems A and B) | `systems.provision` job `succeeded`; System `ready`; ownership `ready`, `ssh_forward_port` 48000. |
+| Provision (Systems A and B) | Run one after the other: System A was torn down before System B was provisioned. Each `systems.provision` job `succeeded`; System `ready`; ownership `ready`, `ssh_forward_port` 48000, the lowest port in the manifest range. |
 | Port source | `systems.ssh_info` answered `sys-A`:48000 from the first provision. The port is in the manifest range, outside the instance `ssh_range`. |
 | Fence before first activation | `systems.authorize_ssh_key`: `conflict`, `authority_system_preactivation_mutation_fenced`. `systems.check_ssh_reachable`: `configuration_error`, same reason. |
 | Activation | External boot of the v6.9 kernel; ownership `activated`. |
@@ -39,7 +39,7 @@ issuer. It read `authority_system_ownership` and `jobs` with the harness databas
 | Authorize after release (System B) | After `runs.release_external_boot` succeeded, the `authorize_ssh_key` job `succeeded`. |
 | Reachability (System B) | `check_ssh_reachable` job `succeeded`, `reachable: true`, TCP connect and SSH banner both ok. |
 | Agent login (System B) | `ssh -p 48000 root@sys-A` with the authorized key ran `uname -r` (`6.19.10-300.fc44.x86_64`) and `id -un` (`root`). |
-| Wrong instance `ssh_addr` (System B) | Inventory `ssh_addr` pointed at `sys-C`, stack processes restarted with `stack-services.sh`. `ssh_info` answered `sys-C`:48000. `authorize_ssh_key` job failed `transport_failure`, `guest SSH endpoint is unreachable; not attempting the authorized-keys append`. `check_ssh_reachable` job `succeeded` with `reachable: false`, `layer: tcp_connect`. |
+| Wrong instance `ssh_addr` (System B) | Inventory `ssh_addr` pointed at `sys-C`, stack processes restarted with `stack-services.sh`. `ssh_info` answered `sys-C`:48000. `authorize_ssh_key` with a key not used before failed `transport_failure`, `guest SSH endpoint is unreachable; not attempting the authorized-keys append`. `check_ssh_reachable` job `succeeded` with `reachable: false`, `layer: tcp_connect`. |
 | Restored `ssh_addr` (System B) | Inventory restored and processes restarted; `check_ssh_reachable` `reachable: true`. |
 | Cleanup | Both Systems `torn_down`, ownership `torn-down`, allocations `released`. The authority daemon listed no domains, its pool held only the base volume, and nothing listened in 48000-48099. |
 

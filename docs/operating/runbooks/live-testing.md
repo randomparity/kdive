@@ -443,15 +443,17 @@ shows. The host preparation itself is
   that one line with `relocated_authority_instance`.
 - **A remote authority System's SSH port comes from the authority's manifest**
   ([remote-live-stack: Remote authority Systems](remote-live-stack.md#remote-authority-systems-adr-0815)).
-  Set the `[[remote_libvirt]]` entry's `ssh_addr` to the manifest entry's `ssh_addr` and open the
+  Set the `[[remote_libvirt]]` entry's `ssh_addr` to an address that reaches the manifest entry's
+  `ssh_addr` bind (the same address unless the entry binds a wildcard), and open the
   manifest entry's SSH range to the workers. A wrong address or a closed range shows as
   `systems.authorize_ssh_key` failing `transport_failure` and a `systems.check_ssh_reachable` job
   that succeeds with `reachable: false` at `layer: tcp_connect`. The entry's `ssh_range` is still
   required but does not bound the port. Keep the manifest's SSH range apart from every other SSH
   range on the authority host; nothing enforces it, and a collision fails a domain start or lets
   another guest answer on a shut-off System's port. A System that reached `ready` before the
-  authority reported ports keeps refusing with `authority_ssh_forward_unreported` until the
-  operator replaces it; nothing backfills the port. Both job tools wait for the first activation
+  authority reported ports has no stored port: `systems.ssh_info`, and the job tools after its
+  first activation, refuse it with `authority_ssh_forward_unreported` until the operator replaces
+  it; nothing backfills the port. Both job tools wait for the first activation
   (`authority_system_preactivation_mutation_fenced`), and `systems.authorize_ssh_key` also waits
   for its release (`external_boot_restricted`).
 - **Register a staged image with its sidecar, then reconcile.** A catalog image for the authority
