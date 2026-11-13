@@ -66,7 +66,15 @@ def _resolve_image_ref(image: str) -> str:
 
 
 def _canonical_image_ref(image: str) -> str:
-    """Treat official Quay MinIO refs as aliases of the historical matrix names."""
+    """Map a compose image ref to its matrix name.
+
+    The matrix records arch support per tag, so a ``tag@sha256:...`` pin is read as that tag and
+    its digest dropped (#3610). That assumes the digest is the tag's multi-arch manifest list
+    (``docker buildx imagetools inspect``), not a single-platform image digest; the guard is
+    static and cannot check it. Official Quay MinIO refs are aliases of
+    the historical matrix names.
+    """
+    image = image.split("@", 1)[0]
     for repository in ("minio", "mc"):
         quay_prefix = f"quay.io/minio/{repository}:"
         if image.startswith(quay_prefix):
