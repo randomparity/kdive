@@ -629,6 +629,10 @@ def test_ssh_info_refuses_a_system_with_no_usable_forward(
             )
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert resp.data["reason"] == reason
+        # An authority-owned System cannot be reprovisioned (ADR-0623), so the remedy is a new one.
+        assert resp.detail is not None
+        assert "tear this System down and provision a new System" in resp.detail
+        assert "Reprovision it" not in resp.detail
 
     asyncio.run(_run())
 
