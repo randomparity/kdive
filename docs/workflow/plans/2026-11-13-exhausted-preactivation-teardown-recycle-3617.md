@@ -78,6 +78,10 @@ Steps:
      disposition="preactivation-absent", generation=5)`, `finalize_authority_system_attempt`
      with attempt 4 returns `('applied','succeeded','torn_down')`, and absence is proven;
    - live: row is `('running', 3, 3)` and no audit row.
+   The exhausted state is seeded (attempt, lease and worker written directly), as the existing
+   capped-teardown test seeds its rounds: the worker step that leaves a marked job `running`
+   (`jobs/worker.py` `_finalize_handler`) is unchanged, and the contract under test is the
+   admission of that row. Say so in the PR body.
    The terminal-policy test calls `enqueue_preactivation_teardown` directly with each of
    `TERMINAL` and `TERMINAL_OR_CANCELED` and expects `ValueError`.
 2. Run the focused command; expect `[lapsed]` and the terminal-policy test to fail.

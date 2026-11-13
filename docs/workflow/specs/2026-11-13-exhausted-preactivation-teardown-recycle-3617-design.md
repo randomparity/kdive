@@ -87,10 +87,12 @@ same job (`replay`), and release still waits for the consumed absence receipt.
      `failed` recycle;
    - the final attempt recorded a `preactivation-absent` receipt and died before finalizing it,
      and the reconciler's teardown repair has not consumed it yet (for example it reports
-     "still has core cleanup"). The row matches the recycle predicate, but every new attempt is
-     refused `busy`, and once the repair applies, the queued row exhausts again on a `torn_down`
-     System. Bounded: release already follows the repair, and the cost is one spent budget and a
-     stray job row. The server cannot read `authority_system_attempts` (migration 0149 revokes
+     "still has core cleanup"). The row matches the recycle predicate. The recycled row is
+     `queued`, and `claim_worker_job` will not claim it while that receipt is unconsumed (claim
+     fence, migration 0149). The repair still tears the System down, but it marks only a
+     `running` job `succeeded`, so the queued row is later claimed, refused `superseded` against
+     the `torn-down` owner, and stays unsettled on a `torn_down` System. Bounded: release reads no
+     job state and still follows the repair; the cost is one stray job row. The server cannot read `authority_system_attempts` (migration 0149 revokes
      it), so a guard needs a migration; the runbook tells the operator to check the reconciler
      log first. Reported as a follow-up candidate;
    - `ops.force_teardown` still replays an exhausted `running` preactivation teardown; the
