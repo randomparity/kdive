@@ -194,7 +194,7 @@ def test_provision_and_drop_roundtrip_against_real_server() -> None:
     xdist_backend.skip_without_docker()
     from testcontainers.postgres import PostgresContainer
 
-    with PostgresContainer("postgres:17") as container:
+    with PostgresContainer(db_conftest._POSTGRES_IMAGE) as container:
         server = container.get_connection_url(driver=None)  # includes the password
         name = db_conftest._worker_db_name()
         worker_url, dbname = db_conftest._provision_worker_db(server, dbname=name)
