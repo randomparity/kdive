@@ -1,10 +1,10 @@
 """List a directory through a descriptor from its first entry (#3601).
 
 ``os.listdir(fd)`` reads from the descriptor's shared offset and rewinds only after reading.
-On btrfs a directory descriptor's visible index range is fixed when it is opened and refreshed
-on each seek, so a listing misses entries created after the descriptor was opened or last
-rewound; ext4 and tmpfs return them. Seeking to 0 immediately before the read returns every
-entry present when the listing starts.
+On btrfs a directory descriptor's visible index range is fixed when it is opened and, on current
+kernels (observed on Linux 7.2), refreshed on each seek, so a listing misses entries created
+after the descriptor was opened or last rewound; ext4 and tmpfs return them. Seeking to 0
+immediately before the read returns every entry present when the listing starts.
 """
 
 from __future__ import annotations

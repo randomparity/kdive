@@ -120,7 +120,7 @@ Interfaces: consumes `list_directory_descriptor` from Task 1.
 
 Verification:
 - Contract "decision-bearing descriptor listings see entries created after the last rewind" —
-  `Mode: focused-test`. Red (recorded on `main` aea536906): with `TMPDIR=/home/dave/t` on
+  `Mode: focused-test`. Red (recorded on `main` aea536906): with `TMPDIR=<a directory on btrfs>` on
   btrfs, `uv run python -m pytest -q tests/providers/local_libvirt/lifecycle/boot/test_session.py
   tests/providers/local_libvirt/lifecycle/boot/test_materializer.py
   tests/providers/remote_libvirt/test_external_boot_authority.py` → `22 failed`. Green: the same
