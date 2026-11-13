@@ -703,3 +703,198 @@ def test_failed_capped_teardown_restarts_and_completes(
             "SELECT * FROM finalize_authority_system_attempt(%s,%s,1,%s,5,2,%s,%s)",
             (credential, job_id, authority_id[0], head_digest, receipt),
         ).fetchone() == ("applied", "succeeded", "torn_down")
+
+
+async def _provision_authority_system(pool: AsyncConnectionPool) -> UUID:
+    """Provision an authority-owned System that has not activated and return its id."""
+    handlers = SystemProvisionHandlers(
+        systems_support.TEST_PROFILE_POLICY,
+        systems_support.TEST_COMPONENT_SOURCES,
+        lambda _root: None,
+        authority_route=lambda _kind, _name: "authority-a",
+    )
+    allocation_id = await systems_support.granted_allocation(pool)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE resources SET name='host-a' WHERE id=("
+            "SELECT resource_id FROM allocations WHERE id=%s)",
+            (allocation_id,),
+        )
+        await conn.execute(
+            "INSERT INTO image_catalog "
+            "(id,provider,name,arch,format,root_device,object_key,digest,provenance,"
+            "visibility,state) VALUES "
+            "(%s,'local-libvirt','authority-base','x86_64','qcow2','/dev/vda',"
+            "'authority-base.qcow2',%s,%s,'public','registered')",
+            (uuid4(), _DIGEST, Jsonb(_ROOT)),
+        )
+    provision = await handlers.provision_system(
+        pool, systems_support.ctx(), allocation_id=allocation_id, profile=_profile()
+    )
+    return UUID(str(provision.data["system_id"]))
+
+
+def _register_worker(migrated_url: str, name: str) -> tuple[str, bytes]:
+    worker = f"docker:{name}-{uuid4()}"
+    credential = uuid4().bytes + uuid4().bytes
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "INSERT INTO worker_incarnations "
+            "(incarnation,authority_kind,authority_binding,fence_protocol,credential_hash,state) "
+            "VALUES (%s,'docker','{}',4,%s,'active')",
+            (worker, credential),
+        )
+    return worker, credential
+
+
+@pytest.mark.parametrize("lease", ["lapsed", "live"])
+def test_exhausted_preactivation_teardown_recycles_only_after_lease_lapse(
+    migrated_url: str, request: pytest.FixtureRequest, lease: str
+) -> None:
+    """#3617, ADR-0620: `systems.teardown` restarts a final attempt that died without a receipt.
+
+    The exhausted state is seeded: the worker leaves a marked job `running` when it fails without
+    a terminal receipt (`jobs/worker.py`), and the contract here is how admission treats that row.
+    """
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    audit_sql = (
+        "SELECT principal FROM audit_log WHERE tool='systems.teardown' "
+        "AND transition='teardown:recycled' AND object_id=%s"
+    )
+    row_sql = "SELECT state,attempt,max_attempts FROM jobs WHERE id=%s"
+    first = systems_support.ctx(role=Role.ADMIN)
+    second = replace(first, principal="user-2")
+
+    async def provision_and_request_teardown() -> tuple[UUID, str]:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id = await _provision_authority_system(pool)
+            queued = await teardown_system(pool, first, str(system_id))
+            assert queued.status == "queued"
+            return system_id, str(queued.object_id)
+
+    async def automatic_then_operator(system_id: UUID) -> tuple[str, str, bool]:
+        async with systems_support.pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                system = await SYSTEMS.get(conn, system_id)
+                assert system is not None
+                swept = await authority_owned.enqueue_control_teardown(
+                    conn,
+                    system,
+                    Authorizing(principal="reconciler", agent_session=None, project="proj"),
+                    recycle=queue.JobRecyclePolicy.NEVER,
+                )
+            response = await teardown_system(pool, second, str(system_id))
+            async with pool.connection() as conn:
+                proven = await authority_owned.preactivation_absence_is_proven(conn, system_id)
+        return swept.state.value, str(response.object_id), proven
+
+    system_id, job_id = asyncio.run(provision_and_request_teardown())
+    old_worker, old_credential = _register_worker(migrated_url, "exhausted-teardown")
+    lease_at = "clock_timestamp() - interval '1 second'"
+    if lease == "live":
+        lease_at = "clock_timestamp() + interval '5 minutes'"
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "UPDATE jobs SET state='running',attempt=3,max_attempts=3,worker_id=%s,"
+            f"heartbeat_at=now(),lease_expires_at={lease_at} WHERE id=%s",
+            (old_worker, job_id),
+        )
+
+    swept_state, response_id, proven = asyncio.run(automatic_then_operator(system_id))
+
+    assert swept_state == "running"
+    assert response_id == job_id
+    assert proven is False
+    with psycopg.connect(migrated_url) as conn:
+        row = conn.execute(row_sql, (job_id,)).fetchone()
+        audits = conn.execute(audit_sql, (system_id,)).fetchall()
+        owner = conn.execute(
+            "SELECT state FROM authority_system_ownership WHERE system_id=%s", (system_id,)
+        ).fetchone()
+    assert owner == ("teardown-requested",)
+    if lease == "live":
+        assert row == ("running", 3, 3)
+        assert audits == []
+        return
+    assert row == ("queued", 3, 6)
+    assert audits == [("user-2",)]
+
+    # The dead final attempt can no longer renew its lease.
+    with psycopg.connect(role_dsns("kdive_worker"), autocommit=True) as old:
+        renewed = old.execute(
+            "SELECT heartbeat_worker_job(%s,%s,3,interval '5 minutes')",
+            (job_id, old_credential),
+        ).fetchone()
+    assert renewed == (False,)
+
+    # A new attempt claims the restarted job and the authority's absence receipt completes it.
+    worker, credential = _register_worker(migrated_url, "recycled-teardown")
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute("UPDATE jobs SET state='canceled' WHERE kind='provision'")
+        marker = conn.execute(
+            "SELECT payload->'authority_system_v1' FROM jobs WHERE id=%s", (job_id,)
+        ).fetchone()
+    assert marker is not None
+    with psycopg.connect(role_dsns("kdive_worker")) as worker_conn:
+        claimed = worker_conn.execute(
+            "SELECT id,attempt FROM claim_worker_job(%s,%s,interval '1 minute',ARRAY['default'])",
+            (worker, credential),
+        ).fetchone()
+        worker_conn.commit()
+    assert claimed == (UUID(job_id), 4)
+    case: dict[str, object] = {
+        "system_id": system_id,
+        "job_id": UUID(job_id),
+        "worker": worker,
+        "credential": credential,
+        "marker": marker[0],
+    }
+    with psycopg.connect(migrated_url) as conn:
+        _, _, receipt, head_digest, _ = _seed_direct_terminal_attempt(
+            conn, case, disposition="preactivation-absent", generation=5
+        )
+        conn.commit()
+        authority_id = conn.execute(
+            "SELECT current_attempt_id FROM authority_system_ownership WHERE system_id=%s",
+            (system_id,),
+        ).fetchone()
+    assert authority_id is not None
+    with psycopg.connect(role_dsns("kdive_worker")) as worker_conn:
+        assert worker_conn.execute(
+            "SELECT * FROM finalize_authority_system_attempt(%s,%s,4,%s,5,2,%s,%s)",
+            (credential, job_id, authority_id[0], head_digest, receipt),
+        ).fetchone() == ("applied", "succeeded", "torn_down")
+
+    async def absence_proven() -> bool:
+        async with systems_support.pool(migrated_url) as pool, pool.connection() as conn:
+            return await authority_owned.preactivation_absence_is_proven(conn, system_id)
+
+    assert asyncio.run(absence_proven()) is True
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [queue.JobRecyclePolicy.TERMINAL, queue.JobRecyclePolicy.TERMINAL_OR_CANCELED],
+)
+def test_preactivation_teardown_refuses_terminal_recycle(
+    migrated_url: str, policy: queue.JobRecyclePolicy
+) -> None:
+    """A terminal recycle could restart a `succeeded` teardown whose receipt was consumed."""
+
+    async def run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id = await _provision_authority_system(pool)
+            async with pool.connection() as conn:
+                system = await SYSTEMS.get(conn, system_id)
+                binding = await authority_owned.authority_system_binding(conn, system_id)
+                assert system is not None and binding is not None
+                with pytest.raises(ValueError, match="cannot recycle"):
+                    await authority_owned.enqueue_preactivation_teardown(
+                        conn,
+                        system,
+                        binding,
+                        Authorizing(principal="user-1", agent_session=None, project="proj"),
+                        recycle=policy,
+                    )
+
+    asyncio.run(run())

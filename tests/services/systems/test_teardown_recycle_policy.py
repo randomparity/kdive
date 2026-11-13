@@ -1,8 +1,10 @@
 """Each caller of the authority teardown admission states its own recycle policy (ADR-0435).
 
 Automatic callers pass ``NEVER`` so a ``failed`` authority teardown is not restarted every
-sweep (#3530); operator-initiated callers pass ``FAILED`` so a retry restarts it. The service
-applies whatever the caller passes, so only a per-caller assertion catches a flipped policy.
+sweep (#3530); operator-initiated callers pass ``FAILED`` so a retry restarts it, and
+``systems.teardown`` passes ``FAILED_OR_LAPSED_EXHAUSTED`` so it also restarts a final attempt
+whose lease lapsed without a receipt (#3617). The service applies whatever the caller passes, so
+only a per-caller assertion catches a flipped policy.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from tests.reconciler.conftest import connect, seed_system
 
 _NEVER = queue.JobRecyclePolicy.NEVER
 _FAILED = queue.JobRecyclePolicy.FAILED
+_FAILED_OR_LAPSED = queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED
 _DIGEST = "sha256:" + "a" * 64
 _ROOT = {
     "root_spec": {
@@ -184,7 +187,7 @@ _CALL_SITES = [
         systems_admin,
         "enqueue_preactivation_teardown",
         _operator_preactivation_teardown,
-        _FAILED,
+        _FAILED_OR_LAPSED,
         id="operator-systems-teardown",
     ),
 ]

@@ -702,12 +702,13 @@ async def _enqueue_preactivation_authority_teardown(
     """Enqueue and bind one activation-free teardown to immutable ownership."""
     try:
         # `job.authorizing` stays the first enqueuer's by design (ADR-0447); audit the requester.
+        # A failed job, or one whose final attempt's lease lapsed, restarts (ADR-0620, #3617).
         job = await enqueue_preactivation_teardown(
             conn,
             system,
             binding,
             job_authorizing(ctx, system.project),
-            recycle=queue.JobRecyclePolicy.FAILED,
+            recycle=queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED,
             on_recycle=partial(_audit_authority_recycle, conn, ctx, system),
         )
     except CategorizedError as exc:
