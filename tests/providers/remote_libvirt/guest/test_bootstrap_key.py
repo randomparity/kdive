@@ -67,3 +67,11 @@ def test_inject_script_is_idempotent_append_with_tight_umask() -> None:
     assert "grep -qxF" in INJECT_SCRIPT
     assert "key=$(cat)" in INJECT_SCRIPT
     assert _PUBKEY not in INJECT_SCRIPT
+
+
+def test_inject_script_flushes_the_key_to_disk_before_success() -> None:
+    # Activation hard-powers-off the domain, so success must mean the key is on disk (#3619).
+    # Under `set -e` a failed flush exits non-zero, which the injector maps to PROVISIONING_FAILURE.
+    lines = INJECT_SCRIPT.splitlines()
+    assert lines[0] == "set -e"
+    assert lines[-1] == "sync -f /root/.ssh/authorized_keys"

@@ -25,7 +25,9 @@ _INJECT_TIMEOUT_S = 60.0
 
 # The key arrives on stdin (`key=$(cat)`), so it never occupies an argv/command-string position it
 # could break out of. `umask 077` makes ~/.ssh 0700 and a fresh authorized_keys 0600; `grep -qxF`
-# keeps the append idempotent across provision retries.
+# keeps the append idempotent across provision retries. `sync -f` commits the file's filesystem
+# before the exit status reports success: activation powers the domain off with `destroy`, which
+# loses a write still held in the guest page cache (#3619).
 INJECT_SCRIPT = (
     "set -e\n"
     "umask 077\n"
@@ -34,6 +36,7 @@ INJECT_SCRIPT = (
     "touch /root/.ssh/authorized_keys\n"
     'grep -qxF "$key" /root/.ssh/authorized_keys '
     "|| printf '%s\\n' \"$key\" >> /root/.ssh/authorized_keys\n"
+    "sync -f /root/.ssh/authorized_keys\n"
 )
 
 
