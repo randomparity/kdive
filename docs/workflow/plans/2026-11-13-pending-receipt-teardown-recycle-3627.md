@@ -8,7 +8,7 @@ System lock; the service downgrades a non-`NEVER` policy to `NEVER` when it is t
 `docs/workflow/specs/2026-11-13-pending-receipt-teardown-recycle-3627-design.md`.
 
 Expected implementation size: 270–330 changed lines (M) — a 40-line migration, a 20-line service
-change, ~210 lines of tests across two files, six window-list edits, a comment, runbook prose.
+change, ~210 lines of tests across two files, seven window-list edits, a comment, runbook prose.
 
 ## Global Constraints
 
@@ -245,7 +245,7 @@ TO kdive_server;
    `("0196", "0196_authority_system_receipt_pending.sql"),` in the `migrations[-91:]` list of
    `tests/db/test_migrate.py` (slice → `[-92:]`), the `[-87:]` lists of the 0091 and 0102 tests
    (→ `[-88:]`) and the `[-74:]` list of the 0115 test (→ `[-75:]`); and the string `"0196",` in
-   the two version-string lists of `tests/db/test_migrate.py` that end with `"0195",`.
+   the three version-string lists of `tests/db/test_migrate.py` that end with `"0195",`.
    `rg -n '"0195"' tests/db` must then show a `0196` line after each hit.
 5. Run both focused commands; expect all pass. Commit
    `feat(db): add the pending absence-receipt predicate (#3627)`.
