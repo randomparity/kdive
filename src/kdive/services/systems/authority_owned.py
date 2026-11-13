@@ -140,7 +140,8 @@ async def authority_ssh_forward_port(
         raise CategorizedError(
             "this authority-owned System reported no SSH forward to attach through; it was "
             "provisioned before the authority reported one, or the authority is older than this "
-            "server. Reprovision it against an upgraded authority.",
+            "server. An authority-owned System cannot be reprovisioned: tear this System down and "
+            "provision a new System against an upgraded authority.",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": reason},
         )

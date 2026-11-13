@@ -113,6 +113,16 @@ authority reports a port, a remote authority System is refused with
 `authority_ssh_forward_unreported` in place of `ssh_not_provisioned`. No schema or payload change;
 the lifecycle identity does not move.
 
+### Amendment (2026-11-13): the refusal names the supported remedy (#3618)
+
+Decision 4 says the `authority_ssh_forward_unreported` message tells the operator to reprovision
+against an upgraded authority, and the "Existing Systems" consequence calls it the reprovision
+message. Reprovision is unsupported for an authority-owned System
+([ADR-0623](0623-authority-owned-system-provisioning.md)), as that consequence already notes, so
+the message now tells the operator to tear the System down and provision a new System against an
+upgraded authority. The reasons, the `configuration_error` category and the absence of any
+fallback are unchanged.
+
 ## Considered & rejected
 
 - **Give the server an authority route and ask the authority.** verified: the sender signs with the
