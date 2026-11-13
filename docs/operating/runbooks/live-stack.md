@@ -290,6 +290,8 @@ phase's diagnostics if packaging, provisioning, or boot fails.
 ## 4. Start the host processes
 
 With an installed local authority, read the [live authority lab traps](live-testing.md#live-authority-lab) first.
+If a failed authority-owned provision holds an Allocation, follow
+[Recovering an allocation stranded by a failed authority-owned provision](live-testing.md#recovering-an-allocation-stranded-by-a-failed-authority-owned-provision).
 
 From a source checkout, run the convenience wrapper:
 
