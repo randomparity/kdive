@@ -40,16 +40,18 @@ from tests.providers.external_boot_authority.tls_support import _tls_material
 pytestmark = pytest.mark.anyio
 
 
-async def test_typed_unix_mutation_replays_after_lost_terminal_response(tmp_path: Path) -> None:
+async def test_typed_unix_mutation_replays_after_lost_terminal_response(
+    short_socket_dir: Path,
+) -> None:
     from kdive.jobs.authority_sender import AuthorityRequestSender
     from kdive.providers.external_boot_authority.service import AuthenticatedPeer
     from kdive.providers.external_boot_authority.transport import _dispatch
 
-    service, repository, adapter, peer, takeover = _service(tmp_path)
-    material = _tls_material(tmp_path, takeover.authority_instance)
-    socket_path = tmp_path / "authority.sock"
+    service, repository, adapter, peer, takeover = _service(short_socket_dir)
+    material = _tls_material(short_socket_dir, takeover.authority_instance)
+    socket_path = short_socket_dir / "authority.sock"
     binding = replace(_binding(socket_path), authority_instance=takeover.authority_instance)
-    context = _resolve_tls_material(binding, FileRefBackend(tmp_path, SecretRegistry()))
+    context = _resolve_tls_material(binding, FileRefBackend(short_socket_dir, SecretRegistry()))
     credential = SecretStr("active-incarnation")
     sender = AuthorityRequestSender(
         lambda: _AuthorityUnixTransport(binding, context), lambda: credential
@@ -149,12 +151,12 @@ async def _healthy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -
     await writer.drain()
 
 
-async def test_configured_unix_binding_uses_tls_and_fixed_socket(tmp_path: Path) -> None:
-    material = _tls_material(tmp_path, "authority-a")
-    socket_path = tmp_path / "authority.sock"
+async def test_configured_unix_binding_uses_tls_and_fixed_socket(short_socket_dir: Path) -> None:
+    material = _tls_material(short_socket_dir, "authority-a")
+    socket_path = short_socket_dir / "authority.sock"
     binding = _binding(socket_path)
     transport = _AuthorityUnixTransport(
-        binding, _resolve_tls_material(binding, FileRefBackend(tmp_path, SecretRegistry()))
+        binding, _resolve_tls_material(binding, FileRefBackend(short_socket_dir, SecretRegistry()))
     )
     envelope = encode_request_envelope(
         "health",
@@ -178,9 +180,9 @@ def test_unix_binding_rejects_unconfined_or_oversize_socket(path: str) -> None:
     assert path not in str(caught.value)
 
 
-async def test_wrong_authority_identity_is_redacted(tmp_path: Path) -> None:
-    material = _tls_material(tmp_path, "authority-a")
-    socket_path = tmp_path / "authority.sock"
+async def test_wrong_authority_identity_is_redacted(short_socket_dir: Path) -> None:
+    material = _tls_material(short_socket_dir, "authority-a")
+    socket_path = short_socket_dir / "authority.sock"
     binding = LocalAuthorityBinding(
         authority_instance="authority-b",
         request_socket=socket_path,
@@ -189,7 +191,7 @@ async def test_wrong_authority_identity_is_redacted(tmp_path: Path) -> None:
         client_key_ref="client-key",  # pragma: allowlist secret - fixture reference
     )
     transport = _AuthorityUnixTransport(
-        binding, _resolve_tls_material(binding, FileRefBackend(tmp_path, SecretRegistry()))
+        binding, _resolve_tls_material(binding, FileRefBackend(short_socket_dir, SecretRegistry()))
     )
     async with _server(socket_path, material, _healthy):
         with pytest.raises(CategorizedError, match="authority: tls-rejected") as caught:
@@ -280,12 +282,12 @@ def test_worker_local_binding_matches_provisioned_authority_socket_and_refs() ->
 
 
 async def test_local_sender_factory_borrows_active_credential_at_encode(
-    tmp_path: Path,
+    short_socket_dir: Path,
 ) -> None:
     from kdive.providers.assembly.authority import local_authority_sender_factory
 
-    material = _tls_material(tmp_path, "authority-a")
-    socket_path = tmp_path / "authority.sock"
+    material = _tls_material(short_socket_dir, "authority-a")
+    socket_path = short_socket_dir / "authority.sock"
     client_key_ref = "client-key"  # pragma: allowlist secret - fixture reference
     config_registry.load(
         {
@@ -303,7 +305,9 @@ async def test_local_sender_factory_borrows_active_credential_at_encode(
         borrowed.append(credential)
         return credential
 
-    sender = local_authority_sender_factory(FileRefBackend(tmp_path, SecretRegistry()), borrow)
+    sender = local_authority_sender_factory(
+        FileRefBackend(short_socket_dir, SecretRegistry()), borrow
+    )
     assert sender is not None
     assert borrowed == []
 
@@ -318,11 +322,11 @@ async def test_local_sender_factory_borrows_active_credential_at_encode(
     assert borrowed == [credential]
 
 
-async def test_stale_credential_is_closed_and_redacted(tmp_path: Path) -> None:
+async def test_stale_credential_is_closed_and_redacted(short_socket_dir: Path) -> None:
     from kdive.providers.assembly.authority import local_authority_sender_factory
 
-    material = _tls_material(tmp_path, "authority-a")
-    socket_path = tmp_path / "authority.sock"
+    material = _tls_material(short_socket_dir, "authority-a")
+    socket_path = short_socket_dir / "authority.sock"
     client_key_ref = "client-key"  # pragma: allowlist secret - fixture reference
     config_registry.load(
         {
@@ -334,7 +338,7 @@ async def test_stale_credential_is_closed_and_redacted(tmp_path: Path) -> None:
         }
     )
     sender = local_authority_sender_factory(
-        FileRefBackend(tmp_path, SecretRegistry()), lambda: SecretStr("stale-incarnation")
+        FileRefBackend(short_socket_dir, SecretRegistry()), lambda: SecretStr("stale-incarnation")
     )
     assert sender is not None
     response = b'{"category":"unauthenticated","status":"error"}'
@@ -365,12 +369,12 @@ def test_local_sender_factory_accepts_only_validated_binding() -> None:
     )
 
 
-async def test_local_transport_bounds_a_stalled_response(tmp_path: Path) -> None:
-    material = _tls_material(tmp_path, "authority-a")
-    socket_path = tmp_path / "authority.sock"
+async def test_local_transport_bounds_a_stalled_response(short_socket_dir: Path) -> None:
+    material = _tls_material(short_socket_dir, "authority-a")
+    socket_path = short_socket_dir / "authority.sock"
     binding = _binding(socket_path)
     transport = _AuthorityUnixTransport(
-        binding, _resolve_tls_material(binding, FileRefBackend(tmp_path, SecretRegistry()))
+        binding, _resolve_tls_material(binding, FileRefBackend(short_socket_dir, SecretRegistry()))
     )
 
     async def stall(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -390,13 +394,13 @@ async def test_local_transport_bounds_a_stalled_response(tmp_path: Path) -> None
     [b"\0\0\0\0", (MAX_ENVELOPE_BYTES + 1).to_bytes(4, "big"), b"\0\0\0\x08x"],
 )
 async def test_local_transport_rejects_malformed_or_truncated_response(
-    tmp_path: Path, frame: bytes
+    short_socket_dir: Path, frame: bytes
 ) -> None:
-    material = _tls_material(tmp_path, "authority-a")
-    socket_path = tmp_path / "authority.sock"
+    material = _tls_material(short_socket_dir, "authority-a")
+    socket_path = short_socket_dir / "authority.sock"
     binding = _binding(socket_path)
     transport = _AuthorityUnixTransport(
-        binding, _resolve_tls_material(binding, FileRefBackend(tmp_path, SecretRegistry()))
+        binding, _resolve_tls_material(binding, FileRefBackend(short_socket_dir, SecretRegistry()))
     )
 
     async def malformed(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -427,12 +431,12 @@ async def test_local_transport_rejects_malformed_or_truncated_response(
     ],
 )
 async def test_local_sender_preserves_closed_peer_rejections(
-    tmp_path: Path, reason: str, category: ErrorCategory, terminal: bool
+    short_socket_dir: Path, reason: str, category: ErrorCategory, terminal: bool
 ) -> None:
     from kdive.providers.assembly.authority import local_authority_sender_factory
 
-    material = _tls_material(tmp_path, "authority-a")
-    socket_path = tmp_path / "authority.sock"
+    material = _tls_material(short_socket_dir, "authority-a")
+    socket_path = short_socket_dir / "authority.sock"
     client_key_ref = "client-key"  # pragma: allowlist secret - fixture reference
     config_registry.load(
         {
@@ -444,7 +448,7 @@ async def test_local_sender_preserves_closed_peer_rejections(
         }
     )
     sender = local_authority_sender_factory(
-        FileRefBackend(tmp_path, SecretRegistry()), lambda: SecretStr("active-incarnation")
+        FileRefBackend(short_socket_dir, SecretRegistry()), lambda: SecretStr("active-incarnation")
     )
     assert sender is not None
     response = json.dumps(

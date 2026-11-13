@@ -193,6 +193,8 @@ def _manifest_identities(document: dict[str, Any], provider_kind: str) -> set[st
                     or not 1 <= entry[low] <= entry[high] <= 65535
                 ):
                     _fail()
+            if entry["ssh_port_min"] < 1024:
+                _fail()
             if entry["gdb_port_min"] == entry["gdb_port_max"] or (
                 entry["gdb_addr"] == entry["ssh_addr"]
                 and entry["gdb_port_min"] <= entry["ssh_port_max"]

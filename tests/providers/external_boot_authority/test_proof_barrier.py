@@ -33,8 +33,10 @@ async def _request(path: Path, document: dict[str, object]) -> dict[str, object]
 
 
 @pytest.mark.anyio
-async def test_barrier_is_closed_until_one_exact_arm_reaches_and_releases(tmp_path: Path) -> None:
-    path = tmp_path / "control.sock"
+async def test_barrier_is_closed_until_one_exact_arm_reaches_and_releases(
+    short_socket_dir: Path,
+) -> None:
+    path = short_socket_dir / "control.sock"
     barrier = AuthorityProofBarrier(path, operator_uid=os.geteuid())
     await barrier.start()
     system_id = uuid4()
@@ -91,9 +93,9 @@ async def test_barrier_is_closed_until_one_exact_arm_reaches_and_releases(tmp_pa
 
 @pytest.mark.anyio
 async def test_barrier_rejects_malformed_oversize_and_unauthorized_peers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    short_socket_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    path = tmp_path / "control.sock"
+    path = short_socket_dir / "control.sock"
     barrier = AuthorityProofBarrier(path, operator_uid=os.geteuid())
     await barrier.start()
     try:
@@ -120,8 +122,10 @@ async def test_barrier_rejects_malformed_oversize_and_unauthorized_peers(
 
 
 @pytest.mark.anyio
-async def test_shutdown_aborts_a_reached_checkpoint_without_releasing_it(tmp_path: Path) -> None:
-    barrier = AuthorityProofBarrier(tmp_path / "control.sock", operator_uid=os.geteuid())
+async def test_shutdown_aborts_a_reached_checkpoint_without_releasing_it(
+    short_socket_dir: Path,
+) -> None:
+    barrier = AuthorityProofBarrier(short_socket_dir / "control.sock", operator_uid=os.geteuid())
     await barrier.start()
     system_id = uuid4()
     run_id = uuid4()
@@ -139,13 +143,15 @@ async def test_shutdown_aborts_a_reached_checkpoint_without_releasing_it(tmp_pat
 
 
 @pytest.mark.anyio
-async def test_shutdown_consumes_an_unwaited_arm_failure(tmp_path: Path) -> None:
+async def test_shutdown_consumes_an_unwaited_arm_failure(short_socket_dir: Path) -> None:
     loop = asyncio.get_running_loop()
     previous = loop.get_exception_handler()
     contexts: list[dict[str, object]] = []
     loop.set_exception_handler(lambda _loop, context: contexts.append(context))
     try:
-        barrier = AuthorityProofBarrier(tmp_path / "control.sock", operator_uid=os.geteuid())
+        barrier = AuthorityProofBarrier(
+            short_socket_dir / "control.sock", operator_uid=os.geteuid()
+        )
         await barrier.arm(uuid4(), uuid4(), AuthorityOperation.ACTIVATE, "after-provider")
         await barrier.close()
         del barrier
@@ -162,8 +168,8 @@ async def test_shutdown_consumes_an_unwaited_arm_failure(tmp_path: Path) -> None
 
 
 @pytest.mark.anyio
-async def test_barrier_refuses_to_replace_a_live_owner_socket(tmp_path: Path) -> None:
-    path = tmp_path / "control.sock"
+async def test_barrier_refuses_to_replace_a_live_owner_socket(short_socket_dir: Path) -> None:
+    path = short_socket_dir / "control.sock"
     listener = socket.socket(socket.AF_UNIX)
     listener.bind(str(path))
     listener.listen()
@@ -193,8 +199,8 @@ async def _until_reached(path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_abort_fails_only_a_reached_cleanup_finalize_wait(tmp_path: Path) -> None:
-    path = tmp_path / "control.sock"
+async def test_abort_fails_only_a_reached_cleanup_finalize_wait(short_socket_dir: Path) -> None:
+    path = short_socket_dir / "control.sock"
     barrier = AuthorityProofBarrier(path, operator_uid=os.geteuid())
     await barrier.start()
     system_id, run_id = uuid4(), uuid4()
@@ -233,8 +239,8 @@ async def test_abort_fails_only_a_reached_cleanup_finalize_wait(tmp_path: Path) 
 
 
 @pytest.mark.anyio
-async def test_release_clears_an_unreached_arm(tmp_path: Path) -> None:
-    path = tmp_path / "control.sock"
+async def test_release_clears_an_unreached_arm(short_socket_dir: Path) -> None:
+    path = short_socket_dir / "control.sock"
     barrier = AuthorityProofBarrier(path, operator_uid=os.geteuid())
     await barrier.start()
     system_id, run_id = uuid4(), uuid4()
@@ -253,8 +259,8 @@ async def test_release_clears_an_unreached_arm(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_shutdown_clears_an_aborted_wait_without_a_stale_arm(tmp_path: Path) -> None:
-    barrier = AuthorityProofBarrier(tmp_path / "control.sock", operator_uid=os.geteuid())
+async def test_shutdown_clears_an_aborted_wait_without_a_stale_arm(short_socket_dir: Path) -> None:
+    barrier = AuthorityProofBarrier(short_socket_dir / "control.sock", operator_uid=os.geteuid())
     system_id, run_id = uuid4(), uuid4()
     await barrier.arm(system_id, run_id, AuthorityOperation.CLEANUP, "before-finalize")
     checkpoint = asyncio.create_task(
