@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -26,6 +27,7 @@ from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.mcp.tools.lifecycle.systems.snapshot import restore_system, snapshot_system
 from kdive.mcp.tools.lifecycle.systems.ssh_access import check_ssh_reachable
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
+from kdive.reconciler.repairs.jobs import repair_terminal_authority_system_attempts
 from kdive.reconciler.repairs.systems import repair_orphaned_systems
 from kdive.security.authz.rbac import Role
 from tests.db.authority_system_support import _seed_direct_terminal_attempt, retain_round
@@ -870,6 +872,79 @@ def test_exhausted_preactivation_teardown_recycles_only_after_lease_lapse(
             return await authority_owned.preactivation_absence_is_proven(conn, system_id)
 
     assert asyncio.run(absence_proven()) is True
+
+
+class _NoArtifacts:
+    def delete_retired_key_batch(self, key: str, limit: int) -> bool:
+        return True
+
+
+@pytest.mark.parametrize("state", ["running", "failed"])
+def test_exhausted_preactivation_teardown_keeps_a_pending_absence_receipt(
+    migrated_url: str, request: pytest.FixtureRequest, state: str
+) -> None:
+    """#3627, ADR-0620: the repair, not a restart, settles a pending absence receipt."""
+    role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
+    first = systems_support.ctx(role=Role.ADMIN)
+    second = replace(first, principal="user-2")
+
+    async def provision_and_request_teardown() -> tuple[UUID, str]:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id = await _provision_authority_system(pool)
+            queued = await teardown_system(pool, first, str(system_id))
+            assert queued.status == "queued"
+            return system_id, str(queued.object_id)
+
+    async def operator_retry(system_id: UUID) -> str:
+        async with systems_support.pool(migrated_url) as pool:
+            response = await teardown_system(pool, second, str(system_id))
+        return str(response.object_id)
+
+    async def reconcile() -> int:
+        async with await psycopg.AsyncConnection.connect(role_dsns("kdive_reconciler")) as conn:
+            return await repair_terminal_authority_system_attempts(conn, cast(Any, _NoArtifacts()))
+
+    system_id, job_id = asyncio.run(provision_and_request_teardown())
+    worker, credential = _register_worker(migrated_url, "receipt-teardown")
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute(
+            "UPDATE jobs SET state=%s,attempt=3,max_attempts=3,worker_id=%s,"
+            "heartbeat_at=now(),lease_expires_at=clock_timestamp()-interval '1 second' "
+            "WHERE id=%s",
+            (state, worker, job_id),
+        )
+        marker = conn.execute(
+            "SELECT payload->'authority_system_v1' FROM jobs WHERE id=%s", (job_id,)
+        ).fetchone()
+        assert marker is not None
+        case: dict[str, object] = {
+            "system_id": system_id,
+            "job_id": UUID(job_id),
+            "worker": worker,
+            "credential": credential,
+            "marker": marker[0],
+        }
+        _seed_direct_terminal_attempt(conn, case, disposition="preactivation-absent")
+
+    assert asyncio.run(operator_retry(system_id)) == job_id
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute(
+            "SELECT state,attempt,max_attempts FROM jobs WHERE id=%s", (job_id,)
+        ).fetchone() == (state, 3, 3)
+        assert conn.execute(
+            "SELECT count(*) FROM audit_log WHERE transition='teardown:recycled' AND object_id=%s",
+            (system_id,),
+        ).fetchone() == (0,)
+
+    # The repair marks only a `running` job `succeeded`; a `failed` one stays `failed`.
+    assert asyncio.run(reconcile()) >= 1
+    with psycopg.connect(migrated_url) as conn:
+        assert conn.execute("SELECT state FROM jobs WHERE id=%s", (job_id,)).fetchone() == (
+            "succeeded" if state == "running" else "failed",
+        )
+        assert conn.execute("SELECT state FROM systems WHERE id=%s", (system_id,)).fetchone() == (
+            "torn_down",
+        )
 
 
 @pytest.mark.parametrize(
