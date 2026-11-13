@@ -167,7 +167,7 @@ demoCredentials:
 # Image pins for the first-party demo backends (bundledBackends path only).
 demo:
   postgres:
-    image: postgres:17
+    image: postgres:17@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317 # 17
   seaweedfs:
     image: ghcr.io/randomparity/kdive-seaweedfs@sha256:6a4e9f013ecd9c1f86136ed3d3c7eb089c8eb13ff3eee83044ab2a2950f7ce6c
     # Expose the bundled object store off-cluster (needed for remote-libvirt guest
