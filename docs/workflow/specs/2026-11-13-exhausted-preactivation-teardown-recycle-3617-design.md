@@ -85,6 +85,14 @@ same job (`replay`), and release still waits for the consumed absence receipt.
    - an operator who calls `systems.teardown` before fixing the cause spends another three
      attempts and must call it again; bounded by `max_attempts` per request, as for the #3530
      `failed` recycle;
+   - the final attempt recorded a `preactivation-absent` receipt and died before finalizing it,
+     and the reconciler's teardown repair has not consumed it yet (for example it reports
+     "still has core cleanup"). The row matches the recycle predicate, but every new attempt is
+     refused `busy`, and once the repair applies, the queued row exhausts again on a `torn_down`
+     System. Bounded: release already follows the repair, and the cost is one spent budget and a
+     stray job row. The server cannot read `authority_system_attempts` (migration 0149 revokes
+     it), so a guard needs a migration; the runbook tells the operator to check the reconciler
+     log first. Reported as a follow-up candidate;
    - `ops.force_teardown` still replays an exhausted `running` preactivation teardown; the
      supported path is `systems.teardown`, and changing the break-glass policy would also change
      ordinary teardown rows. Reported as a follow-up candidate.
@@ -98,7 +106,7 @@ same job (`replay`), and release still waits for the consumed absence receipt.
 
 - With the marked teardown `running`, `attempt = max_attempts` and a lapsed lease,
   `systems.teardown` returns the same job `queued`, with `attempt` unchanged and `max_attempts`
-  raised by the original budget, and writes one `teardown:recycled` audit row for the requester.
+  set to `attempt + max_attempts`, and writes one `teardown:recycled` audit row for the requester.
 - With the lease still live, `systems.teardown` returns the job unchanged and writes no audit row.
 - `enqueue_control_teardown` with `NEVER` returns the exhausted row unchanged in both cases.
 - After the restart, the absence receipt is still unproven; a new claim and a

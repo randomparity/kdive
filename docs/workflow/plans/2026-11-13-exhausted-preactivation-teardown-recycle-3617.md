@@ -134,11 +134,17 @@ Steps:
      teardown rows through `enqueue_control_teardown`; `systems.teardown` is the supported path.
 2. Runbook "Limits" first bullet: the teardown retries each time its lease lapses (about five
    minutes) up to three attempts, then stops `running`; restore the authority, then run
-   `systems.teardown` again, which restarts the same job with three more attempts; link
+   `systems.teardown` again, which restarts the same job with a fresh budget of `max_attempts`
+   more attempts (normally three); link
    `live-testing.md#recovering-an-allocation-stranded-by-a-failed-authority-owned-provision`.
+   Add: if the reconciler log shows `authority System teardown attempt ... still has core
+   cleanup` or `authority System teardown repair failed` for the teardown, the authority already
+   proved absence and the reconciler holds the receipt; fix that cleanup instead of rerunning
+   `systems.teardown`, which cannot finish while that receipt is pending.
 3. `live-testing.md` paragraph "While the cause remains...": after its last attempt the job stays
    `running`; `jobs.cancel` refuses it and `ops.force_teardown` returns it unchanged; once the
-   cause is fixed, `systems.teardown` restarts it with three more attempts. Keep "Find and fix the
+   cause is fixed, `systems.teardown` restarts it with a fresh budget of attempts (normally
+   three), with the same reconciler-log pre-check as step 2. Keep "Find and fix the
    cause before you run `systems.teardown`."
 4. `just lint`; commit `docs(adr): record the exhausted preactivation teardown recycle (#3617)`.
 
