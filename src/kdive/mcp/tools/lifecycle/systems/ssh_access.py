@@ -49,11 +49,11 @@ from kdive.services.systems.authority_owned import (
 _SSH_USER = "root"
 _NOT_READY_DETAIL = "System is not ready; SSH is available only on a ready System."
 # The local-libvirt forward is rendered on every domain now (ADR-0281, #937), so a None endpoint
-# on a ready System means the provider exposes no loopback SSH forward — direct SSH to a System is
-# a local-libvirt capability, not a missing per-profile credential.
+# on a ready System means the provider exposes no SSH forward — a remote-libvirt instance without
+# SSH parity — not a missing per-profile credential.
 _UNPROVISIONED_DETAIL = (
-    "This System's provider exposes no loopback SSH forward; direct SSH to a System is a "
-    "local-libvirt capability."
+    "This System's provider exposes no SSH forward; a remote-libvirt instance needs ssh_addr and "
+    "ssh_range for direct SSH."
 )
 
 
@@ -62,8 +62,9 @@ async def _recorded_endpoint(
 ) -> tuple[tuple[str, int] | None, int | None]:
     """The System's SSH endpoint, and the authority-reported port a job must carry (ADR-0811).
 
-    The port is ``None`` unless the System is authority-owned and local. An owned System that
-    reported none raises instead of falling back to a domain this process cannot read.
+    The port is ``None`` unless the System is authority-owned, local or remote (ADR-0815). An
+    owned System that reported none raises instead of falling back to a domain this process cannot
+    read.
     """
     forward = await authority_ssh_forward_port(conn, system.id)
     binding = await resolver.binding_for_system(conn, system.id)
@@ -107,7 +108,7 @@ async def ssh_info(
             data={"reason": "ssh_not_provisioned"},
         )
     host, port = recorded
-    # A local authority System refuses both job tools before its first activation.
+    # An authority System refuses both job tools before its first activation.
     actions = visible_next_actions(
         ["systems.get"]
         if fenced

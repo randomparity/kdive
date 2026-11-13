@@ -445,6 +445,7 @@ async def test_provider_implements_fixed_port_and_persists_intent_before_mutatio
         executor.shutdown()
 
     assert facts.complete
+    assert facts.ssh_forward_port == 47100
     assert intents_seen
     assert all(intent["bootstrap_identity"] == BOOTSTRAP_IDENTITY for intent in intents_seen)
     assert all(intent["deadline"] == intents_seen[0]["deadline"] for intent in intents_seen)
@@ -693,6 +694,7 @@ async def test_absent_observation_is_read_only(tmp_path: Path) -> None:
     finally:
         executor.shutdown()
     assert not facts.complete
+    assert facts.ssh_forward_port is None
     assert facts.quarantine_retained
     assert tuple(state.iterdir()) == before
     assert connection.mutations == []
@@ -711,6 +713,8 @@ async def test_interrupted_definition_reuses_overlay_ports_and_retained_deadline
         intent_path = state / f"{SYSTEM_ID}.provision.json"
         first = json.loads(intent_path.read_bytes())
         assert first["phase"] == "overlay-ready"
+        partial = await provider.observe_system_provision(_request(), _context(), _snapshot())
+        assert not partial.complete and partial.ssh_forward_port is None
 
         facts = await provider.execute_system_provision(_request(), _context(), _snapshot())
         second = json.loads(intent_path.read_bytes())
@@ -831,6 +835,7 @@ async def test_observe_complete_provision_changes_no_private_or_libvirt_state(
         executor.shutdown()
 
     assert facts.complete
+    assert facts.ssh_forward_port == 47100
     assert {path.name: path.read_bytes() for path in state.iterdir()} == before_files
     assert connection.mutations == before_mutations
 

@@ -149,6 +149,48 @@ def test_recorded_ssh_endpoint_none_for_absent_domain() -> None:
     assert connect.recorded_ssh_endpoint(SystemHandle("kdive-missing")) is None
 
 
+def _no_io_connect(config: RemoteLibvirtConfig) -> RemoteLibvirtConnect:
+    def refuse(uri: str) -> object:
+        raise AssertionError(f"a carried SSH port must not open libvirt ({uri})")
+
+    def no_secrets() -> SecretBackend:
+        raise AssertionError("a carried SSH port must not read TLS secrets")
+
+    return RemoteLibvirtConnect(
+        config_factory=lambda: config, open_connection=refuse, secret_backend_factory=no_secrets
+    )
+
+
+_PARITY = _config(ssh_addr="10.0.0.9", ssh_port_min=47100, ssh_port_max=47199)
+
+
+@pytest.mark.parametrize("port", [1024, 47101, 65535])
+def test_recorded_ssh_endpoint_uses_a_carried_port_without_libvirt(port: int) -> None:
+    # ADR-0815: the authority's domain is invisible over TLS, so the stored port replaces the read
+    # and the address stays the operator's ssh_addr; the instance range does not bound it.
+    endpoint = _no_io_connect(_PARITY).recorded_ssh_endpoint(
+        SystemHandle(_DOMAIN), ssh_forward_port=port
+    )
+    assert endpoint == ("10.0.0.9", port)
+
+
+@pytest.mark.parametrize("config", [_PARITY, _config()], ids=["parity", "no-parity"])
+@pytest.mark.parametrize("port", [0, 1023, 65536])
+def test_recorded_ssh_endpoint_refuses_a_carried_port_out_of_range(
+    port: int, config: RemoteLibvirtConfig
+) -> None:
+    # The bound is checked first, so an invalid port is named even where parity is unset.
+    with pytest.raises(CategorizedError) as exc:
+        _no_io_connect(config).recorded_ssh_endpoint(SystemHandle(_DOMAIN), ssh_forward_port=port)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"reason": "authority_ssh_forward_invalid"}
+
+
+def test_recorded_ssh_endpoint_none_for_a_carried_port_when_parity_inactive() -> None:
+    connect = _no_io_connect(_config())
+    assert connect.recorded_ssh_endpoint(SystemHandle(_DOMAIN), ssh_forward_port=47101) is None
+
+
 def test_open_gdbstub_unset_gdb_addr_is_configuration_error():
     c = _connect(
         resolve_port=lambda system: 47002,

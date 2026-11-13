@@ -28,6 +28,8 @@ from kdive.mcp.tools.lifecycle.systems.ssh_access import (
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.ports.handles import SystemHandle
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
+from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnect
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import ensure_system_bootstrap_key
@@ -223,11 +225,11 @@ def test_ssh_info_unprovisioned_is_config_error(migrated_url: str) -> None:
             resp = await ssh_info(pool, _ctx(), sys_id, resolver=resolver)
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert resp.data["reason"] == "ssh_not_provisioned"
-        # The detail describes the provider-capability gap (local-libvirt only), not a reprovision:
-        # the local forward is always rendered now (ADR-0281), so a None endpoint means the
-        # provider exposes no loopback SSH forward, not a missing per-profile credential.
+        # The detail describes the provider-capability gap, not a reprovision: the local forward
+        # is always rendered now (ADR-0281), so a None endpoint means a remote instance without
+        # SSH parity, not a missing per-profile credential.
         assert resp.detail is not None
-        assert "local-libvirt" in resp.detail
+        assert "ssh_addr" in resp.detail
         assert "reprovision" not in resp.detail.lower()
 
     asyncio.run(_run())
@@ -503,8 +505,20 @@ _RECOVERED = ExternalBootActivationState.RECOVERED
 _ACTIVE = ExternalBootActivationState.ACTIVE
 
 
-def _invisible_domain_resolver() -> ProviderResolver:
-    """A real local connector over a domain this process cannot see, as #3541 reported."""
+_REMOTE_SSH_ADDR = "192.0.2.10"
+_AUTHORITY_HOST = {"local-libvirt": "127.0.0.1", "remote-libvirt": _REMOTE_SSH_ADDR}
+
+
+@pytest.fixture(params=sorted(_AUTHORITY_HOST))
+def authority_kind(request: pytest.FixtureRequest) -> str:
+    """Both authority provider kinds take the stored-port path (ADR-0811, ADR-0815)."""
+    return request.param
+
+
+def _invisible_domain_resolver(kind: str = "local-libvirt") -> ProviderResolver:
+    """A real connector over a domain this process cannot see, as #3541 and #3547 reported."""
+    if kind == "remote-libvirt":
+        return _provider_resolver(connector=_remote_connector_without_libvirt())
 
     def invisible(_system: SystemHandle) -> tuple[str, int]:
         raise _no_domain_error()
@@ -517,10 +531,27 @@ def _invisible_domain_resolver() -> ProviderResolver:
     return _provider_resolver(connector=connector)
 
 
-async def _authority_system(pool, **ownership: Any) -> str:
+def _remote_connector_without_libvirt() -> RemoteLibvirtConnect:
+    """The real remote connector; opening its TLS connection fails, as the domain read would."""
+
+    def unreachable(uri: str) -> object:
+        raise AssertionError(f"the authority's domain is not on {uri}")
+
+    config = RemoteLibvirtConfig(
+        uri="qemu+tls://h/system",
+        cert_refs=TlsCertRefs(client_cert_ref="c", client_key_ref="k", ca_cert_ref="a"),
+        concurrent_allocation_cap=1,
+        ssh_addr=_REMOTE_SSH_ADDR,
+        ssh_port_min=47100,
+        ssh_port_max=47199,
+    )
+    return RemoteLibvirtConnect(config_factory=lambda: config, open_connection=unreachable)
+
+
+async def _authority_system(pool, kind: str = "local-libvirt", **ownership: Any) -> str:
     alloc_id = await _granted_allocation(pool)
     sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-    await _mark_authority_owned(pool, sys_id, **ownership)
+    await _mark_authority_owned(pool, sys_id, provider_kind=kind, **ownership)
     return sys_id
 
 
@@ -546,18 +577,23 @@ async def _job_count(pool) -> int:
     ids=["ready", "activated", "activated-restricting"],
 )
 def test_ssh_info_reports_the_stored_port(
-    migrated_url: str, state: str, activation: ExternalBootActivationState | None
+    migrated_url: str,
+    authority_kind: str,
+    state: str,
+    activation: ExternalBootActivationState | None,
 ) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await _authority_system(
-                pool, state=state, activation=activation, ssh_forward_port=_FORWARD
+                pool, authority_kind, state=state, activation=activation, ssh_forward_port=_FORWARD
             )
-            resp = await ssh_info(pool, _ctx(), sys_id, resolver=_invisible_domain_resolver())
+            resp = await ssh_info(
+                pool, _ctx(), sys_id, resolver=_invisible_domain_resolver(authority_kind)
+            )
         assert resp.status == "ok"
         ssh = resp.data["ssh"]
         assert isinstance(ssh, dict)
-        assert (ssh["host"], ssh["port"]) == ("127.0.0.1", _FORWARD)
+        assert (ssh["host"], ssh["port"]) == (_AUTHORITY_HOST[authority_kind], _FORWARD)
         if state == "ready":
             assert resp.suggested_next_actions == ["systems.get"]
         else:
@@ -583,12 +619,14 @@ def test_ssh_info_reports_the_stored_port(
     ids=["ready", "activated", "teardown-requested"],
 )
 def test_ssh_info_refuses_a_system_with_no_usable_forward(
-    migrated_url: str, ownership: dict[str, Any], reason: str
+    migrated_url: str, authority_kind: str, ownership: dict[str, Any], reason: str
 ) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            sys_id = await _authority_system(pool, **ownership)
-            resp = await ssh_info(pool, _ctx(), sys_id, resolver=_invisible_domain_resolver())
+            sys_id = await _authority_system(pool, authority_kind, **ownership)
+            resp = await ssh_info(
+                pool, _ctx(), sys_id, resolver=_invisible_domain_resolver(authority_kind)
+            )
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert resp.data["reason"] == reason
 
@@ -597,15 +635,19 @@ def test_ssh_info_refuses_a_system_with_no_usable_forward(
 
 @pytest.mark.parametrize("activation", [_RECOVERED, _ACTIVE], ids=["no-restriction", "restricting"])
 def test_check_ssh_reachable_carries_the_stored_port_once_activated(
-    migrated_url: str, activation: ExternalBootActivationState
+    migrated_url: str, authority_kind: str, activation: ExternalBootActivationState
 ) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await _authority_system(
-                pool, state="activated", activation=activation, ssh_forward_port=_FORWARD
+                pool,
+                authority_kind,
+                state="activated",
+                activation=activation,
+                ssh_forward_port=_FORWARD,
             )
             resp = await check_ssh_reachable(
-                pool, _ctx(), sys_id, resolver=_invisible_domain_resolver()
+                pool, _ctx(), sys_id, resolver=_invisible_domain_resolver(authority_kind)
             )
             assert resp.status == "queued"
             payload = await _job_payload(pool, resp.object_id)
@@ -616,11 +658,13 @@ def test_check_ssh_reachable_carries_the_stored_port_once_activated(
 
 @pytest.mark.parametrize("state", ["ready", "teardown-requested"])
 def test_check_ssh_reachable_stays_fenced_before_the_port_read(
-    migrated_url: str, state: str
+    migrated_url: str, authority_kind: str, state: str
 ) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            sys_id = await _authority_system(pool, state=state, ssh_forward_port=_FORWARD)
+            sys_id = await _authority_system(
+                pool, authority_kind, state=state, ssh_forward_port=_FORWARD
+            )
             connector = _FakeConnector(("127.0.0.1", 22022))
             resp = await check_ssh_reachable(
                 pool, _ctx(), sys_id, resolver=_provider_resolver(connector=connector)
@@ -634,13 +678,16 @@ def test_check_ssh_reachable_stays_fenced_before_the_port_read(
 
 def test_check_ssh_reachable_refuses_an_unreported_forward_without_a_job(
     migrated_url: str,
+    authority_kind: str,
 ) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            sys_id = await _authority_system(pool, state="activated", activation=_RECOVERED)
+            sys_id = await _authority_system(
+                pool, authority_kind, state="activated", activation=_RECOVERED
+            )
             before = await _job_count(pool)
             resp = await check_ssh_reachable(
-                pool, _ctx(), sys_id, resolver=_invisible_domain_resolver()
+                pool, _ctx(), sys_id, resolver=_invisible_domain_resolver(authority_kind)
             )
             assert await _job_count(pool) == before
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
@@ -649,14 +696,21 @@ def test_check_ssh_reachable_refuses_an_unreported_forward_without_a_job(
     asyncio.run(_run())
 
 
-def test_authorize_ssh_key_carries_the_stored_port_once_activated(migrated_url: str) -> None:
+def test_authorize_ssh_key_carries_the_stored_port_once_activated(
+    migrated_url: str,
+    authority_kind: str,
+) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await _authority_system(
-                pool, state="activated", activation=_RECOVERED, ssh_forward_port=_FORWARD
+                pool,
+                authority_kind,
+                state="activated",
+                activation=_RECOVERED,
+                ssh_forward_port=_FORWARD,
             )
             resp = await authorize_ssh_key(
-                pool, _ctx(), sys_id, _GOOD_KEY, resolver=_invisible_domain_resolver()
+                pool, _ctx(), sys_id, _GOOD_KEY, resolver=_invisible_domain_resolver(authority_kind)
             )
             assert resp.status == "queued"
             payload = await _job_payload(pool, resp.object_id)
@@ -679,11 +733,13 @@ def test_authorize_ssh_key_carries_the_stored_port_once_activated(migrated_url: 
     ids=["ready", "teardown-requested", "activated-restricting"],
 )
 def test_authorize_ssh_key_keeps_its_denials_before_the_port_read(
-    migrated_url: str, ownership: dict[str, Any], reason: str
+    migrated_url: str, authority_kind: str, ownership: dict[str, Any], reason: str
 ) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            sys_id = await _authority_system(pool, ssh_forward_port=_FORWARD, **ownership)
+            sys_id = await _authority_system(
+                pool, authority_kind, ssh_forward_port=_FORWARD, **ownership
+            )
             connector = _FakeConnector(("127.0.0.1", 22022))
             resp = await authorize_ssh_key(
                 pool, _ctx(), sys_id, _GOOD_KEY, resolver=_provider_resolver(connector=connector)
@@ -695,13 +751,18 @@ def test_authorize_ssh_key_keeps_its_denials_before_the_port_read(
     asyncio.run(_run())
 
 
-def test_authorize_ssh_key_refuses_an_unreported_forward_without_a_job(migrated_url: str) -> None:
+def test_authorize_ssh_key_refuses_an_unreported_forward_without_a_job(
+    migrated_url: str,
+    authority_kind: str,
+) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            sys_id = await _authority_system(pool, state="activated", activation=_RECOVERED)
+            sys_id = await _authority_system(
+                pool, authority_kind, state="activated", activation=_RECOVERED
+            )
             before = await _job_count(pool)
             resp = await authorize_ssh_key(
-                pool, _ctx(), sys_id, _GOOD_KEY, resolver=_invisible_domain_resolver()
+                pool, _ctx(), sys_id, _GOOD_KEY, resolver=_invisible_domain_resolver(authority_kind)
             )
             assert await _job_count(pool) == before
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
@@ -710,23 +771,11 @@ def test_authorize_ssh_key_refuses_an_unreported_forward_without_a_job(migrated_
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("remote", [False, True], ids=["non-authority", "remote-authority"])
-def test_other_systems_keep_the_provider_read_and_a_port_free_payload(
-    migrated_url: str, remote: bool
-) -> None:
+def test_other_systems_keep_the_provider_read_and_a_port_free_payload(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            if remote:
-                await _mark_authority_owned(
-                    pool,
-                    sys_id,
-                    state="activated",
-                    activation=_RECOVERED,
-                    provider_kind="remote-libvirt",
-                    ssh_forward_port=_FORWARD,
-                )
             connector = _FakeConnector(("192.0.2.1", 22022))
             resolver = _provider_resolver(connector=connector)
             info = await ssh_info(pool, _ctx(), sys_id, resolver=resolver)
@@ -740,20 +789,6 @@ def test_other_systems_keep_the_provider_read_and_a_port_free_payload(
         assert connector.seen_forwards == [None, None, None]
         assert probe_payload == {"system_id": sys_id}
         assert key_payload == {"system_id": sys_id, "public_key": _GOOD_KEY}
-
-    asyncio.run(_run())
-
-
-def test_ssh_info_keeps_its_next_actions_for_a_remote_authority_system(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            sys_id = await _authority_system(pool, provider_kind="remote-libvirt")
-            connector = _FakeConnector(("192.0.2.1", 22022))
-            resp = await ssh_info(
-                pool, _ctx(), sys_id, resolver=_provider_resolver(connector=connector)
-            )
-        assert "systems.check_ssh_reachable" in resp.suggested_next_actions
-        assert "systems.authorize_ssh_key" in resp.suggested_next_actions
 
     asyncio.run(_run())
 

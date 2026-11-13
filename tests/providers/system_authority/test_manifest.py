@@ -113,6 +113,24 @@ def test_remote_entry_carries_operator_guest_egress(tmp_path: Path) -> None:
     assert result.provider_entries()[0].guest_egress is True
 
 
+@pytest.mark.parametrize(("ssh_port_min", "accepted"), ((1023, False), (1024, True)))
+def test_remote_entry_refuses_ssh_range_below_receipt_floor(
+    tmp_path: Path, ssh_port_min: int, accepted: bool
+) -> None:
+    path = tmp_path / "manifest.json"
+    document = _remote_document()
+    # Keep the ssh range clear of the fixture's gdb range (31000-31002) on the same address.
+    document["entries"][0].update(ssh_port_min=ssh_port_min, ssh_port_max=ssh_port_min + 2)
+    _write_manifest(path, document)
+
+    if accepted:
+        result = load_authority_system_manifest(path, owner_uid=os.getuid(), owner_gid=os.getgid())
+        assert isinstance(result, RemoteAuthoritySystemManifestV1)
+        return
+    with pytest.raises(ValidationError, match="starts below 1024"):
+        load_authority_system_manifest(path, owner_uid=os.getuid(), owner_gid=os.getgid())
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (("network", "default"), ("guest_egress", "true")),
