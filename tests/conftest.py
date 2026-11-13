@@ -37,6 +37,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Iterator
@@ -310,6 +311,21 @@ def session_owned_tempdir(tmp_path_factory: pytest.TempPathFactory) -> Iterator[
         os.environ.pop("TMPDIR", None)
     else:
         os.environ["TMPDIR"] = previous_env
+
+
+@pytest.fixture
+def short_socket_dir() -> Iterator[Path]:
+    """Yield a private directory under ``/tmp`` short enough to hold an AF_UNIX socket.
+
+    A socket path is limited to 108 bytes, and ``tmp_path`` sits under pytest's basetemp, which a
+    deep ``TMPDIR`` or ``--basetemp`` pushes past that limit (#3602). ``session_owned_tempdir``
+    roots the default temp dir there too, so this names ``/tmp`` explicitly.
+    """
+    root = Path(tempfile.mkdtemp(prefix="kd-", dir="/tmp"))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.fixture(scope="session", autouse=True)
