@@ -451,11 +451,58 @@ shows. The host preparation itself is
   form is in the [local example](../../../examples/local-libvirt/README.md#optional-inventory-systemstoml).
 - **A stuck worker slot** after a unit restarted outside the lifecycle contract (a `needrestart`
   sweep, an unattended upgrade, a manual `systemctl restart`) is documented in
-  [Recovering a wedged worker slot](live-stack.md#recovering-a-wedged-worker-slot). No runbook
-  documents recovering an allocation stranded by a failed authority-owned provision: the
-  teardown steps in the [frame section](#authority-owned-system-frame-3184) cover only a killed
-  fixture-mode run, and teardown of an authority-owned System is refused while its recorded binding
-  mismatches the manifest.
+  [Recovering a wedged worker slot](live-stack.md#recovering-a-wedged-worker-slot). An Allocation
+  held by a failed authority-owned provision is covered in
+  [Recovering an allocation stranded by a failed authority-owned provision](#recovering-an-allocation-stranded-by-a-failed-authority-owned-provision).
+
+#### Recovering an allocation stranded by a failed authority-owned provision
+
+An authority-owned System that fails before its first activation keeps its Allocation.
+`allocations.release` and `ops.force_release` both answer `conflict` with reason
+`authority_system_preactivation_mutation_fenced`, and `systems.get` shows the System in
+`provisioning`. The failed `provision` job does not end. The worker journal
+(`journalctl -u 'kdive-live-worker@*'`) logs
+`marked authority System job <job-id> failed without a terminal receipt: authority: <reason>`,
+and the job stays `running`. It is retried each time its lease lapses, about every five
+minutes, until `attempt` equals `max_attempts` (3).
+
+The `teardown` job that `systems.teardown` queues for such a System is retried the same way.
+After its last attempt, nothing restarts it. `systems.teardown` and `ops.force_teardown` return
+the same job, and `jobs.cancel` refuses it with
+`authority_system_preactivation_teardown_not_cancelable`. **Find and fix the cause before you
+run `systems.teardown`.** The `<reason>` in the worker journal names the shape:
+
+- **`authority: provider-conflict`, with `local authority root source is not installed` in the
+  authority journal.** The binding matches the manifest, but the manifest does not install the
+  profile's root. The authority refuses the teardown's takeover for the same reason, so a
+  teardown run before step 1 exhausts its attempts and strands the System; roll the lab host
+  back, as for a binding mismatch below.
+  1. Add the root to the manifest's `bases` and to `live_vm_host_authority_system_local_bases`.
+     Then re-run `installed-local-authority.yml` with the other inputs unchanged.
+  2. Run `systems.teardown <system-id>` (project `admin`). Wait for the job with `jobs.wait`
+     until it reports `succeeded`. `systems.get` then reports `torn_down`, and the teardown
+     job's `result_ref` holds the authority's preactivation-absence receipt digest.
+  3. Run `allocations.release`, which answers `released`.
+
+  The provision job does not need to be exhausted first: the teardown supersedes its attempt.
+  After its last attempt lapses, the reconciler cancels it, and its `result_ref` is the same
+  receipt digest.
+- **`authority: binding-mismatch`.** The inventory's `authority_instance` for the Resource did
+  not match the installed authority's when the System was provisioned. The System recorded that
+  value, and the recorded binding never changes. The teardown fails with the same reason, and
+  correcting the inventory does not change the recorded binding. Re-running the play with the
+  recorded value as `live_vm_host_authority_instance` does not help: the authority fails its
+  start-up check with `tls-health: handshake-failed`, because its server certificate names a DNS
+  name derived from the installed instance (`authority_server_name`). No tool recovers this
+  System. Roll the lab host back to a clean snapshot and bring the lane up again. To prevent it,
+  check the inventory entry against the manifest before provisioning (the inventory trap above).
+- **The worker died during the final provision attempt.** The authority wrote no terminal
+  receipt, and the job keeps `running` with `attempt` equal to `max_attempts` and a lapsed lease.
+  Follow [Exhausted authority System provision](exhausted-authority-system-provision.md).
+
+A System that the fixed worker provisioned on its own daemon, and whose later Run was routed to
+the authority, is a different shape:
+see [Allocation stranded by an authority-routed fixed-worker System](stranded-activation-recovery.md).
 
 ### Separate installed authority lanes
 
