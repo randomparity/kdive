@@ -87,9 +87,10 @@ Steps:
    """List a directory through a descriptor from its first entry (#3601).
 
    ``os.listdir(fd)`` reads from the descriptor's shared offset and rewinds only after reading.
-   btrfs fixes a directory file's visible index range at its last rewind, so a second listing of
-   the same descriptor misses entries created in between; ext4 and tmpfs return them. Seeking to
-   0 immediately before the read returns every entry present when the listing starts.
+   On btrfs a directory descriptor's visible index range is fixed when it is opened and refreshed
+   on each seek, so a listing misses entries created after the descriptor was opened or last
+   rewound; ext4 and tmpfs return them. Seeking to 0 immediately before the read returns every
+   entry present when the listing starts.
    """
 
    from __future__ import annotations
@@ -169,9 +170,10 @@ Steps:
    ```python
    """Guard: directory listings in src/kdive go through the rewinding helper (#3601).
 
-   ``os.listdir(fd)`` on a reused descriptor misses entries on btrfs, so every listing goes
-   through ``list_directory_descriptor``. The allowlist names the two listings excluded from
-   #3601 by operator approval: a descriptor opened immediately before listing, and a path scan.
+   ``os.listdir(fd)`` misses entries on btrfs, so every ``os.listdir``/``os.scandir`` call goes
+   through ``list_directory_descriptor`` or a named allowlist entry. The allowlist names the two
+   listings excluded from #3601 by operator approval: a descriptor listed right after it is
+   opened, and a path scan.
    """
 
    from __future__ import annotations
@@ -238,8 +240,9 @@ Steps:
            if (path, function) not in _ALLOWLIST
        )
        assert not offenders, (
-           "list directories with kdive.providers.shared.directory_listing."
-           f"list_directory_descriptor, not os.listdir/os.scandir: {offenders}"
+           "list a directory descriptor with kdive.providers.shared.directory_listing."
+           "list_directory_descriptor; for a path listing use Path.iterdir() or add a "
+           f"(file, function) allowlist entry with a reason: {offenders}"
        )
 
 

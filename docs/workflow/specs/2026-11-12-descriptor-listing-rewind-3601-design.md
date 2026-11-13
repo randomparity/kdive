@@ -6,9 +6,9 @@ Provider and capture code lists directories through directory descriptors with
 `os.listdir(<fd>)` and decides on the result: refuse a second target projection, clean
 temporaries, collect or finalize remote store files, bound a scan. CPython's `os.listdir(fd)`
 duplicates the descriptor (the duplicate shares the file offset), reads, and rewinds only
-*after* reading. On btrfs a directory file snapshots its index range at the last rewind, so an
-entry created after that rewind is invisible to the next listing of the same descriptor. tmpfs
-and ext4 return it. With `TMPDIR` on btrfs, 22 tests in three files fail on `main`.
+*after* reading. On btrfs a directory descriptor's visible index range is fixed when it is
+opened and refreshed on each seek, so an entry created after the descriptor was opened or last
+rewound is missing from the next listing. tmpfs and ext4 return it. With `TMPDIR` on btrfs, 22 tests in three files fail on `main`.
 
 ## Scope
 
@@ -32,8 +32,9 @@ and ext4 return it. With `TMPDIR` on btrfs, 22 tests in three files fail on `mai
   (`_remove_spool_entries`).
 - Excluded (operator approval 2026-11-12): `system_authority/journal.py`
   `_check_evidence_bounds` and `jobs/handlers/artifacts/rootfs_reclaim.py`
-  `_live_writer_holds_a_partial`. The first lists a descriptor opened immediately before by
-  `_open_abandoned` (offset 0); the second scans a path. Both stay unchanged and are named
+  `_live_writer_holds_a_partial`. The first lists a descriptor `_open_abandoned` opens
+  immediately before the listing, with no entry created through it in between; the second
+  scans a path. Both stay unchanged and are named
   allowlist entries in the guard.
 - Guard test `tests/guards/test_directory_listing_rewinds.py`: an AST scan of `src/kdive`
   fails on any `os.listdir`/`os.scandir` call (attribute form or a name imported from `os`)
