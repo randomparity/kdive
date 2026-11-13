@@ -10,6 +10,7 @@ module, ``posix.listdir``, or a stored function reference is left to code review
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from functools import cache
 from pathlib import Path
 
@@ -78,7 +79,7 @@ def test_no_bare_directory_listings() -> None:
     )
 
 
-def test_allowlist_entries_still_match() -> None:
-    found = {(path, function) for path, function, _line in _listing_sites()}
-    stale = _ALLOWLIST - found
-    assert not stale, f"stale allowlist entries: {sorted(stale)}"
+def test_each_allowlist_entry_matches_exactly_one_listing() -> None:
+    counts = Counter((path, function) for path, function, _line in _listing_sites())
+    wrong = {entry: counts[entry] for entry in _ALLOWLIST if counts[entry] != 1}
+    assert not wrong, f"each allowlist entry must match exactly one listing call: {wrong}"
