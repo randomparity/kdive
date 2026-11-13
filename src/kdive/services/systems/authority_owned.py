@@ -132,18 +132,21 @@ async def authority_ssh_forward_port(
     if binding is None or (local_only and binding.provider_kind != "local-libvirt"):
         return None
     if binding.ssh_forward_port is None:
-        reason = (
-            "authority_system_not_attachable"
-            if binding.ownership_state not in {"ready", "activated"}
-            else "authority_ssh_forward_unreported"
-        )
+        if binding.ownership_state not in {"ready", "activated"}:
+            raise CategorizedError(
+                "this authority-owned System is in ownership state "
+                f"'{binding.ownership_state}' and is not attachable in that state; SSH attach "
+                "needs a ready or activated System.",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"reason": "authority_system_not_attachable"},
+            )
         raise CategorizedError(
             "this authority-owned System reported no SSH forward to attach through; it was "
             "provisioned before the authority reported one, or the authority is older than this "
             "server. An authority-owned System cannot be reprovisioned: tear this System down and "
             "provision a new System against an upgraded authority.",
             category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"reason": reason},
+            details={"reason": "authority_ssh_forward_unreported"},
         )
     return binding.ssh_forward_port
 
