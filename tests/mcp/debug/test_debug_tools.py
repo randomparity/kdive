@@ -1918,7 +1918,7 @@ def test_start_session_authority_system_without_a_reported_forward_fails_closed(
 
             assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
             assert resp.data["reason"] == "authority_ssh_forward_unreported"
-            assert "Reprovision" in (resp.detail or "")
+            assert "provision a new System" in (resp.detail or "")
             assert connector.opened == []
             assert await _session_count(pool) == 0
 
