@@ -112,6 +112,27 @@ authority's check, and the server applies only the receipt bound.
      authority hosts, including that the instance declares `ssh_addr` with an `ssh_range`, and prove `systems.authorize_ssh_key` against a remote authority System on a
      lab host.
 
+### Amendment (2026-11-13): a wrong address fails authorize, not the reachability probe (#3618)
+
+The "Address" consequence above misnames the failing tool. The #3594 live run
+(`docs/workflow/proofs/2026-11-13-remote-authority-ssh-port-3594.md`) pointed the instance
+`ssh_addr` at the wrong host and, separately, ran with the host firewall closed to the port range.
+In both cases `systems.check_ssh_reachable` did not fail: its job succeeded with
+`reachable: false` at `layer: tcp_connect`. `systems.authorize_ssh_key` is the tool that fails
+with `transport_failure`. The code agrees: `check_ssh_reachable_handler` raises only when it cannot
+run the probe (`system_not_ready`, `ssh_not_provisioned`) and otherwise returns the probe's verdict
+(`jobs/handlers/connectivity/ssh_reachable.py`), while the authorize handler raises
+`TRANSPORT_FAILURE` when the guest endpoint cannot be reached
+(`jobs/handlers/connectivity/ssh_authorize.py`). So a wrong `ssh_addr` or a closed range shows up
+as `systems.authorize_ssh_key` failing `transport_failure` and `systems.check_ssh_reachable`
+succeeding with `reachable: false` at `layer: tcp_connect`. Nothing else changes: the server still
+does not check the address.
+
+The decision 5 refusal, `authority_ssh_forward_unreported`, now tells the operator to tear the
+System down and provision a new System against an upgraded authority, because an authority-owned
+System cannot be reprovisioned ([ADR-0623](0623-authority-owned-system-provisioning.md)). The
+reason values and the `configuration_error` category are unchanged.
+
 ## Considered & rejected
 
 - **Keep the domain read (do nothing).** verified: at `2fbc81af0`,
