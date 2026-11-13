@@ -466,8 +466,8 @@ An authority-owned System that fails before its first activation keeps its Alloc
 and the job stays `running`. It is retried each time its lease lapses, about every five
 minutes, until `attempt` equals `max_attempts` (3).
 
-The `teardown` job that `systems.teardown` queues for such a System is retried the same way.
-After its last attempt, nothing restarts it. `systems.teardown` and `ops.force_teardown` return
+While the cause remains, the `teardown` job that `systems.teardown` queues fails and is retried
+the same way. After its last attempt, nothing restarts it. `systems.teardown` and `ops.force_teardown` return
 the same job, and `jobs.cancel` refuses it with
 `authority_system_preactivation_teardown_not_cancelable`. **Find and fix the cause before you
 run `systems.teardown`.** The `<reason>` in the worker journal names the shape:
@@ -484,9 +484,11 @@ run `systems.teardown`.** The `<reason>` in the worker journal names the shape:
      job's `result_ref` holds the authority's preactivation-absence receipt digest.
   3. Run `allocations.release`, which answers `released`.
 
-  The provision job does not need to be exhausted first: the teardown supersedes its attempt.
-  After its last attempt lapses, the reconciler cancels it, and its `result_ref` is the same
-  receipt digest.
+  The sequence works whether or not the provision job has spent its attempts: the teardown
+  supersedes the current attempt. Once the provision job's last attempt has lapsed, the
+  reconciler cancels it, and its `result_ref` is the same receipt digest. Unlike the stranded
+  `runs.boot` job in the [fixed-worker recovery](stranded-activation-recovery.md), it needs no
+  `jobs.cancel`.
 - **`authority: binding-mismatch`.** The inventory's `authority_instance` for the Resource did
   not match the installed authority's when the System was provisioned. The System recorded that
   value, and the recorded binding never changes. The teardown fails with the same reason, and
@@ -498,7 +500,10 @@ run `systems.teardown`.** The `<reason>` in the worker journal names the shape:
   check the inventory entry against the manifest before provisioning (the inventory trap above).
 - **The worker died during the final provision attempt.** The authority wrote no terminal
   receipt, and the job keeps `running` with `attempt` equal to `max_attempts` and a lapsed lease.
-  Follow [Exhausted authority System provision](exhausted-authority-system-provision.md).
+  Follow [Exhausted authority System provision](exhausted-authority-system-provision.md). The
+  lab run reached that job state through the root-not-installed shape above, not by killing a
+  worker, and its sequence matched that runbook: `systems.teardown`, `torn_down`,
+  `allocations.release`, then the reconciler canceled the provision job.
 
 A System that the fixed worker provisioned on its own daemon, and whose later Run was routed to
 the authority, is a different shape:
