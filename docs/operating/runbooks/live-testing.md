@@ -544,10 +544,12 @@ takeover and name no shape; read the job's earliest `authority: <reason>` line:
      route in `/etc/kdive/live-worker-authority.env` only when it starts, so until then it keeps
      refusing with `binding-mismatch`. The lab run also set the stack environment's
      `KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE` and `KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY`
-     to recorded-instance values for this start; it did not test whether that was needed.
+     to recorded-instance values for this start; it did not test whether that was needed. Note
+     both original values first, for step 6.
   5. Wait for the System's `teardown` job with `jobs.wait`, or run `systems.teardown
-     <system-id>` (project `admin`) if none is queued, or if the job has spent its attempts (see
-     the restart rule above). The job reports `succeeded` with the authority's
+     <system-id>` (project `admin`) if none is queued, or if the job has spent its attempts (the
+     restart rule above; the lab run's teardown had attempts left, so it did not exercise this).
+     The job reports `succeeded` with the authority's
      preactivation-absence receipt digest as its `result_ref`, and `systems.get` reports
      `torn_down`. The reconciler then releases the Allocation (`audit_log` rows from
      `system:reconciler`), and `allocations.release` answers `released`; before the teardown it
@@ -557,8 +559,8 @@ takeover and name no shape; read the job's earliest `authority: <reason>` line:
   6. Install the authority back: re-run `installed-local-authority.yml` with the original vars
      file, restore the stack environment, and restart the stack as in step 4. The original
      manifest must still list every base the lane provisions from; otherwise the next System
-     fails with `local authority root source is not installed` (the shape above). Delete the PKI
-     copy from step 2.
+     fails with `local authority root source is not installed` (the shape above). Shred the PKI
+     copy from step 2: it holds the CA key.
 
   To prevent it, check the inventory entry against the manifest before provisioning (the
   inventory trap above).
