@@ -498,8 +498,8 @@ takeover and name no shape; read the job's earliest `authority: <reason>` line:
 - **`authority: provider-conflict`, with `local authority root source is not installed` in the
   authority journal.** The binding matches the manifest, but the manifest does not install the
   profile's root. The authority refuses the teardown's takeover for the same reason, so a
-  teardown run before step 1 exhausts its attempts and strands the System; roll the lab host
-  back, as for a binding mismatch below.
+  teardown run before step 1 spends its attempts; after step 1, `systems.teardown` restarts it
+  as described above.
   1. Add the root to the manifest's `bases` and to `live_vm_host_authority_system_local_bases`.
      Then re-run `installed-local-authority.yml` with the other inputs unchanged.
   2. Run `systems.teardown <system-id>` (project `admin`). Wait for the job with `jobs.wait`
@@ -515,18 +515,55 @@ takeover and name no shape; read the job's earliest `authority: <reason>` line:
 - **`authority: binding-mismatch`.** The inventory's `authority_instance` for the Resource did
   not match the installed authority's when the System was provisioned. The System recorded that
   value, and the recorded binding never changes. The teardown fails with the same reason, and
-  correcting the inventory does not change the recorded binding. Re-running the play with only
-  `live_vm_host_authority_instance` and the manifest changed to the recorded value fails the
-  authority's start-up check with `tls-health: handshake-failed`: the server certificate was
-  issued for the original instance, whose name `authority_server_name` derives. The authority
-  stays down: in the lab run, restoring it took the original inputs, a `systemctl reset-failed`
-  and `systemctl start` of the unit, and one more play run. Reissuing the certificates for the
-  recorded instance
-  ([renew-local-authority-tls.yml](../../../deploy/ansible/playbooks/renew-local-authority-tls.yml),
-  which also requires `live_vm_host_worker_authority_instance` to match) has not been tried, so
-  no exit is proven. Roll the lab host back to a clean snapshot and bring the lane up again. To
-  prevent it, check the inventory entry against the manifest before provisioning (the inventory
-  trap above).
+  correcting the inventory does not change the recorded binding. The exit is to install the
+  authority under the recorded instance for long enough to tear the System down, then install it
+  back ([lab record](../../workflow/proofs/2026-11-13-authority-binding-mismatch-exit-3616.md)):
+  1. Read the recorded instance:
+     `SELECT authority_instance FROM authority_system_ownership WHERE system_id = '<system-id>'`.
+  2. Issue a server certificate for it. The server certificate names the instance through
+     `authority_server_name`, so a play run that changes only the instance and the manifest
+     fails the authority's start-up check with `tls-health: handshake-failed` and leaves the
+     authority down. Copy the lane's PKI directory to a new private `0700` directory, so the
+     original server certificate stays for step 6, and issue the leaf there from the same CA
+     ([Renewing retained-lane TLS credentials](#renewing-retained-lane-tls-credentials)). The
+     client certificates do not name the instance and stay as they are.
+
+     ```bash
+     scripts/operations/authority-pki.sh leaf --dir "$COPY" --name server --usage server \
+       --days 30 --key existing --authority-instance "$RECORDED_INSTANCE"
+     ```
+  3. Copy the lane's vars file and change `live_vm_host_authority_instance` to the recorded
+     instance (`live_vm_host_worker_authority_instance` follows it unless the file sets it),
+     `live_vm_host_authority_system_manifest_source` to a copy of the manifest with the recorded
+     `authority_instance` and the same `resource_name` and `bases`, and the server certificate
+     and key sources to the copy's `server.pem` and `server.key`. Run
+     `installed-local-authority.yml` with that file. When the play replaces the manifest, the
+     running authority exits with `authority System manifest changed` and systemd restarts it;
+     the play still ends with the authority active.
+  4. Restart the stack (`stack-down.sh`, then `stack-services.sh`). A fixed worker reads the
+     route in `/etc/kdive/live-worker-authority.env` only when it starts, so until then it keeps
+     refusing with `binding-mismatch`. The lab run also set the stack environment's
+     `KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE` and `KDIVE_EXTERNAL_BOOT_AUTHORITY_STORE_IDENTITY`
+     to recorded-instance values for this start; it did not test whether that was needed. Note
+     both original values first, for step 6.
+  5. Wait for the System's `teardown` job with `jobs.wait`, or run `systems.teardown
+     <system-id>` (project `admin`) if none is queued, or if the job has spent its attempts (the
+     restart rule above; the lab run's teardown had attempts left, so it did not exercise this).
+     The job reports `succeeded` with the authority's
+     preactivation-absence receipt digest as its `result_ref`, and `systems.get` reports
+     `torn_down`. The reconciler then releases the Allocation (`audit_log` rows from
+     `system:reconciler`), and `allocations.release` answers `released`; before the teardown it
+     answered `conflict` with reason `authority_system_preactivation_mutation_fenced`. The
+     provision job's next attempt ends `authority System: attempt-superseded`, and once its last
+     attempt lapses the reconciler cancels it with the same `result_ref`.
+  6. Install the authority back: re-run `installed-local-authority.yml` with the original vars
+     file, restore the stack environment, and restart the stack as in step 4. The original
+     manifest must still list every base the lane provisions from; otherwise the next System
+     fails with `local authority root source is not installed` (the shape above). Shred the PKI
+     copy from step 2: it holds the CA key.
+
+  To prevent it, check the inventory entry against the manifest before provisioning (the
+  inventory trap above).
 - **The worker died during the final provision attempt.** The authority wrote no terminal
   receipt, and the job keeps `running` with `attempt` equal to `max_attempts` and a lapsed lease.
   Follow [Exhausted authority System provision](exhausted-authority-system-provision.md). The
