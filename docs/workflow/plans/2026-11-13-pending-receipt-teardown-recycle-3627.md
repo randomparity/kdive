@@ -7,8 +7,6 @@ Architecture: a server-only `SECURITY DEFINER` predicate (migration 0196) answer
 System lock; the service downgrades a non-`NEVER` policy to `NEVER` when it is true. Spec:
 `docs/workflow/specs/2026-11-13-pending-receipt-teardown-recycle-3627-design.md`.
 
-Tech stack: Python 3.14, psycopg 3 async, PostgreSQL migrations under `src/kdive/db/schema/`.
-
 Expected implementation size: 170–230 changed lines (M) — one 40-line migration, a 10-line
 service change, two test files (~140 lines), four one-line window-list edits, runbook and ADR prose.
 
@@ -30,9 +28,6 @@ service change, two test files (~140 lines), four one-line window-list edits, ru
 | `tests/services/systems/test_authority_admission.py` | add one test | S1 (S2 is the existing `[lapsed]` case) |
 | `tests/db/test_migrate.py`, `tests/db/test_migration_0091_system_object_sweep_cursors.py`, `tests/db/test_migration_0102_build_gc_cursors.py`, `tests/db/test_migration_0115_capture_reap_state.py` | append the 0196 row, widen the slice by one | migration window |
 | `docs/operating/runbooks/exhausted-authority-system-provision.md` | reduce the reconciler-log step | operator procedure |
-| `docs/adr/0620-authority-owned-system-teardown.md` | amendment (written with the design) | decision |
-
-No caller migrates; no path is removed.
 
 ## Task 1 — the predicate function
 
@@ -232,8 +227,7 @@ signature.
   `("queued", 3, 6)` instead of `("running", 3, 3)`; green: `uv run python -m pytest
   tests/services/systems/test_authority_admission.py -q -k "pending_absence_receipt or
   recycles_only_after_lease_lapse"` (the second selector is S2).
-- Contract "runbook procedure" — Mode: task-test-not-applicable; operator prose with no
-  executable consumer.
+- Contract "runbook procedure" — Mode: task-test-not-applicable; prose, no executable consumer.
 
 Steps:
 
@@ -249,11 +243,7 @@ class _NoArtifacts:
 def test_exhausted_preactivation_teardown_keeps_a_pending_absence_receipt(
     migrated_url: str, request: pytest.FixtureRequest
 ) -> None:
-    """#3627, ADR-0620: a lapsed final attempt holding an unconsumed absence receipt replays.
-
-    The reconciler teardown repair owns that receipt; a restart would leave a queued row behind the
-    `torn-down` owner.
-    """
+    """#3627, ADR-0620: the repair, not a restart, settles a pending absence receipt."""
     role_dsns: _RoleDsns = request.getfixturevalue("authority_role_dsns")
     first = systems_support.ctx(role=Role.ADMIN)
     second = replace(first, principal="user-2")

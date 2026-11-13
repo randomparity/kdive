@@ -115,7 +115,4 @@ policy changes. A `failed` row with a pending receipt is also left for the repai
   registered once.
 - `tests/services/systems/test_authority_admission.py` — S1 (new case) and S2 (existing
   `test_exhausted_preactivation_teardown_recycles_only_after_lease_lapse[lapsed]`, unchanged).
-- Migration-window lists in `tests/db/test_migrate.py`,
-  `tests/db/test_migration_0091_system_object_sweep_cursors.py`,
-  `tests/db/test_migration_0102_build_gc_cursors.py`,
-  `tests/db/test_migration_0115_capture_reap_state.py` gain the 0196 row.
+- The four migration-window list tests (see the plan file map) gain the 0196 row.
