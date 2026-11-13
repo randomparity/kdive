@@ -617,7 +617,7 @@ lint-workflows:
     rc=0; \
     if [ "$(uname -m)" = "ppc64le" ]; then timeout {{actionlint_timeout}} actionlint || rc=$?; \
     else timeout {{actionlint_timeout}} uv run --with 'actionlint-py==1.7.12.24' actionlint || rc=$?; fi; \
-    if [ "$rc" -eq 124 ]; then echo "lint-workflows: actionlint stalled past {{actionlint_timeout}}s; capture pstree -p and a SIGQUIT goroutine dump, then see #3583" >&2; fi; \
+    if [ "$rc" -eq 124 ]; then echo "lint-workflows: actionlint stalled past {{actionlint_timeout}}s; rerun it by hand and capture pstree -p and a SIGQUIT goroutine dump while it is stalled, see #3583" >&2; fi; \
     exit "$rc"
 
 # Resolve relative markdown links in tracked *.md against the filesystem.
