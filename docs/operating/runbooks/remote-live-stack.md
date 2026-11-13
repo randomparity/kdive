@@ -219,6 +219,41 @@ bootstrap key over the guest agent at provision, so `systems.ssh_info` returns a
   [host setup's image section](remote-libvirt-host-setup.md#2-prepare-guest-images)). The Ubuntu
   24.04 and bare images do not carry it yet (#3091).
 
+### Remote authority Systems (ADR-0815)
+
+On an instance with `authority_instance`, the remote authority defines the System's domain on its
+own session daemon, which the server cannot read. The authority picks the port from its manifest
+entry's `ssh_port_min`..`ssh_port_max`, binds the forward to the entry's `ssh_addr`, and reports
+the port with the provision result. The SSH tools use the instance's `ssh_addr` with that stored
+port ([ADR-0815](../../adr/0815-remote-authority-system-ssh-port-is-reported-by-the-authority.md)).
+
+- **Address.** The instance's `ssh_addr` must reach the forward the manifest entry binds; use the
+  entry's `ssh_addr`. Nothing checks this. With a wrong address, `systems.authorize_ssh_key` fails
+  `transport_failure` (`guest SSH endpoint is unreachable`), and the `systems.check_ssh_reachable`
+  job succeeds with `reachable: false`, `detail: unreachable`, `layer: tcp_connect`. A firewall
+  that blocks the range shows the same way.
+- **Range.** The instance still declares `ssh_range` with `ssh_addr` (one without the other is a
+  `configuration_error`), but `ssh_range` does not bound the reported port. The manifest entry's
+  range does, enforced by the authority. The server checks only that the port is within
+  1024-65535; outside it the tools fail `configuration_error`, `reason=authority_ssh_forward_invalid`.
+  Open the manifest entry's range, not `ssh_range`, from the worker pool in the host firewall.
+- **Port contention.** The authority picks the lowest free port among the domains its own session
+  daemon sees, not the host's system daemon. Keep every manifest SSH range apart from the other
+  SSH ranges on the host, such as an ordinary instance's `ssh_range`. Nothing enforces this. A
+  collision shows up as a domain start failure, or, while the authority System's domain is shut
+  off, as another guest bound to its stored port: the SSH tools then reach that guest,
+  `systems.check_ssh_reachable` can report it reachable, and bootstrap-key authentication fails.
+- **Systems from before the change.** A System that reached `ready` before the authority reported
+  ports (#3586) has no stored port. The SSH tools refuse it with `configuration_error`,
+  `reason=authority_ssh_forward_unreported` (`authority_system_not_attachable` once it leaves
+  `ready` and `activated`). kdive does not backfill the port; that is the operator's call, for
+  example a teardown and a new System on the upgraded authority.
+- **Order.** `systems.ssh_info` answers from the first provision. `systems.authorize_ssh_key` and
+  `systems.check_ssh_reachable` refuse with `authority_system_preactivation_mutation_fenced` until
+  the System's first external-boot activation, and `systems.authorize_ssh_key` also refuses with
+  `external_boot_restricted` while an activation is active. Authorize keys after
+  `runs.release_external_boot` succeeds.
+
 ## 3. Object-store reachability for the presigned PUT
 
 The guest downloads the installed kernel with a presigned GET and uploads a kdump vmcore
@@ -346,7 +381,8 @@ Topology and prerequisites, in addition to steps 1–4:
   rebuild them with `force_image_rebuild=true`. Declare exactly one `[[remote_libvirt]]`
   instance, with `ssh_addr` and `ssh_range` (§2.1). Allow `ssh_addr:ssh_range` from the control
   plane in the provider's firewall (a source-restricted firewalld rich rule, as `gdbstub_acl`
-  writes for the gdbstub range).
+  writes for the gdbstub range). An instance routed to a remote authority instead needs the
+  manifest entry's SSH range open ([Remote authority Systems](#remote-authority-systems-adr-0815)).
 - `REMOTE_PROVIDER_SSH=user@host` gives the test its own access to the provider host: an `ssh`
   destination that works non-interactively from the control plane (key and known host entry),
   whose user is in the provider's `libvirt` group. The test reads the host's `os-release`,
@@ -408,7 +444,9 @@ out. The frame, the per-tool effects and the rejection boundaries are the local 
 Every remote cell boots `fedora-kdive-remote-base-43` on the provider host. Its domain XML, its
 volumes and the provider's `kdive-*` domain set are read over the §7 observer, and the cell
 records the provider host's OS and architecture as its host. `systems.ssh_info` must answer the
-domain's own `hostfwd` address and port, which is `ssh_addr` here.
+domain's own `hostfwd` address and port, which is `ssh_addr` here. These cells use an instance
+without `authority_instance`; on an authority-routed instance the port comes from the authority's
+manifest, not `ssh_range` ([Remote authority Systems](#remote-authority-systems-adr-0815)).
 
 A rejection cell aims at one target per stack and provider: a remote System provisioned, observed,
 torn down and released by the first remote rejection cell. That cell's project then must not
