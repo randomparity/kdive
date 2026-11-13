@@ -17,8 +17,8 @@ but not enforced here; the digest is load-bearing, the comment is informational.
 The same pin also governs every other Postgres image the tree starts against a fresh database
 (the compose stack, the compose lifecycle-proof fixture and the Helm demo backend). A bare
 ``postgres:17`` there let an upstream re-tag to 17.12 break fresh migrations (#3610), so
-those references must equal the db fixture's digest-pinned constant: one Postgres version
-for the suite and every stack, and a Dependabot bump of one reference fails here until all
+those references must equal the db fixture's digest-pinned constant: the schema-test gate and
+every stack migrate on one Postgres version, and a bump of one reference fails here until all
 move together.
 
 Stdlib, ``pyyaml`` and pytest: this reads the tree, not the project.
@@ -122,7 +122,8 @@ def _stack_postgres_images() -> dict[str, str]:
         services = yaml.safe_load(path.read_text(encoding="utf-8")).get("services", {})
         for name, service in services.items():
             image = service.get("image", "") if isinstance(service, dict) else ""
-            if image.split("@", 1)[0].split(":", 1)[0] == "postgres":
+            repository = image.split("@", 1)[0].split(":", 1)[0]
+            if repository.removeprefix("docker.io/").removeprefix("library/") == "postgres":
                 found[f"{path.relative_to(_ROOT)}:services.{name}"] = image
     values = yaml.safe_load(_HELM_VALUES.read_text(encoding="utf-8"))
     found[f"{_HELM_VALUES.relative_to(_ROOT)}:demo.postgres.image"] = values["demo"]["postgres"][
