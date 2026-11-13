@@ -470,7 +470,9 @@ While the cause remains, the `teardown` job that `systems.teardown` queues fails
 the same way. After its last attempt, nothing restarts it. `systems.teardown` and `ops.force_teardown` return
 the same job, and `jobs.cancel` refuses it with
 `authority_system_preactivation_teardown_not_cancelable`. **Find and fix the cause before you
-run `systems.teardown`.** The `<reason>` in the worker journal names the shape:
+run `systems.teardown`.** The `<reason>` in the worker journal names the shape. Lines ending
+`authority System: attempt-superseded` or `authority System: attempt-busy` follow a teardown
+takeover and name no shape; read the job's earliest `authority: <reason>` line:
 
 - **`authority: provider-conflict`, with `local authority root source is not installed` in the
   authority journal.** The binding matches the manifest, but the manifest does not install the
@@ -495,9 +497,14 @@ run `systems.teardown`.** The `<reason>` in the worker journal names the shape:
   correcting the inventory does not change the recorded binding. Re-running the play with only
   `live_vm_host_authority_instance` and the manifest changed to the recorded value fails the
   authority's start-up check with `tls-health: handshake-failed`: the server certificate was
-  issued for the original instance, whose name `authority_server_name` derives. The authority
-  stays down until the play is re-run with the original inputs. Reissuing the certificates for
-  the recorded instance has not been tried, so no exit is proven. Roll the lab host back to a
+  issued for the original instance, whose name `authority_server_name` derives. In the lab run
+  the authority stayed down until it was restored with the original inputs: the first re-run
+  also failed that check, and the service started after `systemctl reset-failed` and
+  `systemctl start` on the unit, after which a further re-run succeeded. Reissuing the
+  certificates for the recorded instance
+  ([renew-local-authority-tls.yml](../../../deploy/ansible/playbooks/renew-local-authority-tls.yml),
+  which also requires `live_vm_host_worker_authority_instance` to match) has not been tried, so
+  no exit is proven. Roll the lab host back to a
   clean snapshot and bring the lane up again. To prevent it, check the inventory entry against
   the manifest before provisioning (the inventory trap above).
 - **The worker died during the final provision attempt.** The authority wrote no terminal
