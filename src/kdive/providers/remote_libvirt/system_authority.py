@@ -55,6 +55,7 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     supplied_base_volume_name,
     volume_backing_path,
 )
+from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.shared.libvirt_xml import (
     backing_store_projection,
     remote_metadata_storage_identity,
@@ -630,7 +631,7 @@ class _PrivateState:
         return descriptor
 
     def _scan(self, descriptor: int) -> None:
-        names = os.listdir(descriptor)
+        names = list_directory_descriptor(descriptor)
         if len(names) > _MAX_STATE_ENTRIES:
             raise ValueError("remote authority System state exceeds 4096 entries")
         for name in names:

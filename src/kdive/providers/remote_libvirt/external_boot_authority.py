@@ -72,6 +72,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     PreparedVolume,
     render_module_volume_name,
 )
+from kdive.providers.shared.directory_listing import list_directory_descriptor
 
 logger = logging.getLogger(__name__)
 
@@ -1498,7 +1499,7 @@ class RemoteModuleVolumePreparationStore:
         """Find one exact durable PREPARE request without trusting a caller-selected path."""
         names = [
             name
-            for name in os.listdir(self._root_fd)
+            for name in list_directory_descriptor(self._root_fd)
             if len(name) == 64 + len(".request") and name.endswith(".request")
         ]
         matches: list[RemoteModuleVolumePreparationRequestV1] = []
@@ -1931,7 +1932,7 @@ class RemoteModuleVolumePreparationStore:
         """
         return [
             name
-            for name in os.listdir(self._root_fd)
+            for name in list_directory_descriptor(self._root_fd)
             if len(name) == 64 + len(suffix)
             and name.endswith(suffix)
             and all(character in "0123456789abcdef" for character in name.removesuffix(suffix))
@@ -2252,7 +2253,7 @@ class RemoteModuleVolumePreparationStore:
             )
         counted = sum(
             1
-            for name in os.listdir(self._root_fd)
+            for name in list_directory_descriptor(self._root_fd)
             for suffix in _FINALIZE_COUNTED_SUFFIXES
             if len(name) == 64 + len(suffix)
             and name.endswith(suffix)

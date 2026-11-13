@@ -93,6 +93,7 @@ from kdive.providers.ports.external_boot import (
     RecoveryPoint,
     RunningKernelObservation,
 )
+from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.shared.external_boot_bounds import materialization_reservation_bytes
 from kdive.providers.shared.external_boot_bounds import source_byte_limit as _source_byte_limit
 from kdive.providers.shared.libvirt_external_boot import (
@@ -1693,7 +1694,7 @@ def _cleanup_uncommitted_payloads(directory_fd: int, primary: BaseException) -> 
     else:
         primary.add_note("uncommitted payload cleanup refused: projection is committed")
         return
-    entries = set(os.listdir(directory_fd))
+    entries = set(list_directory_descriptor(directory_fd))
     allowed = {"kernel", "modules", "initrd", "debuginfo", *_OWNED_TEMPORARY_NAMES}
     if not entries <= allowed:
         primary.add_note("uncommitted payload cleanup refused: projection has unknown entries")
@@ -4468,7 +4469,7 @@ class RecoveryMetadataStore:
         self, directory_fd: int, expected: CleanupTombstoneV1
     ) -> set[str]:
         """The directory's entries, after proving the tombstone and every residue file exact."""
-        entries = set(os.listdir(directory_fd))
+        entries = set(list_directory_descriptor(directory_fd))
         allowed = {_TOMBSTONE_NAME, _INTENT_NAME, _PREPARATION_NAME, _QUARANTINE_NAME}
         if entries - allowed:
             raise ValueError("cleanup tombstone directory contains unexpected payload")
@@ -4563,7 +4564,7 @@ class RecoveryMetadataStore:
                 return "absent"
             return AbortablePartial(intent=None, materialization=None)
         try:
-            entries = set(os.listdir(directory_fd))
+            entries = set(list_directory_descriptor(directory_fd))
             allowed = {
                 _INTENT_NAME,
                 _INITIAL_INTENT_TEMPORARY_NAME,
@@ -4754,7 +4755,7 @@ class RecoveryMetadataStore:
     def _holds_only_adopted_receipt(
         self, directory_fd: int, binding: ExternalBootActivationBinding
     ) -> bool:
-        if set(os.listdir(directory_fd)) != {_TOMBSTONE_NAME, _QUARANTINE_NAME}:
+        if set(list_directory_descriptor(directory_fd)) != {_TOMBSTONE_NAME, _QUARANTINE_NAME}:
             return False
         receipt = self.read_cleanup_quarantine(binding)
         return (
@@ -5009,7 +5010,7 @@ def _replace_private_file(directory_fd: int, temporary: str, final: str, data: b
 
 
 def _publish_initial_intent(directory_fd: int, data: bytes, *, conflict: str) -> None:
-    entries = set(os.listdir(directory_fd))
+    entries = set(list_directory_descriptor(directory_fd))
     expected = {_INTENT_NAME, _INITIAL_INTENT_TEMPORARY_NAME, _PREPARATION_NAME}
     if entries - expected or len(entries - {_PREPARATION_NAME}) > 1:
         raise ValueError(conflict)

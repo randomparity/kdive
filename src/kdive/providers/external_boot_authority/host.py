@@ -72,6 +72,7 @@ from kdive.providers.external_boot_authority.transport import (
     validate_socket_parent,
 )
 from kdive.providers.remote_libvirt.settings import REMOTE_LIBVIRT_STORAGE_POOL
+from kdive.providers.shared.directory_listing import list_directory_descriptor
 
 if TYPE_CHECKING:
     from kdive.providers.external_boot_authority.service import (
@@ -469,7 +470,7 @@ def _local_lanes(
 ) -> dict[str, tuple[str, _JournalIdentity]]:
     lanes: dict[str, tuple[str, _JournalIdentity]] = {}
     try:
-        names = os.listdir(root_fd)
+        names = list_directory_descriptor(root_fd)
     except OSError:
         raise HostReadinessError("journal", "unsafe-tree") from None
     if RETRACTED_DIRECTORY in names:
