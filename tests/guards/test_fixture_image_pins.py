@@ -14,13 +14,22 @@ concern (ADR-0505). Keeping a human-readable tag in a trailing comment (``# 17``
 ``# RELEASE.2025-09-07T16-13-09Z``) is the ADR-0505 convention and is strongly encouraged
 but not enforced here; the digest is load-bearing, the comment is informational.
 
-Stdlib + pytest only: this reads the tree, not the project.
+The same pin also governs every other Postgres image the tree starts against a fresh database
+(the compose stack, the compose lifecycle-proof fixture and the Helm demo backend). A bare
+``postgres:17`` there let an upstream re-tag to 17.12 break fresh migrations (#3610), so
+those references must equal the db fixture's digest-pinned constant: one Postgres version
+for the suite and every stack, and a Dependabot bump of one reference fails here until all
+move together.
+
+Stdlib, ``pyyaml`` and pytest: this reads the tree, not the project.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
+
+import yaml
 
 _TESTS = Path(__file__).resolve().parents[1]
 
@@ -93,4 +102,50 @@ def test_fixture_images_are_digest_pinned() -> None:
         "on re-pull; a digest makes the backend version part of the tree. "
         "To update: `docker pull <tag>` and replace the digest with the new one. "
         f"Unpinned: {unpinned}"
+    )
+
+
+_ROOT = _TESTS.parent
+
+#: Compose files whose ``postgres`` services must use the db fixture's pinned image.
+_COMPOSE_FILES = (
+    _ROOT / "docker-compose.yml",
+    _TESTS / "compose" / "fixtures" / "worker-lifecycle-live.yml",
+)
+_HELM_VALUES = _ROOT / "deploy" / "helm" / "kdive" / "values.yaml"
+
+
+def _stack_postgres_images() -> dict[str, str]:
+    """Map ``<file>:<location>`` to each Postgres image reference the stacks start."""
+    found: dict[str, str] = {}
+    for path in _COMPOSE_FILES:
+        services = yaml.safe_load(path.read_text(encoding="utf-8")).get("services", {})
+        for name, service in services.items():
+            image = service.get("image", "") if isinstance(service, dict) else ""
+            if image.split("@", 1)[0].split(":", 1)[0] == "postgres":
+                found[f"{path.relative_to(_ROOT)}:services.{name}"] = image
+    values = yaml.safe_load(_HELM_VALUES.read_text(encoding="utf-8"))
+    found[f"{_HELM_VALUES.relative_to(_ROOT)}:demo.postgres.image"] = values["demo"]["postgres"][
+        "image"
+    ]
+    return found
+
+
+def test_stack_postgres_images_are_discoverable() -> None:
+    # Two compose services per file plus the Helm demo backend; fewer means a rename or move
+    # left this guard checking less than it claims.
+    assert len(_stack_postgres_images()) == 5, _stack_postgres_images()
+
+
+def test_stack_postgres_images_match_the_pinned_fixture() -> None:
+    pinned = _image_value(
+        (_TESTS / "db" / "conftest.py").read_text(encoding="utf-8"), "_POSTGRES_IMAGE"
+    )
+    assert pinned is not None and _DIGEST_PIN.search(pinned)
+    drift = {where: image for where, image in _stack_postgres_images().items() if image != pinned}
+    assert not drift, (
+        f"every stack Postgres image must equal the db fixture pin {pinned!r} "
+        "(tests/db/conftest.py::_POSTGRES_IMAGE), so an upstream re-tag cannot change the "
+        "Postgres minor version a fresh database migrates on (#3610). Update all references "
+        f"together. Drifted: {drift}"
     )

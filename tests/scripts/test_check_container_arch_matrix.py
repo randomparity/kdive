@@ -92,6 +92,15 @@ def test_official_quay_alias_matches_matrix() -> None:
     assert evaluate(compose, matrix) == []
 
 
+def test_digest_pinned_image_matches_its_tag_row() -> None:
+    """A manifest-list digest pin (``tag@sha256:...``) is the same image the tag row records;
+    the matrix tracks arch support per tag, so the digest must not split the image set (#3610)."""
+    digest = "sha256:" + "a" * 64
+    compose = GOOD_COMPOSE.replace("image: postgres:17\n", f"image: postgres:17@{digest}\n")
+    assert evaluate(compose, GOOD_MATRIX) == []
+    assert "postgres:17" in parse_compose(compose)
+
+
 def test_unrelated_registry_remains_distinct() -> None:
     compose = "services:\n  minio:\n    image: registry.example/minio/minio:RELEASE\n"
     matrix = (
