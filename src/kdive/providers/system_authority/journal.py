@@ -330,7 +330,7 @@ class FileAuthoritySystemJournal:
         return descriptor
 
     def _check_evidence_bounds(self, directory: int, evidence_name: str) -> None:
-        names = [name for name in os.listdir(directory) if name.endswith(".jsonl")]
+        names = [name for name in list_directory_descriptor(directory) if name.endswith(".jsonl")]
         if evidence_name in names:
             return
         own = [name for name in names if name.startswith(f"{self._system_id}.")]

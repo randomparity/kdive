@@ -1,11 +1,10 @@
 """Guard: directory listings in src/kdive go through the rewinding helper (#3601).
 
 ``os.listdir(fd)`` misses entries on btrfs, so every ``os.listdir``/``os.scandir`` call goes
-through ``list_directory_descriptor`` or a named allowlist entry. The allowlist names the two
-listings excluded from #3601 by operator approval: a descriptor listed right after it is
-opened, and a path scan. The scan sees calls spelled ``os.listdir``/``os.scandir`` or through a
-name imported from ``os``; an aliased module, ``posix.listdir``, or a stored function reference is
-left to code review.
+through ``list_directory_descriptor`` or a named allowlist entry. The allowlist holds only path
+listings, which the descriptor defect cannot affect; it never exempts a descriptor. The scan sees
+calls spelled ``os.listdir``/``os.scandir`` or through a name imported from ``os``; an aliased
+module, ``posix.listdir``, or a stored function reference is left to code review.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ _HELPER = Path("providers/shared/directory_listing.py")
 _LISTERS = frozenset({"listdir", "scandir"})
 _ALLOWLIST = frozenset(
     {
-        (Path("providers/system_authority/journal.py"), "_check_evidence_bounds"),
         (Path("jobs/handlers/artifacts/rootfs_reclaim.py"), "_live_writer_holds_a_partial"),
     }
 )
