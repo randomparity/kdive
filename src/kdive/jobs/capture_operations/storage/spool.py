@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import UUID
 
 from kdive.jobs.capture_operations.protocol import CaptureRequest, CaptureResult
+from kdive.providers.shared.directory_listing import list_directory_descriptor
 
 _MAX_RESULT_BYTES = 65_536
 _MAX_CONFIGURATION_BYTES = 16_384
@@ -179,7 +180,7 @@ def _open_spool_parent(path: Path) -> tuple[int | None, bool]:
 
 def _remove_spool_entries(directory_fd: int) -> bool:
     try:
-        entries = os.listdir(directory_fd)
+        entries = list_directory_descriptor(directory_fd)
         if any(entry not in _SPOOL_FILES for entry in entries):
             return False
         for entry in entries:

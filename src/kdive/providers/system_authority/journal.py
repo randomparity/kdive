@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
+from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.system_authority.protocol import (
     GENESIS_DIGEST,
     MAX_MESSAGE_BYTES,
@@ -538,7 +539,7 @@ def inventory_authority_system_journals(
         )
         try:
             _validate_directory(directory_fd, expected_uid)
-            names = os.listdir(directory_fd)
+            names = list_directory_descriptor(directory_fd)
             if ABANDONED_DIRECTORY in names:
                 abandoned_fd = os.open(
                     ABANDONED_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY | _OPEN, dir_fd=directory_fd

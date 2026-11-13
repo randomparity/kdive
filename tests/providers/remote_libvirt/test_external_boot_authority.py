@@ -139,6 +139,7 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     supplied_base_volume_name,
 )
 from kdive.providers.remote_libvirt.recovery_objects import RemoteExternalBootRecoveryObjects
+from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.services.remote_module_authority_preparation import (
     RemoteModulePreparationInputs,
@@ -5138,7 +5139,7 @@ def _seed_system_teardown_intent(store: RemoteModuleVolumePreparationStore) -> s
 
 
 def _store_names(store: RemoteModuleVolumePreparationStore) -> set[str]:
-    return set(os.listdir(store._root_fd))
+    return set(list_directory_descriptor(store._root_fd))
 
 
 async def _finalized_release_store(

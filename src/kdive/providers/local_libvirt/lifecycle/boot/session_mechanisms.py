@@ -61,6 +61,7 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     RunningKernelObservation,
 )
+from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.shared.guest_agent import (
     AgentCommand,
     AgentExecResult,
@@ -465,7 +466,7 @@ class LocalPayloadCleanup:
         file, not a symlink, and a temporary a private regular file, so a retry after any
         partial removal converges while foreign state is quarantined (ADR-0600/0584).
         """
-        entries = set(os.listdir(projection_fd))
+        entries = set(list_directory_descriptor(projection_fd))
         if not entries <= {*PAYLOAD_NAMES, *_OWNED_TEMPORARY_NAMES, _PROJECTION_NAME}:
             raise ValueError("target projection contains unexpected residue")
         for name in entries - {_PROJECTION_NAME}:

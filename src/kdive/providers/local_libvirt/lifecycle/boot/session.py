@@ -51,6 +51,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
     HostStatDeviceIdentity,
     prove_no_foreign_path_references,
 )
+from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.shared.libvirt_external_boot import (
     boot_projection_element_identity,
     parse_domain_xml,
@@ -937,7 +938,7 @@ class _ConcreteSession:
             raise ValueError("target projection does not match session ownership")
         artifact_fd = self._artifact_root()
         digest_name = projection.digest.removeprefix("sha256:")
-        entries = os.listdir(artifact_fd)
+        entries = list_directory_descriptor(artifact_fd)
         if any(entry != digest_name for entry in entries):
             raise ValueError("activation already contains a different target projection")
         try:
