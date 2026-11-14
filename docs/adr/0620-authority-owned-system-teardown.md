@@ -613,6 +613,5 @@ Rejected for this amendment:
 - **Grant the server `SELECT` on `authority_system_attempts`.** judgment: it exposes receipt bytes
   and every attempt's fencing state for a single boolean.
 - **Keep the accepted case and the runbook check.** judgment: the operator must rule out a pending
-  receipt before every retry from a log line naming an attempt id no tool maps to a System, and a
-  miss leaves a teardown that is claimed and refused. With the guard the log matters only when the
-  repair itself stalls.
+  receipt before every retry by reading the reconciler log, and a miss leaves a teardown that is
+  claimed and refused. With the guard the log matters only when the repair itself stalls.
