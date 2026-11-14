@@ -3,16 +3,30 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Re-publishes the GitHub Release for an existing tag, using this workflow file from the
+  # dispatched ref and the tagged commit's code. A tag-triggered rerun cannot pick up a workflow
+  # fix, because it runs the workflow file as it was at the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish, e.g. v0.5.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
   cancel-in-progress: false
 
 env:
   GIT_CLIFF: git-cliff@2.13.1
+  # Read via env, never interpolated into run: — a dispatch input is caller-controlled text.
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  # GitHub rejects a release body over 125,000 characters. Comparing bytes is conservative:
+  # a UTF-8 file never has more characters than bytes.
+  RELEASE_BODY_MAX_BYTES: "125000"
 
 jobs:
   release:
@@ -28,9 +42,17 @@ jobs:
     # headroom is bought where it is cheapest (ADR-0566, #1983).
     timeout-minutes: 20
     steps:
+      - name: Validate release tag
+        run: |
+          if [[ ! "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release tag '${RELEASE_TAG}' is not vX.Y.Z"
+            exit 1
+          fi
+
       - name: Checkout (full history + tags)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -48,8 +70,8 @@ jobs:
           # scripts/pyproject-version.sh reads a colour-free version regardless of the caller's
           # environment (#1883, #1886) — see its header for why.
           expected="v$(scripts/pyproject-version.sh)"
-          if [[ "${GITHUB_REF_NAME}" != "$expected" ]]; then
-            echo "::error::tag ${GITHUB_REF_NAME} != pyproject $expected"
+          if [[ "${RELEASE_TAG}" != "$expected" ]]; then
+            echo "::error::tag ${RELEASE_TAG} != pyproject $expected"
             exit 1
           fi
 
@@ -60,33 +82,48 @@ jobs:
         run: |
           # Guard on the fetch having worked, not on the notes being non-empty: a thin
           # patch (only skipped chore/merge commits) is a legitimate release.
-          prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          prev="$(git describe --tags --abbrev=0 "${RELEASE_TAG}^" 2>/dev/null || true)"
           if [[ -n "$prev" ]]; then
-            count="$(git rev-list --count "${prev}..${GITHUB_REF_NAME}")"
+            count="$(git rev-list --count "${prev}..${RELEASE_TAG}")"
             if [[ "$count" -eq 0 ]]; then
-              echo "::error::no commits between $prev and ${GITHUB_REF_NAME} — shallow fetch?"
+              echo "::error::no commits between $prev and ${RELEASE_TAG} — shallow fetch?"
               exit 1
             fi
           fi
-          uvx "${GIT_CLIFF}" --latest --strip header --output RELEASE_NOTES.md
+          # --current renders the checked-out tag's section, which stays correct when a dispatch
+          # republishes a tag that is no longer the newest.
+          uvx "${GIT_CLIFF}" --current --strip header --output RELEASE_NOTES.md
           if [[ ! -s RELEASE_NOTES.md ]]; then
             echo "Maintenance release — see commit history." >RELEASE_NOTES.md
+          fi
+          if (( $(wc -c <RELEASE_NOTES.md) > RELEASE_BODY_MAX_BYTES )); then
+            mkdir -p notes-asset
+            mv RELEASE_NOTES.md notes-asset/RELEASE_NOTES.md
+            {
+              echo "The release notes for ${RELEASE_TAG} exceed GitHub's release body limit;"
+              echo "they are attached to this release as \`RELEASE_NOTES.md\`."
+              if [[ -n "$prev" ]]; then
+                echo
+                echo "Changes: https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${RELEASE_TAG}"
+              fi
+            } >RELEASE_NOTES.md
           fi
 
       - name: Create or update the GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF_NAME}"
+          tag="${RELEASE_TAG}"
           shopt -s nullglob
           artifacts=(dist/*)
           if [[ "${#artifacts[@]}" -eq 0 ]]; then
             echo "::error::dist/ is empty after build — nothing to release"
             exit 1
           fi
+          artifacts+=(notes-asset/*)
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release edit "$tag" --notes-file RELEASE_NOTES.md
-            gh release upload "$tag" dist/* --clobber
+            gh release upload "$tag" "${artifacts[@]}" --clobber
           else
-            gh release create "$tag" --title "$tag" --notes-file RELEASE_NOTES.md dist/*
+            gh release create "$tag" --title "$tag" --notes-file RELEASE_NOTES.md "${artifacts[@]}"
           fi

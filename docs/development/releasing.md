@@ -50,6 +50,16 @@ and a clean, current `main` checkout at the intended release version.
 4. Merge the post-release version bump before other normal PRs. Include the changelog regenerated
    locally against the new tag in that PR, as described under *Version bumps* above.
 
+When the generated notes exceed GitHub's 125,000-character release body limit, the Release
+workflow attaches them as a `RELEASE_NOTES.md` asset and the release body links to it and to the
+compare view from the previous tag.
+
+To publish the GitHub Release again for an existing tag, for example after a fix to the Release
+workflow, run it manually: `gh workflow run release.yml --ref main -f tag=vX.Y.Z`. That run uses
+the workflow file from `main` and builds the tagged commit; re-running the original tag-triggered
+run does not pick up a workflow fix, because it uses the workflow file as it was at the tag. This
+dispatch does not publish the container image.
+
 Check both publication results before treating the release as available: success in one workflow
 says nothing about the other. A rerun can overwrite GitHub Release assets or move image tags.
 Deleting a Git tag or GitHub Release does not withdraw the GHCR image or change a deployment.
