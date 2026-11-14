@@ -702,7 +702,8 @@ async def _enqueue_preactivation_authority_teardown(
     """Enqueue and bind one activation-free teardown to immutable ownership."""
     try:
         # `job.authorizing` stays the first enqueuer's by design (ADR-0447); audit the requester.
-        # A failed job, or one whose final attempt's lease lapsed, restarts (ADR-0620, #3617).
+        # A failed job, or one whose final attempt's lease lapsed, restarts unless an absence
+        # receipt is pending (ADR-0620, #3617, #3627).
         job = await enqueue_preactivation_teardown(
             conn,
             system,

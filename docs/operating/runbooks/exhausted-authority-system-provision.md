@@ -51,13 +51,15 @@ holds the absence receipt digest. The job keeps its attempt count and receives n
   again. It restarts the same job and adds the job's current `max_attempts` to its budget, so
   each restart grants as many attempts as the job already had: three, then six, then twelve.
   `ops.force_teardown` does not restart it; it replays the stuck job unchanged. Fix the cause
-  first. Also check the reconciler log for
+  first. If the authority already proved absence and the worker died before finalizing,
+  `systems.teardown` returns the same job without restarting it and the job stays `running`; the
+  reconciler's teardown repair finishes it, so the reconciler must be running. If the job stays
+  `running` across reconciler passes, check the reconciler log for
   `authority System teardown attempt <id> still has core cleanup (System <system-id>)` or
-  `authority System teardown repair failed for attempt <id> (System <system-id>)`. The `<id>` is
-  an authority attempt; match the line to this System by its `<system-id>`. Such a line means the
-  authority may already have proved absence and the reconciler may hold the receipt. Fix that
-  cleanup and wait for a reconciler pass that no longer logs it before you run
-  `systems.teardown`; a restarted teardown cannot finish while such a receipt is pending. See
+  `authority System teardown repair failed for attempt <id> (System <system-id>)` and fix that
+  cleanup; a `authority System teardown attempt <id> was superseded (System <system-id>)` line
+  means the repair will not finish it. The `<id>` is an authority attempt; match the line to this
+  System by its `<system-id>`. See
   [Recovering an allocation stranded by a failed authority-owned provision](live-testing.md#recovering-an-allocation-stranded-by-a-failed-authority-owned-provision).
   Do not edit job or System rows by hand.
 - **Retained quarantine.** If the authority cannot prove absence, it retains the System in

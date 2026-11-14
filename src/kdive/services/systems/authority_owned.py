@@ -241,6 +241,19 @@ async def _dedup_job(conn: AsyncConnection, dedup_key: str) -> Job | None:
     return Job.model_validate(row) if row is not None else None
 
 
+async def _preactivation_receipt_pending(
+    conn: AsyncConnection, system_id: UUID, job_id: UUID
+) -> bool:
+    """Whether the job's current attempt holds an unconsumed absence receipt, under the SQL lock."""
+    cursor = await conn.execute(
+        "SELECT authority_system_preactivation_receipt_pending(%s,%s)", (system_id, job_id)
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        raise RuntimeError("authority System receipt-pending check returned no row")
+    return bool(row[0])
+
+
 async def enqueue_preactivation_teardown(
     conn: AsyncConnection,
     system: System,
@@ -256,10 +269,11 @@ async def enqueue_preactivation_teardown(
     a conflict: an authority-owned System must never let a worker dispatch an unmarked teardown.
     The queue's own statement decides whether a prior job with the same marker restarts: a
     ``failed`` one (its retained-receipt budget is spent, #3530) under ``FAILED``, and also a
-    ``running`` one whose final attempt's lease lapsed without a receipt under
-    ``FAILED_OR_LAPSED_EXHAUSTED`` (ADR-0620, #3617). Operator requests pass one of those;
-    automatic callers pass ``NEVER`` so the bound cannot be re-spent every sweep. A terminal
-    policy is refused: it could restart a ``succeeded`` teardown whose receipt was consumed.
+    ``running`` one whose final attempt's lease lapsed under ``FAILED_OR_LAPSED_EXHAUSTED``
+    (ADR-0620, #3617), unless that attempt holds an unconsumed absence receipt the reconciler
+    repair owns (#3627). Operator requests pass one of those; automatic callers pass ``NEVER`` so
+    the bound cannot be re-spent every sweep. A terminal policy is refused: it could restart a
+    ``succeeded`` teardown whose receipt was consumed.
 
     ``on_recycle`` runs in this transaction, once the admission succeeds, when this call restarted
     a prior row. The signal comes from the restarting statement, so a caller that audits the
@@ -298,6 +312,13 @@ async def enqueue_preactivation_teardown(
             "an ordinary teardown job cannot be replayed for an authority-owned System",
             category=ErrorCategory.CONFLICT,
         )
+    if (
+        prior is not None
+        and recycle is not queue.JobRecyclePolicy.NEVER
+        and await _preactivation_receipt_pending(conn, system.id, prior.id)
+    ):
+        # The reconciler teardown repair owns an unconsumed absence receipt (ADR-0620, #3627).
+        recycle = queue.JobRecyclePolicy.NEVER
     job, changed = await queue.enqueue_with_status(
         conn,
         JobKind.TEARDOWN,
