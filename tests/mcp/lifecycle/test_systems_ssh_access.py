@@ -615,8 +615,9 @@ def test_ssh_info_reports_the_stored_port(
             {"state": "teardown-requested", "ssh_forward_port": _FORWARD},
             "authority_system_not_attachable",
         ),
+        ({"state": "provisioning"}, "authority_system_not_attachable"),
     ],
-    ids=["ready", "activated", "teardown-requested"],
+    ids=["ready", "activated", "teardown-requested", "provisioning"],
 )
 def test_ssh_info_refuses_a_system_with_no_usable_forward(
     migrated_url: str, authority_kind: str, ownership: dict[str, Any], reason: str
@@ -629,11 +630,18 @@ def test_ssh_info_refuses_a_system_with_no_usable_forward(
             )
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert resp.data["reason"] == reason
+        assert resp.detail is not None
         if reason == "authority_ssh_forward_unreported":
             # An authority-owned System cannot be reprovisioned (ADR-0623): the remedy is a new one.
-            assert resp.detail is not None
             assert "tear this System down and provision a new System" in resp.detail
             assert "Reprovision it" not in resp.detail
+        else:
+            # A System that left ready/activated is not attachable; it may well have reported a
+            # forward, so the unreported-forward diagnosis and upgrade advice would mislead.
+            assert f"'{ownership['state']}'" in resp.detail
+            assert "not attachable" in resp.detail
+            assert "upgraded authority" not in resp.detail
+            assert "reported no SSH forward" not in resp.detail
 
     asyncio.run(_run())
 
