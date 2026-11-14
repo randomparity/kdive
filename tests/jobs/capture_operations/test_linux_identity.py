@@ -207,6 +207,35 @@ def test_launch_token_scan_skips_matched_process_that_exits_before_identity_read
     )
 
 
+def test_launch_token_scan_skips_process_that_exits_during_cmdline_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
+) -> None:
+    """A process reaped between ``stat()`` and the ``cmdline`` read reports ``ESRCH``; the scan
+    skips it and still returns the surviving match (regression test for #3626)."""
+    (tmp_path / "sys/kernel/random").mkdir(parents=True)
+    (tmp_path / "sys/kernel/random/boot_id").write_text("boot-a\n")
+    interpreter = tmp_path / "python"
+    interpreter.write_bytes(b"python")
+    for pid, start_ticks in ((111, 1111), (222, 2222)):
+        proc = tmp_path / str(pid)
+        proc.mkdir()
+        proc.joinpath("stat").write_text(_stat_text(pid, start_ticks))
+        _register_bootstrap(proc, interpreter=interpreter, token=launch_token)
+    monkeypatch.setattr(linux_identity, "_PROC_ROOT", tmp_path)
+    real_read_cmdline = linux_identity._read_cmdline
+
+    def _vanishing_read_cmdline(path: Path) -> bytes:
+        if path.parent.name == "111":
+            raise ProcessLookupError(errno.ESRCH, "No such process")
+        return real_read_cmdline(path)
+
+    monkeypatch.setattr(linux_identity, "_read_cmdline", _vanishing_read_cmdline)
+
+    assert scan_launch_token(launch_token, interpreter=interpreter, host_instance="host-a") == (
+        LinuxIdentity(host_instance="host-a", boot_id="boot-a", pid=222, start_ticks=2222),
+    )
+
+
 def test_launch_token_scan_raises_for_genuine_identity_read_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_token: str
 ) -> None:
@@ -258,8 +287,8 @@ def test_launch_token_scan_refuses_incomplete_proc_enumeration(
     monkeypatch.setattr(
         linux_identity,
         "_read_cmdline",
-        lambda _path: (_ for _ in ()).throw(PermissionError("hidden proc")),
+        lambda _path: (_ for _ in ()).throw(PermissionError(errno.EACCES, "hidden proc")),
     )
 
-    with pytest.raises(RuntimeError, match="complete launch-token scan"):
+    with pytest.raises(RuntimeError, match=r"could not read .*123: \[Errno 13\] hidden proc"):
         scan_launch_token(launch_token, interpreter=interpreter, host_instance="host-a")

@@ -87,7 +87,8 @@ Break-glass teardown of a stuck cross-project System. Requires platform_admin.
 A System with external-boot activation history gets the authority-marked teardown that
 systems.teardown enqueues, never an ordinary job the worker would refuse. The exception is
 a System whose latest activation ops.recover_stranded_activation settled: it gets the
-ordinary teardown on the worker that owns its domain.
+ordinary teardown on the worker that owns its domain. It does not restart an exhausted
+preactivation authority teardown, which it returns unchanged; systems.teardown does.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
