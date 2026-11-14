@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-11-14
 
 ### ⚠ Breaking Changes
 
@@ -378,9 +378,141 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Script host preparation and guest-image build for local-libvirt
 - Add Ubuntu 24.04 and 26.04 LTS rootfs catalog rows
 - Customize the debian family through the customization boot
-- Add tools.search by-name lookup and a diagnosable query miss
 - Probe the gdbstub when a readiness failure meets the expectation
 - Admit a probed-live gdbstub on an expected crash
+- Add tools.search by-name lookup and a diagnosable query miss
+- Point session.whoami refs at the agent-index doc resource
+- Add a depmod module-staging toolchain vantage
+- Add a parameters detail tier to tools.search
+- Prepare RedHat-family hosts in install-host.sh
+- Add just records recipe for the decision-records CI gate
+- Extract reusable local worker host preparation
+- Prepare SUSE libvirt hosts
+- Prepare localhost libvirt hosts
+- Support RHEL and SLES worker hosts
+- Add SeaweedFS image publisher
+- Initialize bundled S3 bucket
+- Use SeaweedFS backend
+- Pin SeaweedFS demo image
+- Initialize SeaweedFS bucket
+- Attribute external-build finalization phases
+- Add the recover operation across the full seam
+- Name a slot's fence row by its derived incarnation prefix
+- Distinguish and clear unreadable slot residue
+- Recover the residual slots through the registered row
+- Read bounded recoverable worker incarnations
+- Fold bundle digest into external boot scan
+- Guard external boot tar stream inline
+- Represent absent catalog tooling
+- Add SUSE rootfs customizer
+- Add openSUSE rootfs catalog rows
+- Enforce the Bash 4.4 floor and probe GNU tools in check-deps
+- Add optional project filter to systems.list and runs.list
+- Point systems.get at the System's run history
+- Resolve nested request-model fields in binding errors
+- Break down host-wide capacity denial by project/state
+- Carry the readiness crash signature into boot failure details
+- Surface the observed crash signature on boot_readiness
+- Add stress-allocations core (#2769)
+- Drive allocation stress workload (#2769)
+- Pass the System accel to the install force-off (#2757)
+- Add the RHEL-family kdump advisory (#2762)
+- Report the RHEL-family kdump advisory at complete_build (#2762)
+- Point an empty kdump capture at the RHEL-family set (#2762)
+- Gate provision ready on first-boot readiness
+- Derive versioned coverage obligations from registry owners
+- Reject incomplete or mismatched qualification evidence
+- Expose coverage qualification and gate mapping completeness
+- Bound local external boot deadlines by readiness
+- Bind live VM stores to fixture evidence
+- Preflight native and emulated VM lanes
+- Build EL10 guestfs binding for Python 3.14
+- Build and verify pinned external kernel fixtures
+- Add a failed-only recycle policy (#2929)
+- Add the per-arch debug capability table (#2963)
+- Refuse single-step and watchpoints on ppc64le KVM (#2963)
+- Add exact-name remove mode to authority fixture
+- Report and remove a torn journal tail in recovery mode
+- Recover a torn unanchored journal tail at startup
+- Report stored-data rebuild failures as server faults
+- Add reprovision_incomplete failure category (#2980)
+- Settle a stalled reprovisioning System (#2980)
+- Warn once about a stranded orphan teardown (#2978)
+- Keep guest arch on GdbMiAttachment (#3020)
+- Authority teardown admits tearing_down (#3026)
+- Warn on a marked stalled teardown and prune the warned map (#3026)
+- Check markdown link anchors in docs-links (#3048)
+- End an external-boot job on a repeated provider-conflict (#2901)
+- Mark a provider-conflict failure for the repeat check (#2901)
+- Authority teardown runs on an ended allocation (#2992)
+- Add just test-linux native-arch container gate
+- Accept aarch64 in the capture filter and manifest
+- Route lifecycle cells to their approved owners (#2809)
+- Add the host-install evidence runner (#2807)
+- Bind the host-install scenario to its on-host boot node (#2807)
+- Carry the worker inventory path to fixed slots (#3086)
+- Reject an untrusted worker inventory before slot mutation (#3086)
+- Send the remote inventory to fixed workers (#3086)
+- Drop the BTF floor from the live_drgn signal (#3121)
+- Add optional debuginfo plan member
+- Record vmlinux facts in external-boot evidence
+- Carry the vmlinux into the plan
+- Carry debuginfo in port state for #3130
+- Materialize the debuginfo payload for #3130
+- Stage, publish and restore one guest debuginfo file
+- Stage the vmlinux on authority installs (#3130)
+- Name the debuginfo payload in the target projection
+- Provision fixed worker remote TLS references
+- Support native SUSE remote guests and Wicked routing
+- Advertise architecture-compatible capture methods
+- Refuse remote-libvirt images.publish at admission
+- Discharge exhausted authority System provisions after absence
+- Provision a least-privilege live harness login
+- Export the harness DSN and scrub it from daemons
+- Add standalone installed authority validation lanes
+- Frame authority-owned Systems for HTTP tool cells
+- Publish the fixed-worker authority route
+- Pin the kernel corpus revisions as fixture selections
+- Refuse authority TLS certificates inside the expiry margin
+- Attest exact bytes during remote staging
+- Add abortable before-finalize proof checkpoint (#3185)
+- Let a debug session leave the guest running (#3244)
+- Provision the proof-only authority inventory boundary
+- Add authority-pki.sh for authority TLS issuance (#3273)
+- Add the retained authority TLS renewal playbook (#3273)
+- Fence vmcore writes before optional retention
+- List breakpoint rows from debug.list_breakpoints
+- Return frame arguments and locals from read_frame
+- Label staged authority bases virt_content_t
+- Add the pcap pool setting for traffic capture
+- Provision the labelled traffic-capture pcap pool
+- Expose external-boot conflict evidence to admins in systems.get
+- Publish a cleanup quarantine for external-boot release
+- Carry teardown refs in the cleanup-finalized marker (#3333)
+- Inspect attempt volumes with an active owning System
+- Prove an activation's named volumes absent from the pool (#3486)
+- Plan carries the staged module-tree manifest (#3131)
+- Record the staged module-tree manifest with the vmlinux evidence (#3131)
+- Link the staged vmlinux into the module source tree (#3131)
+- Bind the module operation to the staged tree manifest (#3131)
+- Admit authority routes only for Systems on a matching Resource route
+- Admit authority routing by Resource route or declared relocation
+- Add bind-only BYO host inventory skeleton
+- Add stranded activation settlement primitive
+- Add the platform_admin settlement entry
+- Add stranded observation job and target read
+- Add the stranded observation wire contract
+- Observe a stranded activation
+- Add the stranded observation handler
+- Admit the stranded observation
+- Add the stranded-activation recovery tool
+- Carry a reported SSH forward to the endpoint read
+- Point a stranded preparing denial at the recovery tool (#3552)
+- Report ssh_forward_port from the remote intent
+- Refuse a remote ssh port range below 1024
+- Refuse a remote ssh port range below 1024 in preflight
+- Honour a remote authority System's reported SSH port (#3585)
+- Add the pending absence-receipt predicate (#3627)
 
 ### Changed
 
@@ -554,10 +686,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Thread baseline intent callback
 - Expose baseline pre-extraction intent seam
 - Share libvirt boot identity
+- Tighten the depmod search-list rationale
 - Inline the one-caller leaseholding-state tuple
 - Simplify tools.invoke's binding-failure classification
-- Tighten the depmod search-list rationale
 - Let a dict carry _select_named's de-duplication
+- Correct a stale comment and unpack the operand filter
+- Share the in-flight predicate and bind the test key
+- Share the module-staging depmod search contract
+- Tighten the tools.search parameters digest
+- Fix mid-sentence docstring in new provisioning test
+- Make the empty-node probe stub explicit
+- Collapse the label helper to one semanage call
+- Tighten two comment blocks, drop stale wrapper prose
+- Remove duplicate KVM probe
+- Remove dead preparation functions
+- Remove obsolete external boot helper
+- Register worker check IDs
+- Bind authority operations to provider runtimes
+- Name live-stack entry points for where they stop
+- Give the live-stack backends one bring-up implementation
+- Fold the repeated retained-binding assertion into one helper
+- Build the one-off remedy after the branch that cannot use it
+- Define the env helper before its caller and fix a stale claim
+- Tighten the measurement payload assembly
+- Tighten the collections comments to one why apiece
+- Drop a comment clause that narrates review, not the invariant
+- Drop a dead array init and wrap a 218-char line
+- Drop a surface test that only asserts its own stub
+- Drop the registers the unconditional install orphaned
+- Drop a stale half of the runner call-site comment
+- Drop the dead initializer in the uv resolver
+- Match the file's marker idiom and tighten two comments
+- Resolve the native spine once in the cap test
+- Drop a redundant path constant and correct the ADR's die claim
+- Derive a terminal outcome from an invocation identity
+- Take back the residual-slot recovery merge
+- The session reap's unwritable-overlay-directory refusal
+- Keep console polling in shared spine
+- Separate validation store ranges from decode chunks
+- Inline the single-caller live_host_arch helper
+- Drop redundant dict.get fallback in breakdown
+- Keep revision proofs on existing strict policy
+- Simplify the stress driver (#2769)
+- Drop the unused isActive protocol member (#2757)
+- Share the System catalog-rootfs resolver (#2762)
+- Share the readiness poll loop
+- Move the clean power-off helper to a leaf module
+- Index runs by System for existing lookups
+- Share MCP list project scoping helpers
+- Simplify journal-tail test fixtures
+- Inline the one-use final-attempt check (#2889)
+- Scan crash regions with an explicit loop
+- Drop the unused jobs logger and tighten the kind assert
+- Inline the advance-group skip lookup
+- Name the teardown recycle policy choice
+- Extract teardown routing helpers for reuse (#3007)
+- Drop unreachable teardown lifecycle entries
+- Name the 0169 authority functions literally (#2992)
+- Share command and key-value helpers (#2808)
+- Share the catalog cell frame (#2809)
+- Take the node ID from the bound cell (#2807)
+- Reuse the shared os-release identity reader (#2807)
+- Carry the SSH host and installed-kernel hook through the shared frame
+- Drop the unread project field of the investigation fixture
+- Share the operator carrier's row normalization
+- Share the materialization reservation
+- Extract the plan debuginfo member builder
+- Pass lane-context kernel inputs by keyword
+- Name the admission-refusal cell predicate
+- Catalogue KDIVE_KERNEL_SRC as a live-proof variable
+- Reuse domain_xml and fail on libvirt faults
+- Drop a redundant lane image assert
+- Simplify resource-boundary carrier helpers
+- Share the protected authority config reader
+- Name the control cells' id keys and SysRq command once
+- Share the private-image upload helpers
+- Keep the carrier's helpers module-private
+- Remove unused direct worker death verification
+- Move shared tool-cell helpers into support modules
+- Issue the proof carrier PKI with authority-pki.sh (#3273)
+- Share live_vm_host credential install tasks (#3273)
+- Name the libvirt connector type beside the Lane
+- Spell the remote target transport as a plain branch
+- Name the target's collected libvirt connects
+- Rely on the attempt model's conflict-evidence invariant
+- Return the root from the PREPARE preflight
+- One parse for the payload module receipt; use it in the lifecycle path
+- Name the current-candidate predicate
+- Drop redundant count from the discharge read
+- Drop the dead recover arm and qualify the ADR for local
+- Read the oldest adopted terminal directly
+- Share the finished-restore check with _restore
+- Collect activations without a closure list (#3486)
+- Drop a redundant discard in admission routes
+- Let enqueue gate the failed-teardown recycle (#3530)
+- Report the recycle through a callback
+- Tighten the stranded provision runbook wording (#3584)
 
 ### Documentation
 
@@ -1491,31 +1715,1341 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make examples/local-libvirt the local-libvirt quick start
 - Catalogue the preflight and build-image example variables
 - Drop the retired virt-customize passt gap from the apt-host guidance
-- Design the allocation lease deadline disclosure
-- Apply design review to the lease disclosure spec
 - Document artifacts.get's request wrapper exception
 - Scope the artifacts.get wrapper claim to this surface
-- Record by-name tool lookup and diagnosable search miss
-- Fold scope-audit findings into the #2305 design set
-- Design the worker-granted mutation-obligation discharge
-- Correct the discharge caller inventory and split the worker path
-- Name an owner for the already-leaked obligations follow-up
-- Record the fence delta and cover every reclaim call shape
-- Pin the discharge to one System and correct the fence rationale
 - Design explicit depmod resolution for module staging
 - Carry depmod override across the live-worker gate
 - Name the depmod exec-failure category and validate scope
 - Record the drop-in override channel and validate home
 - Stop hand-listing the depmod search directories
 - State the worker's actual privilege level
-- State the measured names= payload span and drop a bad probe
-- Admit a reachable gdbstub on an expected crash (#2303)
-- Confine the expected-crash gdbstub probe to failed readiness
-- Amend 0233 and 0064 for the narrowed gdbstub rejection
-- Drop stale index-sync claim from adr-status-check comment
+- Design the allocation lease deadline disclosure
+- Apply design review to the lease disclosure spec
 - Design CLI connection failure diagnostics
 - Harden CLI failure boundary design
 - Correct CLI diagnostic implementation estimate
+- Design the worker-granted mutation-obligation discharge
+- Correct the discharge caller inventory and split the worker path
+- Name an owner for the already-leaked obligations follow-up
+- Record the fence delta and cover every reclaim call shape
+- Pin the discharge to one System and correct the fence rationale
+- Admit a reachable gdbstub on an expected crash (#2303)
+- Confine the expected-crash gdbstub probe to failed readiness
+- Amend 0233 and 0064 for the narrowed gdbstub rejection
+- Record by-name tool lookup and diagnosable search miss
+- Fold scope-audit findings into the #2305 design set
+- State the measured names= payload span and drop a bad probe
+- Design external-build range buffering
+- Tighten range-buffer verification
+- Correct range-buffer implementation estimate
+- Require cursor-atomic range failures
+- Align range-buffer size estimate
+- Drop stale index-sync claim from adr-status-check comment
+- Record release-time changelog regeneration (ADR-0633)
+- Fold two design-review passes into ADR-0633 and its plan
+- Cut the reference guard the scope audit found unauthorized
+- Regenerate the changelog in the post-release bump PR
+- Give the orphaned changelog write key an owning record
+- Make the changelog check say what actually failed
+- Name tools.search names= in the agent index
+- Make the names= clause its own sentence
+- Decide against an operator override for depmod
+- Correct the override record's claims and caveats
+- State what actually separates an override from a symlink
+- Cut the restated conclusion and the duplicated rationale
+- Design the leaked mutation-obligation repair
+- Close the design's in-flight exclusion gap
+- Renumber the record to ADR-0634 and state the no-op
+- Keep the plan's catalog fence formatter-stable
+- Regenerate tool reference for tools.invoke docstring
+- Decide the module-staging toolchain diagnostics vantage
+- Resolve design-review findings on the depmod vantage
+- Apply scope-audit cuts to the depmod vantage design
+- Say the shipped image fails the depmod check
+- Scope the codec degradation claim to string ids
+- Renumber the depmod image record to 0014
+- State what the query bound does and does not guarantee
+- Note depmod resolution no longer uses PATH
+- Correct the depmod note's recovery and consequence
+- Put each depmod failure on the branch that raises it
+- State the depmod failure contract, not its causes
+- Stop at the depmod contract the codebase supports
+- Align the depmod note with ADR-0631
+- Record ADR-0632 and design for the tools.search parameters tier
+- Fold two design-review passes into ADR-0632 and its plan
+- Resolve scope-audit findings in ADR-0632 and the plan
+- Correct the plan's implementation estimate to the measured size
+- Add the missing no-parameters contract to the plan inventory
+- Clarify learning paths and current architecture
+- Prune obsolete build plans and consolidate operations
+- Consolidate remote setup and retire documentation plans
+- Consolidate provider setup around maintained workflows
+- Consolidate Kubernetes installation and diagnostics
+- Consolidate installation and Compose guidance
+- Consolidate POWER setup and qualify platform evidence
+- Prune deployment plans and consolidate mock OIDC guidance
+- Streamline release procedures and image verification
+- Separate mutation guidance from historical sweep results
+- Retire mutation tooling plans and preserve experiment results
+- Retire obsolete build-use recovery guidance
+- Align doctor verification with current diagnostics
+- Streamline the operator CLI runbook
+- Preserve accounting CLI project-list syntax
+- Align safety guidance with current authorization
+- Scope denial audit guarantees to their handlers
+- Clarify response envelopes and consolidate retry guidance
+- Clarify async job polling and recovery guarantees
+- Use job reads for terminal status checks
+- Replace error catalog with recovery guidance
+- Correct failed restore recovery instructions
+- Clarify domain relationships and resource lifetimes
+- Correct the core experiment workflow and prompts
+- Clarify concurrent crash observation workflow
+- Remove the redundant guide index
+- Streamline the served agent workflow index
+- Preserve generated agent index facts
+- Focus race debugging on observation and evidence
+- Align control guidance with tool contracts
+- Correct crashed system recovery guidance
+- Clarify core capture and postmortem analysis
+- Streamline remaining toolset workflows
+- Align contributor and architecture entry points
+- Remove obsolete implementation checklists
+- Correct deployment and guest helper procedures
+- Consolidate live testing and retire obsolete procedures
+- Remove duplicate troubleshooting notes
+- Remove superseded plans and duplicate designs
+- Streamline client, kernel upload and image workflows
+- Prune completed plans and duplicate historical specs
+- Preserve historical evidence and remove redundant records
+- Remove redundant history and preserve verified evidence
+- Reconcile current main guidance and historical references
+- Retain served debugging and guest customization contracts
+- Spec and plan for fadump provisioning parity (#2381)
+- Document --exclude for ppc64le bundle build (#2381)
+- Design removing the check-mermaid guardrail
+- Apply design review to the check-mermaid removal
+- Count the full plan-document residue
+- Drop node and npm from the host prerequisites
+- Drop node from the contributor dev-tooling lists
+- Drop the removed doc-check dependency step from setup
+- Design the ppc64le live proof run for #2383
+- Apply design review to the ppc64le live-proof spec (#2383)
+- Re-freeze scope after the audit checkpoints (#2383)
+- Apply cycle-2 review findings (#2383)
+- Record host-keyed libguestfs appliance budgets
+- Record the token-lifetime surface in the #2383 scope
+- Record the emulated-POWER live proof run (#2383)
+- Link the emulated-POWER proof record (#2383)
+- Add native-POWER9 follow-up run to the #2383 proof record
+- Describe both multiplier keys in the setting help
+- Point the #2383 proof record at its filed follow-ups
+- Record the provider-shared appliance multiplier decision (#2397)
+- Cut the appliance-multiplier design to its smaller shape (#2397)
+- Apply the scope audit's cuts to the #2397 design
+- Correct the probe's rationale and its unfixed host class
+- State LIBVIRT_TCG_DEADLINE_MULTIPLIER governs both libvirt providers
+- Record the measured emulated-host appliance budget calibration
+- Record one canonical qemu emulator package map
+- Split the RHEL family from Fedora in the dependency checker
+- Name the RedHat qemu emulator package by nativeness
+- Resolve the emulator at every probe, including the doctor
+- Renumber to ADR-0637 after a 0636 collision on main
+- Ground the EL packaging claim in a live EL10 measurement
+- Correct a stale line citation and add native ppc64le evidence
+- Correct the guestfish calibration figure and add run 2
+- Record run 3 and the customization-boot freeze
+- Cite #2423 for the customization-boot freeze
+- Give local-libvirt a provider page that owns host families
+- Record the verified RedHat-family limits
+- Link the SELinux overlay limitation to its issue
+- Design the static svirt_image_t label for session-mode domains
+- Retire the seclabel decision and widen the label to install staging
+- Apply the scope audit and verify criterion 4 on a live host
+- Close two gaps in the plan verification inventories
+- State the Task 1 label criterion as a directive check
+- Record the svirt_image_t label and retire the SELinux limitation
+- Settle the build-path question and harden the live proof
+- Amend ADR-0204, add operator recovery, fix spec scoping
+- Correct the session-mode confinement claim and disclose the build path
+- Amend ADR-0052, bound the foreign-rule recovery claim
+- Point the two deferrals at their filed issues
+- Stop claiming the confinement boundary is not widened
+- Record virt_content_t as a measured, unadopted alternative
+- Record the #2424 live proof and fold its measurements into ADR-0639
+- Design MinIO Quay registry migration
+- Avoid ADR number collision
+- Align plan with ADR number
+- Align ADR title with number
+- Use valid proposed ADR status
+- Record native-POWER9 fadump+kdump proof — all 4 ppc64le tests PASSED (#2383, #1204)
+- Design MinIO Quay registry migration
+- Use valid proposed ADR status
+- Renumber the svirt image label ADR to 0640
+- Renumber duplicate ADR-0637 (RedHat QEMU nativeness) to 0641
+- Name the mechanism behind records.yml's merge-base assumption
+- Record reusable worker host role boundary
+- Date worker host decision status
+- Design SUSE libvirt host preparation
+- Clarify absent SUSE libvirtd units
+- Use valid proposed ADR status
+- Design localhost libvirt host preparation
+- Correct localhost host plan estimate
+- Design local libvirt host installation guidance
+- Document local libvirt host preparation
+- Define TCG provisioning failure model
+- Keep TCG emulator record proposed
+- Select SeaweedFS backend contract (#2444)
+- Gate S3 migration on runtime proof (#2444)
+- Fix MinIO ADR supersession banner (#2444)
+- Guide tool parameter discovery
+- Design shared KVM openability probe
+- Cover KVM probe close failures
+- Name shared KVM probe
+- Regenerate config reference
+- Design SELinux build workspace labeling
+- Harden SELinux workspace design
+- Complete SELinux workspace test plan
+- Design customization boot freeze handling
+- Design SeaweedFS consumer migration
+- Package SeaweedFS initializer design
+- Clarify SeaweedFS initializer image
+- Describe SeaweedFS volume transition
+- Record SeaweedFS platform evidence
+- Update SeaweedFS operator paths
+- Update SeaweedFS operator guidance
+- Describe SeaweedFS bundled services
+- Preserve legacy MinIO volume
+- Append SeaweedFS evidence
+- Accept SeaweedFS backend contract
+- Design worker ID registration
+- Strengthen registration proof
+- Plan terminal install failure recovery
+- Preserve boot readiness failure boundary
+- Correct terminal failure implementation estimate
+- Clarify terminal step semantics
+- Correct failure guard wording
+- Keep state contract agent-safe
+- Design worker write baseline
+- Refine worker write baseline design
+- Constrain worker write baseline roles
+- Keep worker baseline ADR proposed
+- Accept worker write baseline decision
+- Date worker baseline acceptance
+- Atomically finalize ordinary teardown
+- Plan atomic teardown discharge
+- Accept atomic teardown decision
+- Design handler worker-role tests
+- Refine handler role test design
+- Lock handler role lifecycle
+- Accept handler worker-role test boundary
+- Normalize handler role ADR title
+- Design worker grant catalog guard
+- Design failed-system obligation repair
+- Guard failed obligation repair eligibility
+- Design image catalog worker insert
+- Complete image catalog grant design
+- Clarify image catalog grant authority
+- Correct migration history scope
+- Clarify grant rollback
+- Correct ADR-0629 lock citation
+- Append ADR-0629 citation correction
+- Accept ADR-0386 live-test topology
+- Add remaining investigation toolset guides
+- Clarify investigation and vmcore guides
+- Design adr-0284 operator guide phase
+- Model operator guide exposure boundary
+- Surface operator index in phase design
+- Add adr-0284 operator guides
+- Accept adr-0284 workflow docs
+- Specify provider-owned authority capability
+- Rebuild AGENTS.md from current repository evidence
+- Name SeaweedFS in the remaining MinIO references
+- Design one owner for live-stack backend bring-up
+- Design the stack entry-point rename
+- Resolve design-review findings on the entry-point rename
+- Record the successor-invocation fencing decision as ADR-0657
+- Correct ADR-0657's grounds and disclose the failed-unit residual
+- Record ADR-0657's partial supersession in ADR-0574
+- Record what a refused start does not report
+- Design the local-libvirt host kernel readability fix
+- Act on the scope audit of the kernel-readability design
+- Reconcile the host-kernel and guestfs guidance
+- Correct the distro claim behind the family guard
+- State what the endpoint abort does and does not settle
+- Name the allowlist, not the stat probe, as the redirect bound
+- Design external-build finalization measurement
+- Resolve design review findings on the measurement design
+- Resolve scope-audit findings on the measurement design
+- Record the measured external-build finalization rows
+- Accept ADR 0655 on durable asynchronous finalization
+- Accept ADR 0655 on retained synchronous completion
+- Close the evidence-record defects the second review pass found
+- Bound the cancellation and instrumentation claims to what the code does
+- Bound the ceiling figure to the manifest the rows measured
+- Record ppc64le finalization measurement and resolve debt-0015
+- Clarify _terminate's fence-conflict handling is forward defense
+- Record ADR-0658 on libvirt-free entry points and its light spec
+- Resolve design-review findings on ADR-0658 and its spec
+- Apply scope-audit remedies to ADR-0658 and its spec
+- Record the degraded-record-is-an-output arm in the spec
+- Re-anchor ADR-0658 and its spec to the merged line positions
+- Bound the --wipe orphaning claim to the unresolved-endpoint case
+- Record that the unset sentinel does not cross the process boundary
+- Renumber ADR-0658 to 0660 (0658 held by #2502, 0659 by #2519)
+- Renumber this record to ADR-0659
+- State what the tcg guard actually observed
+- Stop promising test-live-tcg skips cleanly
+- Disclose the collections recipe's writes outside the checkout
+- Design the missing-domain vs missing-forward distinction (#2502)
+- Resolve design review findings for #2502
+- Resolve scope-audit findings for #2502
+- Name the missing-domain reason in the SSH tool contract
+- Record the measured implementation size against the plan estimate
+- Correct the port contract and the server-vs-worker attribution
+- Add the pre-gateway tool-catalog survey light spec (#2521)
+- Resolve design-review findings on the survey spec (#2521)
+- Route survey entries to their owning fix issue (#2521)
+- Record the pre-gateway tool-catalog assertion survey (#2521)
+- Name A3's out-of-tier fix locus and correct the marker-file count (#2521)
+- Drop duplicated prose from the survey record
+- Design the local-libvirt host interpreter pin
+- State the become password prepare-local-libvirt-host needs
+- Scope the interpreter pin to the play, not the inventory
+- Design the preset libvirt endpoint contract guard
+- Resolve design review findings on the preset contract guard
+- Cover all three loader-failure legs in the guard spec
+- Correct the reap defects recorded above resolve_libvirt_uri
+- Add light spec for the guest-image live_vm skip (#2518)
+- Revise spec for the decided fail-loud shape (#2518)
+- State env.sh's deliberate KDIVE_GUEST_IMAGE omission
+- Correct what the native job's export does and does not fix
+- Record the guest-image exception to the skip/fail tri-state
+- Scope the guest-image fail-loud claim to the native tier
+- Drop the duplicated-literal note the pin now covers
+- Update the spec for the preflight and DSN-alias layers
+- Note the guest-image gate is outside the require_live_vm_* family
+- Design the expiry sweep external-boot denial log (#2519)
+- Address design review on the expiry denial log (#2519)
+- Settle the fence-arm deferral raised by the scope audit (#2519)
+- Correct stale lint-shell coverage comment
+- Bound the interpreter pin's family claim
+- Record EL9's zero headroom under the ansible floor
+- Add light spec for raising _RANGE_CHUNK_BYTES (#2569)
+- Decide provisioning enables the container-engine daemon
+- Resolve design review findings on the engine-enable decision
+- Cut the declared-engine assert from the enable design
+- State that Requires= starts the socket rather than enabling it
+- Record what the unit probe trades and fix three stale citations
+- Scope the before-any-mutation claim to this task file
+- Spec and plan for naming why diagnostics withheld
+- Apply design-review findings to the spec and plan
+- Cut the unasked-for result reshape and add the full-gate task
+- Define the lifecycle retry actions
+- Add the wedged worker slot recovery procedure
+- Widen the implementation estimate to the measured diff
+- Correct three review findings in the operator documents
+- Disposition the review notes on both operator documents
+- State the native live_vm tier's env contract and loud failure
+- Design the shared build-profile shape guard
+- Cut the tautological arch criterion and false tracker claim
+- Cut the placement rationale the module docstring owns
+- Record the kernel-upgrade /boot relabel decision (ADR-0668)
+- Drop the kernel-upgrade re-run from the local-libvirt guides
+- Add ADR-0664 for the native live_vm guest-image fail-loud rule
+- Widen ADR-0664's runbook citation range
+- Record onboard preflight severity design (#2568)
+- Resolve design-review findings on onboard preflight severity (#2568)
+- Resolve scope-audit findings on onboard preflight severity (#2568)
+- Name both boundaries and the token's single-line precondition
+- Design recovery for the residual worker slots
+- Tighten the residual-recovery design set
+- Resolve the residual-recovery design review
+- Close the residual-recovery scope audit
+- Qualify what a refused slot preserves
+- Name case 5 a decision, not a pending gap
+- Amend 0667 for the reverted implementation
+- Stop 0667's amendment recommending the manual UPDATE
+- Design the wipe reap's endpoint-derived privilege
+- Correct the reap-privilege design after the scope audit
+- Correct the reap's daemon claim and consequences
+- Drop the reverted guard and fix the gate-order premise
+- Correct the misclassification premise after the security pass
+- Cut a narrating comment and separate creation from access
+- Record the overlay-writability precondition the branch ships
+- Scope ADR-0662 off the gate's liveness probe
+- Correct the failure model for the unescalated gate probe
+- Bound three claims the probe carve-out overstated
+- Retire the criterion that mandates the fail-open probe
+- Design residual slot recovery
+- Resolve residual recovery review
+- Record restored residual slot recovery
+- Design empty cgroup observation fix
+- Correct systemd observation estimate
+- Specify pytest terminal summary proof gate
+- Design systemd proof case isolation
+- Record systemd proof scope expansion
+- Record systemd proof review expansion
+- Integrate live proof gate recovery design
+- Specify runner recovery capacity correction
+- Specify remote supplied rootfs live proof
+- State observed guest-agent readiness
+- Correct libguestfs kernel remediation
+- Retain Debian remediation scope
+- Correct remediation test command
+- Define automatic local pre-push verification
+- Refresh range chunk tuning design after scanner fix
+- Record decoder accounting blocker and admission caveat
+- Amend range chunk design to preserve decode accounting
+- Annotate validation chunk measurement supersession
+- Plan bundle digest scan folding
+- Clarify lifecycle recovery refusal actions
+- Design external boot stream guards
+- Specify overlap-safe secret redaction
+- Specify scoped changelog credential cleanup
+- Resolve unused changelog credential debt
+- Resolve external boot release debt
+- Format TCG preflight debt resolution
+- Clarify resolved TCG preflight residual
+- Specify portable documentation path certification
+- Complete depmod failure model
+- Specify portable Markdown link guard repair
+- State the Linux runner fact the ty pin relies on
+- Design SUSE rootfs support
+- Record SUSE rootfs live proof
+- Specify hosted TCG preflight topology
+- Reopen hosted TCG preflight proof debt
+- Clarify hosted TCG debt closure condition
+- Record the developer-host Bash 4.4 and GNU tools floor
+- Apply design-review notes to ADR-0672 and the spec
+- Apply scope-audit wording fixes to the #2647 spec
+- Describe the macOS Homebrew Bash and GNU tools setup
+- Renumber the developer-host floor ADR to 0673
+- Resolve debt record 0013
+- Design complete live-stack worker skew coverage
+- Date architecture review for current release
+- Keep native readiness plan transient
+- Clarify native extractor verification
+- Align extractor scope with changed files
+- Name the ppc64le guest image in build-image.sh and setup docs
+- Design single-flight complete_build finalize (#2680)
+- Resolve design review findings for single-flight finalize
+- Bound the complete_build retry promise to a live finalize
+- State the ADR-0675 retry count in terms of the whole finalize
+- Fix unresolvable doc paths in ADR-0675 and its plan
+- Disclose the needrestart-exclusion patch-latency tradeoff
+- Spec, plan, and ADR-0677 for systems.get run history
+- Apply design review to systems.get run history
+- Correct the admission-invariant paths in the spec
+- Name runs.list as the System history read
+- Name the shipped truncation key in ADR-0677
+- Rewrap the ADR-0677 decision paragraph
+- Regenerate tool reference for nested binding disclosure
+- Add ADR-0676 amending the at_capacity breadcrumb decision
+- Design the failed-boot crash signature surface (#2691)
+- Apply design review to the crash signature spec and plan
+- Apply scope audit to the crash signature design
+- Correct the crash signature plan's size estimate
+- Record the crash signature write-side filter in the spec
+- Design host-arch guests for native live tests
+- Name the native proofs that skip or stay x86_64 on POWER
+- Resolve design review findings for host-arch live tests
+- Name the guest-cpu proof that skips on POWER
+- Name the ppc64le inputs the local spine needs on POWER
+- Restore the kernel bug A/B test cases
+- Add kernel test cases 11-26 for untested MCP tools
+- Cite the open ppc64le gdbstub tracker in the test cases
+- Specify gdbstub tracker reference update
+- Expand gdbstub tracker scope to kernel cases
+- Correct gdbstub tracker in kernel cases
+- Design checkout worker version provenance
+- Specify live proof kernel tree reporting
+- Specify live-stack kernel preflight
+- Design isolated spine module staging
+- Correct spine staging failure model
+- Keep spine implementation plan private
+- Specify the multi-client allocation stress script (#2769)
+- Add abandonment and lease-expiry checks to the stress spec (#2769)
+- Apply stress design review findings (#2769)
+- Count valid-call errors instead of failing the stress run (#2769)
+- Document the allocation stress script (#2769)
+- Clean power-off for local-libvirt boot and install (#2757)
+- Drop a relative link the link check cannot resolve (#2757)
+- Address design review for clean power-off (#2757)
+- Record the console ordering on the clean path (#2757)
+- Record the SHUTDOWN wait and the actual diff size (#2757)
+- RHEL-family kdump advisory spec, plan and ADR-0678 (#2762)
+- Address design review findings (#2762)
+- Run the family lookup in a savepoint (#2762)
+- Say the RHEL-family advisory counts =m as present
+- State the remote readiness helper is kdump-only (#2762)
+- Gate local-libvirt provision ready on first boot (ADR-0680)
+- Settle ADR-0680 design review findings
+- Settle ADR-0680 scope audit findings
+- State provision waits for first boot
+- Record first-boot scan consequences in ADR-0680
+- Clean power-off for local-libvirt external-boot stops (#2780)
+- Resolve design review for external-boot clean power-off
+- Apply the operator's TCG decision to ADR-0681 (#2780)
+- Record why the remaining power-offs stay hard
+- Record the abort-during-shutdown window in ADR-0681
+- Scope the ADR-0640 amendment's package install correctly
+- Amend 0583 and 0584 for the local authority boot fixes
+- Run the test suite in a Linux container on macOS
+- Stop listing EL host prep as full in the family table
+- Note the guestfs base follows uv's interpreter choice
+- Stop scoping the worker guestfs binding to kdump capture
+- Design remote initrd admission
+- Cover absent initrd evidence
+- Specify redacted external-boot refusal logging
+- Define independent coverage obligations for qualification
+- Date the accepted coverage decision
+- Specify external boot timing snapshot
+- Resolve coverage ADR number collision
+- Decide clean operator power off
+- Publish operator off wait contract
+- Specify external-boot configuration refusal transport
+- Decide power provider I/O fence
+- Preserve power provider telemetry across fence
+- Name the retained clean-stop helper
+- Specify teardown destroy race
+- Require quiescence proof before power call deadlines
+- Define reproducible lab lane preparation for #2805
+- Record reproducible lab lane preparation
+- State fixture revision boundary
+- Make cold lane build reproducible
+- Specify native POWER reservation handoff
+- Bind preflight to supplied mount
+- Catalog lane capacity inputs and fixture freshness
+- Record unknown local RESET barrier feasibility
+- Resolve duplicate ADR 0688 numbering
+- Distinguish host and guest distribution support
+- Design EL10 guestfs Python binding build
+- Record EL10 binding proof revision
+- Define authority carrier System fixture contract
+- State authority fixture image constraints
+- Correct local libvirt Python probe comment
+- Design pinned external kernel fixtures
+- Accept pinned kernel fixture decision
+- Register fixture inputs and refresh served build guide
+- Renumber kernel fixture ADR and date its acceptance
+- Distinguish preflight Python environments
+- Describe systems.get run history fields
+- Amend finalization waiting mechanism
+- Define bounded guest regular-file reads
+- Specify guestfs xattr restore preflight
+- Specify System run lookup index tradeoffs
+- Use canonical ADR status syntax
+- Specify shared list project scoping
+- Use the required ADR heading format
+- Refresh agent testing guidance and record test timings
+- Specify container runtime input permissions
+- Conform runtime permissions ADR to record schema
+- Design per-call teardown executor wiring
+- Resolve design review notes for teardown executor
+- Design teardown failure commit for real System states
+- Resolve design review findings for teardown failure commit
+- Route teardown success-clause note to campaign follow-up
+- Design pre-target teardown recovery and boundary logging
+- Resolve design review findings for pre-target recovery
+- Rewrap spec diagnostics paragraph
+- Record the operator logging rule for provider failures
+- Amend 0584 to retract one unanchored journal tail
+- Keep retraction evidence in a reserved journal subdirectory
+- Format the journal-tail plan's code fence
+- Narrow the ReadWritePaths claim and drop an unowned deferral
+- Reconcile journal tails only after a startup head mismatch
+- Record the built size of the journal-tail change
+- Design authority retirement memlock ceiling restart (#2891)
+- Resolve design review notes for #2891
+- Apply scope audit cuts for #2891
+- Describe authority retirement of the memlock ceiling
+- Bound the absent-account teardown claim to retained evidence
+- Record the teardown restart order after LOGIN revocation
+- Record the pam_limits memlock grant consequence
+- Design the teardown takeover settle path (#2884)
+- Fold the takeover rule into the ADR-0620 amendment (#2884)
+- Record the interrupted-takeover defect in the design (#2884)
+- Note recycle authorizing and the built size after the re-audit (#2884)
+- Route the two follow-up candidates in the plan (#2884)
+- State ppc64le live-host runbook preconditions at their failure points
+- Design exhausted authority job recovery (#2889)
+- Resolve design review findings (#2889)
+- Compensate the Run of a dead-lettered stray job (#2889)
+- State which receipt paths bound the stray dead-letter (#2889)
+- Name the per-arch guest-panic mechanism (#2890)
+- Date and scope the ADR amendments (#2890)
+- Readiness marker after console escape sequences (#2907)
+- Apply design-review notes for #2907
+- Correct live-proof commands from the scope audit
+- Record the single-write dd pipe for the readiness unit
+- Record the raw pre-marker crash scan
+- Design failed-System teardown contract (#2908)
+- Settle failed-System teardown design review findings
+- Name the owner of the reprovisioning teardown gap
+- Amend ADR-0435 for failed-System teardown (#2908)
+- Design the periodic readiness anchor quiescence (#2899)
+- Settle the #2899 design review findings
+- Design the retained teardown requeue category fix (#2916)
+- Cite the envelope ADR in the planned migration comment (#2916)
+- Design teardown without power restore (#2898)
+- Resolve design review findings (#2898)
+- Point the quarantine residual note at its record
+- State that the installer prunes no worker groups
+- Design the failed teardown job re-run (#2929)
+- Resolve design review findings (#2929)
+- Reject the lapsed-exhausted policy in the design (#2929)
+- Design dead-letter for an exhausted retained teardown (#2917)
+- Keep the teardown route when a retained teardown dead-letters (#2917)
+- Note the reconciler lanes see a dead-lettered teardown (#2917)
+- Align the #2917 spec with 0163 and the reconciler lanes
+- Design the periodic retry for a torn or vanished lane
+- Resolve design review of the torn or vanished lane retry
+- Bound when a structural lane fault is refused at once
+- Design native POWER pseries gdbstub proof (#2739)
+- Address design review for POWER gdbstub proof (#2739)
+- Record native POWER pseries gdbstub proof (#2739)
+- Address review of POWER gdbstub proof record (#2739)
+- Format the engine call sequence in the proof record (#2739)
+- Note the reprovisioning teardown refusal
+- Design ppc64le live gdbstub test enablement (#2740)
+- Resolve design review findings for #2740
+- State that the single-step skip precedes live_vm preflight
+- Design lazy artifact root for absence proofs (#2926)
+- Resolve design review notes (#2926)
+- Add scope-audit fault arm and ADR status step (#2926)
+- Accept ADR-0710 with its implementation (#2926)
+- Record an invalid envelope as a server fault (#2932)
+- Resolve design review findings for #2932
+- Correct pseries reset pc in #1149 proof record
+- Design the per-budget acknowledged-retry grant bound (#2960)
+- Resolve design review of the grant bound (#2960)
+- Record the ADR-0711 amendments on ADR-0626 and ADR-0620 (#2960)
+- Spec and plan for preparing activation teardown
+- Record the remote-libvirt PREP limit for #2961
+- State how teardown ends a preparing reservation
+- Drop a relative ADR link that does not resolve from the plan (#2960)
+- Design cross-generation teardown observation (#2921)
+- Fold design review into #2921 spec, plan and ADR
+- Document the reprovision teardown refusal
+- Describe the teardown refusal as a non-retryable conflict
+- Wrap the ADR-0435 #2979 sentence
+- Append the #2979 amendment instead of rewriting ADR-0435
+- Refuse single-step and watchpoints on ppc64le KVM (#2963)
+- Resolve design review findings for #2963
+- Apply scope-audit wording fixes for #2963
+- Align ADR-0712 rejection with admission-time accel
+- Regenerate the served debug toolset doc (#2963)
+- Match ADR-0712 to the record shape the records gate checks
+- Note watchpoint_unsupported's set-time attach-failure form
+- Wrap the single-step refusal paragraph
+- Design carrier fixture cleanup (#2965)
+- Apply design review to carrier fixture cleanup
+- Remove the fixture after failed carrier runs too
+- Format the plan's Python block for ruff
+- State the carrier fixture cleanup contract (#2965)
+- State when the carrier removes its fixture
+- Check for a returned fixture after a failed carrier run
+- Order teardown and release after carrier cleanup
+- Name the admin role for the carrier System teardown
+- Design startup recovery of a torn journal tail
+- Resolve design review findings for torn-tail recovery
+- Record System reuse decision and carrier fixture_mode
+- Add System reuse spec and plan (#2968)
+- Correct reuse refusal consequence and create-mode text
+- Design resume-time watchpoint insert classification (#2964)
+- Apply design review to the #2964 design
+- Cite the step-verb timeout source in the ADR 0712 amendment
+- Design debug transcript dir provisioning (#2955)
+- Apply design review findings (#2955)
+- Apply scope audit findings (#2955)
+- Amend ADR-0088 for the server debug transcript dir (#2955)
+- Takeover recovery preserves the recorded mutation (0584)
+- Bound the 0584 recovery invariant to mutation fields
+- Design server-built model faults (#2981)
+- Resolve design review notes (#2981)
+- Amend ADR-0709 with the stored-data server-fault boundary
+- Avoid a false markdown link in the #2981 plan
+- Design the stalled-reprovision reconciler lane (#2980)
+- Window reclaimed-attempt failures and record the replay path
+- Record the stalled-reprovision lane (#2980)
+- State the reprovision settle window as a floor (#2980)
+- Record the approved #2961 teardown reading
+- Design ordinary teardown refusal for authority-held domains (#2966)
+- Resolve #2966 design review findings
+- Align the #2966 plan with its tasks
+- Name #2992 as the owner of the lease-expiry path
+- Format the #2966 plan's code block
+- Record why enqueue_control_teardown does not refuse
+- Design the teardown recycle policy per enqueuer (#2978)
+- Resolve design review findings (#2978)
+- Design repository stored-row server faults (#3009)
+- Resolve design review notes (#3009)
+- Widen ADR-0709 to repository rebuilds (#3009)
+- Avoid false markdown links in the #3009 plan
+- Design the unrouted preparing teardown route
+- Apply the #3017 design review
+- Apply the #3017 scope audit
+- Narrow the #3017 end-to-end arm to a canceled job
+- Note that just ci runs the records gate
+- Record the reprovision same-profile recycle (#3008)
+- Accept the outliving-handler residual of the recycle (#3008)
+- Design break-glass authority teardown routing (#3007)
+- Order break-glass admission after the preactivation fence (#3007)
+- Regenerate ops tool reference (#3007)
+- Amend ADR-0620 for break-glass authority teardown (#3007)
+- Design session-pinned cleanup finalization (#3012)
+- Correct the #3012 replay enumeration after design review
+- Bound the #3012 problem statement to the two ports
+- Name libvirt failure at the pinned open in the #3012 records
+- Name watchpoint_insert_failed in watchpoint docs (#3023)
+- Qualify watchpoint_insert_failed as gdb's resume error (#3023)
+- Name carrier tests as migration DSN consumer
+- Admit a remote preparing teardown without PREP (#3016)
+- Compact the #3016 plan around parametrized tests
+- State the interrupted-preparation residual for #3016
+- Cover the retained-receipt handler case for #3016
+- Correct the #3016 size estimate for the retained-receipt case
+- Note skipped Systems keep their lane slot (#3015)
+- Spec and plan for the force-close external-boot refusal (#3025)
+- Settle refusal order and tearing_down residue (#3025)
+- Record the force-close external-boot refusal (#3025)
+- Regenerate references for the force-close refusal (#3025)
+- Spec and plan for catalog and receipt stored-row faults (#3044)
+- Tighten the #3044 plan header
+- Apply the #3044 design-review findings
+- Cite ADR-0361 in the #3044 gate decision
+- Amend ADR-0709 for catalog and receipt rebuilds (#3044)
+- Runbook for a stuck tearing_down external-boot System
+- Design the tearing_down authority teardown exit (#3026)
+- Resolve design review findings for #3026
+- Runbook names the authority teardown exit (#3026)
+- Design markdown anchor check for docs-links (#3048)
+- Resolve design review findings for anchor check (#3048)
+- Design session-pinned recovery-object delete and adopt (#3045)
+- Settle design review notes for #3045
+- Design repeated provider-conflict terminal for external boot (#2901)
+- Resolve design review findings for #2901
+- Name the ADR-0714 file exactly in the #2901 plan
+- Design the ended-allocation authority teardown (#2992)
+- Resolve design review findings for #2992
+- Apply scope audit cuts for #2992
+- Record the teardown exception to the active-allocation fence (#2992)
+- Drop stale active-Allocation wording from teardown text (#3060)
+- Spec, ADR-0715 and plan for catalog image smoke (#2808)
+- Settle scope-audit notes for image smoke (#2808)
+- Run the catalog image smoke and qualify it (#2808)
+- Note the pending-count drop from the image-smoke node (#2808)
+- List exactly what image-smoke artifacts retain (#2808)
+- Record the actual implementation size for image smoke (#2808)
+- Scope the authority role to the scenarios that use it (#3066)
+- Resolve design-review notes for #3066
+- Describe the scenario-scoped authority role (#3066)
+- Design the native-arch Linux test container (#3072)
+- Keep plan snippets clear of the doc link and path checks
+- Apply design review notes for the Linux test container
+- Name just test-linux as the macOS unit gate
+- State the commit floor for just test-linux <sha>
+- Record the security pass controls in the threat model
+- Design the deep-lifecycle matrix (#2809)
+- Resolve the deep-lifecycle design review (#2809)
+- Run the deep lifecycle cells (#2809)
+- Correct the deep-lifecycle plan's size estimate (#2809)
+- Say which cleanup checks the first run observed
+- Design the host-installation proof producer (#2807)
+- Resolve design review findings for the host-install proof (#2807)
+- Apply scope-audit cuts to the host-install design (#2807)
+- Document the host-installation producer and unattended become (#2807)
+- Record the clean and repeated host installation proof (#2807)
+- State that post-candidate commits are documentation only (#2807)
+- Record the lab-host runs of the host-install proof (#2807)
+- Scope the proof record's evidence to its candidate and matrix (#2807)
+- Record the flexo lab-host proof at the final candidate (#2807)
+- Record the final flexo proof and the narrowed role set (#2807)
+- Record the deep-lifecycle rerun after #3078
+- Spec, plan and ADR-0574 amendment for worker inventory (#3086)
+- Apply design review dispositions for #3086
+- Document fixed-worker inventory delivery and TLS ref layout (#3086)
+- Link the Ansible TLS layout follow-up #3088
+- State the guest rp_filter per image in ADR-0721 (#3090)
+- Spec, plan and ADR-0722 for the core tool cells (#2811)
+- Resolve design-review findings for #2811
+- Name pg_catalog in the #2811 threat model
+- Run the core tool cells in both configurations
+- Record the core tool cells' two-lane run
+- Design the remote deep lifecycle on a separate provider host (#2810)
+- Resolve design review findings for the remote deep lifecycle (#2810)
+- Observe released capacity on the provider host (#2810)
+- Run the remote deep lifecycle (#2810)
+- Rewrap the coverage qualification binding paragraph
+- Record the remote lane's network and inventory trust boundaries
+- Record the first remote deep-lifecycle run (#2810)
+- Record the remote deep-lifecycle run at the final candidate
+- Record the core tool cells at the merged candidate
+- Design the remote slot's inherited crashkernel removal (#3094)
+- Apply design review notes to the #3094 spec
+- Name the ADR-0082 amendment form in the #3094 spec
+- Record the remote slot's crashkernel rule and image rebuild (#3094)
+- Record the remote deep-lifecycle run with the #3094 helper
+- Amend ADR-0722 by appending, not rewriting decision 3
+- Design the catalog tool cells (#3095)
+- Apply design review to the catalog tool cells
+- Apply the scope audit to the catalog tool cells
+- Run the catalog tool cells
+- Design the investigation and artifact tool cells (#3096)
+- Resolve the design review of the investigation tool cells
+- Run the investigation tool cells
+- Describe the blocked list cells and the absent-owner twin
+- Design the read-only operator tool cells
+- Resolve the operator tool-cell design review
+- State the per-lane blocked secrets.list count
+- Run the read-only operator tool cells
+- Record the operator tool-cell lab run
+- Record the operator tool-cell run at the final carrier
+- Record the operator tool-cell run at the final carrier
+- Specify native POWER spine kernel prerequisites
+- Sync external build MCP resource
+- Align spine kernel prerequisites with the preflight
+- Name every SSH spine proof that needs virtio-net
+- State the crash-capture symbols and pahole ownership reason
+- Record that the Fedora 44 ppc64le guest drgn cannot load BTF
+- Say drgn-live needs guest DWARF, not kernel BTF (#3121)
+- Name the DWARF symbols and vmcore proofs the spine preflight needs
+- Credit the kdump symbols to ppc64le_defconfig, not the fragment
+- Design drgn-live on a staged DWARF vmlinux (#3121)
+- Resolve design review findings for #3121
+- Drop placeholder link syntax from the #3121 plan
+- State that drgn-live reads the uploaded vmlinux (#3121)
+- Record the native POWER old-helper result in ADR-0723 (#3121)
+- Name attach-drgn-live as the blind-guest stop point
+- Design the external-boot debuginfo plan member (#3129)
+- Resolve design review findings for #3129
+- Resolve scope audit notes for #3129
+- Cite the ADR-0656 store-time figure exactly
+- Design the provider-lane System tool cells (#3062)
+- Resolve the System tool-cell design review
+- Align the lane-target plan step with its interface
+- Add the System lifecycle tool-cell carrier
+- Record that the gateway id-validation cells qualify
+- Record the System tool-cell run at a939e67ba
+- Design local vmlinux staging for #3130
+- Resolve design review findings for #3130
+- State the #3130 upgrade order against #3129
+- Design the remote System tool cells (#3080)
+- Format the plan's code fences
+- Apply design-review findings to the plan
+- Run the remote System tool cells
+- Select the local System cells by provider
+- Record the remote System tool-cell run at ee349c788
+- Record the #3130 surface change and x86 owner
+- Design the x86_64 local run and image tool cells
+- Resolve the run tool-cell design review
+- Add the run and image tool-cell procedure
+- Record the run and image tool-cell lab run
+- Design the remote run and image tool cells
+- Resolve the remote run tool-cell design review
+- Add the lab teardown step to the remote run plan
+- Add the remote run and image tool-cell procedure
+- Record the remote run and image tool-cell lab run
+- Design the break-glass provider tool cells
+- Apply design review to the break-glass cells
+- Block the force_release functional cells (option b)
+- Add the break-glass provider tool-cell procedure
+- Check the provider before each break-glass wipe
+- Record the break-glass tool-cell lab run
+- Specify refresh of pruned rootfs pins
+- Preserve catalog packages in refresh commands
+- Record approved lifecycle uv selection design
+- Specify EL10 distro source selection (#3068)
+- Record bounded EL10 binding proof (#3068)
+- Remove Debian-only kernel fixture workaround
+- Keep ADR acceptance status in required format
+- Specify provider-scoped diagnostics repair
+- Define checkout-local shfmt selection
+- Regenerate diagnostics provider reference
+- Regenerate diagnostics provider CLI help
+- Use the required accepted status format
+- Assign the refreshed session-libvirt decision number
+- Accept documented AppArmor session posture
+- Correct AppArmor session confinement claims
+- Specify file-based kexec fixture support
+- Specify observed x86 fixture capture prerequisite
+- Specify remote firewall prerequisite convergence
+- Define derived remote materializer capacity
+- Specify Debian remote kernel helper for #3081
+- Specify bounded reboot probe readiness
+- Reassign Debian helper decision to ADR 0766
+- Specify queued availability proof
+- Correct upstream kernel case fix citations
+- Specify real secret presence proof for live cells
+- Specify explicit customization kernel selection
+- Normalize retained-kernel decision status lines
+- Design bounded remote egress preflight
+- Accept Ubuntu remote network policy for #3091
+- Record approved image cache permission status
+- Specify native SUSE remote image and network policy
+- Specify bounded Leap image growth after build failure
+- Correct SUSE native policy registration design
+- Specify guarded native JeOS firstboot completion
+- Accept filtered-list denied-visibility evidence (#3108)
+- Drop a path-shaped gate list from the #3108 spec
+- State the #3108 validation coverage as built
+- Record ADR-0757 System capture-method architecture
+- State how wrapper text is verified for #3153
+- Accept ADR-0759 remote image publication refusal
+- Document the remote images.publish refusal
+- State the real cause of the remote publish refusal
+- Record the remote publish refusal live run
+- Record the refusal run at the refreshed base
+- Accept receipt-bound authority System discharge (#3143)
+- Note reconciler release arms share the absence exception
+- Drop the worker kernel-source requirement (#3193)
+- Address design review for #3193
+- Fix the demo-up header per scope audit (#3193)
+- The demo needs a workspace, not a kernel tree
+- Walk a tree-less host through the demo
+- Direct core-method choice to supported_capture_methods
+- Cover absent and empty supported_capture_methods
+- Intersect capture list with core methods
+- Stop claiming the workers read KDIVE_KERNEL_SRC
+- Start the cell-comparison text in its own paragraph
+- Cite the dedicated harness role issue
+- Live-tier harness login role design (#3196)
+- Resolve design review findings for the harness role (#3196)
+- Observe the harness DDL refusal directly (#3196)
+- Run the harness on the least-privilege login
+- Accept ADR-0769 with its implementation
+- Date the ADR-0769 acceptance
+- State the exact ownership refusal in ADR-0769
+- Drop the kernel-tree step from the host-install runbook
+- Let a capability cell follow the support verdict (#2815)
+- Run the power and snapshot tool cells (#2815)
+- State the SSH host-key trust the power cells rely on
+- Record the power and snapshot cells' last run
+- Design the local capture tool-cell proof (#2814)
+- Settle the capture design review findings (#2814)
+- State that captured cores are retained evidence (#2814)
+- Run the capture tool cells (#2814)
+- Place crash(8) and drgn with the MCP server
+- Name the admin stranger of the isolation cells
+- State remote authority toolchain prerequisites
+- Name remote authority appliance prerequisites
+- Drop merged #3143 from authority lane blockers
+- Design x86_64 resource-boundary proofs
+- Run the local resource-boundary cells
+- Align resource-boundary cleanup and slow-boot reuse
+- Run the remote resource-boundary cells
+- Design the authority-owned System frame (#3184)
+- Resolve design review of the authority System frame
+- Record the explicit authority-frame selection decision
+- Apply the scope audit cuts to the authority frame design
+- Name the stack's own inventory for the authority frame
+- State that the authority frame's client is admin-scoped
+- Label the bounded remote pool with an fcontext rule
+- Admit openSUSE Leap 16 x86_64 as a remote-libvirt provider host
+- Record the local resource-boundary run
+- Design the installed authority lane bring-up (#3215)
+- Resolve the #3215 design review notes
+- Carry the #3215 scope-audit notes into the plan
+- Document the installed authority lane bring-up
+- Note the port-value stop and fixture copy placement
+- Name the candidate of the resource-boundary runs
+- Design the remote authority System frame (#3209)
+- Apply remote frame design review notes (#3209)
+- Run the remote authority frame arm (#3209)
+- Correct the remote frame size estimate (#3209)
+- Record remote frame trust and cleanup scope (#3209)
+- Clean up remote leftovers as the authority account (#3209)
+- Match the remote frame's observer-first order (#3209)
+- Block the kdump cells when the guest kdump fails
+- Record the capture cells' last run
+- Design the build-use recovery tool cells
+- Record where recovery cells get termination evidence
+- Align the recovery-cell design with its restore order
+- Record the build-use recovery cells' last run
+- Design the local control tool-cell proof (#3115)
+- Settle the control cells' design review (#3115)
+- Run the control tool cells (#3115)
+- Name the kmsg marker the watch cell writes (#3115)
+- Record the control cells' last run
+- Design the mutating operator tool cells (#3110)
+- Run the mutating operator tool cells
+- Design the local GDB debug tool cells (#2813)
+- Name five more filtering list tools in ADR-0756 (#2813)
+- Point ADR-0722 at the widened filtered-list set (#2813)
+- Record the debug tool cells' last run
+- Design the broken/fixed kernel corpus exercises
+- Run the kernel corpus cells
+- Record the kernel corpus cells' last run
+- Specify sourced backend loopback defaults
+- Include lifecycle witness endpoint callers
+- Define shared host-dump spool ownership
+- Specify fixture kdump filesystem defaults
+- Specify authority first-start convergence
+- Keep authority implementation plan transient
+- Define settled canceled-install build-use release
+- Bound install-release ownership and threat model
+- Define nonintrusive session reservation
+- Retain session ownership baseline provenance
+- Define on-demand reconciliation failure reporting
+- Design isolated Compose image preparation
+- Design capture publication upload fence for #3262
+- Design the authority TLS expiry check and restart bound
+- Record the approved 12-hour expiry margin
+- Fold design review findings into the expiry design
+- Note the drift proof's shared start budget
+- State that the authority start budget counts every start
+- Count live authority proofs against the start budget
+- Name the installed stage-volume invocation
+- Design authority recovery fault construction (#3185)
+- Fold design review findings into the fault design (#3185)
+- Record the operator design decision for #3185
+- Drop the unapproved-ADR blocker branch (#3185)
+- Document authority recovery fault proofs (#3185)
+- Name the receipt observer in the threat model (#3185)
+- Design running guest between debug calls (#3244)
+- Use the bare Proposed status in ADR-0783
+- Resolve design review findings for #3244
+- Correct cancellation mechanism and fold design notes (#3244)
+- Rewrap a spec line
+- Interpolate the halt bounds into the wrapper text (#3244)
+- Describe running between calls and accept ADR-0783
+- State the refused-interrupt failure in every contract
+- Specify run system and job service-cell proof
+- Catalogue the exclusive-queue proof approval knob
+- Design retained authority TLS renewal (#3273)
+- Propose ADR-0803 authority TLS custody and renewal
+- Record operator design decisions for #3273
+- Document retained-lane TLS renewal and rotation (#3273)
+- Record the #3278 merge base and moved task citations
+- Accept ADR-0803 after the retained-lane renewal proof (#3273)
+- Specify attachment-owned symbol cleanup
+- Record quota-limited staging proof for #3229
+- State which reap failures raise ReapFailure
+- Cite the merged head for the #3229 quota rerun
+- Specify capture launch abort closure
+- Design the session-stack pcap hand-off fix (#3270)
+- Fold the #3270 design review into the spec and ADR-0385
+- Name the reply parser's error class in the #3270 spec
+- Describe the pcap remediation as daemon-neutral
+- Record vmcore backend publication fault proof
+- Point store credential refusals at the store logs
+- Design list_breakpoints rows (#3242)
+- Disclose fake rows and the what/expr naming split
+- Record the #3242 list_breakpoints live rerun
+- Specify headless lane image console policy
+- Specify bounded console panic observation
+- Preserve generic console observer contract
+- Design per-start console boot identity (#3254)
+- Accept crash-kernel evidence for kdump force crashes (#3254)
+- Note the x86 command-line record behind crash-kernel evidence (#3254)
+- Design x86_64 orchestration fault proofs
+- Resolve orchestration-fault design review findings
+- Record operator decisions and the conditional fence fix
+- Bound the conditional fence to the handler and libvirt paths
+- Run the orchestration-fault cells
+- Align orchestration-fault bounds with the carrier
+- State where each orchestration fault lands and what is probed
+- Design allocation, accounting and report service cells (#3098)
+- Resolve design review findings for #3098 cells
+- Record approved design decisions for #3098
+- Apply scope-audit dispositions for #3098
+- Design read_frame arguments and locals (#3243)
+- Apply design review to read_frame variables (#3243)
+- Design CLI translation cells for the core tools (#3099)
+- Resolve design review findings for #3099 CLI cells
+- Apply scope-audit cuts to the #3099 plan
+- List images and resources list gaps and cli runbook readings
+- Rewrap the cli validation sentence in the #3099 spec
+- Design the remote power, snapshot and control cells (#3116)
+- Keep the remote pcap path in the provider lane
+- Address design review of the remote control cells
+- The new bindings move the matrix digest
+- Run the remote power, snapshot and control cells
+- Note the predicted remote pcap name in the cleanup
+- Record the remote power, snapshot and control cell run
+- State the live CPU residue of the authority projection
+- Design the remote debug tool cells (#3113)
+- Resolve the #3113 design review findings
+- Name the drgn-live transport proof in the #3113 spec
+- Run the remote debug tool cells
+- Name the transport_release key and the drgn-live reason gate
+- Record the remote debug tool cell run
+- Amend ADR-0623 with the staged-base label contract
+- Record the libguestfs backend and deploy precondition
+- Describe the forward NIC without a libvirt NIC
+- Record the #3294 remote capture cell run
+- Design the 32 authority HTTP functional tool cells (#3186)
+- Resolve design review findings for authority tool cells (#3186)
+- Name the shared identity seams in the #3186 surface note
+- Document the authority functional tool cells and accept ADR-0788 (#3186)
+- Specify the remote capture tool cells (#3114)
+- Resolve the #3114 design review findings
+- Drop the unused ADR slot path reference
+- Run the remote capture tool cells
+- Record the remote capture cells' last run
+- Design remote capture vhost-off NIC and pcap pool
+- Amend ADR-0432 for the vhost-off NIC and the pcap pool
+- Rerun site.yml and reprovision remote Systems for capture
+- State how the reaper handles a missing pcap pool
+- Move the pcap pool target and record the SUSE label residual
+- List the pcap pool setting and host pool in the setup guides
+- Note pre-upgrade pcaps left in the disk pool
+- Record the root-owned pcap pool and the refuted QEMU-owned shape
+- Describe the pcap pool as root-owned in the setting help
+- Record the pcap pool safety check and the create-denied reason
+- Name the pcap pool safety and create-denied failures
+- Record the measured vhost-off throughput cost
+- State what the cleanup fence checks
+- Record the orphan admission fix in ADR-0788 and the runbook (#3186)
+- Wrap the orphan runbook bullet (#3186)
+- Record ADR-0805 authority-observed conflict recording
+- Record the operator's mixed-stays-retryable decision
+- Record that teardown does not complete from recovery_conflict
+- Amend 0620 and 0805 for teardown from recovery_conflict
+- Amend 0805 by banner, not by rewriting Consequences
+- Amend 0585 for the PREPARE System stop
+- Record conflict resolution restoring the acknowledged identity
+- Wrap the ADR-0805 amendment item 6
+- Keep ADR-0805 consequences append-only
+- Amend ADR-0787 for the finalized marker (#3326)
+- Describe the identity-keyed receipt in ADR-0787 (#3326)
+- Align #3326 wording with the identity-keyed receipt
+- Record what the PREPARE pre-stop refusal does at the worker
+- Amend ADR-0585 and ADR-0714 for an abandoned PREPARE
+- Record settling a pre-stop PREPARE refusal in ADR-0585
+- Scope the started-execution proof and the refusal replay in ADR-0585
+- Note that no reader assumes a console part size
+- Record idle-seal limits and tie the poll window to the seal delay
+- Record the adoption and post-anchor settle in ADR-0585
+- Scope the post-anchor settle and disclose the missing generation tracker
+- Amend ADR-0585 for scratch format, btrfs root and console lines
+- Record the live-run appliance fixes in the ADR-0585 amendment
+- Move ACPI to the console change and note the dependency
+- Keep ACPI in the amendment and narrow the dependency note
+- Amend 0609 for ACTIVATE terminal evidence
+- Amend ADR-0787 for remote finalize file removal (#3333)
+- Align the ADR-0787 amendment with the marker refs (#3333)
+- State the legacy marker behavior in the ADR-0787 amendment (#3333)
+- Amend 0584 for the remote observation readiness wait
+- Amend 0583 for the btrfs subvolume root argument
+- Amend 0583 for the running-domain teardown identity check
+- Amend 0620 for the teardown reap discharge; correct the stale comment
+- Amend 0754 for release after an activated System's teardown
+- Describe the conflict arm's restored-source flow
+- Amend 0588 and 0584 for the authority-side module-volume sweep
+- Rewrap the 0584 sweep amendment
+- A re-entered release recovery begins its own budget
+- Narrow the re-entry rationale and state the queued-first-attempt cost
+- Rewrap the ADR-0684 amendment
+- Describe the cleanup retry as an idempotent reap
+- A release failure while recovering commits and the retry adopts
+- State the window before a retry's own begin
+- Record the closure of a terminally failed release recovery
+- Rewrap the closure paragraph
+- State the closure's discharge and reconciler limits
+- State the closure's discharge and reconciler limits
+- Note the null-free evidence identity in the 0614 amendment
+- A definite authority rejection ends the lifecycle wait
+- State the limits of the refused mark and the allowlist audit
+- Amend 0620 for teardown after a completed release
+- Reflow the 0620 amendment
+- Record the resolve-conflict module reap
+- Design the remote resolve-conflict terminal state (#3414)
+- Amend ADR-0805 and ADR-0620 for the retained-object resolve (#3414)
+- Drop stale blocker text after the cell rebind (#3186)
+- Amend 0615 with per-binding orphan routing and host ownership check
+- Design the remote restore crash-window fix (#3427)
+- State the expected implementation size (#3427)
+- Resolve the #3427 design review notes
+- Release finalize leaves an adopted receipt in place (#3435)
+- Bound #3435 design claims after design review
+- Record the release lane's narrowed state set (#3426)
+- Scope the teardown exit to the two states it covers (#3426)
+- Design the first-activation release proof (#3423)
+- Amend 0754 so release reads the first activation (#3423)
+- List md- and mapper-named volume groups as refused
+- Quarantine inventory for an adopted release cleanup retry (#3434)
+- Resolve design review findings for #3434
+- Address scope audit for #3434
+- Design recover and resolve-conflict failure commits (#3429)
+- Plan recover and resolve-conflict failure commits (#3429)
+- Address design review for #3429
+- Align #3429 design with the scope audit
+- State the reconciler redrive the #3429 amendment rejects
+- Say a resolve that fails after recovery began ends recovery_failed (#3429)
+- Name data.activation_state and bound the refused resubmit (#3429)
+- Note migration 0184 in the cleanup-evidence comment (#3432)
+- Amend ADR-0787 for the remote finalize hardening (#3419)
+- Align the observe-cap spec with its test (#3421)
+- Design teardown that keeps an adopted receipt (#3467)
+- Keep the tombstone beside an adopted receipt at teardown (#3467)
+- Design the failed restore re-drive (#3469)
+- Note the validator refusal is rewrapped
+- Design teardown store collection (#3472)
+- Apply design review to teardown collection (#3472)
+- State the kept teardown record's lifetime (#3472)
+- Bound when a failed collection is retried (#3472)
+- Design teardown collection of every activation (#3486)
+- Apply design review to sibling collection (#3486)
+- Add the torn-down store remedy to the host runbook (#3486)
+- Keep the store copy private in the runbook remedy (#3486)
+- Spec and plan for the release scan bound (#3475)
+- Resolve design review notes for #3475
+- Amend ADR-0787 for the release scan bound (#3475)
+- Amend ADR-0787 lock paragraph additively (#3492)
+- Spec for the local pending cleanup identity (#3490)
+- State which pending-point reads are test-guarded (#3490)
+- Design local authority intent resume across generations
+- Resolve the intent resume design review
+- Amend ADR-0787 for finalize re-checking managed (#3493)
+- Design the remote vmlinux staging in the module tree (#3131)
+- Resolve design review findings for #3131
+- Document the remote vmlinux staging and regenerate resources (#3131)
+- Record class-only logging for interpolated refusals (#3476)
+- Ground 0707 amendment in operator decision only (#3476)
+- Design finalize keeping a shared plan pair (#3494)
+- Re-wrap the 0787 #3494 rejected bullet
+- Design canonical machine identity for local authority (#3148)
+- Record profile-pinned machines in the identity design (#3148)
+- Name the in-flight pinned-intent consequence (#3148)
+- Propose accepting guest-egress host-loopback exposure (#3496)
+- Add QEMU-native passt and exposure scope to 0810 (#3496)
+- Scope the 0810 decision to customization boots and revisit triggers (#3496)
+- Record operator decision and accept 0810 (#3496)
+- Disclose host-loopback exposure of guest_egress (#3495)
+- Correct exposed-account wording per review (#3495)
+- Regenerate systems toolset snapshot (#3495)
+- Drop relative link from served systems toolset (#3495)
+- Fix duplicated word and rewrap loopback notes (#3495)
+- Note kdive-owned loopback listeners and customization NIC (#3495)
+- Point §3 at the amendment, cite #3311, reflow (#3495)
+- Keep ADR-0313 section 3 untouched; reflow live-testing (#3495)
+- Domain-free pinned open for quarantine-row port (#3489)
+- Dispose design review findings (#3489)
+- Amend ADR-0710 for domain-free quarantine port open (#3489)
+- Scope the 0724 local upgrade-order reversal
+- Place the 3511 design under docs/workflow/specs
+- State that partial and full cpu checks hash identically
+- Design config-declared relocation for authority route admission
+- Correct admission invariant and refusal remedy wording
+- Record route-added-after-provisioning limit
+- Cite stranded-allocation recovery issue
+- Design authority-owned System overlay paths (#3524)
+- Specify authority root wiring and tests (#3524)
+- Fit the light-spec line cap (#3524)
+- Design journal headroom for teardown (#3526)
+- Record the real statvfs observation for #3125
+- Trim the #3125 spec to its word cap
+- Move the #3125 spec to docs/workflow/specs
+- Design recovery of an unconfirmed authority journal record (#3531)
+- Resolve design review findings for #3531
+- Keep the frozen failure model unchanged (#3531)
+- Define the BYO host inventory skeleton
+- Clarify BYO export and input boundaries
+- Require explicit BYO operation advertisement
+- Design the authority boot step record (#3135)
+- Record the authority boot step decision (0812)
+- Align the boot step spec and ADR with the locked insert
+- Point ADR-0787 and ADR-0804 at later amendments
+- Scope the ADR-0804 amendment to what is reachable
+- Design the authority install refusal contract (#3535)
+- Resolve design review notes for #3535
+- Name the assigned numbers without a path glob (#3535)
+- Design the SSH forward port immutability clause (#3546)
+- Bound the failure model after the #3546 design review
+- Tighten the btrfs fixture requirement wording
+- Design torn journal tail recovery (#3543)
+- Apply design review of torn tail recovery (#3543)
+- Record the torn tail refusal category (#3543)
+- Correct the torn tail size estimate (#3543)
+- Design the guest-egress loopback firewall recipe proof
+- Resolve design review findings for the firewall recipe
+- Record the QEMU-uid loopback firewall lab result
+- Bound the firewall recipe limits to what ran
+- Correct firewall recipe scope statements
+- Record the authority arm as an accepted unproven limit
+- Add load, removal and resolver limits to the firewall recipe
+- Keep customization NIC open in ADR-0810 (#3513)
+- Scope ADR-0810 customization NIC proof to its arrangement (#3513)
+- Document the live authority lab traps
+- Scope authority lab traps to source evidence
+- Correct authority lab symptoms and ordering
+- Correct the readiness probe failure modes
+- Specify native remote vmlinux proof for ppc64le
+- Explain native bundles for foreign proof controllers
+- Design bounded module appliance liveness for remote proof
+- Record native remote POWER vmlinux proof
+- Link the completed native remote proof
+- Stranded activation settlement spec, ADR and plan
+- Apply design review findings for settlement
+- Apply scope audit cuts for settlement
+- State the tool's denial and refusal audit duty
+- Specify stranded activation observation
+- Apply design review to stranded observation
+- Correct the stranded observation file count
+- Regenerate the job-kind surfaces
+- Place the observation amendment under Consequences
+- Prove the observation's upgrade order
+- Route a settled stranded activation to its worker
+- Close the design review's routing and rollout gaps
+- Apply the scope audit's findings
+- Describe the stranded-activation recovery tool
+- Design authority SSH access through the stored port
+- Resolve design review of authority SSH access
+- Apply scope audit cut to authority SSH design
+- Record the remote authority System SSH port source
+- Resolve design review of remote authority SSH port
+- Bound a remote authority SSH port by the receipt only
+- Resolve confirming review of remote authority SSH port
+- Stranded allocation recovery proof design (#3552)
+- Resolve design review of stranded recovery proof (#3552)
+- Fit stranded recovery spec to the light cap (#3552)
+- Recover an allocation stranded by a fixed-worker activation (#3552)
+- Cancel the exhausted boot job the live strand leaves (#3552)
+- Define verification labels as a completion gate
+- Design the remote authority ssh_forward_port report (#3586)
+- Keep the floor tests clear of the gdb range (#3586)
+- Drop the loopback-only wording on the ssh forward port
+- Name the guard that keeps an old intent's port out of facts
+- Design the remote authority SSH port consumer (#3585)
+- Fit the #3585 spec to the light-spec cap
+- Fit the #3585 spec to the light-spec cap
+- Resolve the #3585 design review findings
+- Reword ssh_forward_port readers for remote Systems (#3585)
+- Design descriptor listing rewind for btrfs (#3601)
+- Correct btrfs listing mechanism and guard remedy (#3601)
+- State which listing spellings the guard detects
+- Record the journal listing moving into scope (#3601)
+- Note the btrfs kernel behavior and redact a local path
+- Design the stranded authority provision runbook (#3584)
+- Wrap the validation entry (#3584)
+- Wrap the validation entry (#3584)
+- Pin the lab commit and per-shape induction (#3584)
+- Link the stranded-activation runbook (#3584)
+- Recover an allocation stranded by a failed authority provision (#3584)
+- Record the lab-proven exhausted provision sequence (#3584)
+- State the unproven mismatch exit and worker-kill reason (#3584)
+- Name superseded journal lines and the untried TLS reissue (#3584)
+- Operate and prove the remote authority SSH port
+- Narrow the pre-change refusal and the address rule
+- Amend ADR-0815 and ADR-0811 for the #3594 findings
+- Separate observed and inferred authorize failures
+- Design the exhausted preactivation teardown recycle (#3617)
+- Disposition the design review findings (#3617)
+- Disposition the scope audit findings (#3617)
+- Record the exhausted preactivation teardown recycle (#3617)
+- State the doubling budget and the attempt-id log caveat (#3617)
+- Record the remote bootstrap key live arms
+- Prove the authority binding-mismatch exit (#3616)
+- Address review notes on the binding-mismatch exit (#3616)
+- Design the pending absence-receipt recycle guard (#3627)
+- Trim the receipt-pending plan to its tasks (#3627)
+- Disposition the design review findings (#3627)
+- Count the third migration version list (#3627)
+- State ops.force_teardown does not restart exhausted teardown (#3628)
+- Drop the stale attempt-id mapping ground (#3627)
+- Quote the System id in the teardown cleanup line
 
 ### Fixed
 
@@ -2480,13 +4014,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Run the local-libvirt example on the fixed live-worker lifecycle
 - Put uv's install directory on PATH for non-interactive shells
 - Make the checkout and kernel tree traversable by the worker accounts
-- Disclose the lease deadline and its reference clock
-- Bind tools.invoke's ValidationError to name field/kind detail
-- Avoid ADR-0123 key collision and RBAC bypass in tools.invoke
-- Stop mislabeling a body-raised ValidationError as bad arguments
-- Couple suggested_next_actions to the same binding-failure flag
 - Accept all registered worker-vantage check ids
-- Discharge mutation obligations through a worker-granted path
 - Resolve depmod explicitly instead of through PATH
 - Keep spawn-pressure depmod failures retryable
 - Stop /usr/local shadowing the packaged depmod
@@ -2494,16 +4022,957 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the depmod search path root-owned
 - Drop the KDIVE_DEPMOD override, resolve by fixed list
 - Name the searched directories in the failure message
-- Bound each names= entry, and record the threat model
-- Make the names= leak assertion bite and correct four claims
+- Disclose the lease deadline and its reference clock
+- Bind tools.invoke's ValidationError to name field/kind detail
+- Avoid ADR-0123 key collision and RBAC bypass in tools.invoke
+- Stop mislabeling a body-raised ValidationError as bad arguments
+- Couple suggested_next_actions to the same binding-failure flag
+- Report endpoint connection failures
+- Discharge mutation obligations through a worker-granted path
 - Guide boot pairing corrections
 - Complete pairing recovery hint
 - Agree the runs.get next action with the capture set
 - Drop the ADR ref from the start_session agent contract
 - Fail the expected-crash gdbstub probe closed on a fault
-- Report endpoint connection failures
+- Bound each names= entry, and record the threat model
+- Make the names= leak assertion bite and correct four claims
+- Buffer external archive range reads
 - Repoint stale ty override to retrieve/guestfs.py
 - Declare kmod in live_vm_host toolchain
+- Make cancel/bind advisory-lock race deterministic
+- Resolve virsh, qemu-img, virt-customize explicitly
+- Map InsufficientPrivilege to configuration_error
+- Repair mutation obligations leaked on torn-down Systems
+- Report a wholly failed leaked-obligation pass
+- Gate tools.invoke field_errors on tool visibility
+- Update tools.invoke docstring and add coverage (review)
+- Bound the leaked-obligation repair pass at 100
+- Bound the query copied into the tool_search_miss record
+- Name the parameters tier in the gateway-on instructions
+- Correct the .list claim and guard the unknown-type invariant
+- Check current architecture and define retention criteria
+- Sync CLI help and documentation contract guards
+- Scan full ppc64le ELF for Linux banner past 16 MiB window
+- Use raw_vmcore_refs for redaction leak check in live-stack tests
+- Reject a release token cut by a scan chunk boundary
+- Inject fadump-capture.service into kdump-capable rhel images (#2381)
+- Declare fadump-capture.service in guest_base_image role (#2381)
+- Correct the fadump-capture unit's harvest and install contracts
+- Mount every guest filesystem when harvesting a vmcore
+- Scale the virt-customize budget on emulated hosts
+- Drive the worker's libvirt URI in the live-stack spine
+- Scope the raised spine budgets to the ppc64le drivers
+- Fall back to the published live-worker libvirt endpoint
+- Source env.sh in stack-up before deciding the OIDC image
+- Sync live-worker venv locked with the live group
+- Gate ppc64le fadump live driver on accelerator, not arch
+- Enable and check virtnodedevd alongside virtqemud in up.sh
+- Widen the libvirt remediation gate to include nodedev_ok
+- Keep the named-unit diagnostics reachable under set -e
+- Scale the rootfs build-tool budget off the worker host's KVM
+- Make the budget tests host-independent and narrow the claim
+- Probe KVM openability for the rootfs build-tool budget
+- Reject non-finite and unbounded TCG multiplier values
+- Correct ceiling-reversibility comment on TCG multiplier
+- Resolve the RHEL family's off-PATH qemu emulator in every probe
+- Fall through rather than abort when host_arch is unset
+- Resolve the off-PATH emulator in the fadump probe too
+- Open the KVM node rather than stat it for build budgets
+- Scale every appliance probe budget off the worker host's KVM
+- Start the modular libvirt sockets on RedHat hosts
+- Start the container engine on RedHat hosts
+- Relabel host-file bind mounts for SELinux hosts
+- Give the session libvirt daemon an explicit core limit
+- Pin the libguestfs direct backend for live workers
+- Pin the libguestfs direct backend in the worker gate
+- Label the whole rootfs tree virt_image_t on SELinux hosts
+- Resolve the worker venv interpreter instead of pinning a path
+- Skip the guestfs binding link on a Python minor mismatch
+- Label kdive image directories svirt_image_t
+- Abort on a broken policy store, not silently
+- Use Quay for MinIO images
+- Document KDIVE_LIVE_VM_POWER_AUTHORITY_CONFIG env var (#2152)
+- Fix broken power-host-bringup.md link in live-testing runbook (#2152)
+- Use Quay for MinIO images
+- Verify runner interpreter and role routes
+- Link guestfs for validated system Python
+- Skip absent monolithic units on SUSE
+- Query systemd before masking monolithic units
+- Validate localhost host setup inputs
+- Validate localhost checkout revision
+- Select SLES libvirt daemon
+- Require locked localhost source
+- Preserve local libvirt installer executable mode
+- Provision ppc64le TCG emulator
+- Provision Fedora TCG emulator
+- Correct EL setup dependency hints
+- Bound EL ppc64le qemu advice
+- Refuse unavailable EL ppc64le qemu
+- Validate SeaweedFS workflow inputs
+- Parse SeaweedFS manifest check
+- Narrow SeaweedFS publish permissions
+- Bound SeaweedFS publish jobs
+- Install libvirt headers for SeaweedFS proofs
+- Trigger SeaweedFS proofs for workflow changes
+- Share KVM openability probe
+- Label canonical build workspace
+- Fail fast on customization manager freeze
+- Bound customization freeze signature
+- Align SeaweedFS startup barrier
+- Route policy to SeaweedFS
+- Pass SeaweedFS initializer contract
+- Select SeaweedFS backends
+- Align SeaweedFS fixture credentials
+- Align SeaweedFS operator contracts
+- Select current arch matrix
+- Invoke SeaweedFS initializer correctly
+- Preserve authority readiness results
+- Fail built runs on terminal install errors
+- Preserve boot failure readiness evidence
+- Guard terminal failure metadata
+- Atomically finalize teardown
+- Retry stalled teardown
+- Repair failed system mutation obligations
+- Grant worker image catalog insert
+- Raise local libvirt memlock limit
+- Report libvirt-devel only when headers are missing
+- Close the sweep guard's blind spot and two snapshot tests
+- Stop the services-stage test reaching the host's real sudo
+- Send the live build_profile shape BuildProfile actually accepts
+- Cite the correct ADR for the external-build upload lane
+- Reconcile a same-boot successor invocation instead of refusing it
+- Make the retained-binding assertion bite and repair the doc gate
+- Log the out-of-band replacement the new branch consumes
+- Declare the local-libvirt host kernel mode in provisioning
+- Probe /boot kernel readability in check-setup-deps
+- Check kvm membership instead of reading as each worker
+- Close the review notes on the kernel probes and remedies
+- Check the kvm group before relabelling, not after
+- Give every live-stack entry point one libvirt endpoint
+- Refuse a symlinked contract and name the endpoint override
+- Follow the published daemon family in session recovery
+- Read the deployed build and presigned URL from their real shapes
+- Correct the supported request budget and measure store wait
+- Renumber ADR-0655 to 0656 (conflict with main) and fix up.sh ref
+- Make LiveStackClient.call_tool name positional-only
+- Enable virtnodedevd.socket on modular session bring-up
+- Keep the proof-record doc-path citation on one line
+- Make installer agree with Ansible on credentials dir mode
+- Stop pr-body-scan comments from cancelling body-edit scans
+- Split flattened lifecycle conflict and authority failure messages
+- Cite ADR-0048 for the upload-only build-profile lane
+- Name a Docker package the detected family ships
+- Declare a container runtime for openSUSE workers
+- Declare the Fedora container runtime behind a gate
+- Gate the runtime by distribution and existing provider
+- Route the docker package by exact distribution id
+- Install the engine before the compose plugin
+- Let libvirt-free entry points survive a broken published contract
+- Make the degraded-endpoint record an output, not an input
+- Let a repaired endpoint clear the degraded record
+- Name the third way out of a refused --wipe, and prove the export
+- Fail test-live-tcg on a zero-proof run
+- Install pinned Ansible collections in the developer setup path
+- Resolve libvirt endpoint in console-parts live test
+- Surface envelope detail and data in SpinePhaseError
+- Cap SpinePhaseError's rendered data to a bounded line
+- Distinguish a missing domain from a missing SSH forward
+- Keep the ADR citation out of the agent-facing tool surface
+- Keep the category conjunct in the narrowed SSH swallow
+- Recreate the session libvirt runtime root on every boot
+- Pin the local-libvirt host play to the system interpreter
+- Keep the interpreter pin out of the shared inventory
+- Report a preset libvirt endpoint that contradicts the contract
+- Correct the LIBVIRT_ENV bound and the loader-refusal coverage
+- Fail loud on an unresolvable KDIVE_GUEST_IMAGE
+- Stage the native job's guest image inside the provider root
+- Require KDIVE_GUEST_IMAGE in the provisioned preflight family
+- Report and fail what --wipe could not reap
+- Grade the --wipe reap on the observed end state
+- Name the endpoint a zero-domain reap consulted
+- Refuse a dead libvirt endpoint before --wipe stops anything
+- State the zero-domain/overlay contradiction --wipe can see
+- Walk agent_smoke against the gateway catalog, not the flat one
+- Harden agent_smoke reachability against review findings
+- Log the external-boot refusal that skips an expiry
+- Address review of the recover operation
+- Keep root out of the runner-writable checkout
+- Cover deploy/systemd and .github/scripts in lint-shell
+- Count the AuthError tool-exposure fail-open
+- Gate entry_cancelled assertion on actual context entry
+- Release remote live-stack allocations on failure path
+- Compare tcg allowed root to the setting default, not resolved
+- Remove dead kdive_domains() and stale references
+- Enable the container-engine daemon and grant its socket group
+- Refuse the socket grant for a worker slot account
+- Refuse an absent grant target and import the engine last
+- Assert the runner's engine unit at its own call site
+- Resolve uv up front in the lifecycle installer
+- Pin the installer DSN invariant and name the real remedy
+- Widen the xtrace pin on the published installer stderr
+- Name the cause of every diagnostics withholding
+- Label a redaction refusal as one, not an acquisition failure
+- Keep internal_error reachable and refresh the artifacts
+- Fail the native live_vm tier when no proofs ran
+- Pin the native zero-proof gate against a defanged guard
+- Anchor the allocation-cap export on the inserting process
+- Re-apply the /boot relabel on a kernel upgrade
+- Harden the kernel hook and the checks that guard it
+- Let the caller declare the preflight's severity (#2568)
+- Stop naming a cause the mint gate cannot know (#2568)
+- Re-emit onboard.sh's capture so the stop's claim is true (#2568)
+- Keep the minted token out of the failure re-emit (#2568)
+- Stop naming FAIL entries the preflight may not have printed
+- Install the shared relabel hook on the runner host too
+- Separate the incoherent-row refusal and make the live guard bite
+- Refuse a slot whose fence row is not this host's
+- Sweep a stale row left beside the retained generation
+- Derive the --wipe reap's privilege from the endpoint
+- Refuse a session reap on an unwritable overlay dir
+- Refuse --wipe up front on an unwritable overlay dir
+- Correct the overlay gate's premise and its remedy advice
+- Probe the endpoint as the operator, not under sudo
+- Strip the fragment before classifying the endpoint
+- Decode zstd bzimages deterministically
+- Update anyio past vulnerable release
+- Inspect and clear residual slot facts
+- Recover complete residual worker row sets
+- Stop retained units during recovery
+- Distinguish out-of-band worker restarts
+- Accept released exit status
+- Share live pytest proof gate
+- Preflight native lifecycle compatibility
+- Preserve native cleanup after compatible preflight
+- Materialize hosted systemd proof script
+- Make live summary parsing locale-independent
+- Nest console artifact request
+- Isolate console paging helper
+- Wait for marker-bearing console part
+- Accept valid released systemd terminal states
+- Declare Ubuntu Python headers
+- Repair project venv on rerun
+- Fit runner recovery capacity to storage
+- Defer native fallocate resolution
+- Correct kernel remediation guidance
+- Use default runtime directories in preflight guard
+- Give live VM hosts their own operator identity
+- Isolate authority fixture Git environment
+- Keep authority test marker private
+- Isolate pre-push Git environment
+- Redact the union of overlapping secret matches
+- Require TCG onboarding preflight
+- Make documentation path checks portable and fail closed
+- Gate local depmod diagnostics
+- Preserve debt record history
+- Disable local diagnostics in compose
+- Finalize debt resolution status
+- Make Markdown link checks portable and fail closed
+- Distinguish docs-path converter failures
+- Pin ty to the Linux target platform
+- Boot SUSE rootfs images
+- Configure SUSE guest networking
+- Preserve SUSE readiness contract
+- Create SUSE readiness drop-in directory
+- Bind SUSE readiness and kernel proof
+- Align SUSE SSH proof with provision semantics
+- Retry bannerless SSH forwards
+- Extend SSH authorization preflight
+- Reject unsupported SUSE crash dumps
+- Retain SUSE makedumpfile warnings
+- Complete SUSE quest guardrails
+- Probe configured libvirt endpoint in preflight
+- Run the gdbstub_acl ufw prune on Bash 3.2
+- Report unknown for unprobed live workers
+- Match worker readiness check name in evidence filter
+- Keep native manifest probe unprivileged
+- Gate native mint on fixed worker readiness
+- Redact native evidence capture failures
+- Provision native warm-store kernel extractor
+- Install root-resolvable uv for the local-libvirt host play
+- Report a schema behind the checkout, not an outage
+- Set grpcio system-OpenSSL/zlib flags for every root/unattended uv sync
+- Default KDIVE_GUEST_IMAGE to the arch-matching catalog image
+- Switch Dockerfile apt sources to https before update
+- Lower local-libvirt host external-boot concurrency default
+- Address gauntlet review notes on capacity fix
+- Probe pip/PEP 668 before --break-system-packages
+- Join the in-flight complete_build finalize on retry
+- Block needrestart from restarting kdive-live-worker units
+- Ensure needrestart's conf.d directory exists first
+- Log a failed complete_build finalize once
+- Stop rootfs dest test writing under /var/lib/kdive
+- Grant kdive_reconciler audit_log insert for record_system
+- Resolve nested $ref inside anyOf for optional wrappers
+- Return recorded build result on declined chunk refresh
+- Close the crash signature key coupling and write side
+- Resolve checkout worker build identity
+- Exclude absent portable witness from skew policy
+- Surface optional witness status under strict skew
+- Keep Compose project stable across worktrees
+- Preserve live backends across worktrees
+- Keep backend wait command visible to guard
+- Capture live proof revisions before pathless collection
+- Preserve caller options when sourcing live-stack env
+- Strip POWER spine boot image in scratch space
+- Enable gdbstub for x86 spine attach
+- Complete spine gdbstub prerequisites
+- Upload vmlinux for every spine arch and record the gap in junit
+- Route ppc64 vmalloc reads around libkdumpfile
+- Isolate spine module staging environment
+- Reject oversized local install modules early
+- Exempt authority staging from legacy module limit
+- Address stress review round 1 (#2769)
+- Address stress review round 2 (#2769)
+- Stop clients on a dead session, release before replay
+- Quiet the MCP SDK's unlisted-tool warning (#2769)
+- Name KDIVE_PYTHON, not the worker venv, in preflight
+- Drop misattributed ADR-0203 cite, cover WARN path
+- Separate demo MCP-config workspace from kernel-src fixture
+- Clarify KDIVE_DEMO_WORKSPACE default is a reference
+- Shut guests down cleanly before a power-off (#2757)
+- Wait for a stopping guest without a request (#2757)
+- Match platform-owned cmdline tokens by parameter name
+- Match kernel quote-stripping and crashkernel's substring scan
+- Skip console truncate for a running domain on retry
+- Stop external-boot guests cleanly (ADR-0681)
+- Preflight the Ansible collections prepare-local-libvirt-host needs
+- Restore ADR-0640 svirt_image_t labels in host prep
+- Name the manual label steps outside the RedHat family
+- Route the label remedy through selinux-label.sh
+- Stop calling virDomain.free, which libvirt lacks
+- Stop bounding provider dispatch by the TLS I/O timeout
+- Match preparation receipts by authority generation
+- Import TargetProjectionV1 where reopen_projection uses it
+- Let the local-mutation authority read host kernel modules
+- Let the local-mutation authority unpack setuid appliance files
+- Inspect the persistent domain definition
+- Open materialized modules inside their digest directory
+- Accept the rooted entries libguestfs find0 writes
+- Read back an xattr-free module tree as it was installed
+- Recognize the defined target by its definition identities
+- Name the whole-disk root when no initrd resolves UUID
+- Prove the whole-disk root before a direct-root boot
+- Probe authority domain exit on its session socket
+- Observe a running domain's modules as last published
+- Admit every authority operation on the fixed route
+- Have _compact_os defer to image_os_id for the os-release id
+- Fail EL host prep when the worker venv lacks guestfs
+- Link guestfs from the worker venv's own interpreter
+- Relay the base interpreter's guestfs import error
+- Accept raced shutoff during local libvirt destroy
+- Validate selectable live-debug rootfs before provisioning
+- Require initrd for remote root admission
+- Clarify initrd recovery and sync reference
+- Scale authority readiness for TCG guests
+- Log redacted external-boot refusal reasons
+- Preserve authority failures when exception text raises
+- Preserve authority TCG domain identity during provision
+- Bind qualification evidence to catalog platform lanes
+- Keep timing resolution across provider boundary
+- Request clean operator power off
+- Fence operator off against force crash
+- Sync power off tool bounds and CLI help
+- Share clean shutdown bound without provider import
+- Preserve local boot timing refusals across authority
+- Fence non-OFF power provider I/O
+- Accept inactive teardown destroy race
+- Resume paused domains explicitly
+- Accept local qemu Unix URI defaults
+- Provision Fedora Python headers
+- Bind guest module labels before publication
+- Replay captured SELinux labels on recovery
+- Verify pinned kernel source before reuse
+- Satisfy BTF dependencies in kernel fixture config
+- Align fixture provenance with native Kbuild outputs
+- Preserve little-endian POWER fixture target
+- Bind installed module metadata to fixture identity
+- Validate disabled kernel configuration requirements
+- Revalidate executable source before fixture reuse
+- Resolve kernel fixture ADR numbering collision
+- Derive documented history cap from enforced limit
+- Bound guest regular-file transfer during copying
+- Preflight guestfs recovery xattrs before mutation
+- Pin staged rootfs when minting live VM fixtures
+- Scope runtime audit insert columns
+- Recognize audit column grant authority
+- Prepare capture manifest input permissions
+- Check hook dependencies and allow hosts without pip
+- Install the complete developer toolchain
+- Preserve Helm release build defaults
+- Skip absent optional kernel tree traversal
+- Normalize copied container runtime input permissions
+- Use the per-call authority executor for System teardown
+- Commit teardown failures for Systems in their real state
+- Separate reclaim from a refused commit in worker logs
+- Recover an unpublished pre-stop-intent local activation
+- Log the swallowed authority provider exception
+- Keep provider_conflict when the error cannot render
+- Log adapter failures by type and refusals by fixed reason
+- Skip x86_64-only reachability and SUSE kdump spines on other hosts
+- Upload the carrier kernel for the recorded guest arch
+- Install the lifecycle witness from live_vm_venv
+- Raise the authority session libvirtd memlock limit
+- Remove the memlock drop-in on authority teardown
+- Restart the user manager until its memlock is raised
+- Retract an unanchored journal tail with preserved evidence
+- Retract a record whose head advance was refused
+- Retract one unanchored journal tail at startup
+- Bound startup reconcile lane loads by a deadline
+- Tolerate a missing authority account and retire its memlock ceiling
+- Retire the authority memlock ceiling on role disable
+- Read memlock in the C locale and restart after revocation
+- Stop mint-system.sh opening an unclosed investigation
+- Take over an unresolved teardown and fence other purposes
+- Bind teardown proof context to its own generation
+- Re-run a failed authority teardown job
+- Recover a teardown after an interrupted takeover
+- Recycle a lapsed final authority teardown attempt (#2889)
+- Dead-letter an authority boot job no receipt can finish (#2889)
+- Say a marked job's row stays running when the worker drops it
+- Pin C locale on install-side memlock reads
+- Install python3-packaging for the system pip module
+- Accept nlink 1 on diagnostic source directories
+- Match kdive-ready after console escape sequences
+- Write kdive-ready on its own console line
+- Write the kdive-ready line in a single write
+- Keep raw pre-marker lines in the crash scan
+- Reclaim a failed System at teardown without a transition
+- Wait out an in-flight anchor in the periodic readiness check (#2899)
+- Clear error_category on the retained teardown requeue
+- Surface a job's category only when it failed
+- Never restore power on System teardown recovery
+- Keep pruned activation parents gone after cleanup
+- Converge teardown from tombstone and removed abort
+- Check the tombstone before an unpinned quarantine
+- Degrade a failed job with no category in from_job
+- Survive getty interleave in the customization marker
+- Scan raw console for faults after a torn escape
+- Finish finalization interrupted before its rmdir
+- Append worker groups instead of replacing them
+- Refuse a worker in the RedHat wheel group too
+- Re-run a dead-lettered ordinary teardown job (#2929)
+- Dead-letter an exhausted retained System teardown (#2917)
+- Renumber the retained dead-letter migration to 0164 (#2917)
+- Retry a torn or vanished lane in the periodic check
+- Let payload cleanup remove its own temporaries
+- Own the staged kernel temporary in cleanup
+- Refuse teardown of a reprovisioning System
+- Bound teardown refusal docs and pin the locked recheck
+- Open the session artifact root on first use
+- Prune activation parents after a partial abort
+- Raise InvalidEnvelopeError for an invalid ToolResponse
+- Envelope an invalid ToolResponse as infrastructure_failure
+- Address branch review notes for #2932
+- Bound the acknowledged-retry grant per budget (#2960)
+- Tear down a preparing activation without preparing
+- Reap zombie-only process groups on macOS
+- Do not log absent intent at ERROR after cleanup
+- Bound cross-generation teardown observation (#2921)
+- Build lifecycle venv with the live group
+- Refuse reprovision while a teardown job is live
+- Keep non-ready reprovision errors ahead of teardown check
+- Refuse a worker account in the wheel group at verify
+- Record and remove the carrier's authority fixture
+- Remove the fixture when a carrier fails before its proof
+- Remove the carrier fixture after an interrupted run
+- Keep shared parents on partial activation abort
+- Add bounded reason to journal-conflict rejections
+- Run a round floor so starved tests cover every scenario
+- Scope predecessor adoption to one activation
+- Code resume-time watchpoint insert failures (#2964)
+- Scope KDIVE_DEBUG_DIR to the server (#2955)
+- Create KDIVE_DEBUG_DIR at services bring-up (#2955)
+- Create the server debug dir in live_vm_host (#2955)
+- Preflight the carrier DSN before fixture mutation (#2953)
+- Keep local timing when takeover recovers a mutation
+- Derive release hint from the matrix and detail the release conflict
+- Identity-check a plan supplied to teardown
+- Refuse ordinary teardown for any external-boot history
+- Refuse release while a System needs authority teardown
+- Replace a refused ordinary teardown with the authority route
+- Keep a keyed teardown retry from undoing the replacement
+- Replace only a canceled teardown no worker claimed
+- Force_teardown re-runs a dead-lettered teardown (#2978)
+- Report corrupt stored rows as server faults
+- Keep fail-open and fail-closed callers over stored-row faults
+- Warn about an orphaned System held by a canceled teardown row
+- Unlink owned temporaries before the partial-abort digest rmdir
+- Lstat owned temporaries instead of opening them
+- Route a never-authorized preparing teardown
+- Word the records base-ref error for shallow and disjoint clones
+- Recycle a settled same-profile reprovision job (#3008)
+- Log bounded reason on recovery and orphan rejections
+- Route break-glass teardown through the external-boot authority (#3007)
+- Pin cleanup quarantine and finalization to the session
+- Give the debug dir the role's operator group (#3021)
+- Carry release denial detail through break-glass release
+- RBAC-filter the stale-handle wait action on release failures
+- Admit a remote preparing teardown without PREP (#3016)
+- Skip stalled teardown for external-boot history (#3015)
+- Refuse force-close of external-boot Systems (#3025)
+- Name ops.force_teardown in break-glass release refusal detail
+- Carry the refusing System id into break-glass release detail
+- Report a corrupt image-catalog row as a server fault
+- Report a corrupt module-attempt receipt as a server fault
+- Ignore CDPATH when docs-links locates its helper (#3048)
+- Pin recovery-object delete and adopt writes to the session
+- Clear CDPATH in self-locating cd (#3056)
+- Accept the registered image state in image smoke (#2808)
+- Wait for the new boot after control.power cycle (#2808)
+- Retain cleanup-attempt evidence and refuse empty HEAD (#2808)
+- Require authority only where the scenario routes through it (#3066)
+- Stop when an installed authority cannot be identified (#3066)
+- Record and judge every deployed role that was read (#3066)
+- Add the CI runner tools the slim test image lacks
+- Fetch origin/main after cloning the candidate bundle (#2807)
+- Fetch the documented kernel tree before host preparation (#2807)
+- Judge boot assertions on the observed boot alone (#2807)
+- Address branch review of the host-install producer
+- Settle the confirming review's notes on the runner
+- Keep runner output owner-only and bound host-supplied reads (#2807)
+- Name block reasons and resolve local scp operands
+- Tighten the runner's remote transfer and pin boundaries
+- Read contract roles through the shared evidence reader
+- Settle the security re-pass on the runner
+- Keep writing the phase record when a check command is missing (#2807)
+- Judge a boot apart from node failures its record explains (#2807)
+- Require only the roles the host-install cell names
+- Reclaim install staging at System teardown (#3078)
+- Reject a NUL in the worker inventory path as untrusted
+- Route SSH-forward replies back through slirp (#3090)
+- Start the recovery lane with a durable death verifier
+- Read the tool-cell snapshot in a read-only session
+- Route remote lifecycle cells and qualify remote tool scenarios (#2810)
+- Hash the remote base volume on the provider host (#2810)
+- Keep the probe destination out of blocked reasons
+- Own the installed kernel before the reconnect proof
+- Drop an inherited crashkernel= from a non-kdump kdive slot
+- Require the binding-failure shape for gateway validation cells
+- Name the middleware-enveloped tools the gateway rule excludes
+- Name the exported inventory path the catalog cells need
+- Keep cell errors when fixture cleanup fails
+- List private images as the owning project's viewer
+- Keep the presigned config URL out of failure output
+- Keep cell cleanup and evidence honest under partial failure
+- Bound paging and name what the close evidence observes
+- Purge only objects under the cell's own owner prefixes
+- Keep presigned URLs out of assertions and adopted objects
+- Name the owning issue on a blocked filtering-list record
+- Key drgn-live warnings on the vmlinux upload, probe always (#3121)
+- Let kdive-drgn use drgn's default debug-info search (#3121)
+- Reject oversize script before probe; bound staging docs (#3121)
+- Run the introspect probe without a pooled connection
+- Cite #3121 in code until ADR-0723 is accepted
+- Expect not_found from the isolated provision and reprovision
+- Replay a proven target cleanup and flag unstaged lane images
+- Keep debuginfo local and refuse dangling links
+- Count the debuginfo payload as a known object
+- Log unexpected authority transport failures
+- Validate stored journal heads in JSON mode
+- Refresh pruned x86 rootfs image pins
+- Pass trusted uv selection to lifecycle installer
+- Isolate uv version probe from credential input
+- Restrict EL10 binding downloads to distro sources (#3068)
+- Select nonempty kernel fixture package inventory
+- Scope diagnostics to the selected provider
+- Isolate the developer shfmt installation
+- Reject unsuccessful formatter version probes
+- Start session libvirt with current provider groups
+- Restore selected libvirt runtime directories at boot
+- Enable file-based kexec in pinned kernel fixtures
+- Enable required fw_cfg in default x86 fixtures
+- Enable observed RHEL kdump filesystem prerequisites
+- Enable the RHEL capture initramfs LZMA decoder
+- Share artifact directories across worker slots
+- Prepare remote firewall backends before ACL convergence
+- Derive remote materializer capacity from artifact bounds
+- Install remote kernels with Debian native tools
+- Retry read-only reboot probes within readiness budget
+- Skip remote hosts without provider authority
+- Prove capture quiescence through native TLS monitors
+- Validate fixed TLS credential leaf targets
+- Create cloud-init configuration directory before staging
+- Select the catalog customization kernel explicitly
+- Retain the explicit Fedora regression kernel
+- Reject known Docker guest forwarding conflict
+- Normalize optional tool discovery across shells
+- Install Ubuntu remote guest source routing
+- Generate Ubuntu SSH host keys per guest
+- Refuse inherited SSH service prechecks
+- Share local build workspace with session QEMU
+- Provision persistent local rootfs cache access
+- Accept native Wicked batch update control records
+- Grow pinned Leap images before package customization
+- Preserve textual Ethernet types in Wicked discovery
+- Register owned native SUSE Ethernet policies
+- Complete pinned Leap native firstboot state
+- Pin native JeOS unit bytes without capture framing
+- Reject Wicked overrides in native unit roots
+- Recognize guestfish output delimiters
+- Refuse fadump capture on x86_64 Systems
+- Recreate oidc on bring-up so KDIVE_OIDC_PORT changes apply
+- Drop the unread worker kernel source root
+- Stop opening kernel-tree ancestors to worker accounts
+- Name the migration-owner DSN and unreadable tables
+- Do not guess which DSN lacks the grant
+- Check the harness ADMIN option with a valid privilege name
+- Reset every direct harness grant before re-granting
+- Install the SUSE libvirt default network definition
+- Apply libvirt autostart and reload SUSE network defs
+- Fold uv's unnormalized bin dir before the PATH check
+- Stop staging a kernel tree in the host-install proof
+- Call supporting snapshot tools without scalar's name clash
+- Own every disk a snapshot job leaves, even when it fails
+- Wait for libvirt driver init before re-locking runtime
+- Read the failed daemon's journal, not a file log
+- Bound the pid read and report launch failures
+- Read the session daemon pid file as the operator
+- Block an exposed capture call that lacks a dependency
+- Tighten the capture cells' review notes
+- Name the stack, not the worker, in a dependency stop
+- Resolve native authority installation paths
+- Isolate immutable authority appliance assets
+- Wait for a booting guest before the boot-id baseline
+- Name the last agent fault in a baseline boot_timeout
+- Create the uploaded-rootfs staging root for local workers
+- Label the uploaded-rootfs staging root for qemu
+- Bound the agent fault text in a baseline boot_timeout
+- Name the authority lane config as an unprefixed test input
+- Require the lane inventory before the routed-resource guard
+- Serve libvirt TLS through virtproxyd on SUSE
+- Keep SUSE QEMU at one build with its modules
+- Serve GRUB on the serial console in RHEL-family images
+- Forward the installed worker authority route
+- Derive backend URLs from ADDR:PORT port values
+- Reject port addresses with no host characters
+- Limit the serial GRUB console to the proven Rocky arm
+- Observe the remote authority as its account, not root
+- Block a capture cell when the guest kdump cannot arm
+- Recover a left pin and reset the killed unit on restore
+- Restore the fleet even when a left pin cannot be recovered
+- Accept only a fixed worker unit name before sudo
+- Read the alive recovery refusal without one()
+- Keep a guest writer's stop from masking the cell outcome
+- Bump mcp to 1.30.0 for CVE-2026-59951
+- Keep the corpus banner and bound the map-check claim
+- Route POWER corpus cells to execution owner
+- Preserve loopback backend bindings after sourcing env
+- Prepare shared host-dump capture spool
+- Build shared kdump filesystems into kernel fixtures
+- Converge authority inputs before first start
+- Consume GDB interrupt stop from its command reply
+- Release settled canceled-install build-use pins
+- Accept installed local capture session URIs
+- Reserve gdbstub sessions without probing
+- Bind session runtime cleanup to creation ownership
+- Retain uncertain native session resources
+- Report failed on-demand reconciliation repairs
+- Prepare owned image before Compose volume proof
+- Preserve proof failure across cleanup timer transition
+- Document Compose image override for environment guard
+- Preserve capture publication keys during upload cleanup
+- Describe durable ownership in upload reap diagnostics
+- Bound the external-boot authority restart loop
+- Forward allow-listed provider error details from the child
+- Shape-check forwarded capture failure details
+- Name certificate expiry in authority TLS health failures
+- Limit local expiry fallback to the health-client leaf
+- Revalidate staged-to-object source transitions
+- Resolve every row an aborted finalize published on failure (#3185)
+- Wait for and report the orphan arm's owned rows on failure (#3185)
+- Fail a refused interrupt at once and state the full hold bound
+- Let a true-by-default boolean flag send false (#3244)
+- Match run and system cell expectations to product behaviour
+- Confine authority proof inventory to a fixed observer
+- Bound collector startup failure diagnostics
+- Suppress native authority inventory diagnostics
+- Preserve disabled inventory interpreter compatibility
+- Withdraw, harden and never auto-start via the inventory boundary
+- Harden authority TLS renewal per review (#3273)
+- Refuse dotted PKI paths and skip untestable locale case (#3273)
+- Resolve carrier role siblings and gate teardown on acl (#3273)
+- Reclaim attachment-owned symbol staging
+- Keep halt and task errors through merged cleanup paths
+- Close verified capture launch aborts before retry
+- Check QMP replies and label the pcap tree for the session stack
+- Bound logged QMP text and test quiescence reply paths
+- Report vmcore retirement before capture prerequisites
+- Reject incomplete Compose store credentials
+- Check Compose store credential pair in the store entrypoint
+- Keep the ADR reference out of the tool docstring
+- Serve Fedora image GRUB on the serial console
+- Install Fedora guestfs build tools
+- Observe complete panic records and retain failure evidence
+- Key console rotation on a per-start boot nonce (#3254)
+- Name the boot marker failure and reuse a stale temp file (#3254)
+- Let concurrent starts each write a unique boot marker temp (#3254)
+- Accept the kdump crash-kernel boot as force-crash evidence (#3254)
+- Check the provisioned System after provision, not before
+- Record the System's accelerator in the fault cell context
+- Accept sudo-rs's exit 0 on an observer sudo denial
+- Refuse a sudo listing even beside a denial line
+- Remove uv's world-writable venv lock from the collector
+- Bind the stamped build identity in the collector file set
+- Require the build identity stamp to name the candidate
+- Interpolate read_frame's variable bounds into its docstring
+- Set gdb @entry rows aside in the read_frame cell
+- Expect the fixture console boot marker in the authority frame (#3185)
+- Expect the fixture console boot marker in the authority frame (#3185)
+- Bump certifi to 2026.10.19 for GHSA-6q48-6c7w-9gw2 (#3307)
+- Accept libvirt-filled domain readback in authority validation
+- Accept a live custom CPU only as host-model expansion
+- Keep libvirt from relabelling the authority base
+- Pin the direct libguestfs backend for the authority
+- Start authority Systems without a libvirt network
+- Presign SigV4 so vmcore reads get a signing deadline
+- Reject a zero download TTL and isolate the AWS profile
+- Keep libvirt from relabelling the authority base
+- Address #3315 review findings
+- Pin the direct libguestfs backend on the live_vm_host authority
+- Send QMP through the libvirt_qemu module function
+- Fail capture filter commands on a QMP error reply
+- Map a denied remote pcap open to its remediation
+- Name EACCES causes in the pcap remediation and log it
+- Wire the VMCOREINFO build-id reader into postmortem
+- Render the data NIC without vhost-net
+- Write capture pcaps to the provisioned pcap pool
+- Carry the pcap pool into the gated capture child
+- Keep the pcap pool reachable by the QEMU runtime user
+- Label the pcap pool on enforcing SUSE hosts too
+- Refuse a pcap pool defined with another target
+- Fit the pcap remediation under the child's 512 cap
+- Give the pcap pool directory group root
+- Report a stopped pcap pool as a configuration error
+- Pre-create each capture pcap for the domain's QEMU user
+- Make the pcap pool directory root-owned and 0711
+- Refuse unsafe pcap pools and denied volume creates
+- Bump OpenTelemetry to 1.45.1 for CVE-2026-114603
+- Parse remote module attempt receipt as JSON text
+- Persist canonical release and teardown identities
+- Grant kdive_server the quarantine row-lock privilege
+- Call a catalog-hidden read-only generated verb through
+- Route authority external boot through remote store
+- Admit orphan disposition through the fixed authority route (#3186)
+- Accept schema-allowed scalars in the --<param>-json escape
+- Refuse non-finite numbers in the --<param>-json escape
+- Commit the orphan disposition in its own transaction (#3186)
+- Record authority-observed conflicts as recovery_conflict
+- Bind conflict evidence objects to the activation
+- Observe a refusal outside the lane lock and finalize it
+- Bind the recovering attempt to the head's attempt
+- Complete a refusal under the binding a takeover sets
+- Teardown discards a retained recovery point
+- Teardown discard records its receipt on replay
+- Finalize a tombstone over an unrecovered intent
+- Bind lane guest context to guest-observing service cells
+- Keep lane roles on guest-observing cells, drop dead marker
+- Expose filter and paging options on list verbs
+- Keep inventory list payload unchanged
+- Log remote-module completion failures
+- Log every remote-module CategorizedError
+- Inspect the System before starting the module appliance
+- Stop the System before module PREPARE starts the appliance
+- Check PREPARE preconditions before stopping the System
+- Map a changed appliance identity to a refusal
+- Label the module appliance image virt_content_t
+- Restore the source from an acknowledged third identity
+- Keep a finalized cleanup absent and refuse a second operation
+- Bound the finalized-marker read and recheck adopt
+- Key the cleanup receipt by recovery record
+- Refuse PREPARE while a session or job holds the System
+- Refuse before journaling and skip housekeeping jobs
+- Do not recheck a remote PREPARE the host already started
+- Settle an abandoned remote module PREPARE
+- Cover every PREPARE failure and replays
+- Label pre-stop failures and tighten the replay mark
+- Settle a PREPARE refused at the pre-stop recheck
+- Count a recorded stop as a started execution
+- Settle only real pre-stop refusals and replay them
+- Scope the started-execution proof to its own request
+- An orphan prior-power owner must not wedge PREPARE
+- Count a file-backed System root in the attachment proof
+- Count nested root path aliases with multiplicity
+- Make purpose-recover RECOVER restore-only
+- Seal remote console parts when the console goes idle
+- Keep buffered bytes when a tail flush fails
+- Redact the joined parts in the per-Run console snapshot
+- Space idle seals and bound the bytes kept after a failed flush
+- Redact the snapshot off the event loop and note trim limits
+- Bump authlib and dnspython for CVE-2026-96760 and CVE-2026-114605
+- Adopt a predecessor's preparation on the remote adapter
+- Settle a PREPARE the authority refuses after anchoring
+- Settle only a definitive refusal of an operation this call anchored
+- Mount a btrfs root subvolume and announce failures on the appliance console
+- Format the appliance scratch volume once and log the missing-result console tail
+- Validate scratch before repair and fail on truncated formats
+- Build the scratch filesystem without orphan_file and prove poweroff
+- Attach the root as qcow2 and resolve a usr-merged module directory
+- End the appliance console wait when the domain is gone
+- Render the x86_64 ACPI feature the reference domain carries
+- Read the console once more after the appliance domain ends
+- Keep libvirt from relabelling the staged base under the appliance root
+- Carry the staged base into every inspection and validate its path
+- Render the reference console, cmdline, lifecycle and balloon in the module appliance
+- Expect the virtio-serial controller and require every lifecycle action
+- Give the appliance init a hash seed on its kernel command line
+- Render a virtio-rng entropy device in the appliance domain
+- Render the x86_64 ACPI feature the reference domain carries
+- Admit at most one alias and address on the entropy device
+- Bind an ACTIVATE job's PREP terminal evidence to durable records
+- Return the boot-artifact volume name as its provider reference
+- Delete an activation's files at cleanup finalize (#3333)
+- Refuse replays after cleanup finalize and tolerate foreign files (#3333)
+- Address review pass 2 on the finalized marker (#3333)
+- Filter the latest-takeover lookup on the activate purpose
+- Wait for the guest agent when observing a remote boot
+- Cap the observation wait below the worker deadline
+- Carry the btrfs root subvolume into the root spec
+- Accept @ and dot-led subvolume names; widen injection tests
+- Validate a running domain's boot projection at teardown
+- Discharge the module reap obligation at System teardown
+- Admit allocation release after an activated System's teardown
+- Admit derived release phases on lifecycle and read paths
+- Sweep module volumes in the authority's own pool
+- List before reading retention; sweep only the listed volumes
+- Sweep a large listing in slices that fit the wire limit
+- Import the candidate slice bound the sweep uses
+- Stop the System before the release module restore
+- Let a release cleanup reap delete volumes while the System runs
+- Give a re-entered release recovery its own readiness deadline
+- Admit a derived release cleanup at the evidence gate
+- Commit a release failure while its recovery is in flight
+- Tie a recovering release failure to its own attempt only
+- Close a terminally failed release recovery as recovery_failed
+- Hash the stored evidence documents without their null members
+- Reap a System teardown against the stored restored result
+- Mark a rejection that proves the request was not admitted
+- End the lifecycle wait on a definite rejection
+- Emit a closed allowlist of extra fields
+- Clamp the wait's last backoff and cover cancellation in it
+- Admit a teardown after a completed remote release
+- Read run reap discharge in one statement
+- Wait for the module-volume sweep before the final volume check
+- Re-entered recover and resolve-conflict get a fresh budget
+- Resolve-conflict reaps the restore's module volumes before cleanup
+- Remote resolve-conflict recovers without cleanup and a swept reap is idempotent
+- Finalize a retried cleanup against the earlier attempt's receipt
+- Finalize an adopted release cleanup under its own proof
+- Finalize against the oldest adopted cleanup across retries
+- Admit a remote-libvirt recovery orphan by fixed authority route
+- Route orphan disposition by the System's binding
+- Recover teardown and retry from a restore's crash window
+- Release finalize leaves an adopted receipt (#3435)
+- Release finalize leaves an adopted receipt (#3435)
+- Select only recovered activations in the release lane
+- Give a re-entered local recover a fresh transport budget (#3430)
+- Admit release after teardown on the recorded first activation (#3423)
+- Give foreign orphan row refusal a stable reason
+- Split btrfs subvolume roots on LVM volumes
+- Read only sda as a disk in btrfs subvolume roots
+- Fail closed on named md arrays in btrfs subvolume roots
+- Inventory a retried release cleanup under its adopted proof
+- Publish a quarantine row under the receipt's own operation identity
+- Commit recover and resolve-conflict failures while recovering (#3429)
+- Stop the cleanup-evidence read admitting resolve-conflict (#3432)
+- Bump joserfc to 1.7.7 for CVE-2026-119283 and CVE-2026-119284
+- Harden remote cleanup finalize (#3419)
+- Bound store scans by suffix and fix remedy text
+- Drop the finalize scan bound and widen remedy
+- Name the System and run in the legacy-marker refusal
+- Raise the guest-agent observation cap and name it on failure (#3421)
+- Await the reconciler release instead of re-admitting one (#3433)
+- Log remote cleanup refusal text
+- Log shared reap and cleanup refusals
+- Carry the module-volume sweep removed count in the log message
+- Keep an adopted quarantine receipt managed
+- Accept a leading-slash btrfs subvol in root inspection
+- Inventory the adopted cleanup receipt on a release retry
+- Keep an adopted receipt at System teardown (#3467)
+- Drop tombstone residue beside an adopted receipt (#3467)
+- Prune empty parents beside an adopted receipt (#3467)
+- Keep a receipt adopted while teardown finalizes (#3467)
+- Give recover and resolve-conflict re-entry a fresh deadline
+- Re-drive a restore whose host call failed (#3469)
+- Log remaining remote refusal text
+- Collect a torn-down activation's store files (#3472)
+- Refuse every activation of a torn-down System (#3486)
+- Find and claim every activation of a System in the store (#3486)
+- Collect every proven activation of a torn-down System (#3486)
+- Bound release finalize, not System teardown (#3475)
+- Make upload staging directory group-writable (#3214)
+- Take the directory lock in record_cleanup_quarantine (#3492)
+- Reopen the quarantine receipt under the lock (#3492)
+- Key pending cleanup point by the identity that ran (#3490)
+- Resume authority System intent across generations
+- Re-check managed under the store lock in finalize (#3493)
+- Refuse a staged vmlinux without an archive build (#3131)
+- Finalize keeps a plan pair another activation needs
+- Tolerate libvirt's versioned machine in the owned identity
+- Open quarantine-row port without a domain (#3489)
+- Admit retry generations that adopted a preparation (#3370)
+- Ignore a libvirt-defaulted cpu in the authority identity
+- Ignore only a check-none defaulted cpu in the identity
+- Resolve authority System overlay and baseline paths
+- Compare domain type as accelerator in external-boot check
+- Reserve journal headroom for teardown (#3526)
+- Log the headroom refusal and pin the resume placement (#3526)
+- Check guest free space before staging the uploaded vmlinux
+- Credit overwritten vmlinux, size lazily, cover review findings
+- Quarantine an unconfirmed journal record (#3531)
+- Map quarantine OS errors to journal-conflict (#3531)
+- Bound the authority System retained requeue (#3530)
+- Restart a failed capped teardown (#3530)
+- Recycle a failed teardown only on request (#3530)
+- Attach debug sessions to authority-owned Systems
+- Sanitize mixed BYO errors and name resource reconcile
+- Record the boot step when an authority activation commits
+- Retry the authority boot step write
+- Lock the authority boot step write like the fixed handler
+- Skip the boot step when its activation is superseded
+- Write the boot step without waiting and check the System
+- Sanitize malformed BYO authority errors
+- Map a guest free-space refusal to install_failure (#3535)
+- Carry an install refusal to the job row (#3535)
+- Keep the size bound on the closed value base (#3535)
+- Validate the tombstone under the lock before recording quarantine
+- Pin the authority System SSH forward port once set
+- Recover a torn final journal record
+- Recheck adopt_object digest inside the pin
+- Audit the requester of an authority teardown recycle
+- Take the recycle signal from the restarting statement
+- Mount inspected boot filesystem
+- Upload native POWER bundles from ARM controllers
+- Select the installed running POWER kernel
+- Install Fedora remote image inspection tools
+- Omit x86 features on POWER
+- Normalize the pSeries panic default
+- Separate scratch capacity from allocation
+- Report bounded appliance liveness
+- Type the oversize settlement reason refusal
+- Bound settlement evidence and align reason trimming
+- Fence settlement on the observed head and the Python lock
+- Leave the role denial for the tool to envelope
+- Check the derived name for stranded absence
+- Type the mountpoints from the real binding
+- Read the settlement from one repository predicate
+- Use the carried SSH forward in connectivity handlers
+- Resolve authority-owned SSH endpoints from the stored port
+- Use --yes for the recovery CLI and run teardown as worker (#3552)
+- Pin stack Postgres images to the 17.10 digest (#3610)
+- Bound lint-workflows so a stalled actionlint fails (#3583)
+- Say when to capture the actionlint stall evidence (#3583)
+- Add a rewinding directory-descriptor listing helper
+- List directory descriptors from offset 0 on btrfs
+- Route journal evidence-bound listing through helper
+- Tell operators to provision a new authority System
+- Recycle an exhausted preactivation teardown (#3617)
+- Flush the injected bootstrap key to disk
+- Keep a pending absence receipt's teardown (#3627)
+- Give authority_system_not_attachable its own message (#3629)
+- Skip processes that exit during the launch-token cmdline read (#3626)
+- Bump OpenTelemetry pins for CVE-2026-126360
+- Bump dnspython to 2.9.2 for CVE-2026-128089
+- Name the System in teardown-repair log lines (#3628)
 
 ### Security
 
@@ -2518,6 +4987,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin the ppc64le uv wheel to 0.11.31
 - Update cryptography to 50.0.0
 - Bump astral-sh/setup-uv in the github-actions group
+- Declare make and tar for the live-stack bundle recipe
+- Run the full local gate before eligible pushes
+- Bump the github-actions group across 1 directory with 3 updates
+- Bump pyjwt to 2.15.1 for CVE-2026-102274
+- Lock urllib3 2.8.0 for runtime advisories (#3000)
+- Run the records gate in just ci and fail without origin/main
+- Bump the github-actions group across 1 directory with 7 updates
 
 ### Diagnostic
 
@@ -2535,6 +5011,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Apply local authority route fix
 - Reconcile native proof with remote authority host
 - Reconcile origin main
+- Refresh main before delivery
+- Update checkout worker fix with main
+- Update gdbstub tracker with main
+- Update gdbstub tracker with main
+
+### Review
+
+- Clarify fadump-capture superseding intent; add negative test (#2381)
+- Generalize the uv install comment beyond Ubuntu
+- Pin GRPC system-OpenSSL/zlib flags on the authority venv install too
+- Scope the ADR claims and cover a source with no modules
 
 ### Security
 
@@ -2558,6 +5045,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Format the plan's fenced python to match the shipped test
 - Wrap the denial signature in the admission plan
 - Format the design set's fenced Python blocks
+- Trim the AGENT_INDEX_DOC_URI comment to its why
+- Use em dash in new #2400 comments for file convention
+- Format customization freeze test
+- Ruff-format the plan's embedded Python blocks
+- Tidy the wrapping and comment this change introduced
+- Wrap the network reload assertions under 100 columns
+- Keep the route loader message under 100 columns
+- Rewrap the result-seam docstrings
+
+### Wip
+
+- Parked binding-required admission (superseded by option B)
+- Rewrite ADR-0752 and spec to the Resource-route rule
 
 ## [0.4.0] - 2026-07-23
 
@@ -7351,7 +9851,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add psycopg-pool and testcontainers; pin .sql to LF
 
-[unreleased]: https://github.com/randomparity/kdive/compare/v0.4.0..HEAD
+[0.5.0]: https://github.com/randomparity/kdive/compare/v0.4.0..v0.5.0
 [0.4.0]: https://github.com/randomparity/kdive/compare/v0.3.0..v0.4.0
 [0.3.0]: https://github.com/randomparity/kdive/compare/v0.2.0..v0.3.0
 [0.2.0]: https://github.com/randomparity/kdive/compare/v0.1.0..v0.2.0
