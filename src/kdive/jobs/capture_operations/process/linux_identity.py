@@ -149,10 +149,12 @@ def scan_launch_token(
             if entry.stat().st_uid != owner:
                 continue
             raw_cmdline = _read_cmdline(entry / "cmdline")
-        except FileNotFoundError:
+        except FileNotFoundError, ProcessLookupError:
             continue
         except OSError as error:
-            raise RuntimeError(f"complete launch-token scan could not read {entry}") from error
+            raise RuntimeError(
+                f"complete launch-token scan could not read {entry}: {error}"
+            ) from error
         argv = [part for part in raw_cmdline.split(b"\0") if part]
         if not _matches_capture_bootstrap(argv, launch_token):
             continue
@@ -162,7 +164,9 @@ def scan_launch_token(
         except FileNotFoundError, ProcessLookupError:
             continue
         except OSError as error:
-            raise RuntimeError(f"complete launch-token scan could not attest {entry}") from error
+            raise RuntimeError(
+                f"complete launch-token scan could not attest {entry}: {error}"
+            ) from error
         if observed_executable == executable:
             matches.append(identity)
     return tuple(sorted(matches, key=lambda identity: identity.pid))
