@@ -119,9 +119,10 @@ async def repair_terminal_authority_system_attempts(
             status = await _finalize_authority_system_teardown(conn, candidate)
         except Exception:  # noqa: BLE001 - retain this candidate and continue the bounded batch
             _log.warning(
-                "reconciler: authority System teardown repair failed for attempt %s; "
+                "reconciler: authority System teardown repair failed for attempt %s (System %s); "
                 "retrying next pass",
                 authority_id,
+                system_id,
                 exc_info=True,
             )
             continue
@@ -129,18 +130,23 @@ async def repair_terminal_authority_system_attempts(
             repaired += 1
         elif status == "cleanup-required":
             _log.warning(
-                "reconciler: authority System teardown attempt %s still has core cleanup; "
-                "retrying next pass",
+                "reconciler: authority System teardown attempt %s still has core cleanup "
+                "(System %s); retrying next pass",
                 authority_id,
+                system_id,
             )
         elif status == "superseded":
             _log.info(
-                "reconciler: authority System teardown attempt %s was superseded", authority_id
+                "reconciler: authority System teardown attempt %s was superseded (System %s)",
+                authority_id,
+                system_id,
             )
         elif status == "conflict":
             _log.error(
-                "reconciler: authority System teardown attempt %s conflicts with consumed receipt",
+                "reconciler: authority System teardown attempt %s conflicts with consumed "
+                "receipt (System %s)",
                 authority_id,
+                system_id,
             )
         else:
             raise RuntimeError("authority System teardown repair returned an invalid status")
