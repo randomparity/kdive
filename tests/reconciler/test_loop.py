@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import fields
 from datetime import timedelta
@@ -536,6 +537,38 @@ def test_terminal_authority_system_cleanup_preserves_cancellation(
         finalize.assert_not_awaited()
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("status", ["raised", "cleanup-required", "superseded", "conflict"])
+def test_terminal_authority_system_teardown_logs_name_the_system(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, status: str
+) -> None:
+    authority_id, system_id = uuid4(), uuid4()
+    digest = "sha256:" + "c" * 64
+    candidate = (authority_id, 4, system_id, 9, digest, digest)
+    reclaim = AsyncMock(side_effect=RuntimeError("reclaim") if status == "raised" else None)
+    monkeypatch.setattr(
+        job_repairs, "_repair_terminal_authority_system_provisions", AsyncMock(return_value=0)
+    )
+    monkeypatch.setattr(
+        job_repairs, "_authority_system_teardown_candidates", AsyncMock(return_value=[candidate])
+    )
+    monkeypatch.setattr(job_repairs, "reclaim_system_core_after_provider_teardown", reclaim)
+    monkeypatch.setattr(
+        job_repairs, "_finalize_authority_system_teardown", AsyncMock(return_value=status)
+    )
+    monkeypatch.setattr(
+        job_repairs, "_discharge_exhausted_authority_system_provisions", AsyncMock(return_value=0)
+    )
+
+    with caplog.at_level(logging.INFO, logger=job_repairs.__name__):
+        asyncio.run(
+            repair_terminal_authority_system_attempts(cast(Any, object()), cast(Any, object()))
+        )
+
+    [record] = [r for r in caplog.records if "authority System teardown" in r.getMessage()]
+    assert str(authority_id) in record.getMessage()
+    assert f"System {system_id}" in record.getMessage()
 
 
 def test_zombie_job_compensates_owning_run(migrated_url: str) -> None:
