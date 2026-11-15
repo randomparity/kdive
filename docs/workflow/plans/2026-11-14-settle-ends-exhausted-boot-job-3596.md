@@ -192,8 +192,12 @@ def test_a_locked_job_refuses_without_waiting(
     stranded = _exhausted(migrated_url, authority_role_dsns)
     with psycopg.connect(migrated_url) as holder:
         holder.execute("SELECT 1 FROM jobs WHERE id = %s FOR UPDATE", (stranded.case.job_id,))
-        assert _settle(authority_role_dsns, stranded.case.activation_id) == "job_live"
+        # A settlement that waited would be canceled here instead of hanging.
+        with psycopg.connect(authority_role_dsns("kdive_server"), autocommit=True) as conn:
+            conn.execute("SET statement_timeout = '5s'")
+            row = conn.execute(_SETTLE, (stranded.case.activation_id, *_SETTLE_ARGS)).fetchone()
         holder.rollback()
+    assert row == ("job_live",)
     assert _rows(migrated_url, stranded)[0] == "running"
 ```
 
@@ -346,11 +350,10 @@ Steps:
    exhausted `boot` job at that moment. Wait for any live job to end, then `observe` again."
    In the `authority_objects_present` row replace "Nothing in kdive removes them yet (#3587),
    so" with "Nothing in kdive removes them, so".
-   In `docs/operating/runbooks/live-testing.md`, replace "Unlike the stranded `runs.boot` job in
-   the [fixed-worker recovery](stranded-activation-recovery.md), it needs no `jobs.cancel`." with
-   "Like the stranded `runs.boot` job in the
-   [fixed-worker recovery](stranded-activation-recovery.md), which settlement ends, it needs no
-   `jobs.cancel`." (scope audit F1).
+   In `docs/operating/runbooks/live-testing.md`, change the sentence "Unlike the stranded
+   `runs.boot` job in the fixed-worker recovery, it needs no `jobs.cancel`" to "Like the stranded
+   `runs.boot` job in the fixed-worker recovery, which settlement ends, it needs no
+   `jobs.cancel`", keeping its link (scope audit F1).
 3. Run the green command and `just docs-links`; commit
    `docs(runbook): drop the manual cancel from stranded recovery`.
 
