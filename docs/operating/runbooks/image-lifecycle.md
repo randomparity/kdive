@@ -366,9 +366,19 @@ session daemon, QEMU, `kdive server` and `kdive reconciler` all run as the opera
 operator, the rule took server and reconciler `/readyz` to 503 and stopped the operator's own
 loopback clients until it was removed. Keyed to a worker slot account, it blocks no guest connection
 and fails that worker's readiness. The `kdive` system units for the server and reconciler were not
-run. An authority host, where one account owns the session daemon and the authority service, is
-unproven because no lab host carries `provider_authority_host`. Do not assume the rule is safe on
-either.
+run; do not assume the rule is safe there.
+
+**A `provider_authority_host` with a network listener does not meet the condition either:** QEMU,
+the authority's session daemon and the authority service all run as `kdive-provider-authority`.
+Keyed to that uid on a Fedora 44 authority host, the rule blocked the guest's loopback connections,
+but the authority failed its next readiness check, about 30 s later, with
+`tls-health: handshake-failed`. That check opens a TLS connection from the service to its own
+network listener, which routes through `lo`. Every restart failed the same way, systemd stopped
+restarting the unit after five failed starts, and workers got connection refused on the listener port.
+Do not load the rule on such a host. If it was loaded, deleting the table does not bring the unit
+back: run `systemctl reset-failed kdive-external-boot-authority.service`, then
+`systemctl start kdive-external-boot-authority.service`. An authority without a network listener
+was not run.
 
 Where the condition does hold, this is the tested rule. Save it to a file, load it with
 `nft -f <file>`, and remove it with `nft delete table inet kdive_guest_loopback`:

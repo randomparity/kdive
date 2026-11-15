@@ -231,6 +231,50 @@ same session daemon, so the same condition and DNS exemption apply. The remote a
 unproven, as the previous amendment records; a remote authority System has no customization boot.
 Where the condition cannot be met, the exposure through this NIC is accepted as stated above.
 
+### Amendment (2026-11-15): the firewall recipe stops a networked authority host (#3581)
+
+This amendment replaces the 2026-11-04 limit "Remote authority: unproven" with a lab result. It does
+not change the decision or the rule: the exposure stays accepted, and a remote authority host is
+one more arrangement where the rule cannot be used.
+
+**Method.** One lab host, sys-R3 (Fedora 44, x86_64 with KVM, kernel 6.19.10, SELinux enforcing,
+`qemu-kvm-core` 10.2.2, libvirt 12.0.0, libslirp 4.9.1, nftables 1.1.6, `systemd-resolved` stub
+resolver), was provisioned by `deploy/ansible/site.yml` with `provider_authority_host`, its network
+listener on the host's routable address, and a manifest entry carrying `guest_egress: true`. A
+control plane on sys-R4 provisioned one authority System through the remote lane at `d1bb5e642`.
+The QEMU process, the authority's session `libvirtd` and the authority service's main process all
+ran as the uid of `kdive-provider-authority`, read from the running processes. The System's NIC was
+`user,id=kdivessh,restrict=off`. The runbook's rule was loaded unchanged, keyed to that uid, with
+the DNS exemption for `127.0.0.53`. Guest commands ran through the QEMU guest agent.
+
+| Check | No rule | Rule on the QEMU uid |
+|---|---|---|
+| Guest to `10.0.2.2` TCP service on host `127.0.0.1` | connected | blocked, timeout |
+| Guest to the host's routable address (SSH and the authority's listener) | connected | blocked, timeout |
+| Guest to `fec0::2` TCP port 22 | not run | blocked, refused |
+| Guest to another host on the LAN | not run | connected |
+| Guest DNS | answered | answered |
+| Authority unit | active | failed |
+
+**Authority result.** About 30 s after the rule loaded, the authority's periodic readiness check
+failed with `readiness_failure: tls-health: handshake-failed` and the process exited. That check
+opens a TLS connection from the service to its own network listener, at an address that routes
+through `lo`, so the rule rejects it. Each of the four automatic restarts failed the same way within
+seconds of starting, and systemd then reported "Start request repeated too quickly" and left the
+unit `failed` (`Result=exit-code`, `NRestarts=5`). The control plane got connection refused on the
+listener port. The running System's QEMU and session daemon kept running. Forty seconds after the
+table was deleted the unit was still `failed`; `systemctl reset-failed` and `systemctl start`
+brought it back to active, and it stayed active through the next two readiness intervals. The held
+System was then torn down through the lane. A new provision while the rule was loaded was not
+attempted: the proof harness refuses to start against an inactive authority.
+
+**Limits.** One Fedora 44 host ran. An authority without a network listener, Ubuntu, Rocky and
+openSUSE authority hosts, and ppc64le were not run. Whether the rule would also break the
+authority's database or object-store connections was not observed, because both were off-host in
+this lane and the readiness failure came first. The "Remote authority: unproven" limit and the
+"remote authority arm remains unproven" sentence in the two earlier amendments are superseded by
+this result.
+
 ## Considered & rejected
 
 - **libvirt passt backend.** Rejected: it does not mitigate. passt's default gateway mapping is the
