@@ -249,13 +249,13 @@ test-linux $sha="HEAD" *ARGS:
       echo "test-linux: warning: cannot read the $engine memory; at most 8 xdist workers" >&2
     fi
     # xdist clamps a numeric `-n` to `--maxprocesses`, so an explicit worker count in the
-    # arguments replaces the cap instead of following it.
+    # arguments replaces the memory cap with the lock limit of 8 instead of following it.
     set -- {{ARGS}}
     cap=("--maxprocesses=$workers")
     for arg in "$@"; do
       case "$arg" in
         -n | -n* | --numprocesses | --numprocesses=* | --maxprocesses | --maxprocesses=*)
-          cap=()
+          cap=(--maxprocesses=8)
           echo "test-linux: the arguments set the worker count; the memory cap is not used" >&2
           break
           ;;

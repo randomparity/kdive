@@ -161,7 +161,7 @@ def test_explicit_worker_count_replaces_the_memory_cap(
     )
 
     assert result.returncode == 0, result.stderr
-    assert _suite_args(calls) == [*worker_args, "tests/jobs"]
+    assert _suite_args(calls) == ["--maxprocesses=8", *worker_args, "tests/jobs"]
     assert "the memory cap is not used" in result.stderr
 
 
