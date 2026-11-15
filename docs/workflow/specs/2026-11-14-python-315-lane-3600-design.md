@@ -15,7 +15,7 @@ suite. It reports each probe's outcome, the forced version bumps, and the packag
 build from source, in its job summary. The gating 3.14 lane, release images, and the
 repository's pins stay untouched.
 
-Decision record: [ADR-NNNN](../../adr/NNNN-python-315-informational-lane.md).
+Decision record: [ADR-0817](../../adr/0817-python-315-informational-lane.md).
 
 ## Design
 
