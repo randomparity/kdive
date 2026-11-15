@@ -320,7 +320,12 @@ unless you opt in.
 To let a local-libvirt resource's guests install tools at runtime (ADR-0313, #1031):
 
 1. Set `guest_egress = true` on that resource's `[[local_libvirt]]` block in `systems.toml`. The
-   block's `name` must match the discovery-created resource name — read it from `kdivectl resources list` (or the `resources` catalog); a mismatch is silently ignored and egress stays off.
+   block binds to the discovery-created resource by its `host_uri`, and reconcile renames that
+   resource to the block's `name` (read it back with `kdivectl resources list`, or the `resources`
+   catalog). Provision-time lookup uses the allocated resource's name, which is therefore the
+   block's `name`, so a `name` that differs from the discovered one still gets egress. A `host_uri`
+   that matches no discovered host is reported as an `overlay deferred` warning; the block applies
+   nothing and egress stays off until discovery sees that host.
 2. Reconcile (`kdive reconcile-systems`, the deploy `migrate` step, or the reconciler loop).
 3. **Re-provision** the System (the flag renders `restrict=off` into the domain XML at provision;
    it does not retrofit a running guest). New Systems pick it up on first boot.
