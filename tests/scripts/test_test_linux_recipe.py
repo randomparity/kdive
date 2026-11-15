@@ -9,6 +9,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parents[2]
 
 _STUB_ENGINE = """#!/usr/bin/env bash
@@ -147,10 +149,24 @@ def test_unreadable_memory_keeps_eight_workers_with_a_warning(tmp_path: Path) ->
     assert "warning: cannot read the podman memory" in result.stderr
 
 
-def test_explicit_worker_arguments_follow_the_computed_cap(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "worker_args",
+    [["-n", "6"], ["-n6"], ["--numprocesses=6"], ["--maxprocesses=6"], ["--maxprocesses", "6"]],
+)
+def test_explicit_worker_count_replaces_the_memory_cap(
+    tmp_path: Path, worker_args: list[str]
+) -> None:
     result, calls = _run_recipe(
-        tmp_path, "podman", "--maxprocesses=6", "tests/jobs", memory=str(3782492160)
+        tmp_path, "podman", *worker_args, "tests/jobs", memory=str(3782492160)
     )
 
     assert result.returncode == 0, result.stderr
-    assert _suite_args(calls) == ["--maxprocesses=2", "--maxprocesses=6", "tests/jobs"]
+    assert _suite_args(calls) == [*worker_args, "tests/jobs"]
+    assert "the memory cap is not used" in result.stderr
+
+
+def test_other_arguments_keep_the_memory_cap(tmp_path: Path) -> None:
+    result, calls = _run_recipe(tmp_path, "podman", "-k", "retry", memory=str(3782492160))
+
+    assert result.returncode == 0, result.stderr
+    assert _suite_args(calls) == ["--maxprocesses=2", "-k", "retry"]

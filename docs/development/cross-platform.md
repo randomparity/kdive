@@ -75,7 +75,7 @@ Linux container at the engine's native architecture (arm64 on Apple silicon;
 - The container runs at most 8 xdist workers, the limit for the shared test PostgreSQL lock.
   The recipe lowers the cap to fit the engine's total memory: it keeps 1.5 GiB for the
   pytest controller and the test backends and allows 1 GiB per worker, and prints the cap
-  it chose. A 3.6 GiB `podman machine` gets 2 workers and a slower run. An explicit `--maxprocesses=N` in the arguments wins.
+  it chose. A 3.6 GiB `podman machine` gets 2 workers and a slower run. An explicit `-n N` or `--maxprocesses=N` in the arguments replaces the cap.
 - `CONTAINER_ENGINE=podman just test-linux` uses `podman machine`. Set
   `CONTAINER_CONNECTION` to choose the rootless (`podman-machine-default`) or rootful
   (`podman-machine-default-root`) connection. The recipe disables SELinux labels for the

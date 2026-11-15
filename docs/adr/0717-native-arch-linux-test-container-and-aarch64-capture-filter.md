@@ -64,7 +64,8 @@ silicon.
   about 760 MiB, and the controller, PostgreSQL and SeaweedFS take about 1.2 GiB. Item 3
   now reads: the recipe reads the engine's total memory, keeps 1.5 GiB, allows 1 GiB per
   worker, caps at 8, and prints the cap; when it cannot read the memory, it warns and uses 8.
-  The cap is the first argument to `just test`, so an explicit `--maxprocesses` wins.
+  An explicit `-n` or `--maxprocesses` in the arguments replaces the cap, because xdist
+  clamps a numeric `-n` to `--maxprocesses`.
 - The socket group step and `host.docker.internal` needed no change. Under rootless Podman
   the socket is `0:0 660` in the container, so `tester` joins group `root`.
 

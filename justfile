@@ -210,8 +210,8 @@ test-shard shard:
 # a dirty tree gets a warning. The git common directory is mounted read-only, so the run works
 # from a worktree and changes nothing in the checkout. `CONTAINER_ENGINE` selects `docker`
 # (default) or `podman` (`podman machine` on macOS; `CONTAINER_CONNECTION` picks the
-# connection). The xdist worker cap fits the engine's memory. Extra arguments go to
-# `just test` after that cap, so an explicit `--maxprocesses` wins; they get the same shell
+# connection). The xdist worker cap fits the engine's memory; an explicit `-n` or
+# `--maxprocesses` replaces it. Extra arguments go to `just test`, with the same shell
 # splitting as `test-verbose`.
 test-linux $sha="HEAD" *ARGS:
     #!/usr/bin/env bash
@@ -248,6 +248,19 @@ test-linux $sha="HEAD" *ARGS:
       workers=8
       echo "test-linux: warning: cannot read the $engine memory; at most 8 xdist workers" >&2
     fi
+    # xdist clamps a numeric `-n` to `--maxprocesses`, so an explicit worker count in the
+    # arguments replaces the cap instead of following it.
+    set -- {{ARGS}}
+    cap=("--maxprocesses=$workers")
+    for arg in "$@"; do
+      case "$arg" in
+        -n | -n* | --numprocesses | --numprocesses=* | --maxprocesses | --maxprocesses=*)
+          cap=()
+          echo "test-linux: the arguments set the worker count; the memory cap is not used" >&2
+          break
+          ;;
+      esac
+    done
     commit="$(git rev-parse --verify --end-of-options "$sha^{commit}")"
     if [[ -n "$(git status --porcelain)" ]]; then
       echo "test-linux: warning: uncommitted changes are not tested; testing $commit" >&2
@@ -267,7 +280,7 @@ test-linux $sha="HEAD" *ARGS:
       --env PYTHONHASHSEED \
       --env TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
       --add-host host.docker.internal:host-gateway \
-      kdive-test-linux "$commit" "--maxprocesses=$workers" {{ARGS}}
+      kdive-test-linux "$commit" "${cap[@]}" "$@"
 
 # Detect hash-order-dependent pytest collection directly and reproducibly (#2072). The
 # weekly suite's shared per-run seed makes every xdist worker collect identically, so

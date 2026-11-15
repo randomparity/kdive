@@ -18,8 +18,8 @@ with a bare `statfs` error. A 3.6 GiB VM OOM-killed the 8 xdist workers.
    recipe exits 1, names the git directory, and says to share it or use a shared checkout.
 3. Worker cap (operator decision, option A): from the engine's `MemTotal`, keep 1.5 GiB and
    use 1 GiB per worker (3 workers still OOM), clamped to 1..8; print the cap. Unreadable memory: 8 and a
-   warning. The recipe passes `--maxprocesses=N` first, so explicit ARGS win; the entry
-   script stops adding `--maxprocesses=8`.
+   warning. An explicit `-n`/`--maxprocesses` in ARGS replaces the cap; the entry script
+   stops adding `--maxprocesses=8`.
 
 Socket gid (`0:0 660` rootless, so `tester` joins `root`) and the host gateway need no
 change; the runs prove both. The recipe comment, `docs/development/cross-platform.md` and
@@ -54,6 +54,6 @@ logs its arguments. Green: `just test-verbose tests/scripts/test_test_linux_reci
 - Scope 2: `focused-test` — a failed probe exits 1 with the message and no suite run; a
   passed probe runs the suite.
 - Scope 3: `focused-test` — 3607 MiB gives 2, 32 GiB gives 8, 1 GiB gives 1, unreadable
-  gives 8 and a warning, explicit `--maxprocesses` follows the cap. All red before.
+  gives 8 and a warning, explicit `-n`/`--maxprocesses` drops the cap. All red before.
 - Docs and ADR amendment: `task-test-not-applicable` — prose; `just docs-check` and
   `just records` check links and shape.
