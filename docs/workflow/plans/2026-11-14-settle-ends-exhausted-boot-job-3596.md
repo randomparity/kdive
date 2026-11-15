@@ -34,7 +34,7 @@ tests ~10, end-to-end test ~15, runbook ~10.
 | four window tests (above) | modify | migration registry |
 | `tests/db/stranded_activation_support.py`, the 0197 test | modify | shared `_record_both` |
 | `tests/db/test_stranded_recovery_end_to_end.py` | modify | tool-level arm without `jobs.cancel` |
-| `docs/operating/runbooks/stranded-activation-recovery.md` | modify | operator procedure |
+| `docs/operating/runbooks/stranded-activation-recovery.md`, `live-testing.md` | modify | operator procedure |
 
 ## Task 1: the migration and its contract
 
@@ -346,6 +346,11 @@ Steps:
    exhausted `boot` job at that moment. Wait for any live job to end, then `observe` again."
    In the `authority_objects_present` row replace "Nothing in kdive removes them yet (#3587),
    so" with "Nothing in kdive removes them, so".
+   In `docs/operating/runbooks/live-testing.md`, replace "Unlike the stranded `runs.boot` job in
+   the [fixed-worker recovery](stranded-activation-recovery.md), it needs no `jobs.cancel`." with
+   "Like the stranded `runs.boot` job in the
+   [fixed-worker recovery](stranded-activation-recovery.md), which settlement ends, it needs no
+   `jobs.cancel`." (scope audit F1).
 3. Run the green command and `just docs-links`; commit
    `docs(runbook): drop the manual cancel from stranded recovery`.
 
