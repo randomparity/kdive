@@ -59,9 +59,10 @@ MISSING_BOOT_CONFIG_REASON = "kernel_missing_boot_config"
 # already there. It also names the alternative, because uploading an initrd is the other way out.
 _ROOTFS_REMEDIATION = (
     "rebuild the kernel with the missing CONFIG_* so the guest can mount its root filesystem and "
-    "boot - EXT4_FS or XFS_FS, whichever your rootfs uses. Build them in (=y): any symbol listed "
-    "under built_in_required is set to =m in your config, and the direct-kernel boot mounts root "
-    "before a module can load. Uploading an initrd artifact with the build is the alternative "
+    "boot - EXT4_FS, XFS_FS or BTRFS_FS, whichever your rootfs uses. Build them in (=y): any "
+    "symbol listed under built_in_required is set to =m in your config, and the direct-kernel "
+    "boot mounts root before a module can load. Uploading an initrd artifact with the build is the "
+    "alternative "
     f"(see {_EXTERNAL_BUILD_CONTRACT_URI})"
 )
 
@@ -85,8 +86,9 @@ _UNKNOWN_GUEST_REMEDIATION = (
 NO_EFFECTIVE_CONFIG_REASON = "no_effective_config_uploaded"
 _NO_EFFECTIVE_CONFIG_REMEDIATION = (
     "upload the built kernel's effective_config alongside the build (artifacts.create_run_upload) "
-    "so runs.complete_build can check the boot-critical EXT4_FS-or-XFS_FS/VIRTIO_BLK symbols the "
-    f"guest needs to mount its root filesystem (see {_EXTERNAL_BUILD_CONTRACT_URI})"
+    "so runs.complete_build can check the boot-critical EXT4_FS/XFS_FS/BTRFS_FS and "
+    "VIRTIO_BLK symbols the guest needs to mount its root filesystem "
+    f"(see {_EXTERNAL_BUILD_CONTRACT_URI})"
 )
 
 MISSING_DEBUGINFO_REASON = "missing_debuginfo"
@@ -164,11 +166,11 @@ async def rootfs_mount_warning(
     root filesystem is no longer silently completed. Keys on the ``rootfs_mount`` *advertised*
     clauses (the feature is never gated); warns, never refuses — the upload always succeeds.
 
-    The root-filesystem clause is the OR-group ``{EXT4_FS, XFS_FS}``: kdive has no guest-family
-    axis, so it cannot tell whether the Run targets local-libvirt's ext4 qcow2 or a RHEL-family
-    XFS rootfs. The warning therefore means "this kernel can mount *no* root filesystem kdive
-    boots", not "this kernel does not match your guest" — a deliberately weak predicate that never
-    fires on a kernel carrying either filesystem.
+    The root-filesystem clause is the OR-group ``{EXT4_FS, XFS_FS, BTRFS_FS}``: kdive has no
+    guest-family axis, so it cannot tell whether the Run targets local-libvirt's ext4 qcow2 or a
+    RHEL-family XFS rootfs. The warning therefore means "this kernel can mount *no* root
+    filesystem kdive boots", not "this kernel does not match your guest" — a deliberately weak
+    predicate that never fires on a kernel carrying any of the three filesystems.
 
     Both ``rootfs_mount`` clauses require ``=y`` unless something can load a module before root is
     mounted (#1860, #1881). Two facts answer that, and either alone relieves the clause (ADR-0545):

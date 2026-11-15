@@ -47,7 +47,7 @@ from tests.mcp.systems_support import provider_resolver
 # unrelated symbol but no root filesystem kdive boots from and no VIRTIO_BLK, so the advisory fires
 # (fail-open only suppresses on an absent/unreadable/degenerate config, not on this one). btrfs, not
 # XFS: #1626 made XFS_FS a satisfying member of the rootfs_mount {EXT4_FS, XFS_FS} OR-group.
-_BAD_CONFIG = b"CONFIG_BTRFS_FS=y\n# CONFIG_EXT4_FS is not set\n# CONFIG_VIRTIO_BLK is not set\n"
+_BAD_CONFIG = b"CONFIG_F2FS_FS=y\n# CONFIG_EXT4_FS is not set\n# CONFIG_VIRTIO_BLK is not set\n"
 
 
 def _patched_load(config: KernelConfig | None) -> Any:
@@ -239,7 +239,7 @@ def test_bad_effective_config_uploads_completes_and_warns(migrated_url: str) -> 
         # ...but the success envelope now carries the non-blocking boot-config advisory.
         warning = cast("dict[str, Any]", resp.data["missing_boot_config"])
         assert warning["reason"] == MISSING_BOOT_CONFIG_REASON
-        assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
+        assert warning["missing"] == ["BTRFS_FS", "EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
         assert resp.suggested_next_actions == ["runs.get"]
         assert resp.refs["external_build_contract"] == EXTERNAL_BUILD_CONTRACT_URI
 

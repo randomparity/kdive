@@ -283,7 +283,7 @@ def test_no_restricting_activation_admits_every_operation(
         (
             _STATE.PREPARING,
             _OP.RUN_BOOT,
-            ["runs.get", "ops.recover_stranded_activation", "systems.teardown"],
+            ["runs.get", "ops.recover_stranded_activation"],
         ),
         (_STATE.ABANDONED, _OP.ALLOCATION_RELEASE, ["runs.get", "systems.teardown"]),
     ],
@@ -307,14 +307,35 @@ def test_an_authority_owned_preparing_system_is_not_pointed_at_the_recovery(
     assert denied.next_actions == ["runs.get", "systems.teardown"]
 
 
+def test_an_unowned_preparing_denial_warns_that_teardown_forecloses_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settlement refuses a torn-down System, so recovery is named first (ADR-0816, #3597)."""
+    _authority_owned(monkeypatch, owned=False)
+    message = str(_denial(monkeypatch, _STATE.PREPARING, _OP.RUN_BOOT))
+    assert message.index("ops.recover_stranded_activation") < message.index("systems.teardown")
+    assert "forecloses" in message
+
+
+def test_an_owned_preparing_denial_keeps_the_plain_teardown_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _authority_owned(monkeypatch, owned=True)
+    message = str(_denial(monkeypatch, _STATE.PREPARING, _OP.RUN_BOOT))
+    assert "forecloses" not in message
+    assert "systems.teardown is admitted while the activation is preparing" in message
+
+
 @pytest.mark.parametrize("state", sorted(_EVERY_RESTRICTED_STATE, key=str))
 def test_release_hint_names_teardown_only_where_the_matrix_admits_it(
     monkeypatch: pytest.MonkeyPatch, state: ExternalBootActivationState
 ) -> None:
+    _authority_owned(monkeypatch, owned=False)
     denied = _denial(monkeypatch, state, _OP.ALLOCATION_RELEASE)
     teardown_admitted = state in _ADMITTING_STATES[_OP.SYSTEM_TEARDOWN]
     assert ("systems.teardown" in str(denied)) is teardown_admitted
-    assert ("systems.teardown" in denied.next_actions) is teardown_admitted
+    stranded = state is _STATE.PREPARING  # an unowned System is the stranded shape
+    assert ("systems.teardown" in denied.next_actions) is (teardown_admitted and not stranded)
     assert f"activation is {state.value}" in str(denied)
 
 
