@@ -39,8 +39,9 @@ base.
   unchanged; an unknown `root_fs` is still refused.
 - **Accepted failure classes:** a kernel with btrfs only as a module (`=m`) is refused, the
   same rule as ext4/xfs, because the spine boots without a module-loading initrd guarantee.
-  Callers that do not pass `root_fs="btrfs"` gain nothing; no shipped caller passes it, and the
-  remote authority cell does not run this preflight; wiring callers is out of scope.
+  Callers that do not pass `root_fs="btrfs"` gain nothing; no shipped caller passes it (the
+  remote authority cells pass no `root_fs`, which checks ext4 or XFS); wiring callers is out of
+  scope.
   `root_fs="btrfs"` with `arch="ppc64le"` keeps the unchanged ppc64le ext4 check (as `xfs`
   does today); the btrfs branch serves x86_64 callers.
 - **Covered elsewhere:** product-side kernel_config advisory for btrfs (#3582); nftables

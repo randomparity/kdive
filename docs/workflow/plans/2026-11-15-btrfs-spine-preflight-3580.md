@@ -86,5 +86,6 @@ Steps:
 2. remote-live-stack.md: replace "On a kernel that has ext4, no preflight names a missing btrfs
    or XFS driver: the boot job ends `boot_timeout`." with "A kernel without the driver ends
    `boot_timeout`. The spine preflight names `CONFIG_BTRFS_FS=y` only when its caller passes
-   `root_fs="btrfs"`; no shipped caller does yet, and the remote authority cell does not run it."
+   `root_fs="btrfs"`. No shipped caller does yet: the remote authority cells pass no `root_fs`,
+   which checks only for ext4 or XFS."
 3. Run `just docs-links` and `just docs-paths`; expect exit 0. Commit `docs(live): state the btrfs preflight (#3580)`.
