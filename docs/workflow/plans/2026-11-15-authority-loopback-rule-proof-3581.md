@@ -17,14 +17,14 @@ plus one appended ADR amendment with a results table (~30–80 lines).
 
 ## Global Constraints
 
-- No lab hostname, IP address, username, lab name or Proxmox VM id in any committed file, commit
-  message, PR body or issue comment; hosts are written `sys-R3` (authority host) and `sys-R4`
+- No lab hostname, FQDN or domain suffix, IP address, username, lab name or VM id in any
+  committed file, commit message, PR body or issue comment; quote journal lines as message text
+  only (`journalctl -o cat`); hosts are written `sys-R3` (authority host) and `sys-R4`
   (control plane), continuing ADR-0810's `sys-R1`/`sys-R2` tokens.
 - ADR-0810 is append-only: add one `### Amendment (2026-11-15): <title> (#3581)` block at the
   end of the amendments, before `## Considered & rejected`; change nothing else in the file.
 - Do not change the rule text, the role, or `pki.yml` (operator exclusions).
 - State only what ran. A check that did not run is named as not run.
-- Avoid the 09:00Z–10:30Z Proxmox backup window for rollback.
 
 ## File map
 
@@ -41,8 +41,9 @@ Verification:
   repository test can exercise a lab host's nftables state.
 
 Steps:
-1. Stage the lane from the private recipe (snapshot both guests first; PKI, bundle, backends,
-   `site.yml` without then with the authority role, control-plane stack, staged base volume).
+1. Snapshot both guests, then stage the lane: libvirt and authority PKI, a bundle of the
+   candidate, control-plane backends, `site.yml` without then with `provider_authority_host`
+   (network listener enabled), the control-plane stack, and a staged base volume.
    Expected: `systemctl is-active kdive-external-boot-authority.service` prints `active` and the
    control-plane `/readyz` endpoints report ready.
 2. Provision one authority System (manifest entry has `guest_egress: true`) and leave it running.
@@ -55,13 +56,18 @@ Steps:
    `timeout 5 bash -c '</dev/tcp/10.0.2.2/<port>'`. Expected baseline: exit 0.
 5. Write the runbook rule with `<qemu-uid>` and the resolver from `/etc/resolv.conf`; `nft -f`.
 6. Repeat step 4. Record exit status ((a)).
-7. Watch `journalctl -u kdive-external-boot-authority.service` and `systemctl status` for 90 s.
-   Record readiness errors and unit state ((b)). Then attempt a provision and teardown through
-   the lane; record the outcome.
-8. `nft delete table inet kdive_guest_loopback`; confirm the unit returns to `active`.
-9. Tear down the System; roll both guests back to the snapshot; delete the snapshot.
+7. For at least 90 s, record `journalctl -o cat -u kdive-external-boot-authority.service` and
+   `systemctl show -p ActiveState,SubState,Result,NRestarts kdive-external-boot-authority.service`
+   ((b)). Then attempt a provision and teardown through the lane; record the outcome. The unit's
+   `StartLimitBurst=5` in 600 s may leave it `failed` with `Result=start-limit-hit`.
+8. `nft delete table inet kdive_guest_loopback`. If the unit is `failed`, record its state, run
+   `systemctl reset-failed kdive-external-boot-authority.service` and `systemctl start` it, then
+   record whether it reaches `active` and ready.
+9. Only if step 8 left the authority serving, tear down the System through the lane. Then roll
+   both guests back to the snapshot and delete the snapshot.
 
-Rollback: step 8 and step 9 restore the lab whatever the result.
+Rollback: the snapshot rollback in step 9 restores the lab whatever the result; the lane teardown
+before it is best effort.
 
 ## Task 2: Runbook and ADR amendment
 
@@ -72,9 +78,12 @@ Verification:
 
 Steps:
 1. Replace the runbook sentence with the observed authority-host result and its cause, keeping
-   "Do not assume" wording only for arrangements that did not run.
+   "Do not assume" wording only for arrangements that did not run. A unit left `failed` by the
+   start limit is attributed to the start limit, with the recovery commands.
 2. Append the ADR-0810 amendment: correction of the "unproven" limit, rule, method, results
    table (no rule / rule on the QEMU uid), limits found, what was not run.
-3. Run `just docs-links`, `just docs-paths`, `just adr-status-check`, `just records`,
+3. Scan the diff, commit message and planned PR/issue text for the authority host's short name,
+   FQDN, domain suffix and addresses (`rg -n`); expected: no match.
+4. Run `just docs-links`, `just docs-paths`, `just adr-status-check`, `just records`,
    `just lint`. Expected: each exits 0.
-4. Commit `docs: record the loopback rule on a provider authority host (#3581)`.
+5. Commit `docs: record the loopback rule on a provider authority host (#3581)`.

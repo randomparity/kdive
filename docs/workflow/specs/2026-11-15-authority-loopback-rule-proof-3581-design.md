@@ -34,9 +34,14 @@ Proof, on the private lab (control plane plus one Fedora 44 host provisioned wit
 3. Load the runbook's rule text unchanged, keyed to that uid, with the DNS exemption for the
    host's loopback resolver.
 4. Record (a): the same guest connection with the rule loaded.
-5. Record (b): authority unit state and journal across at least two readiness intervals, then a
-   provision and teardown through the lane.
-6. Remove the rule; confirm readiness returns. Roll both guests back to the pre-run snapshot.
+5. Record (b): authority unit state (`systemctl show -p ActiveState,SubState,Result,NRestarts`)
+   and journal message text (`journalctl -o cat`) across at least two readiness intervals, then
+   a provision and teardown attempt through the lane. The unit's `StartLimitBurst=5` in 600 s can
+   leave it `failed` with `Result=start-limit-hit`; record that as distinct from the rule's effect.
+6. Remove the rule. If the unit is `failed`, run `systemctl reset-failed` then `systemctl start`;
+   record the pre-reset state and whether the unit then reached active and ready. Tear down the
+   System through the lane only once the authority is serving; otherwise rely on step 7.
+7. Roll both guests back to the pre-run snapshot.
 
 Guest commands run through the QEMU guest agent as the authority account, so no guest SSH key
 is needed. If the authority cannot be stood up on the lab (environment failure outside this
@@ -69,7 +74,11 @@ No code, rule or role change (operator exclusions in `WORK:SCOPE`).
 
 - Outcomes (a) and (b) each recorded as observed, with the uid evidence, in the ADR amendment.
 - The runbook no longer says "unproven" for the authority host and matches the amendment.
-- Both lab guests rolled back; no lab hostname, address, username or lab name in the diff.
+- (b) states whether the start limit was hit and what restored the unit; a unit left `failed` by
+  the start limit is attributed to it, not to the rule.
+- Both lab guests rolled back. The diff, commit messages, PR body and issue comments carry no lab
+  hostname, FQDN or domain suffix, address, username, lab name or VM id; each is scanned for the
+  authority host's short name, FQDN, domain suffix and addresses before it is committed or posted.
 
 ## Validation
 
