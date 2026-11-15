@@ -1,7 +1,8 @@
 """The `test-linux` recipe drives Docker and macOS `podman machine` the same way (#3074).
 
 A stub engine on `PATH` stands in for the container engine: it logs each call and answers
-`info`, `build` and `run` as the test sets up, so no engine or VM is needed.
+`info` (socket path and memory), `build` and `run` as the test sets up, so no engine or VM
+is needed.
 """
 
 import os
@@ -13,7 +14,12 @@ _ROOT = Path(__file__).resolve().parents[2]
 _STUB_ENGINE = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$STUB_LOG"
 case "$1" in
-  info) printf '%s\\n' "$STUB_SOCKET" ;;
+  info)
+    case "$*" in
+      *MemTotal*) printf '%s\\n' "$STUB_MEMORY" ;;
+      *) printf '%s\\n' "$STUB_SOCKET" ;;
+    esac
+    ;;
   run) [[ " $* " == *" --entrypoint "* ]] && exit "$STUB_PROBE_EXIT" ;;
 esac
 exit 0
@@ -21,7 +27,11 @@ exit 0
 
 
 def _run_recipe(
-    tmp_path: Path, engine: str, *, probe_exit: int = 0
+    tmp_path: Path,
+    engine: str,
+    *args: str,
+    probe_exit: int = 0,
+    memory: str = str(32 * 1024**3),
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run `just test-linux` against a stub engine; return the result and its logged calls."""
     bin_dir = tmp_path / "bin"
@@ -38,9 +48,10 @@ def _run_recipe(
         "STUB_LOG": str(log),
         "STUB_SOCKET": "unix:///run/user/501/podman/podman.sock",
         "STUB_PROBE_EXIT": str(probe_exit),
+        "STUB_MEMORY": memory,
     }
     result = subprocess.run(
-        ["just", "test-linux"],
+        ["just", "test-linux", "HEAD", *args],
         cwd=_ROOT,
         env=env,
         check=False,
@@ -98,3 +109,48 @@ def test_readable_git_directory_runs_the_suite(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert len(_probe_runs(calls)) == 1
     assert len(_suite_runs(calls)) == 1
+
+
+def _suite_args(calls: list[str]) -> list[str]:
+    """The arguments the suite container's entry point receives, after the commit."""
+    [suite] = _suite_runs(calls)
+    return suite.split(" kdive-test-linux ", maxsplit=1)[1].split()[1:]
+
+
+def test_worker_cap_fits_a_small_engine_vm(tmp_path: Path) -> None:
+    result, calls = _run_recipe(tmp_path, "podman", memory=str(3782492160))
+
+    assert result.returncode == 0, result.stderr
+    assert _suite_args(calls) == ["--maxprocesses=3"]
+    assert "podman has 3607 MiB; at most 3 xdist workers" in result.stderr
+
+
+def test_worker_cap_stays_at_eight_with_enough_memory(tmp_path: Path) -> None:
+    result, calls = _run_recipe(tmp_path, "docker", memory=str(33596157952))
+
+    assert result.returncode == 0, result.stderr
+    assert _suite_args(calls) == ["--maxprocesses=8"]
+
+
+def test_worker_cap_never_drops_below_one(tmp_path: Path) -> None:
+    result, calls = _run_recipe(tmp_path, "podman", memory=str(1024**3))
+
+    assert result.returncode == 0, result.stderr
+    assert _suite_args(calls) == ["--maxprocesses=1"]
+
+
+def test_unreadable_memory_keeps_eight_workers_with_a_warning(tmp_path: Path) -> None:
+    result, calls = _run_recipe(tmp_path, "podman", memory="<no value>")
+
+    assert result.returncode == 0, result.stderr
+    assert _suite_args(calls) == ["--maxprocesses=8"]
+    assert "warning: cannot read the podman memory" in result.stderr
+
+
+def test_explicit_worker_arguments_follow_the_computed_cap(tmp_path: Path) -> None:
+    result, calls = _run_recipe(
+        tmp_path, "podman", "--maxprocesses=6", "tests/jobs", memory=str(3782492160)
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _suite_args(calls) == ["--maxprocesses=3", "--maxprocesses=6", "tests/jobs"]

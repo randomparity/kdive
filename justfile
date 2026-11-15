@@ -209,8 +209,10 @@ test-shard shard:
 # regression evidence. It tests the committed `sha` (default HEAD), never uncommitted edits;
 # a dirty tree gets a warning. The git common directory is mounted read-only, so the run works
 # from a worktree and changes nothing in the checkout. `CONTAINER_ENGINE` selects `docker`
-# (default) or `podman`; only Docker is verified on macOS. Extra arguments go to `just test`,
-# with the same shell splitting as `test-verbose`.
+# (default) or `podman` (`podman machine` on macOS; `CONTAINER_CONNECTION` picks the
+# connection). The xdist worker cap fits the engine's memory. Extra arguments go to
+# `just test` after that cap, so an explicit `--maxprocesses` wins; they get the same shell
+# splitting as `test-verbose`.
 test-linux $sha="HEAD" *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -219,6 +221,7 @@ test-linux $sha="HEAD" *ARGS:
       docker)
         socket=/var/run/docker.sock
         engine_args=()
+        memory_format='{{{{.MemTotal}}'
         ;;
       podman)
         # `podman machine` reports the socket as a URI, and SELinux in its VM denies the
@@ -226,12 +229,24 @@ test-linux $sha="HEAD" *ARGS:
         socket="$(podman info --format '{{{{.Host.RemoteSocket.Path}}')"
         socket="${socket#unix://}"
         engine_args=(--security-opt label=disable)
+        memory_format='{{{{.Host.MemTotal}}'
         ;;
       *)
         echo "test-linux: CONTAINER_ENGINE must be docker or podman, not '$engine'" >&2
         exit 2
         ;;
     esac
+    # Each xdist worker peaks near 600 MiB, and the engine VM also holds the test backends.
+    # Keep 1 GiB for them and 800 MiB per worker, at most 8 (the shared PostgreSQL lock limit).
+    memory="$("$engine" info --format "$memory_format" 2>/dev/null)" || memory=""
+    if [[ $memory =~ ^[0-9]+$ ]]; then
+      workers=$(((memory / 1048576 - 1024) / 800))
+      workers=$((workers < 1 ? 1 : workers > 8 ? 8 : workers))
+      echo "test-linux: $engine has $((memory / 1048576)) MiB; at most $workers xdist workers" >&2
+    else
+      workers=8
+      echo "test-linux: warning: cannot read the $engine memory; at most 8 xdist workers" >&2
+    fi
     commit="$(git rev-parse --verify --end-of-options "$sha^{commit}")"
     if [[ -n "$(git status --porcelain)" ]]; then
       echo "test-linux: warning: uncommitted changes are not tested; testing $commit" >&2
@@ -251,7 +266,7 @@ test-linux $sha="HEAD" *ARGS:
       --env PYTHONHASHSEED \
       --env TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
       --add-host host.docker.internal:host-gateway \
-      kdive-test-linux "$commit" {{ARGS}}
+      kdive-test-linux "$commit" "--maxprocesses=$workers" {{ARGS}}
 
 # Detect hash-order-dependent pytest collection directly and reproducibly (#2072). The
 # weekly suite's shared per-run seed makes every xdist worker collect identically, so
