@@ -242,7 +242,11 @@ test-linux $sha="HEAD" *ARGS:
     memory="$("$engine" info --format "$memory_format" 2>/dev/null)" || memory=""
     if [[ $memory =~ ^[0-9]+$ ]]; then
       workers=$(((memory / 1048576 - 1536) / 1024))
-      workers=$((workers < 1 ? 1 : workers > 8 ? 8 : workers))
+      if ((workers < 1)); then
+        workers=1
+      elif ((workers > 8)); then
+        workers=8
+      fi
       echo "test-linux: $engine has $((memory / 1048576)) MiB; at most $workers xdist workers" >&2
     else
       workers=8
