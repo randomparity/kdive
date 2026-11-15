@@ -122,7 +122,8 @@ uv built from source in that run (the lane keeps no uv cache, so the list is alw
 or skipped probe also raises a warning.
 
 Contract tests that read `pyproject.toml` or `uv.lock` fail in this lane by design, because they
-see the relaxed copy. Read test failures in two groups: those 3.14-contract tests, and genuine
+see the relaxed copy. A `test` failure with no failing node ids in the summary is
+infrastructure (for example a test-image pull), not a 3.15 result. Read test failures in two groups: those 3.14-contract tests, and genuine
 3.15 incompatibilities.
 
 ## Native POWER host integration

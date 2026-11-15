@@ -42,8 +42,11 @@ and the source-built packages to the job summary and warns per failure.
   set bounds the cost.
 - Relaxed `>=` pins let `uv lock` take releases nobody reviewed for packages lacking cp315
   artifacts, and their sdists are built and executed on the runner. The exposure is a
-  compromised upstream release reaching a runner that holds only a `contents: read` token, no
-  secrets and no cache, in a job no required check depends on.
+  compromised upstream release reaching a runner that holds a `contents: read` token and no
+  secrets, in a job no required check depends on. The lane applies no release-age cooldown.
+  `enable-cache: false` stops only setup-uv's own save: code on the runner can still reach the
+  Actions cache service, and schedule and dispatch runs share the default branch's cache scope,
+  which `ci.yml` restores.
 - The lane uses a newer uv than the rest of CI. Nothing it produces is committed, so the skew
   cannot reach a lockfile.
 
