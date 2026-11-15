@@ -18,6 +18,13 @@ _WORKFLOWS = _ROOT / ".github/workflows"
 _LANE = _WORKFLOWS / "python-315.yml"
 _PROBES = ("lock", "sync", "ruff", "ty", "test")
 _OVERRIDE = "Relax the 3.14-only pins for this lane"
+_STEP_TIMEOUTS = {"lock": 10, "sync": 25, "test": 40}
+_PROBE_GATE = {
+    "sync": "steps.lock.outcome == 'success'",
+    "ruff": "steps.sync.outcome == 'success'",
+    "ty": "steps.sync.outcome == 'success'",
+    "test": "steps.sync.outcome == 'success'",
+}
 _MARKER = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.15'"
 
 
@@ -50,8 +57,13 @@ def _base_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in {"GITHUB_ENV", "LANE_LOGS"}}
 
 
+def _relaxed(entries: list) -> list:
+    return [e.replace("==", ">=", 1) if isinstance(e, str) else e for e in entries]
+
+
 def test_override_relaxes_the_current_pyproject(tmp_path: Path) -> None:
     shutil.copy(_ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
+    committed = tomllib.loads((_ROOT / "pyproject.toml").read_text())
     env = {**_base_env(), "RUNNER_TEMP": str(tmp_path)}
 
     result = _run(_step(_OVERRIDE)["run"], tmp_path, env)
@@ -59,11 +71,11 @@ def test_override_relaxes_the_current_pyproject(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     data = tomllib.loads((tmp_path / "pyproject.toml").read_text())
     assert data["project"]["requires-python"] == ">=3.14"
-    entries = list(data["project"]["dependencies"])
-    for group in data.get("dependency-groups", {}).values():
-        entries.extend(entry for entry in group if isinstance(entry, str))
-    pinned = [entry for entry in entries if "==" in entry]
-    assert not pinned, f"override left exact pins: {pinned}"
+    assert data["project"]["dependencies"] == _relaxed(committed["project"]["dependencies"])
+    groups = committed.get("dependency-groups", {})
+    assert data.get("dependency-groups", {}).keys() == groups.keys()
+    for name, entries in groups.items():
+        assert data["dependency-groups"][name] == _relaxed(entries), f"group {name}"
     assert data["tool"]["uv"]["required-environments"] == [_MARKER]
 
 
@@ -140,9 +152,14 @@ def test_lane_is_informational_and_isolated() -> None:
     assert set(probes) == set(_PROBES)
     for probe, step in probes.items():
         assert step.get("continue-on-error") is True, f"probe {probe} can fail the job"
+        assert step.get("if") == _PROBE_GATE.get(probe), f"probe {probe} chaining"
+        assert step.get("timeout-minutes") == _STEP_TIMEOUTS.get(probe), f"probe {probe} timeout"
     report = _step("Report")
     assert report.get("if") == "always()"
     assert "continue-on-error" not in report
+    failures = _step("Test failure summary")
+    assert failures.get("continue-on-error") is True
+    assert failures.get("if") == "always() && steps.test.outcome != 'skipped'"
     ci = (_WORKFLOWS / "ci.yml").read_text()
     assert "UV_PYTHON" not in ci
     assert "3.15" not in ci

@@ -52,7 +52,9 @@ fails otherwise, so a drifted `pyproject.toml` cannot silently test the 3.14 con
 
 **Probes.** Each is `continue-on-error: true` with an `id`; later probes run only when the
 install succeeded (`if: steps.sync.outcome == 'success'`), so a failed install reports the
-rest as skipped rather than as misleading failures:
+rest as skipped rather than as misleading failures. `lock`, `sync` and `test` carry step
+timeouts (10, 25 and 40 minutes) inside the job's 75, so a 3.15 hang is reported as that
+probe's failure, not as a cancelled job:
 
 | id | command |
 |---|---|
@@ -60,18 +62,23 @@ rest as skipped rather than as misleading failures:
 | `sync` | `uv sync --locked` (log retained) |
 | `ruff` | `uv run --no-sync ruff check --target-version py315` |
 | `ty` | `uv run --no-sync ty check --python-version 3.15` |
-| `test` | `just pull-test-images && just test`, with `KDIVE_REQUIRE_DOCKER=1` |
+| `test` | `just pull-test-images && just test`, with `KDIVE_REQUIRE_DOCKER=1` and a JUnit report |
 
 `just test` is the gate's own selection; pytest's warnings summary surfaces 3.15
 deprecations. apt installs `libvirt-dev libffi-dev` through `scripts/apt-install.sh` (cffi
-2.0.0 has no cp315 wheel and builds from sdist). setup-uv caching is on with a `py315`
-suffix so source-built wheels (pydantic-core, grpcio) are reused across runs.
+2.0.0 has no cp315 wheel and builds from sdist). setup-uv caching is off: a cached
+source-built wheel installs without a `Built` line, so only a cold sync makes the report's
+source-build list true for the run.
 
 **Report.** A final `if: always()` step writes a Markdown table of the five outcomes, the
 `uv lock` `Updated`/`Added`/`Removed` lines (forced bumps), and the `uv sync` `Built` lines
-(packages without a cp315 wheel at the locked version) to `$GITHUB_STEP_SUMMARY`, and emits one
-`::warning::` per non-success probe. It always exits 0. The job is therefore green whenever
-its infrastructure steps work; its findings live in the summary and warnings.
+(packages uv built from source in this run: no usable cp315 wheel at the locked version;
+`libvirt-python` is sdist-only on every Python and the project itself is always built) to
+`$GITHUB_STEP_SUMMARY`, and emits one `::warning::` per non-success probe. It always exits 0.
+A `Test failure summary` step, the `ci.yml` pattern (#2062), then renders the test probe's
+JUnit report with `scripts/pytest_summary.py` so the failing node ids are in the summary; it
+runs whenever the test probe ran and is `continue-on-error`. The job is therefore green
+whenever its infrastructure steps work; its findings live in the summary and warnings.
 
 **Cut.** No container smoke: `tests/container/Dockerfile` installs no Python dependencies (its
 entrypoint syncs at run time), so a 3.15 base there proves nothing the `sync` probe does not,
@@ -90,8 +97,8 @@ to bypass. No change to `Dockerfile`s, `requires-python`, or ruff/ty targets (ex
      findings classify them, they do not gate.
    - An infrastructure step (checkout, apt, setup-uv, the override) failing turns the job red:
      a non-required check, and the override's drift is caught earlier by the gating guard below.
-   - Source builds (grpcio, pydantic-core) cost minutes per uncached run: bounded by the path
-     filter, the weekly cadence, the cache, and a 60-minute timeout.
+   - Source builds (grpcio, pydantic-core) cost minutes on every run, since the lane is
+     uncached: bounded by the path filter, the weekly cadence, and a 75-minute job timeout.
    - Upstream index churn changes the answer between runs: that is the signal.
 4. **Covered elsewhere** — action pin consistency (`tests/guards/test_workflow_action_pins.py`),
    apt bounding (`tests/guards/test_apt_install_is_bounded.py`), workflow lint
@@ -102,13 +109,15 @@ to bypass. No change to `Dockerfile`s, `requires-python`, or ruff/ty targets (ex
 A new guard, `tests/guards/test_python_315_workflow.py`, in the gating suite:
 
 - **Override applies to today's `pyproject.toml`**: run the override step's `run` block on a
-  temp copy; `tomllib` reads `requires-python == ">=3.14"`, no `==` among
-  `project.dependencies` and dependency groups, and the `required-environments` entry.
+  temp copy; `tomllib` reads `requires-python == ">=3.14"`, `project.dependencies` and every
+  dependency group equal to the committed lists with each `==` turned into `>=`, and the
+  `required-environments` entry.
 - **Override fails loud on drift**: on a copy whose `requires-python` differs, the block exits
   non-zero and leaves the file unchanged.
 - **Non-gating and isolated**: the workflow has no `push` trigger and read-only permissions;
   each probe step (`lock`, `sync`, `ruff`, `ty`, `test`) is
-  `continue-on-error: true`; the report step runs `always()`;
+  `continue-on-error: true`, chained on `lock`/`sync` success, with the step timeouts above;
+  the report step runs `always()`; the failure-summary step is `continue-on-error`;
   `ci.yml` sets no `UV_PYTHON`, mentions no `3.15`, and its required check's `needs` are
   unchanged.
 - **Report never fails and names failures**: run the report block with fake outcomes and logs;

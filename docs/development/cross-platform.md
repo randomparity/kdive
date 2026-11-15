@@ -114,8 +114,11 @@ The project pins 3.14 exactly, so the lane's first step relaxes `requires-python
 is never committed. If `pyproject.toml` no longer carries the `==3.14.*` pin, that step fails and
 names the line to update. The lane then runs five probes with uv `0.13.8`: `uv lock`,
 `uv sync --locked`, `ruff check --target-version py315`, `ty check --python-version 3.15` and
-`just test`. The job summary lists each probe's outcome, the versions `uv lock` changed and the
-packages built from source; each failed or skipped probe also raises a warning.
+`just test`; `lock`, `sync` and `test` have step timeouts, so a hang shows as that probe's
+failure. The job summary lists each probe's outcome, the versions `uv lock` changed, the packages
+uv built from source in that run (the lane keeps no uv cache, so the list is always complete;
+`libvirt-python` and the project itself always appear) and the failing test node ids; each failed
+or skipped probe also raises a warning.
 
 Contract tests that read `pyproject.toml` or `uv.lock` fail in this lane by design, because they
 see the relaxed copy. Read test failures in two groups: those 3.14-contract tests, and genuine

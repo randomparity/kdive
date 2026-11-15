@@ -4,7 +4,8 @@ name: Python 3.15 (informational)
 # pins 3.14 exactly, so the first step relaxes those pins in this job's checkout only — the
 # edit is never committed — and re-resolves with a uv that ships 3.15. Every probe is
 # continue-on-error; the Report step writes the outcomes, the versions uv forced and the
-# packages built from source to the job summary, and raises a warning per failed probe.
+# packages uv built from source to the job summary, and raises a warning per failed probe; the
+# Test failure summary step after it adds the failing test node ids.
 # Contract tests that read pyproject.toml or uv.lock fail here by design: the relaxed copy is
 # not the committed one.
 
@@ -36,9 +37,11 @@ jobs:
   python-315:
     name: python 3.15 (informational)
     runs-on: ubuntu-latest
-    # The apt script's ~11 minute worst case (ADR-0566), a cold 3.15 resolve and source builds,
-    # and the unsharded suite, plus margin.
-    timeout-minutes: 60
+    # The probes carry their own step timeouts (lock 10, sync 25, test 40) so a hang is reported
+    # as that probe's failure rather than a cancelled job. They are ceilings, not a budget: a
+    # normal run spends minutes in apt, lock and the cold uncached sync, so a test step that
+    # hangs to its 40-minute limit still ends well inside 75 and the Report step runs.
+    timeout-minutes: 75
     env:
       UV_PYTHON: "3.15"
     steps:
@@ -56,9 +59,10 @@ jobs:
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           # Lane-only: the repository's uv offers only a 3.15 beta (ADR-0817).
+          # Repo-wide pin is 0.11.18 (ci.yml); converge once that pin offers 3.15 final.
           version: "0.13.8"
-          enable-cache: true
-          cache-suffix: py315
+          # No cache: a cached source-built wheel installs without a `Built` line, so only a
+          # cold sync makes the Report's source-build list this run's real builds.
 
       - name: Set up just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
@@ -89,12 +93,14 @@ jobs:
       - name: Re-resolve for 3.15
         id: lock
         continue-on-error: true
+        timeout-minutes: 10
         run: uv lock 2>&1 | tee "$LANE_LOGS/lock.log"
 
       - name: Sync
         id: sync
         if: steps.lock.outcome == 'success'
         continue-on-error: true
+        timeout-minutes: 25
         run: uv sync --locked 2>&1 | tee "$LANE_LOGS/sync.log"
 
       - name: Ruff (py315)
@@ -113,9 +119,14 @@ jobs:
         id: test
         if: steps.sync.outcome == 'success'
         continue-on-error: true
+        timeout-minutes: 40
         env:
           # A broken Docker daemon must not hide the db suite as skips (ADR-0015).
           KDIVE_REQUIRE_DOCKER: "1"
+          # A JUnit report for the failure summary below, as in ci.yml's tests job (#2062).
+          PYTEST_ADDOPTS: >-
+            --junit-xml=${{ runner.temp }}/pytest-junit.xml
+            -o junit_family=xunit1
         run: just pull-test-images && just test
 
       - name: Report
@@ -146,10 +157,21 @@ jobs:
             echo '```'
             grep -E '^(Updated|Added|Removed) ' "${LANE_LOGS:-/nonexistent}/lock.log" 2>/dev/null || echo "(none)"
             echo '```'
-            echo "Built from source (no cp315 wheel at the locked version):"
+            echo "Built from source by uv in this run (no usable cp315 wheel at the locked version;"
+            echo "libvirt-python is sdist-only on every Python and the project itself is always built):"
             echo '```'
             grep -E '^ *Built ' "${LANE_LOGS:-/nonexistent}/sync.log" 2>/dev/null || echo "(none)"
             echo '```'
           }
           summary >> "$GITHUB_STEP_SUMMARY"
           if ((${#warnings[@]})); then printf '%s\n' "${warnings[@]}"; fi
+
+      - name: Test failure summary
+        # Reporting only, as in ci.yml: the script returns 0 for every input, a missing report
+        # included, and continue-on-error covers `uv run` failing to start. Runs only when the
+        # test probe ran, so a skipped probe adds no "no report" prose to the summary.
+        if: always() && steps.test.outcome != 'skipped'
+        continue-on-error: true
+        env:
+          PYTEST_JUNIT_REPORT: ${{ runner.temp }}/pytest-junit.xml
+        run: uv run --no-sync python scripts/pytest_summary.py "$PYTEST_JUNIT_REPORT"
