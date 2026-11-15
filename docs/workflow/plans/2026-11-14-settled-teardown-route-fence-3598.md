@@ -1,15 +1,5 @@
 # Settled teardown route fence (#3598) — implementation plan
 
-Goal: the teardown route resolver returns no route for a System whose newest activation is
-settled, whatever server build calls it.
-
-Architecture: one forward-only migration re-creates the SQL resolver with a settlement predicate;
-a real-Postgres test proves the settled, recorded-but-unsettled, and grant shapes; the ADR-0816
-amendment and runbook drop the server-safety half of the upgrade order.
-
-Tech stack: PostgreSQL migrations under `src/kdive/db/schema/`, pytest against real Postgres
-(`migrated_url`, `authority_role_dsns` fixtures), psycopg 3.
-
 Spec: [settled teardown route fence](../specs/2026-11-14-settled-teardown-route-fence-3598-design.md).
 
 Expected implementation size: 130–170 changed lines (S) — migration ~55, test ~70, four window
@@ -21,7 +11,7 @@ tests ~8, ADR amendment ~20, runbook ~5.
 - Applied migrations are byte-immutable (`just schema-guard`); never edit 0167 or 0194.
 - ADR-0816 is append-only (`just records`): add one `### Amendment` block after the #3551
   amendment and before `## Considered & rejected`; change no existing line.
-- No Python change under `src/`.
+- No Python change under `src/` (spec, Scope).
 
 ## Task 1 — migration and its proof
 
@@ -36,9 +26,10 @@ Files: create `src/kdive/db/schema/0197_settled_teardown_route_fence.sql`,
 Interfaces consumed (exist on main `004ef4e7d`): `tests.db.stranded_activation_support._strand`
 (`(migrated_url, role_dsns, *, suffix="s", allocate=True) -> _Stranded`, fields `case`,
 `observer_job`, `authority`); `tests.db.external_boot_authority_support._acknowledge(conn, case,
-authority)`; `_record_authority`, `_record_worker`, `_settle` in
-`tests/db/test_migration_0194_stranded_activation_settlement.py` (module-private; import them, as
-`_RoleDsns` is imported elsewhere).
+authority)`; the SQL functions `record_stranded_activation_authority_absence`,
+`record_stranded_activation_worker_ownership` and `settle_stranded_external_boot_activation`
+(0194), called inline as the 0194 test does, because the repo imports helpers only from
+`*_support.py` modules.
 
 Verification:
 - Settled route fence — `focused-test`:
@@ -46,7 +37,10 @@ Verification:
   final assertion sees `[(activation_id,)]`. Green:
   `just test-verbose tests/db/test_migration_0197_settled_teardown_route_fence.py`.
 - Unsettled route unchanged — `focused-test`: the same test asserts the route before recording
-  and after both records (`settled_at` null).
+  and after both records (`settled_at` null); the marker branch keeps its route in the existing
+  `tests/integration/test_external_boot_unrouted_teardown.py` and
+  `tests/db/test_exhausted_retained_teardown.py`, run with
+  `just test-verbose tests/integration/test_external_boot_unrouted_teardown.py tests/db/test_exhausted_retained_teardown.py tests/db/test_migration_0194_stranded_activation_settlement.py`.
 - Grants and definer — `focused-test`: `test_resolver_keeps_its_definer_and_grants`.
 - Registration — `focused-test`: the four window tests, run with
   `just test-verbose tests/db/test_migrate.py tests/db/test_migration_0091_system_object_sweep_cursors.py tests/db/test_migration_0102_build_gc_cursors.py tests/db/test_migration_0115_capture_reap_state.py`.
@@ -66,12 +60,7 @@ import psycopg
 
 from kdive.db import migrate
 from tests.db.external_boot_authority_support import _acknowledge, _RoleDsns
-from tests.db.stranded_activation_support import _strand
-from tests.db.test_migration_0194_stranded_activation_settlement import (
-    _record_authority,
-    _record_worker,
-    _settle,
-)
+from tests.db.stranded_activation_support import _DOMAIN, _strand, _Stranded
 
 _ROUTES = "SELECT activation_id FROM resolve_external_boot_system_teardown_dispatch_binding(%s)"
 
@@ -84,6 +73,38 @@ def _routes(role_dsns: _RoleDsns, system_id: UUID) -> list[tuple[Any, ...]]:
     # The server role is the resolver's only grantee: the call an older server makes.
     with psycopg.connect(role_dsns("kdive_server"), autocommit=True) as conn:
         return conn.execute(_ROUTES, (system_id,)).fetchall()
+
+
+def _call(role_dsns: _RoleDsns, role: str, sql: str, args: tuple[Any, ...]) -> Any:
+    with psycopg.connect(role_dsns(role), autocommit=True) as conn:
+        row = conn.execute(sql, args).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _record_both(role_dsns: _RoleDsns, stranded: _Stranded) -> None:
+    case = stranded.case
+    authority = _call(
+        role_dsns,
+        "kdive_provider_authority",
+        "SELECT record_stranded_activation_authority_absence(%s,%s,%s,%s,%s,%s,%s)",
+        (
+            case.activation_id,
+            case.authority_instance,
+            _DOMAIN,
+            None,
+            None,
+            "sha256:" + "e" * 64,
+            [],
+        ),
+    )
+    worker = _call(
+        role_dsns,
+        "kdive_worker",
+        "SELECT record_stranded_activation_worker_ownership(%s,%s,%s,%s,%s)",
+        (case.credential, stranded.observer_job, 1, case.activation_id, _DOMAIN),
+    )
+    assert (authority, worker) == ("applied", "applied")
 
 
 def test_settled_system_with_a_retired_authority_row_has_no_route(
@@ -100,11 +121,12 @@ def test_settled_system_with_a_retired_authority_row_has_no_route(
             (stranded.authority.authority_id,),
         )
     assert _routes(authority_role_dsns, case.system_id) == [(case.activation_id,)]
-    assert _record_authority(authority_role_dsns, stranded) == "applied"
-    assert _record_worker(authority_role_dsns, stranded) == "applied"
+    _record_both(authority_role_dsns, stranded)
     assert _routes(authority_role_dsns, case.system_id) == [(case.activation_id,)]
 
-    assert _settle(authority_role_dsns, case.activation_id) == "applied"
+    settle = "SELECT settle_stranded_external_boot_activation(%s,%s,%s,%s,%s)"
+    args = (case.activation_id, "admin", "session", "operator-cli", "stranded")
+    assert _call(authority_role_dsns, "kdive_server", settle, args) == "applied"
 
     with psycopg.connect(migrated_url) as conn:
         row = conn.execute(
@@ -135,7 +157,7 @@ def test_resolver_keeps_its_definer_and_grants(migrated_url: str) -> None:
    as the last condition of the first branch's outer `WHERE newest.state <> 'torn_down'` and of
    the second branch's `WHERE newest.state = 'preparing'`. No `REVOKE`/`GRANT`.
 4. Update the four window tests as listed in Files.
-5. Run both focused commands; expect all green. Commit
+5. Run the three focused commands; expect all green. Commit
    `fix(db): refuse a settled System's authority teardown route`.
 
 Rollback: forward-only; a revert PR removes 0197 only before any deployment applied it.

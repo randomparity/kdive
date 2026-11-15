@@ -58,11 +58,5 @@ lease-expiry fence (#3599).
 
 ## Validation
 
-- Success 1 and 2 — `focused-test`: `tests/db/test_migration_0197_settled_teardown_route_fence.py`
-  calls the resolver as `kdive_server` before recording, after recording, and after settling;
-  red before 0197 exists on the settled assertion.
-- Success 3 — `focused-test`: the same file reads `pg_proc.prosecdef` and
-  `has_function_privilege` for `kdive_server` and `kdive_worker`.
-- Migration registration — `focused-test`: the four `migrations[-K:]` window tests.
-- ADR and runbook prose — `task-test-not-applicable`: no executable consumer reads them; the
-  `just records` gate checks that ADR-0816 stays append-only.
+Per-contract verification is in the plan's Task 1 and Task 2 inventories; Success 2's marker
+branch is held by the existing unrouted-teardown tests.
