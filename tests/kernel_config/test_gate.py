@@ -157,13 +157,17 @@ def test_rootfs_missing_one_symbol_warns_and_names_it():
     assert warning["missing"] == ["VIRTIO_BLK"]
 
 
+def test_rootfs_btrfs_root_draws_no_advisory():
+    assert _rootfs_call(all_builtin({"BTRFS_FS", "VIRTIO_BLK"})) is None
+
+
 def test_rootfs_no_supported_filesystem_names_both_alternatives():
-    # BTRFS is a real filesystem kdive never boots from: neither OR-group member is enabled, so
-    # the advisory fires and offers both alternatives rather than only ext4.
-    cfg = all_builtin({"BTRFS_FS"})
+    # F2FS is a real filesystem kdive never boots from: no OR-group member is enabled, so the
+    # advisory fires and offers every alternative rather than only ext4.
+    cfg = all_builtin({"F2FS_FS"})
     warning = _rootfs_call(cfg)
     assert warning is not None
-    assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
+    assert warning["missing"] == ["BTRFS_FS", "EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
     assert "mount" in warning["remediation"]
 
 
