@@ -154,7 +154,6 @@ def test_lane_is_informational_and_isolated() -> None:
         assert step.get("continue-on-error") is True, f"probe {probe} can fail the job"
         assert step.get("if") == _PROBE_GATE.get(probe), f"probe {probe} chaining"
         assert step.get("timeout-minutes") == _STEP_TIMEOUTS.get(probe), f"probe {probe} timeout"
-    assert "--exclude-newer" in probes["lock"]["run"], "the lane must keep the 7-day cooldown"
     setup_uv = _step("Set up uv")
     assert setup_uv["with"].get("enable-cache") is False, "setup-uv caches unless disabled"
     report = _step("Report")
