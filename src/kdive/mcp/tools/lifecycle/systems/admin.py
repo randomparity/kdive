@@ -551,7 +551,8 @@ async def _teardown_locked(
         denial = await ordinary_teardown_denial(conn, ctx, system, system_id)
         if denial is not None:
             return denial
-        job = await queue.enqueue(
+        prior = await queue.get_by_dedup_key(conn, _teardown_dedup_key(uid))
+        job, changed = await queue.enqueue_with_status(
             conn,
             JobKind.TEARDOWN,
             TeardownPayload(system_id=str(uid)),
@@ -559,6 +560,9 @@ async def _teardown_locked(
             _teardown_dedup_key(uid),
             recycle=queue.JobRecyclePolicy.FAILED,
         )
+        # A recycle keeps the first enqueuer as `job.authorizing` (ADR-0447); audit the requester.
+        if prior is not None and changed:
+            await _audit_teardown_recycle(conn, ctx, system, job)
         envelope = job_envelope(job, "system_id", uid)
         if idempotency_key is not None:
             await record_envelope(
@@ -652,7 +656,7 @@ async def _route_settled_teardown(
         recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
     )
     if changed and audit_recycle:
-        await _audit_authority_recycle(conn, ctx, system, job)
+        await _audit_teardown_recycle(conn, ctx, system, job)
     envelope = job_envelope(job, "system_id", system.id)
     if idempotency_key is not None and not await _key_names_job(
         conn, ctx, idempotency_key, envelope.object_id
@@ -710,7 +714,7 @@ async def _enqueue_preactivation_authority_teardown(
             binding,
             job_authorizing(ctx, system.project),
             recycle=queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED,
-            on_recycle=partial(_audit_authority_recycle, conn, ctx, system),
+            on_recycle=partial(_audit_teardown_recycle, conn, ctx, system),
         )
     except CategorizedError as exc:
         if exc.category is not ErrorCategory.CONFLICT:
@@ -735,10 +739,10 @@ async def _enqueue_preactivation_authority_teardown(
     return envelope
 
 
-async def _audit_authority_recycle(
+async def _audit_teardown_recycle(
     conn: AsyncConnection, ctx: RequestContext, system: System, job: Job
 ) -> None:
-    """Record who asked for an authority teardown recycle, in the recycle's transaction.
+    """Record who asked for a teardown recycle, in the recycle's transaction.
 
     A recycled job keeps the ``authorizing`` principal of whoever first enqueued it (ADR-0447, with
     ADR-0435 and ADR-0620), so the requester would otherwise leave no trace. The recycling caller
@@ -894,7 +898,7 @@ async def _enqueue_authority_teardown(
     # requester is audited here. Break-glass is already recorded in `platform_audit_log`, and
     # its platform admin need not hold the System's project.
     if prior is not None and changed and audit_recycle:
-        await _audit_authority_recycle(conn, ctx, system, job)
+        await _audit_teardown_recycle(conn, ctx, system, job)
     envelope = job_envelope(job, "system_id", system.id)
     # A key already recorded for the replaced ordinary job names this same job row; recording it
     # again would raise and roll the replacement back behind a stale replay.
