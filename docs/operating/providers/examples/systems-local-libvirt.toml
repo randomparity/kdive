@@ -48,7 +48,8 @@ path = "/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2"
 # HOST — one local-libvirt resource on qemu:///system, reconciled into resources.
 #
 # Local-libvirt omits vcpus/memory_mb here: discovery probes the host's size ceiling and merges
-# it onto the row, so this overlay only sets name/cost_class/concurrent_allocation_cap.
+# it onto the row, so this overlay only sets name/cost_class/pool/concurrent_allocation_cap. It
+# binds by `host_uri` and renames the discovered row to `name`.
 # ---------------------------------------------------------------------------------------------
 [[local_libvirt]]
 name = "workstation"
