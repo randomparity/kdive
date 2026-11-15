@@ -29,7 +29,7 @@ search path, a probe assigning `inspect_get_mountpoints(...)` to `dict[str, str]
 
 The step sets `KDIVE_APT_TIMEOUT_S=180`: a healthy install of the package's 252-package
 closure took about 60 s in `ubuntu:26.04`, equal to the script's default budget, and `live.yml`
-already uses 180 s for a superset. The `checks` job's `timeout-minutes` rises from 20 to 30 to
+already uses 180 s for a superset. The `checks` job's `timeout-minutes` rises from 20 to 35 to
 hold the worst case of both bounded installs (three attempts each: about 17 min here plus about
 8 min for `libvirt-dev`).
 
@@ -104,7 +104,7 @@ Considered and rejected:
 - Guard test: `Mode: focused-test` — `tests/guards/test_ci_job_graph.py` asserts the step
   exists in `checks`, runs `./scripts/apt-install.sh python3-guestfs`, links `guestfs.py` into
   the venv purelib, checks `find_spec("guestfs")`, sets the 180 s apt budget, precedes
-  `Type check`, and that `checks` has `timeout-minutes` of at least 30. Red: removing the
+  `Type check`, and that `checks` has `timeout-minutes` of at least 35. Red: removing the
   step fails the test. Green: `just test-verbose tests/guards/test_ci_job_graph.py`.
 - CI behaviour: `Mode: task-test-not-applicable` locally — the binding path is the runner's;
   proven by Success 1 and 2 on real CI runs.

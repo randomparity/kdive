@@ -155,7 +155,7 @@ def test_type_check_sees_the_libguestfs_binding() -> None:
     assert 'ln -sfn "$wrapper" "$site/guestfs.py"' in run
     assert 'find_spec("guestfs") is None' in run
     assert expose["env"]["KDIVE_APT_TIMEOUT_S"] == "180"
-    assert _jobs()["checks"]["timeout-minutes"] >= 30
+    assert _jobs()["checks"]["timeout-minutes"] >= 35
 
 
 @pytest.mark.parametrize("fail_at", [None, 0, 4, 8, 9])

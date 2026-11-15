@@ -27,7 +27,7 @@ change (~25), one guard test (~20), two comment edits (~15).
 
 | File | Change |
 |---|---|
-| `.github/workflows/ci.yml` | `checks`: new step before `Type check`; `timeout-minutes` 20 → 30 |
+| `.github/workflows/ci.yml` | `checks`: new step before `Type check`; `timeout-minutes` 20 → 35 |
 | `tests/guards/test_ci_job_graph.py` | new test pinning the step |
 | `pyproject.toml` | ty override comment: libguestfs is visible in CI's type check; drgn is not |
 | `AGENTS.md` | ty bullet: same correction |
@@ -70,12 +70,12 @@ Steps:
        assert 'ln -sfn "$wrapper" "$site/guestfs.py"' in run
        assert 'find_spec("guestfs") is None' in run
        assert expose["env"]["KDIVE_APT_TIMEOUT_S"] == "180"
-       assert _jobs()["checks"]["timeout-minutes"] >= 30
+       assert _jobs()["checks"]["timeout-minutes"] >= 35
    ```
 
 2. Run `just test-verbose tests/guards/test_ci_job_graph.py`; expect the new test to fail
    with `StopIteration`.
-3. In `.github/workflows/ci.yml`, `checks` job: set `timeout-minutes: 30` and update its
+3. In `.github/workflows/ci.yml`, `checks` job: set `timeout-minutes: 35` and update its
    comment to name both bounded apt installs; insert immediately before `- name: Type check`:
 
    ```yaml

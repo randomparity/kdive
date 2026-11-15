@@ -42,9 +42,9 @@ jobs:
   checks:
     name: lint · type · guards
     runs-on: ubuntu-latest
-    # Holds both bounded apt installs' worst case (ADR-0566): about 8 minutes for libvirt-dev and
+    # Holds both bounded apt installs' worst case (ADR-0566): about 11 minutes for libvirt-dev and
     # about 17 for python3-guestfs at its 180 s budget, plus work and setup margin.
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
