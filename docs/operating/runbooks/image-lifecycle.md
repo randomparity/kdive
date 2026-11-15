@@ -323,7 +323,8 @@ To let a local-libvirt resource's guests install tools at runtime (ADR-0313, #10
    block binds to the discovery-created resource by its `host_uri`, and reconcile renames that
    resource to the block's `name` (read it back with `kdivectl resources list`, or the `resources`
    catalog). Provision-time lookup uses the allocated resource's name, which is therefore the
-   block's `name`, so a `name` that differs from the discovered one still gets egress. A `host_uri`
+   block's `name` once reconcile has applied the rename, so a `name` that differs from the
+   discovered one still gets egress. A `host_uri`
    that matches no discovered host is reported as an `overlay deferred` warning; the block applies
    nothing and egress stays off until discovery sees that host.
 2. Reconcile (`kdive reconcile-systems`, the deploy `migrate` step, or the reconciler loop).
