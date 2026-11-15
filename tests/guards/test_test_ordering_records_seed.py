@@ -256,5 +256,6 @@ def test_collection_order_recipe_fails_reproducibly_with_node_id_diff(tmp_path: 
     assert first.stdout == second.stdout
     assert "--- PYTHONHASHSEED=1" in first.stdout
     assert "+++ PYTHONHASHSEED=2" in first.stdout
-    assert "-test_hash_collection.py::test_value[" in first.stdout
-    assert "+test_hash_collection.py::test_value[" in first.stdout
+    # pytest's rootdir, and so the node-ID prefix, depends on where the checkout and basetemp live.
+    assert re.search(r"^-.*test_hash_collection\.py::test_value\[", first.stdout, re.M)
+    assert re.search(r"^\+.*test_hash_collection\.py::test_value\[", first.stdout, re.M)
