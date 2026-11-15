@@ -6,9 +6,8 @@
 6.1.4 (`podman machine`, libkrun), `podman info --format '{{.Host.RemoteSocket.Path}}'`
 returns a URI (`unix:///run/podman/podman.sock`), and `podman run --volume` rejects it
 (`invalid option type`). Without the prefix, the entry script stops at `stat: cannot statx
-'/var/run/docker.sock': Permission denied`: SELinux in the VM labels the socket. A third stop is host-specific: the VM
-shares only `/Users`, `/private` and `/var/folders`, so a git directory on another volume
-fails with `statfs <path>: no such file or directory`, which names no fix.
+'/var/run/docker.sock': Permission denied`: SELinux in the VM labels the socket. The VM shares only `/Users`,
+`/private` and `/var/folders`; a git directory elsewhere fails with a bare `statfs` error.
 
 ## Scope
 
@@ -16,9 +15,10 @@ Change only the `test-linux` recipe in `justfile`:
 
 1. Podman branch: remove a leading `unix://` from the socket path.
 2. Podman branch: add `--security-opt label=disable` to `run`. Docker gets no new flag.
-3. Both engines: before the suite run, a probe container mounts the git common directory
-   read-only. On failure the recipe exits 1 with `test-linux: <engine> cannot mount <dir>`
-   and the fix: share the path with the engine VM, or use a checkout under a shared path.
+3. Both engines: before the suite, a probe runs the test image with the same engine flags
+   and `--entrypoint test ... -r /repo/HEAD` on the read-only git mount. On failure the
+   recipe exits 1, names the git directory, and says to share it with the engine VM or
+   use a checkout under a shared path. The recipe comment drops "only Docker is verified".
 
 `tests/container/run-suite.sh` and the host gateway stay unchanged. Under rootless Podman
 the socket is `0:0 660` in the container, so `tester` joins group `root`; the runs prove it.
@@ -29,8 +29,7 @@ connections, the shared-path requirement, and the run results.
 
 - **Actors and deployments:** a developer on macOS with Docker Desktop or `podman machine`
   (rootless or rootful connection, selected by `CONTAINER_CONNECTION`).
-- **Invariants:** the Docker run keeps its flags; the recipe still tests a commit and never
-  writes into the checkout.
+- **Invariants:** Docker keeps its flags; the recipe tests a commit, never the checkout.
 - **Accepted failure classes:** the probe costs one extra container start per run. A mount
   failure from another cause also gets the shared-path message; the engine's own error line
   prints above it. `label=disable` disables SELinux separation only for this test container,
@@ -40,9 +39,9 @@ connections, the shared-path requirement, and the run results.
 ## Success
 
 On this host, `just test-linux` at the branch head exits 0 with Podman rootless
-(`CONTAINER_CONNECTION=podman-machine-default`), Podman rootful
-(`podman-machine-default-root`), and Docker Desktop. A run from a checkout on an unshared
-volume exits 1 with the message in Scope item 3.
+(`CONTAINER_CONNECTION=podman-machine-default`) and rootful (`podman-machine-default-root`)
+from a clone under a VM-shared path, and with Docker Desktop from the `/Volumes` worktree.
+A Podman run from that worktree exits 1 with the Scope 3 message.
 
 ## Validation
 
@@ -54,7 +53,7 @@ that logs its arguments. Green: `just test-verbose tests/scripts/test_test_linux
 - SELinux label (Scope 2): `focused-test` — Podman `run` has `label=disable`, Docker `run`
   does not; red today for Podman.
 - Shared-path probe (Scope 3): `focused-test` — a stub probe failure exits 1 with the
-  message and starts no suite run; red today (no probe).
+  message and no suite run; a passing probe goes on to the suite; red today (no probe).
 - Live behavior: the runs in Success.
 - Docs and ADR amendment: `task-test-not-applicable` — prose; `just docs-check` and
   `just records` cover links and record shape.
