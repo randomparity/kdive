@@ -31,7 +31,7 @@ The step sets `KDIVE_APT_TIMEOUT_S=180`: a healthy install of the package's 252-
 closure took about 60 s in `ubuntu:26.04`, equal to the script's default budget, and `live.yml`
 already uses 180 s for a superset. The `checks` job's `timeout-minutes` rises from 20 to 35 to
 hold the worst case of both bounded installs (three attempts each: about 17 min here plus about
-8 min for `libvirt-dev`).
+11 min for `libvirt-dev`) with work and setup margin.
 
 The step fails closed: if the package installs no wrapper at that path, or the venv
 interpreter cannot then locate the `guestfs` module, the step exits non-zero, so the job
