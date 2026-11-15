@@ -53,7 +53,7 @@ Steps:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, LiteralString
 from uuid import UUID
 
 import psycopg
@@ -75,7 +75,7 @@ def _routes(role_dsns: _RoleDsns, system_id: UUID) -> list[tuple[Any, ...]]:
         return conn.execute(_ROUTES, (system_id,)).fetchall()
 
 
-def _call(role_dsns: _RoleDsns, role: str, sql: str, args: tuple[Any, ...]) -> Any:
+def _call(role_dsns: _RoleDsns, role: str, sql: LiteralString, args: tuple[Any, ...]) -> Any:
     with psycopg.connect(role_dsns(role), autocommit=True) as conn:
         row = conn.execute(sql, args).fetchone()
     assert row is not None

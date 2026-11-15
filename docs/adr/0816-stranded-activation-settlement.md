@@ -213,6 +213,20 @@ No migration: 0194 already grants the worker and reconciler the settlement colum
   completed authority history, a behaviour change for genuine authority Systems this issue
   excludes.
 
+### Amendment (2026-11-14): the resolver refuses a settled System (#3598)
+
+This amendment qualifies the #3551 amendment's upgrade-order Consequence, which left "do not use
+the tool until every server is upgraded" as the only guard against an older server routing a
+settled System to the authority over its `retired` row.
+
+Migration 0197 re-creates `resolve_external_boot_system_teardown_dispatch_binding` so that a
+System whose newest activation has a settlement row with `settled_at` set has no route. The
+signature, owner and grants are unchanged. An older server now refuses that System's teardown with
+`external_boot_teardown_authority_unresolved` instead of enqueueing an authority teardown, so the
+fence no longer depends on upgrade order. An older server still cannot send a settled System to
+the worker, so the teardown needs an upgraded server; that is availability, not safety. The
+reconciler's place in the order is unchanged.
+
 ## Considered & rejected
 
 - **Do nothing and leave recovery to lease expiry.** verified: `reconcile` skips the allocation
