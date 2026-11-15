@@ -1,0 +1,155 @@
+name: Python 3.15 (informational)
+
+# Evaluates CPython 3.15 on linux/x86_64 without gating anything (ADR-0817, #3600). The project
+# pins 3.14 exactly, so the first step relaxes those pins in this job's checkout only — the
+# edit is never committed — and re-resolves with a uv that ships 3.15. Every probe is
+# continue-on-error; the Report step writes the outcomes, the versions uv forced and the
+# packages built from source to the job summary, and raises a warning per failed probe.
+# Contract tests that read pyproject.toml or uv.lock fail here by design: the relaxed copy is
+# not the committed one.
+
+on:
+  pull_request:
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - Dockerfile
+      - tests/container/Dockerfile
+      - .github/workflows/python-315.yml
+  schedule:
+    # Mondays 05:23 UTC.
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-315-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  python-315:
+    name: python 3.15 (informational)
+    runs-on: ubuntu-latest
+    # The apt script's ~11 minute worst case (ADR-0566), a cold 3.15 resolve and source builds,
+    # and the unsharded suite, plus margin.
+    timeout-minutes: 60
+    env:
+      UV_PYTHON: "3.15"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build headers
+        # libvirt-python always compiles against libvirt-dev; libffi-dev covers cffi when no
+        # cp315 wheel exists at the locked version. Bounded and retried (ADR-0566).
+        run: ./scripts/apt-install.sh libvirt-dev libffi-dev
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          # Lane-only: the repository's uv offers only a 3.15 beta (ADR-0817).
+          version: "0.13.8"
+          enable-cache: true
+          cache-suffix: py315
+
+      - name: Set up just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
+      - name: Relax the 3.14-only pins for this lane
+        run: |
+          mkdir -p "${RUNNER_TEMP:-/tmp}/lane"
+          if [[ -n ${GITHUB_ENV:-} ]]; then echo "LANE_LOGS=$RUNNER_TEMP/lane" >> "$GITHUB_ENV"; fi
+          pin='requires-python = "==3.14.*"'
+          if ! grep -qxF "$pin" pyproject.toml; then
+            echo "::error::pyproject.toml has no '$pin' line; update this lane's override" >&2
+            exit 1
+          fi
+          sed -E \
+            -e 's/^requires-python = "==3\.14\.\*"$/requires-python = ">=3.14"/' \
+            -e 's/^(  "[^"]+)==([^"]+",)$/\1>=\2/' \
+            pyproject.toml > pyproject.toml.new
+          mv pyproject.toml.new pyproject.toml
+          cat >> pyproject.toml <<'TOML'
+
+          [tool.uv]
+          required-environments = [
+            "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.15'",
+          ]
+          TOML
+          grep -nE '^requires-python|^\[tool\.uv\]' pyproject.toml
+
+      - name: Re-resolve for 3.15
+        id: lock
+        continue-on-error: true
+        run: uv lock 2>&1 | tee "$LANE_LOGS/lock.log"
+
+      - name: Sync
+        id: sync
+        if: steps.lock.outcome == 'success'
+        continue-on-error: true
+        run: uv sync --locked 2>&1 | tee "$LANE_LOGS/sync.log"
+
+      - name: Ruff (py315)
+        id: ruff
+        if: steps.sync.outcome == 'success'
+        continue-on-error: true
+        run: uv run --no-sync ruff check --target-version py315
+
+      - name: ty (3.15)
+        id: ty
+        if: steps.sync.outcome == 'success'
+        continue-on-error: true
+        run: uv run --no-sync ty check --python-version 3.15
+
+      - name: Test
+        id: test
+        if: steps.sync.outcome == 'success'
+        continue-on-error: true
+        env:
+          # A broken Docker daemon must not hide the db suite as skips (ADR-0015).
+          KDIVE_REQUIRE_DOCKER: "1"
+        run: just pull-test-images && just test
+
+      - name: Report
+        if: always()
+        env:
+          LOCK_OUTCOME: ${{ steps.lock.outcome }}
+          SYNC_OUTCOME: ${{ steps.sync.outcome }}
+          RUFF_OUTCOME: ${{ steps.ruff.outcome }}
+          TY_OUTCOME: ${{ steps.ty.outcome }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+        run: |
+          warnings=()
+          summary() {
+            echo "## Python 3.15 lane — linux/x86_64 (informational — never gates)"
+            echo
+            echo "| probe | outcome |"
+            echo "|---|---|"
+            for probe in lock sync ruff ty test; do
+              var="${probe^^}_OUTCOME"
+              outcome="${!var:-}"
+              echo "| $probe | ${outcome:-not run} |"
+              if [[ $outcome != success ]]; then
+                warnings+=("::warning title=Python 3.15 lane::$probe: ${outcome:-not run}")
+              fi
+            done
+            echo
+            echo "Forced version changes (uv lock):"
+            echo '```'
+            grep -E '^(Updated|Added|Removed) ' "${LANE_LOGS:-/nonexistent}/lock.log" 2>/dev/null || echo "(none)"
+            echo '```'
+            echo "Built from source (no cp315 wheel at the locked version):"
+            echo '```'
+            grep -E '^ *Built ' "${LANE_LOGS:-/nonexistent}/sync.log" 2>/dev/null || echo "(none)"
+            echo '```'
+          }
+          summary >> "$GITHUB_STEP_SUMMARY"
+          if ((${#warnings[@]})); then printf '%s\n' "${warnings[@]}"; fi

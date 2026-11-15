@@ -101,6 +101,26 @@ a target-native JRE. A first local build needs its base images and Maven depende
 not work offline without those cached inputs. A published-image override needs registry access.
 There is no separate native-JVM issuer step in the POWER host flow.
 
+## Python 3.15 lane
+
+[`python-315.yml`](../../.github/workflows/python-315.yml) evaluates CPython 3.15 on
+linux/x86_64 only; it does not cover ppc64le. It runs on pull requests that change
+`pyproject.toml`, `uv.lock`, either Dockerfile or the workflow itself, weekly on Mondays, and on
+manual dispatch. It never gates: it is not part of the required check, and every probe continues
+on error ([ADR-0817](../adr/0817-python-315-informational-lane.md)).
+
+The project pins 3.14 exactly, so the lane's first step relaxes `requires-python` and the exact
+`==` pins to `>=` in its own checkout and restricts resolution to linux/x86_64 on 3.15. The edit
+is never committed. If `pyproject.toml` no longer carries the `==3.14.*` pin, that step fails and
+names the line to update. The lane then runs five probes with uv `0.13.8`: `uv lock`,
+`uv sync --locked`, `ruff check --target-version py315`, `ty check --python-version 3.15` and
+`just test`. The job summary lists each probe's outcome, the versions `uv lock` changed and the
+packages built from source; each failed or skipped probe also raises a warning.
+
+Contract tests that read `pyproject.toml` or `uv.lock` fail in this lane by design, because they
+see the relaxed copy. Read test failures in two groups: those 3.14-contract tests, and genuine
+3.15 incompatibilities.
+
 ## Native POWER host integration
 
 Use the [live-stack runbook](../operating/runbooks/live-stack.md) for provisioning, fixtures,
