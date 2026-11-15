@@ -59,11 +59,12 @@ _ROOTFS = feature_requirement(ROOTFS_MOUNT)
 
 def test_advertised_clauses_read_the_advertise_set_not_the_empty_gate():
     # rootfs_mount has no gate_required, so unmet_clauses is always empty; the advisory path must
-    # read the advertised set instead. BTRFS_FS keeps the config non-degenerate while enabling no
-    # root filesystem kdive boots (#1626 made XFS_FS one, so it no longer serves that role here).
-    cfg = _all_builtin({"BTRFS_FS"})
+    # read the advertised set instead. F2FS_FS keeps the config non-degenerate while enabling no
+    # root filesystem kdive boots (#1626 made XFS_FS one and #3582 BTRFS_FS).
+    cfg = _all_builtin({"F2FS_FS"})
     assert unmet_clauses(cfg, _ROOTFS, arch=None) == ()
     assert missing_symbols(unmet_advertised_clauses(cfg, _ROOTFS)) == [
+        "BTRFS_FS",
         "EXT4_FS",
         "VIRTIO_BLK",
         "XFS_FS",
@@ -182,15 +183,15 @@ def test_built_in_required_names_the_modular_half_of_missing_and_nothing_else():
     feature = feature_requirement(ROOTFS_MOUNT)
     cfg = KernelConfig(frozenset({"VIRTIO_BLK"}), frozenset())
     unmet = unmet_advertised_clauses(cfg, feature)
-    assert missing_symbols(unmet) == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
+    assert missing_symbols(unmet) == ["BTRFS_FS", "EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
     assert built_in_required_symbols(cfg, unmet) == ["VIRTIO_BLK"]
 
 
 def test_built_in_required_is_empty_when_every_missing_symbol_is_absent_outright():
     feature = feature_requirement(ROOTFS_MOUNT)
-    cfg = _all_builtin({"BTRFS_FS"})
+    cfg = _all_builtin({"F2FS_FS"})
     unmet = unmet_advertised_clauses(cfg, feature)
-    assert missing_symbols(unmet) == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
+    assert missing_symbols(unmet) == ["BTRFS_FS", "EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
     assert built_in_required_symbols(cfg, unmet) == []
 
 

@@ -139,6 +139,26 @@ def test_split_jobs_carry_their_own_runtime_and_base_ref_prerequisites() -> None
     assert '"${BASE_SHA:-origin/main}"' in schema["run"]
 
 
+def test_type_check_sees_the_libguestfs_binding() -> None:
+    """Without the binding, a type error that needs its annotations passes CI (#3588)."""
+    checks = _jobs()["checks"]
+    steps = checks["steps"]
+    names = [step["name"] for step in steps]
+    expose = next(
+        s for s in steps if s["name"] == "Expose the libguestfs binding to the type check"
+    )
+    position = names.index(expose["name"])
+    assert names.index("Sync dependencies") < position < names.index("Type check")
+    run = expose["run"]
+    assert "./scripts/apt-install.sh python3-guestfs" in run
+    assert "wrapper=/usr/lib/python3/dist-packages/guestfs.py" in run
+    assert 'if [ ! -f "$wrapper" ]' in run
+    assert 'ln -sfn "$wrapper" "$site/guestfs.py"' in run
+    assert 'find_spec("guestfs") is None' in run
+    assert expose["env"]["KDIVE_APT_TIMEOUT_S"] == "180"
+    assert checks["timeout-minutes"] >= 35
+
+
 @pytest.mark.parametrize("fail_at", [None, 0, 4, 8, 9])
 def test_ansible_timings_preserve_failure_and_stop_later_harnesses(
     tmp_path: Path, fail_at: int | None
