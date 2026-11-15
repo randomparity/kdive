@@ -12,7 +12,8 @@ says nothing about whether 3.15 works or what blocks adopting it.
 A separate, non-gating workflow resolves the project for CPython 3.15 with the fewest version
 changes it can, installs it, and runs `ruff`/`ty` probes at the 3.15 target and the ordinary
 suite. It reports each probe's outcome, the forced version bumps, and the packages that had to
-build from source, in its job summary. The gating 3.14 lane, release images, and the
+build from source, in its job summary. The answer is for linux/x86_64 only;
+ppc64le, where cp315 wheel coverage is thinner, is not covered. The gating 3.14 lane, release images, and the
 repository's pins stay untouched.
 
 Decision record: [ADR-0817](../../adr/0817-python-315-informational-lane.md).

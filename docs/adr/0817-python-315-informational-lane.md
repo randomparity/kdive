@@ -32,7 +32,7 @@ and the source-built packages to the job summary and warns per failure.
 ## Consequences
 
 - The required check, the committed pins, `uv.lock` and the images are unchanged; the lane
-  answers "what would adopting 3.15 take" without touching what ships.
+  answers "what would adopting 3.15 take on linux/x86_64" without touching what ships.
 - Tests that read `pyproject.toml` or `uv.lock` fail in this lane by design, because they read
   the relaxed copy. Its findings must separate those from genuine 3.15 failures.
 - The job is green whenever its infrastructure works, so a reader must open its summary; a red
