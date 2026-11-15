@@ -227,6 +227,45 @@ fence no longer depends on upgrade order. An older server still cannot send a se
 the worker, so the teardown needs an upgraded server; that is availability, not safety. The
 reconciler's place in the order is unchanged.
 
+### Amendment (2026-11-14): settlement ends the exhausted boot job (#3596)
+
+This amendment narrows the Decision's "no queued or running authority-marked job" clause. A
+`runs.boot` that strands the System leaves its marked `boot` job `running` after its last
+attempt, and nothing ends it: the 0165 dead-letter sweep skips it while its authority row is
+`allocating` or `current` and no acknowledged-retry grant was spent. Settlement refused
+`job_live` until an operator ran `jobs.cancel`.
+
+Migration 0198 re-creates `settle_stranded_external_boot_activation` with the same signature,
+owner and grants. A marked `boot` job of the System and of the settled activation that is
+`running` with `attempt >= max_attempts`, a lapsed lease, and no claimable acknowledged-retry
+grant no longer refuses settlement. The function locks it with `NOWAIT`, refusing `job_live` when
+another transaction holds it. Only after every other check passes does it fail the job and its
+`created` or `running` Run with `lease_expired`, as the 0165 sweep does, and write one
+`platform_audit_log` row per job with scope `failed_job:<job-id>`. Every other queued or running
+marked job still refuses `job_live`, and a refusal still changes nothing.
+
+**Consequences.**
+
+- The settlement, which already acts as `platform_admin` with a reason, ends the job. The
+  reconciler's sweep and its 0165 acknowledged-retry bound are unchanged.
+- Neither the sweep nor settlement waits on a job row the other holds: the sweep skips locked
+  jobs and settlement refuses. A refusal caused by a lock clears on the next `settle`.
+
+**Considered & rejected.**
+
+- **Let the reconciler end it, amending the 0165 `CONTINUE` condition for the stranded shape.**
+  judgment: authority and scope. The sweep has no operator authority over an authority-marked
+  job, and changing that bound is a non-goal approved for #3596.
+- **Cancel through `jobs.cancel` from the tool before settling.** verified: `cancel_job` in
+  `src/kdive/mcp/tools/jobs.py` (main `e48eb0f78`) commits in its own transaction and never
+  touches the Run, so a later refusal would leave the job canceled and the Run running.
+- **Leave the job for the sweep after settlement supersedes its authority row.** judgment: fit.
+  The Run would stay `running` until a later reconciler pass, and settlement would still have to
+  stop counting the job as live.
+- **Copy the whole 0194 function body into 0198.** judgment: complexity. Three asserted
+  replacements of the stored definition, the pattern migration 0150 uses, keep the change
+  reviewable.
+
 ## Considered & rejected
 
 - **Do nothing and leave recovery to lease expiry.** verified: `reconcile` skips the allocation
