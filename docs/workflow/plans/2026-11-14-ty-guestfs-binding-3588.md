@@ -69,6 +69,8 @@ Steps:
        assert 'if [ ! -f "$wrapper" ]' in run
        assert 'ln -sfn "$wrapper" "$site/guestfs.py"' in run
        assert 'find_spec("guestfs") is None' in run
+       assert expose["env"]["KDIVE_APT_TIMEOUT_S"] == "180"
+       assert _jobs()["checks"]["timeout-minutes"] >= 30
    ```
 
 2. Run `just test-verbose tests/guards/test_ci_job_graph.py`; expect the new test to fail
@@ -78,7 +80,12 @@ Steps:
 
    ```yaml
          - name: Expose the libguestfs binding to the type check
-           # <why: ty needs the wrapper's annotations; wrapper only; fail closed; budget>
+           # ty reads the binding's annotations from its pure-Python wrapper; the C module is
+           # built for the distro interpreter and static checking never imports it, so only the
+           # wrapper is linked into the locked venv. Without it a binding-only type error passes
+           # here and fails on hosts that have the binding (#3588, PR #3576). Fails closed when
+           # the wrapper is absent. 180 s: the healthy install took ~60 s in ubuntu:26.04, the
+           # script's default budget; live.yml uses 180 s for a superset (ADR-0566).
            env:
              KDIVE_APT_TIMEOUT_S: "180"
            run: |
@@ -110,11 +117,15 @@ runner; the proof is the CI run itself (spec Success 1–2).
 2. Create throwaway branch `proof/ty-guestfs-3588` from the PR head. In
    `src/kdive/providers/local_libvirt/lifecycle/rootfs/baseline_kernel.py` replace
    `mountpoints = cast(dict[str, str], guest.inspect_get_mountpoints(roots[0]))` with
-   `mountpoints = guest.inspect_get_mountpoints(roots[0])`, commit
+   `mountpoints = guest.inspect_get_mountpoints(roots[0])`, and delete the now-unused
+   `from typing import cast` (line 17; otherwise ruff F401 fails `Lint` first), commit
    `test: inject a binding-only type error (proof, do not merge)`. Confirm `just type` passes
    locally (this host's venv has no binding, which is the defect being fixed).
 3. Push the branch (pre-push gate runs normally) and start `gh workflow run ci.yml --ref
-   proof/ty-guestfs-3588`. Expect `lint · type · guards` red at `Type check` with a ty
-   attribute diagnostic on `mountpoints.get` (the `list[tuple[str, str]]` arm has no `.get`).
-4. Record the run URL, then delete the remote and local proof branch.
+   proof/ty-guestfs-3588`. Expect `lint · type · guards` red with every step before `Type check`
+   green and `Type check` failing with `unresolved-attribute` on `mountpoints.get` (the
+   `list[tuple[str, str]]` arm has no `.get`); read this from the job's step list and log, not
+   the job conclusion alone.
+4. Record the run URL, cancel the rest of the run (`gh run cancel <id>`), then delete the remote
+   and local proof branch.
 5. Put both run URLs in the PR body.

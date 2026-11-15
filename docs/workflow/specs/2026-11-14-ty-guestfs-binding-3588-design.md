@@ -27,6 +27,12 @@ Verified on Fedora 44 (python3-libguestfs 1.60.1, ty 0.0.62): with only `guestfs
 search path, a probe assigning `inspect_get_mountpoints(...)` to `dict[str, str]` fails with
 `invalid-assignment`, and passes without the wrapper.
 
+The step sets `KDIVE_APT_TIMEOUT_S=180`: a healthy install of the package's 252-package
+closure took about 60 s in `ubuntu:26.04`, equal to the script's default budget, and `live.yml`
+already uses 180 s for a superset. The `checks` job's `timeout-minutes` rises from 20 to 30 to
+hold the worst case of both bounded installs (three attempts each: about 17 min here plus about
+8 min for `libvirt-dev`).
+
 The step fails closed: if the package installs no wrapper at that path, or the venv
 interpreter cannot then locate the `guestfs` module, the step exits non-zero, so the job
 cannot report a type check that ran without the binding.
@@ -36,7 +42,7 @@ state that libguestfs is absent from CI; both are corrected (drgn stays absent).
 itself is unchanged: the guestfs ignores are now unused in CI too, which
 `unused-ignore-comment = "ignore"` already tolerates, and they stay used on hosts without the
 binding. A guard test in `tests/guards/test_ci_job_graph.py` pins the step, its order before
-`Type check`, and its fail-closed checks.
+`Type check`, its fail-closed checks, its apt budget, and the job timeout.
 
 Considered and rejected:
 
@@ -85,17 +91,20 @@ Considered and rejected:
 ## Success
 
 1. On a CI run of the PR head, the `checks` job's new step succeeds and `Type check` passes.
-2. On a CI run with a deliberately injected binding-only type error (assigning
-   `guest.inspect_get_mountpoints(...)` to `dict[str, str]` without the `cast` in
-   `baseline_kernel.py`), `Type check` fails with `invalid-assignment`; the fault commit is
-   then reverted. The run URLs are reported.
+2. On a CI run with a deliberately injected binding-only type error (the `cast` removed from
+   `mountpoints = cast(dict[str, str], guest.inspect_get_mountpoints(...))` in
+   `baseline_kernel.py`, together with the then-unused `from typing import cast`), every step
+   before `Type check` succeeds and `Type check` fails with `unresolved-attribute` on
+   `mountpoints.get` (`list[tuple[str, str]]` has no `get`). The proof branch is not merged; its
+   run URL is reported.
 3. `just type` is still the only gating type step, and the guard test passes.
 
 ## Validation
 
 - Guard test: `Mode: focused-test` — `tests/guards/test_ci_job_graph.py` asserts the step
   exists in `checks`, runs `./scripts/apt-install.sh python3-guestfs`, links `guestfs.py` into
-  the venv purelib, checks `find_spec("guestfs")`, and precedes `Type check`. Red: removing the
+  the venv purelib, checks `find_spec("guestfs")`, sets the 180 s apt budget, precedes
+  `Type check`, and that `checks` has `timeout-minutes` of at least 30. Red: removing the
   step fails the test. Green: `just test-verbose tests/guards/test_ci_job_graph.py`.
 - CI behaviour: `Mode: task-test-not-applicable` locally — the binding path is the runner's;
   proven by Success 1 and 2 on real CI runs.
