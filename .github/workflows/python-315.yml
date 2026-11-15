@@ -98,7 +98,11 @@ jobs:
         id: lock
         continue-on-error: true
         timeout-minutes: 10
-        run: uv lock 2>&1 | tee "$LANE_LOGS/lock.log"
+        # The relaxed pins let uv take releases nobody reviewed; hold them to the same 7-day
+        # cooldown dependabot.yml applies, so a release published minutes ago never runs here.
+        run: |
+          cutoff="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          uv lock --exclude-newer "$cutoff" 2>&1 | tee "$LANE_LOGS/lock.log"
 
       - name: Sync
         id: sync

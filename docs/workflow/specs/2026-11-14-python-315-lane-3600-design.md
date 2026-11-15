@@ -93,7 +93,9 @@ to bypass. No change to `Dockerfile`s, `requires-python`, or ruff/ty targets (ex
    reviewed by nobody, can enter the relaxed resolution and run its build on the runner.
 2. **Invariants and assets at stake** — the required check's verdict and the 3.14 contract
    (`pyproject.toml`, `uv.lock`, images) on `main`; runner minutes; the runner itself, which
-   holds a `contents: read` token, no secrets, and (`enable-cache: false`) no Actions cache.
+   holds a `contents: read` token and no secrets. `enable-cache: false` stops setup-uv's save
+   only; schedule/dispatch runs share the default branch's cache scope. `uv lock
+   --exclude-newer` (7 days, matching `.github/dependabot.yml`) bounds how fresh a release can be.
 3. **Accepted failure classes**
    - Contract tests that read `pyproject.toml`/`uv.lock` (the relaxed copy) fail by design; the
      findings classify them, they do not gate.
