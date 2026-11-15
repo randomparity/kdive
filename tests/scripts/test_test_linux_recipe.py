@@ -123,8 +123,15 @@ def test_worker_cap_fits_a_small_engine_vm(tmp_path: Path) -> None:
     result, calls = _run_recipe(tmp_path, "podman", memory=str(3782492160))
 
     assert result.returncode == 0, result.stderr
-    assert _suite_args(calls) == ["--maxprocesses=2"]
-    assert "podman has 3607 MiB; at most 2 xdist workers" in result.stderr
+    assert _suite_args(calls) == ["--maxprocesses=1"]
+    assert "podman has 3607 MiB; at most 1 xdist workers" in result.stderr
+
+
+def test_worker_cap_scales_with_engine_memory(tmp_path: Path) -> None:
+    result, calls = _run_recipe(tmp_path, "podman", memory=str(8 * 1024**3))
+
+    assert result.returncode == 0, result.stderr
+    assert _suite_args(calls) == ["--maxprocesses=4"]
 
 
 def test_worker_cap_stays_at_eight_with_enough_memory(tmp_path: Path) -> None:
@@ -169,4 +176,4 @@ def test_other_arguments_keep_the_memory_cap(tmp_path: Path) -> None:
     result, calls = _run_recipe(tmp_path, "podman", "-k", "retry", memory=str(3782492160))
 
     assert result.returncode == 0, result.stderr
-    assert _suite_args(calls) == ["--maxprocesses=2", "-k", "retry"]
+    assert _suite_args(calls) == ["--maxprocesses=1", "-k", "retry"]
