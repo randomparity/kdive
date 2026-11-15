@@ -24,7 +24,7 @@ dispatch. It never runs on `push` and no `ci.yml` job depends on it.
 Within its own checkout only, the job relaxes `requires-python` to `>=3.14` and every `==`
 list pin to `>=`, and appends `[tool.uv] required-environments` for linux/x86_64/3.15. `uv
 lock` then keeps every locked version as a preference and moves only packages with no
-installable cp315 artifact — the minimal bump set. The job installs with uv `0.13.8` and runs
+installable cp315 artifact — the minimal bump set. The job installs with uv `0.13.6` and runs
 `lock`, `sync`, `ruff --target-version py315`, `ty --python-version 3.15` and `just test` as
 `continue-on-error` probes. An always-green report step writes their outcomes, the forced bumps
 and the source-built packages to the job summary and warns per failure.
@@ -38,7 +38,12 @@ and the source-built packages to the job summary and warns per failure.
 - The job is green whenever its infrastructure works, so a reader must open its summary; a red
   run means the lane itself broke.
 - Packages lacking cp315 wheels with an sdist (cffi, pydantic-core, grpcio at today's locks)
-  build from source, costing minutes on a cold cache; the uv cache and the trigger set bound it.
+  build from source, costing minutes on every run: the lane keeps no uv cache, and the trigger
+  set bounds the cost.
+- Relaxed `>=` pins let `uv lock` take releases nobody reviewed for packages lacking cp315
+  artifacts, and their sdists are built and executed on the runner. The exposure is a
+  compromised upstream release reaching a runner that holds only a `contents: read` token, no
+  secrets and no cache, in a job no required check depends on.
 - The lane uses a newer uv than the rest of CI. Nothing it produces is committed, so the skew
   cannot reach a lockfile.
 

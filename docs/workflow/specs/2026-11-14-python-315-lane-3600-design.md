@@ -33,7 +33,7 @@ No `push` trigger. `permissions: contents: read`. Its own `concurrency` group wi
 `cancel-in-progress`. It is in no `needs:` of `ci.yml`, so the required `lint · type · test`
 check cannot see it.
 
-**Interpreter.** setup-uv at uv `0.13.8` (the repository pins `0.11.18`, whose download index
+**Interpreter.** setup-uv at uv `0.13.6` (the newest in that action release's pinned checksum table) (the repository pins `0.11.18`, whose download index
 offers only `3.15.0b1`; `0.13.x` offers `3.15.0`–`3.15.2`). `UV_PYTHON: "3.15"` is set at job
 level; uv downloads the managed interpreter. No `actions/setup-python`.
 
@@ -89,9 +89,11 @@ to bypass. No change to `Dockerfile`s, `requires-python`, or ruff/ty targets (ex
 
 1. **Actors and deployments** — GitHub Actions on `ubuntu-latest` x86_64, triggered by a
    same-repo or Dependabot PR touching the path filter, the weekly schedule, or a maintainer's
-   dispatch. Fork PRs run with the read-only token like `ci.yml`.
+   dispatch. Fork PRs run with the read-only token like `ci.yml`. An upstream PyPI release,
+   reviewed by nobody, can enter the relaxed resolution and run its build on the runner.
 2. **Invariants and assets at stake** — the required check's verdict and the 3.14 contract
-   (`pyproject.toml`, `uv.lock`, images) on `main`; runner minutes.
+   (`pyproject.toml`, `uv.lock`, images) on `main`; runner minutes; the runner itself, which
+   holds a `contents: read` token, no secrets, and (`enable-cache: false`) no Actions cache.
 3. **Accepted failure classes**
    - Contract tests that read `pyproject.toml`/`uv.lock` (the relaxed copy) fail by design; the
      findings classify them, they do not gate.

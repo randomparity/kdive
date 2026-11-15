@@ -60,9 +60,13 @@ jobs:
         with:
           # Lane-only: the repository's uv offers only a 3.15 beta (ADR-0817).
           # Repo-wide pin is 0.11.18 (ci.yml); converge once that pin offers 3.15 final.
-          version: "0.13.8"
-          # No cache: a cached source-built wheel installs without a `Built` line, so only a
-          # cold sync makes the Report's source-build list this run's real builds.
+          # 0.13.6 is the newest uv in this setup-uv release's pinned checksum table, so the
+          # download is verified against the action SHA rather than a runtime manifest.
+          version: "0.13.6"
+          # setup-uv caches by default on hosted runners. Off: a run builds sdists from unreviewed
+          # releases, which must not persist into a cache, and a cached source-built wheel
+          # installs without a `Built` line, so only a cold sync lists this run's real builds.
+          enable-cache: false
 
       - name: Set up just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
