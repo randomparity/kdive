@@ -26,8 +26,8 @@ base.
 3. **On pass only:** in `docs/operating/runbooks/live-testing.md` (fixture section) and
    `docs/operating/runbooks/remote-live-stack.md` (Prerequisites), replace the "no kernel
    preflight names the btrfs driver" sentences with the fact that the spine preflight names
-   `CONFIG_BTRFS_FS=y` only when called with `root_fs="btrfs"`, and that no shipped caller passes it. Keep the
-   rebuild-into-a-fresh-directory guidance.
+   `CONFIG_BTRFS_FS=y` only when called with `root_fs="btrfs"`, and that no shipped caller
+   passes it. Keep the rebuild-into-a-fresh-directory guidance.
 4. **On fail:** record the cause in an issue comment and in the PR carrying the design
    artifacts; no `spine.py` or runbook edit.
 
