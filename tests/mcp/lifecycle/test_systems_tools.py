@@ -1802,6 +1802,41 @@ def test_teardown_recycles_dead_lettered_ordinary_job(
     asyncio.run(_run())
 
 
+def test_ordinary_recycle_keeps_first_principal_and_audits_requester(migrated_url: str) -> None:
+    """#3589, ADR-0447: an ordinary recycle keeps `authorizing`; the recycler gets one audit row."""
+
+    async def _run() -> None:
+        second = replace(ctx(Role.ADMIN), principal="user-2")
+        async with systems_support.pool(migrated_url) as pool:
+            system_id, job_id = await _ordinary_teardown_job(pool, SystemState.FAILED)
+            first_rows = await _recycle_audit_principals(pool, system_id)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET state = 'failed', attempt = max_attempts, "
+                    "error_category = 'infrastructure_failure' WHERE id = %s",
+                    (job_id,),
+                )
+            recycled = await _teardown(pool, second, system_id)
+            async with pool.connection() as conn:
+                row = await (await conn.execute(_JOB_PRINCIPAL_SQL, (job_id,))).fetchone()
+                audit = await (
+                    await conn.execute(
+                        "SELECT args_digest FROM audit_log WHERE transition = "
+                        "'teardown:recycled' AND object_id = %s",
+                        (UUID(system_id),),
+                    )
+                ).fetchall()
+            rows = await _recycle_audit_principals(pool, system_id)
+
+        assert first_rows == []
+        assert recycled.object_id == job_id
+        assert row == ("user-1",)
+        assert rows == ["user-2"]
+        assert audit == [(args_digest({"system_id": system_id, "job_id": job_id}),)]
+
+    asyncio.run(_run())
+
+
 @pytest.mark.parametrize("prior", ["queued", "running", "running-lapsed", "succeeded", "canceled"])
 def test_teardown_replays_live_or_settled_ordinary_job(migrated_url: str, prior: str) -> None:
     """#2929: only a failed ordinary teardown is re-run; live and settled jobs replay."""
@@ -1817,12 +1852,14 @@ def test_teardown_replays_live_or_settled_ordinary_job(migrated_url: str, prior:
                     await conn.execute("UPDATE jobs SET state = %s WHERE id = %s", (prior, job_id))
                 before = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
             response = await _teardown(pool, ctx(Role.ADMIN), system_id)
+            audited = await _recycle_audit_principals(pool, system_id)
             async with pool.connection() as conn:
                 after = await (await conn.execute(_JOB_COLUMNS, (job_id,))).fetchone()
 
         assert response.object_id == job_id
         assert before is not None and after == before
         assert response.status == before[0]
+        assert audited == []
 
     asyncio.run(_run())
 
