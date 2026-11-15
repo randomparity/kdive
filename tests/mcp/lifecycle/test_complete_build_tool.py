@@ -1192,7 +1192,7 @@ def test_a_modular_boot_kernel_with_no_initrd_completes_with_the_boot_config_war
             )
         assert first.status == "succeeded", first
         warning = cast(dict[str, Any], first.data["missing_boot_config"])
-        assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
+        assert warning["missing"] == ["BTRFS_FS", "EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
         assert warning["built_in_required"] == ["EXT4_FS", "VIRTIO_BLK"]
         assert "=y" in cast(str, warning["remediation"])
         assert first.refs["external_build_contract"] == EXTERNAL_BUILD_CONTRACT_URI
@@ -1263,7 +1263,7 @@ def test_the_direct_kernel_lanes_still_warn_on_the_same_modular_kernel(
                 )
                 assert resp.status == "succeeded", resp
                 warning = cast(dict[str, Any], resp.data["missing_boot_config"])
-                assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"], kind
+                assert warning["missing"] == ["BTRFS_FS", "EXT4_FS", "VIRTIO_BLK", "XFS_FS"], kind
                 assert warning["built_in_required"] == ["EXT4_FS", "VIRTIO_BLK"], kind
 
     asyncio.run(_run())
