@@ -604,7 +604,7 @@ class LocalExternalBootAuthorityAdapter:
         point = self._resolve_point(
             binding, authority, allow_cleanup_receipt=operation in _DELETING_OPERATIONS
         )
-        if point is None and request.operation in _DELETING_OPERATIONS:
+        if point is None and operation in _DELETING_OPERATIONS:
             point = self._pending_cleanup_finalization.get(context.operation_identity)
         if point is None and operation is AuthorityOperation.TEARDOWN:
             if not request.recovery_objects:
