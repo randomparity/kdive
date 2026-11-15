@@ -121,8 +121,8 @@ def test_worker_cap_fits_a_small_engine_vm(tmp_path: Path) -> None:
     result, calls = _run_recipe(tmp_path, "podman", memory=str(3782492160))
 
     assert result.returncode == 0, result.stderr
-    assert _suite_args(calls) == ["--maxprocesses=3"]
-    assert "podman has 3607 MiB; at most 3 xdist workers" in result.stderr
+    assert _suite_args(calls) == ["--maxprocesses=2"]
+    assert "podman has 3607 MiB; at most 2 xdist workers" in result.stderr
 
 
 def test_worker_cap_stays_at_eight_with_enough_memory(tmp_path: Path) -> None:
@@ -153,4 +153,4 @@ def test_explicit_worker_arguments_follow_the_computed_cap(tmp_path: Path) -> No
     )
 
     assert result.returncode == 0, result.stderr
-    assert _suite_args(calls) == ["--maxprocesses=3", "--maxprocesses=6", "tests/jobs"]
+    assert _suite_args(calls) == ["--maxprocesses=2", "--maxprocesses=6", "tests/jobs"]

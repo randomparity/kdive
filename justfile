@@ -236,11 +236,12 @@ test-linux $sha="HEAD" *ARGS:
         exit 2
         ;;
     esac
-    # Each xdist worker peaks near 600 MiB, and the engine VM also holds the test backends.
-    # Keep 1 GiB for them and 800 MiB per worker, at most 8 (the shared PostgreSQL lock limit).
+    # An xdist worker grows to about 760 MiB, and the pytest controller, PostgreSQL and
+    # SeaweedFS take about 1.2 GiB in the engine VM. Keep 1.5 GiB for them and 1 GiB per
+    # worker, at most 8 (the shared PostgreSQL lock limit).
     memory="$("$engine" info --format "$memory_format" 2>/dev/null)" || memory=""
     if [[ $memory =~ ^[0-9]+$ ]]; then
-      workers=$(((memory / 1048576 - 1024) / 800))
+      workers=$(((memory / 1048576 - 1536) / 1024))
       workers=$((workers < 1 ? 1 : workers > 8 ? 8 : workers))
       echo "test-linux: $engine has $((memory / 1048576)) MiB; at most $workers xdist workers" >&2
     else
