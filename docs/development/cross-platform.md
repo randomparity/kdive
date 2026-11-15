@@ -110,8 +110,9 @@ manual dispatch. It never gates: it is not part of the required check, and every
 on error ([ADR-0817](../adr/0817-python-315-informational-lane.md)).
 
 The project pins 3.14 exactly, so the lane's first step relaxes `requires-python` and the exact
-`==` pins to `>=` in its own checkout and restricts resolution to linux/x86_64 on 3.15. The edit
-is never committed. If `pyproject.toml` no longer carries the `==3.14.*` pin, that step fails and
+`==` pins to `>=` in its own checkout and requires installable artifacts for linux/x86_64 on
+3.15. The lock stays universal, so a forced bump can appear as a fork such as
+`v3.3.4 -> v3.3.4, v3.3.9`. The edit is never committed. If `pyproject.toml` no longer carries the `==3.14.*` pin, that step fails and
 names the line to update. The lane then runs five probes with uv `0.13.8`: `uv lock`,
 `uv sync --locked`, `ruff check --target-version py315`, `ty check --python-version 3.15` and
 `just test`; `lock`, `sync` and `test` have step timeouts, so a hang shows as that probe's
