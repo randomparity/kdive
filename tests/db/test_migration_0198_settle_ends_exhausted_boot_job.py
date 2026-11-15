@@ -56,16 +56,33 @@ def _rows(migrated_url: str, stranded: _Stranded) -> tuple[Any, ...]:
     return row
 
 
+@pytest.mark.parametrize("run_state", ["created", "running"])
 def test_settlement_fails_the_exhausted_job_and_its_run(
-    migrated_url: str, authority_role_dsns: _RoleDsns
+    migrated_url: str, authority_role_dsns: _RoleDsns, run_state: str
 ) -> None:
     stranded = _exhausted(migrated_url, authority_role_dsns)
+    case = stranded.case
+    with psycopg.connect(migrated_url) as conn:
+        conn.execute("UPDATE runs SET state = %s WHERE id = %s", (run_state, case.run_id))
 
-    assert _settle(authority_role_dsns, stranded.case.activation_id) == "applied"
+    assert _settle(authority_role_dsns, case.activation_id) == "applied"
 
     ended = _rows(migrated_url, stranded)
     assert ended[:2] + ended[4:] == ("failed", "lease_expired", "failed", "lease_expired", 1)
-    assert _settle(authority_role_dsns, stranded.case.activation_id) == "replayed"
+    with psycopg.connect(migrated_url) as conn:
+        audit = conn.execute(
+            "SELECT principal, agent_session, platform_role, tool, actor FROM platform_audit_log "
+            "WHERE scope = %s",
+            (f"failed_job:{case.job_id}",),
+        ).fetchone()
+    assert audit == (
+        "admin",
+        "session",
+        "platform_admin",
+        "external_boot.settle_stranded_activation",
+        "operator-cli",
+    )
+    assert _settle(authority_role_dsns, case.activation_id) == "replayed"
     assert _rows(migrated_url, stranded)[-1] == 1
 
 
@@ -102,7 +119,11 @@ def test_a_held_job_or_a_refusal_changes_nothing(
 def test_a_claimable_grant_keeps_the_job_live(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
-    """An unconsumed acknowledged-retry grant lets a worker claim the job again (0150)."""
+    """An unconsumed acknowledged-retry grant lets a worker claim the job again (0150).
+
+    Settlement only consults the predicate; building a real grant needs an acknowledged journal
+    head, which `test_external_boot_authority_journal_migration.py` already covers for 0165.
+    """
     stranded = _exhausted(migrated_url, authority_role_dsns)
     # The predicate is private to definer functions; stand it in for one transaction, rolled
     # back, so no other test sees it. A superuser session passes the server-role check.
