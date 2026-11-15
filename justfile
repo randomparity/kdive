@@ -216,8 +216,17 @@ test-linux $sha="HEAD" *ARGS:
     set -euo pipefail
     engine="${CONTAINER_ENGINE:-docker}"
     case "$engine" in
-      docker) socket=/var/run/docker.sock ;;
-      podman) socket="$(podman info --format '{{{{.Host.RemoteSocket.Path}}')" ;;
+      docker)
+        socket=/var/run/docker.sock
+        engine_args=()
+        ;;
+      podman)
+        # `podman machine` reports the socket as a URI, and SELinux in its VM denies the
+        # socket to a labeled container.
+        socket="$(podman info --format '{{{{.Host.RemoteSocket.Path}}')"
+        socket="${socket#unix://}"
+        engine_args=(--security-opt label=disable)
+        ;;
       *)
         echo "test-linux: CONTAINER_ENGINE must be docker or podman, not '$engine'" >&2
         exit 2
@@ -229,7 +238,13 @@ test-linux $sha="HEAD" *ARGS:
     fi
     common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
     "$engine" build --quiet --tag kdive-test-linux tests/container >/dev/null
-    exec "$engine" run --rm --init \
+    if ! "$engine" run --rm "${engine_args[@]}" --volume "$common_dir:/repo:ro" \
+      --entrypoint test kdive-test-linux -r /repo/HEAD; then
+      echo "test-linux: $engine cannot read the git directory $common_dir in a container;" \
+        "share that path with the engine VM, or run from a checkout under a shared path" >&2
+      exit 1
+    fi
+    exec "$engine" run --rm --init "${engine_args[@]}" \
       --volume "$common_dir:/repo:ro" \
       --volume "$socket:/var/run/docker.sock" \
       --volume kdive-test-linux-uv-cache:/home/tester/.cache/uv \
