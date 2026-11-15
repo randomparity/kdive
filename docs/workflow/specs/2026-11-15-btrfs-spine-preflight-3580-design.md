@@ -26,9 +26,10 @@ base.
 3. **On pass only:** in `docs/operating/runbooks/live-testing.md` (fixture section) and
    `docs/operating/runbooks/remote-live-stack.md` (Prerequisites), replace the "no kernel
    preflight names the btrfs driver" sentences with the fact that the spine preflight names
-   `CONFIG_BTRFS_FS=y` when called with `root_fs="btrfs"`. Keep the rebuild-into-a-fresh-
-   directory guidance.
-4. **On fail:** record the cause on the issue and in the PR; no `spine.py` or runbook edit.
+   `CONFIG_BTRFS_FS=y` only when called with `root_fs="btrfs"`, and that no shipped caller passes it. Keep the
+   rebuild-into-a-fresh-directory guidance.
+4. **On fail:** record the cause in an issue comment and in the PR carrying the design
+   artifacts; no `spine.py` or runbook edit.
 
 ## Failure model
 
@@ -38,7 +39,10 @@ base.
   unchanged; an unknown `root_fs` is still refused.
 - **Accepted failure classes:** a kernel with btrfs only as a module (`=m`) is refused, the
   same rule as ext4/xfs, because the spine boots without a module-loading initrd guarantee.
-  Callers that do not pass `root_fs="btrfs"` gain nothing; wiring callers is out of scope.
+  Callers that do not pass `root_fs="btrfs"` gain nothing; no shipped caller passes it, and the
+  remote authority cell does not run this preflight; wiring callers is out of scope.
+  `root_fs="btrfs"` with `arch="ppc64le"` keeps the unchanged ppc64le ext4 check (as `xfs`
+  does today); the btrfs branch serves x86_64 callers.
 - **Covered elsewhere:** product-side kernel_config advisory for btrfs (#3582); nftables
   loopback proof (#3581).
 

@@ -18,12 +18,14 @@ Expected implementation size: 25–40 changed lines (S) — one branch plus one 
 ## Task 0: live cell (lab, no repository change)
 
 Run `tests/integration/test_authority_vmlinux_live.py` on the remote authority lane with
-`KDIVE_KERNEL_SRC` set to a fresh `scripts/kernel_fixtures.py build --baseline longterm --arch
-x86_64` output, against the staged Fedora 44 cloud base (btrfs root). Expected: `1 passed`, and a
+`KDIVE_KERNEL_SRC` set to the output of `python3 scripts/kernel_fixtures.py build --baseline
+longterm --arch x86_64 --source <new dir> --output <new dir> --jobs <n>`, against the staged
+Fedora 44 cloud base; confirm its btrfs root first with `virt-filesystems -a <base> --filesystems`. Expected: `1 passed`, and a
 `vmlinux-staging-observed` line whose `kernel_release` is the fixture release. Also run the
 branch's preflight against a copy of that tree's `.config` with `root_fs="btrfs"` (expect bytes
 returned) and with `BTRFS_FS` unset (expect `SpinePhaseError` naming `CONFIG_BTRFS_FS=y`).
-Cleanup: release everything, roll both lab guests back to their pre-run snapshot.
+Cleanup: release everything, roll both lab guests back to their pre-run snapshot outside the
+nightly backup window. On failure, record the cause in an issue comment and the PR.
 
 ## Task 1: preflight accepts btrfs
 
@@ -35,8 +37,8 @@ str, *, ..., root_fs: str | None = None) -> bytes` and `SpinePhaseError` (both e
 
 Verification:
 - Contract "btrfs accepted, driver named; unknown still refused" — `Mode: focused-test`;
-  test `test_spine_config_names_btrfs_for_btrfs_root`; red: `SpinePhaseError` "unsupported guest
-  root filesystem 'btrfs'" escapes the first assertion; green:
+  test `test_spine_config_names_btrfs_for_btrfs_root`; red: the first `pytest.raises` fails with
+  an `AssertionError` that its pattern did not match "unsupported guest root filesystem 'btrfs'"; green:
   `just test-verbose tests/integration/live_stack/test_spine.py` all pass.
 
 Steps:
@@ -79,10 +81,10 @@ Verification:
 Steps:
 1. live-testing.md: replace "the boot job ends `boot_timeout` with no named cause, because no
    kernel preflight names the btrfs driver (#3519)." with "the boot job ends `boot_timeout`.
-   The spine preflight names `CONFIG_BTRFS_FS=y` when its caller passes `root_fs=\"btrfs\"`
-   (#3580)."
+   The spine preflight names `CONFIG_BTRFS_FS=y` only when its caller passes `root_fs="btrfs"`
+   (#3580); no shipped caller does yet."
 2. remote-live-stack.md: replace "On a kernel that has ext4, no preflight names a missing btrfs
-   or XFS driver: the boot job ends `boot_timeout`." with "A kernel without the guest root's
-   driver ends `boot_timeout`; the spine preflight names it only for a caller that passes the
-   matching `root_fs` (`ext4`, `xfs` or `btrfs`)."
+   or XFS driver: the boot job ends `boot_timeout`." with "A kernel without the driver ends
+   `boot_timeout`. The spine preflight names `CONFIG_BTRFS_FS=y` only when its caller passes
+   `root_fs="btrfs"`; no shipped caller does yet, and the remote authority cell does not run it."
 3. Run `just docs-links` and `just docs-paths`; expect exit 0. Commit `docs(live): state the btrfs preflight (#3580)`.
