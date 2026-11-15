@@ -124,6 +124,10 @@ def test_a_locked_job_refuses_without_waiting(
     stranded = _exhausted(migrated_url, authority_role_dsns)
     with psycopg.connect(migrated_url) as holder:
         holder.execute("SELECT 1 FROM jobs WHERE id = %s FOR UPDATE", (stranded.case.job_id,))
-        assert _settle(authority_role_dsns, stranded.case.activation_id) == "job_live"
+        # A settlement that waited would raise LockNotAvailable here instead of hanging.
+        with psycopg.connect(authority_role_dsns("kdive_server"), autocommit=True) as conn:
+            conn.execute("SET lock_timeout = '2s'")
+            row = conn.execute(_SETTLE, (stranded.case.activation_id, *_SETTLE_ARGS)).fetchone()
         holder.rollback()
+    assert row == ("job_live",)
     assert _rows(migrated_url, stranded)[0] == "running"
