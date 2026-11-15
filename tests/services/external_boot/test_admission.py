@@ -330,10 +330,11 @@ def test_an_owned_preparing_denial_keeps_the_plain_teardown_hint(
 def test_release_hint_names_teardown_only_where_the_matrix_admits_it(
     monkeypatch: pytest.MonkeyPatch, state: ExternalBootActivationState
 ) -> None:
+    _authority_owned(monkeypatch, owned=False)
     denied = _denial(monkeypatch, state, _OP.ALLOCATION_RELEASE)
     teardown_admitted = state in _ADMITTING_STATES[_OP.SYSTEM_TEARDOWN]
     assert ("systems.teardown" in str(denied)) is teardown_admitted
-    stranded = state is _STATE.PREPARING  # the helper's default System is unowned
+    stranded = state is _STATE.PREPARING  # an unowned System is the stranded shape
     assert ("systems.teardown" in denied.next_actions) is (teardown_admitted and not stranded)
     assert f"activation is {state.value}" in str(denied)
 
