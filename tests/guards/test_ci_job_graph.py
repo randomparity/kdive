@@ -141,7 +141,8 @@ def test_split_jobs_carry_their_own_runtime_and_base_ref_prerequisites() -> None
 
 def test_type_check_sees_the_libguestfs_binding() -> None:
     """Without the binding, a type error that needs its annotations passes CI (#3588)."""
-    steps = _jobs()["checks"]["steps"]
+    checks = _jobs()["checks"]
+    steps = checks["steps"]
     names = [step["name"] for step in steps]
     expose = next(
         s for s in steps if s["name"] == "Expose the libguestfs binding to the type check"
@@ -155,7 +156,7 @@ def test_type_check_sees_the_libguestfs_binding() -> None:
     assert 'ln -sfn "$wrapper" "$site/guestfs.py"' in run
     assert 'find_spec("guestfs") is None' in run
     assert expose["env"]["KDIVE_APT_TIMEOUT_S"] == "180"
-    assert _jobs()["checks"]["timeout-minutes"] >= 35
+    assert checks["timeout-minutes"] >= 35
 
 
 @pytest.mark.parametrize("fail_at", [None, 0, 4, 8, 9])
