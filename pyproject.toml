@@ -92,13 +92,15 @@ python-platform = "linux"
 
 [[tool.ty.overrides]]
 # drgn and libguestfs are operator-provided C extensions (the `live` dependency-group and the
-# system libguestfs binding) absent from CI and most environments, but present on a worker/host
-# that runs the live_vm + local-libvirt operations (this dev host does). When they ARE installed,
-# ty resolves them, and the per-site `# ty: ignore[unresolved-import]`/`[unresolved-attribute]`
-# directives flip from "used" (CI) to "unused" (host with the extensions). `unused-ignore-comment`
-# is the one rule that cannot be satisfied in both environments at once, so it is scoped off for
-# exactly these C-extension wrapper files; every other rule stays strict here. This keeps
-# `just type` consistent whether or not the extensions are installed — no `SKIP=ty` ritual.
+# system libguestfs binding), absent from most environments but present on a worker/host that
+# runs the live_vm + local-libvirt operations. CI's type check links the libguestfs binding's
+# pure-Python wrapper into its venv so binding-only type errors fail there (#3588); drgn stays
+# absent from CI. When an extension IS visible, ty resolves it, and the per-site
+# `# ty: ignore[unresolved-import]`/`[unresolved-attribute]` directives flip from "used" to
+# "unused". `unused-ignore-comment` is the one rule that cannot be satisfied in both environments
+# at once, so it is scoped off for exactly these C-extension wrapper files; every other rule
+# stays strict here. This keeps `just type` consistent whether or not the extensions are
+# installed — no `SKIP=ty` ritual.
 include = [
   "src/kdive/providers/local_libvirt/lifecycle/rootfs/baseline_kernel.py",
   "src/kdive/providers/local_libvirt/lifecycle/boot/guest_kernel_writer.py",
