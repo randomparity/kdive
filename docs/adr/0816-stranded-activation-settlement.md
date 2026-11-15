@@ -249,7 +249,9 @@ marked job still refuses `job_live`, and a refusal still changes nothing.
 - The settlement, which already acts as `platform_admin` with a reason, ends the job. The
   reconciler's sweep and its 0165 acknowledged-retry bound are unchanged.
 - Neither the sweep nor settlement waits on a job row the other holds: the sweep skips locked
-  jobs and settlement refuses. A refusal caused by a lock clears on the next `settle`.
+  jobs and settlement refuses `job_live`; the operator observes and settles again.
+- Settlement locks the job row before the journal-head and authority rows, the reverse of the
+  authority commit paths. A deadlock would abort one transaction whole, changing nothing.
 
 **Considered & rejected.**
 
@@ -259,9 +261,11 @@ marked job still refuses `job_live`, and a refusal still changes nothing.
 - **Cancel through `jobs.cancel` from the tool before settling.** verified: `cancel_job` in
   `src/kdive/mcp/tools/jobs.py` (main `e48eb0f78`) commits in its own transaction and never
   touches the Run, so a later refusal would leave the job canceled and the Run running.
-- **Leave the job for the sweep after settlement supersedes its authority row.** judgment: fit.
-  The Run would stay `running` until a later reconciler pass, and settlement would still have to
-  stop counting the job as live.
+- **Keep the runbook's manual `jobs.cancel`.** verified: #3596 and the #3552 live proof; the
+  cancel is an unaudited extra step that leaves the Run `running`.
+- **Leave the job for the sweep after settlement supersedes its authority row.** judgment: scope.
+  #3596 asks for the end inside the audited settlement; the Run would also stay `running` until
+  a later reconciler pass, and settlement would still have to stop counting the job as live.
 - **Copy the whole 0194 function body into 0198.** judgment: complexity. Three asserted
   replacements of the stored definition, the pattern migration 0150 uses, keep the change
   reviewable.

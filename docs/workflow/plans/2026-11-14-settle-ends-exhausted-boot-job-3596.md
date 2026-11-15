@@ -61,8 +61,9 @@ Interfaces: consumes `_strand`, `_Stranded`, `_DOMAIN` (`tests/db/stranded_activ
 Steps:
 
 1. Move `_record_both` from `tests/db/test_migration_0197_settled_teardown_route_fence.py` into
-   `tests/db/stranded_activation_support.py` unchanged (with its `_call` helper); the 0197 test imports
-   `_record_both` from there. Then write the test file:
+   `tests/db/stranded_activation_support.py` unchanged with its `_call` helper (add `LiteralString` to
+   the support module's `typing` import); the 0197 test imports `_call` and `_record_both` from
+   there and drops its now-unused `_DOMAIN` import. Then write the test file:
 
 ```python
 """Real-Postgres proof that settlement ends the stranded boot job (#3596, ADR-0816)."""
@@ -262,7 +263,7 @@ DECLARE
            'external_boot.settle_stranded_activation', 'failed_job:' || ended.id::text,
            encode(sha256(convert_to(public.canonical_external_boot_authority_json(
                jsonb_build_object('activation_id', p_activation_id::text,
-                                  'job_id', ended.id::text)
+                                  'job_id', ended.id::text, 'reason', v_reason)
            ), 'UTF8')), 'hex'),
            p_actor
     FROM unnest(v_exhausted) AS ended (id);
@@ -341,10 +342,10 @@ Steps:
    Settlement fails that job and its Run with `lease_expired`, and audits it, when its `attempt`
    has reached its `max_attempts`, its lease has lapsed and no worker can claim it again." Replace
    the `job_live` row's action with "An authority-marked job for the System is queued or running
-   and a worker holds it or can still claim it. Wait for it to end, then `observe` again. If the
-   reconciler or a worker was touching an exhausted `boot` job at that moment, run `settle`
-   again." In the `authority_objects_present` row replace "Nothing in kdive removes them yet
-   (#3587), so" with "Nothing in kdive removes them, so".
+   and a worker holds it or can still claim it, or the reconciler or a worker was updating an
+   exhausted `boot` job at that moment. Wait for any live job to end, then `observe` again."
+   In the `authority_objects_present` row replace "Nothing in kdive removes them yet (#3587),
+   so" with "Nothing in kdive removes them, so".
 3. Run the green command and `just docs-links`; commit
    `docs(runbook): drop the manual cancel from stranded recovery`.
 

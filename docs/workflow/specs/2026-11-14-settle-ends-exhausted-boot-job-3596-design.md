@@ -43,7 +43,7 @@ owner, grants and every other refusal are unchanged.
    path writes.
 3. **Audit.** Each ended job adds one `platform_audit_log` row: tool
    `external_boot.settle_stranded_activation`, scope `failed_job:<job-id>`, the settlement's
-   principal, session and actor, and an args digest over the activation and job ids.
+   principal, session and actor, and an args digest over the activation id, job id and reason.
 
 A refusal returns before step 2, so it ends no job; its locks end with the caller's transaction.
 No Python code changes: the status set is unchanged, and the tool already returns `settled`.
@@ -61,10 +61,15 @@ The runbook's Recover step 2 and `job_live` row drop the manual cancel. Its
    - A job a worker holds (live lease) or can still claim (attempts remaining, or an unconsumed
      acknowledged-retry grant) is never ended.
    - A refused settlement changes no job, Run or activation.
-   - Every ended job is audited with the settlement's principal and reason.
+   - Every ended job is audited with the settlement's principal, actor and reason.
 3. **Accepted failure classes**
    - A worker or the sweep holding the job row lock makes settle refuse `job_live`: transient;
-     the operator runs `settle` again (NOWAIT, as the 0165 sweep does for authority rows).
+     the operator runs `observe` and `settle` again (NOWAIT, as the 0165 sweep does for
+     authority rows).
+   - Settle locks the job row before the journal-head and authority rows, the reverse of the
+     authority commit paths. No path is known that holds an authority row of a dead, lapsed job
+     and waits on its row; if one deadlocks, Postgres aborts one transaction whole and nothing
+     changes, so the operator reruns.
    - A heartbeat that renews a lapsed lease before settle locks the row keeps the job live: the
      worker evidently holds it.
    - An exhausted job of an earlier activation of the same System still refuses `job_live`; the
@@ -76,11 +81,5 @@ The runbook's Recover step 2 and `job_live` row drop the manual cancel. Its
 
 ## Validation
 
-- Real-database migration tests (`tests/db/test_migration_0198_settle_ends_exhausted_boot_job.py`):
-  ends and audits the exhausted job and compensates its Run; `job_live` with nothing changed for a
-  live lease, attempts remaining, a queued job, a grant, another activation's marker, and a locked
-  row; a later refusal (`evidence_stale`) leaves the job running.
-- `tests/db/test_stranded_recovery_end_to_end.py`: the exhausted-job arm settles with no
-  `jobs.cancel`, and the job and Run end `failed`.
-- The four `migrations[-K:]` window tests list 0198.
-- Live proof on the lab once the campaign grants the live slot.
+Real-database tests in the plan's Task 1 (migration contract, registry) and Task 2 (the
+operator's tools settle with no `jobs.cancel`); the live proof once the campaign grants its slot.
