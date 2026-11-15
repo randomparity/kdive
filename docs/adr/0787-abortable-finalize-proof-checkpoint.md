@@ -502,3 +502,13 @@ the System's domain, so after local teardown the receipt is visible on disk only
 amendment (#3489) moved the four quarantine-row port methods to `open_pinned`, which needs no
 domain, and overrides that remark: the local port reads a kept `managed` receipt after System
 teardown, as the remote port does. The rest of the 2026-11-01 amendment stands.
+
+### Amendment (2026-11-14): `record_cleanup_quarantine` also re-validates the tombstone under the lock (#3591)
+
+The 2026-11-01 amendment (#3492) says `record_cleanup_quarantine` takes the recovery-directory
+`flock` and re-reads the receipt under it. That is incomplete: the method also re-validates the
+tombstone under the same lock (#3517, PR #3556). Its early tombstone read happens before the
+lock, so a finalize that completes in between removes the tombstone. After taking the lock the
+method reads the tombstone again and, if it no longer equals the expected one, fails with
+`cleanup tombstone does not match recovery point`. No receipt is written into a directory that
+has no tombstone. The `managed` re-read and the rest of the 2026-11-01 amendment stand.

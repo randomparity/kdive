@@ -476,7 +476,7 @@ def test_rootfs_mount_matches_the_real_direct_kernel_boot():
     # 0441) is commonly XFS, so the root-fs requirement is EXT4_FS-or-XFS_FS, not EXT4_FS alone.
     feat = feature_requirement("rootfs_mount")
     symbols = {s for clause in feat.advertised for s in clause.symbols}
-    assert symbols == {"EXT4_FS", "XFS_FS", "VIRTIO_BLK"}
+    assert symbols == {"BTRFS_FS", "EXT4_FS", "XFS_FS", "VIRTIO_BLK"}
     for stale in ("SQUASHFS", "SQUASHFS_ZSTD", "OVERLAY_FS", "BLK_DEV_LOOP"):
         assert stale not in symbols
     assert "squashfs" not in feat.summary.lower()
@@ -517,7 +517,7 @@ def test_rootfs_mount_root_filesystem_is_an_or_group_not_two_and_clauses():
     # built-in value each clause also carries (#1860) is pinned by its own test below.
     feat = feature_requirement("rootfs_mount")
     grouping = [clause.symbols for clause in feat.advertised]
-    assert frozenset({"EXT4_FS", "XFS_FS"}) in grouping
+    assert frozenset({"BTRFS_FS", "EXT4_FS", "XFS_FS"}) in grouping
     assert frozenset({"EXT4_FS"}) not in grouping
     assert frozenset({"XFS_FS"}) not in grouping
 
@@ -1212,7 +1212,7 @@ def test_the_manifest_clause_object_carries_the_built_in_value_and_omits_it_at_t
     by_feature = {entry["feature"]: entry["requirements"] for entry in feature_manifest()}
     rootfs = by_feature[ROOTFS_MOUNT]
     assert isinstance(rootfs, list)
-    assert {"symbols": ["EXT4_FS", "XFS_FS"], "built_in": "unless_initrd"} in rootfs
+    assert {"symbols": ["BTRFS_FS", "EXT4_FS", "XFS_FS"], "built_in": "unless_initrd"} in rootfs
     assert {"symbols": ["VIRTIO_BLK"], "built_in": "unless_initrd"} in rootfs
     ikconfig = by_feature["ikconfig"]
     assert isinstance(ikconfig, list)
@@ -1701,7 +1701,7 @@ def test_a_clause_is_unless_initrd_only_where_every_seam_reading_it_supplies_the
     assert _unless_initrd_without_the_fact(
         FEATURE_REQUIREMENTS,
         {ROOTFS_MOUNT: SeamFacts(initrd=False, guest_initramfs=True, arch=False)},
-    ) == {ROOTFS_MOUNT: ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]}
+    ) == {ROOTFS_MOUNT: ["BTRFS_FS", "EXT4_FS", "VIRTIO_BLK", "XFS_FS"]}
 
 
 def test_a_clause_is_unless_initrd_only_where_every_seam_supplies_the_boot_model_fact_too():
@@ -1723,7 +1723,7 @@ def test_a_clause_is_unless_initrd_only_where_every_seam_supplies_the_boot_model
     assert _guest_initramfs_without_the_fact(
         FEATURE_REQUIREMENTS,
         {ROOTFS_MOUNT: SeamFacts(initrd=True, guest_initramfs=False, arch=False)},
-    ) == {ROOTFS_MOUNT: ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]}
+    ) == {ROOTFS_MOUNT: ["BTRFS_FS", "EXT4_FS", "VIRTIO_BLK", "XFS_FS"]}
 
 
 def test_a_clause_is_arch_scoped_only_where_every_seam_reading_it_supplies_the_arch():

@@ -36,8 +36,9 @@ or the built kernel tree.
   [build and upload guide](../external-build-upload.md). The kernel must include the root
   filesystem driver of the guest image: `CONFIG_BTRFS_FS` for the Fedora-family cloud bases
   (btrfs root), `CONFIG_XFS_FS` for the XFS-rooted guests; the pinned fixture fragment builds
-  both in. On a kernel that has ext4, no preflight names a missing btrfs or XFS driver: the boot
-  job ends `boot_timeout`.
+  both in. A kernel without the driver ends `boot_timeout`. The spine preflight names
+  `CONFIG_BTRFS_FS=y` only when its caller passes `root_fs="btrfs"`. No shipped caller does yet:
+  the remote authority cells pass no `root_fs`, which checks only for ext4 or XFS.
 
 ## 1. Worker → host TLS reachability
 

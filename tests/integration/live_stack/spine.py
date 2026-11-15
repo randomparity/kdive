@@ -749,7 +749,7 @@ def check_spine_kernel_config(
     """
     if arch not in {"x86_64", "ppc64le"}:
         raise SpinePhaseError(phase_name, f"unsupported kernel arch {arch!r}")
-    if root_fs not in {None, "ext4", "xfs"}:
+    if root_fs not in {None, "ext4", "xfs", "btrfs"}:
         raise SpinePhaseError(phase_name, f"unsupported guest root filesystem {root_fs!r}")
     config_path = kernel_src / ".config"
     try:
@@ -770,6 +770,9 @@ def check_spine_kernel_config(
     elif root_fs == "xfs":
         if not config.is_builtin("XFS_FS"):
             missing.append("CONFIG_XFS_FS=y")
+    elif root_fs == "btrfs":
+        if not config.is_builtin("BTRFS_FS"):
+            missing.append("CONFIG_BTRFS_FS=y")
     elif not (config.is_builtin("EXT4_FS") or config.is_builtin("XFS_FS")):
         missing.append("CONFIG_EXT4_FS=y or CONFIG_XFS_FS=y")
     if require_initrd:
