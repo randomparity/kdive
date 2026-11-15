@@ -317,9 +317,11 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 # shapes = ["small", "medium", "large", "max"]
 
 # Local-libvirt does NOT declare vcpus/memory_mb here: its size ceiling is probed by discovery
-# and merged onto the row, so this overlay only sets name/cost_class/concurrent_allocation_cap.
-# `name` must match the discovery-created resource name (read it from `kdive resources list` /
-# the `resources` catalog) for this overlay to apply — a mismatch is silently ignored.
+# and merged onto the row, so this overlay only sets name/cost_class/pool/
+# concurrent_allocation_cap.
+# The overlay binds to the discovery-created resource by `host_uri`, not by `name`: the row is
+# renamed to this block's `name`. A `host_uri` no discovered host matches is reported as an
+# "overlay deferred" warning (reconcile output) and applies nothing until discovery sees that host.
 # [[local_libvirt]]
 # name = "workstation"
 # host_uri = "qemu:///system"

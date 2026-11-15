@@ -471,7 +471,9 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   project-wide relaxations); the operator-provided C extensions (`drgn`, `libguestfs`) suppress
   `unresolved-import` with a scoped per-site ignore, and the files importing them are the only
   `[[tool.ty.overrides]]` entry (`unused-ignore-comment` off, because those directives are used
-  in CI and unused on a host that has the extensions).
+  where an extension is absent and unused where it is present). CI's type check links the
+  libguestfs binding's Python wrapper into its venv, so a type error that needs the binding fails
+  there; drgn stays absent from CI.
 - Runtime env vars are `KDIVE_*` (`KDIVE_DATABASE_URL`, `KDIVE_OIDC_*`, `KDIVE_S3_*`,
   `KDIVE_HTTP_HOST/PORT`, `KDIVE_LOG_LEVEL`). The generated
   [config reference](docs/guide/reference/config.md) is the full list (`just config-docs` to
