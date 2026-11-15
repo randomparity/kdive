@@ -42,8 +42,9 @@ jobs:
   checks:
     name: lint · type · guards
     runs-on: ubuntu-latest
-    # Includes the bounded apt retry budget (ADR-0566) plus work and setup margin.
-    timeout-minutes: 20
+    # Holds both bounded apt installs' worst case (ADR-0566): about 8 minutes for libvirt-dev and
+    # about 17 for python3-guestfs at its 180 s budget, plus work and setup margin.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -110,6 +111,27 @@ jobs:
 
       - name: Lint shell scripts
         run: just lint-shell
+
+      - name: Expose the libguestfs binding to the type check
+        # ty reads the binding's annotations from its pure-Python wrapper; the C module beside it
+        # is built for the distro interpreter and static checking never imports it, so only the
+        # wrapper is linked into the locked venv. Without it a type error that needs the binding
+        # passes here and fails on hosts that have it (#3588, PR #3576). Fails closed when the
+        # wrapper is absent. 180 s: a healthy install of the package's dependency closure took
+        # about 60 s in ubuntu:26.04, the script's default budget; live.yml uses 180 s for a
+        # superset.
+        env:
+          KDIVE_APT_TIMEOUT_S: "180"
+        run: |
+          ./scripts/apt-install.sh python3-guestfs
+          wrapper=/usr/lib/python3/dist-packages/guestfs.py
+          if [ ! -f "$wrapper" ]; then
+            echo "::error::python3-guestfs installed no $wrapper; ty cannot see the binding" >&2
+            exit 1
+          fi
+          site="$(.venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+          ln -sfn "$wrapper" "$site/guestfs.py"
+          .venv/bin/python -c 'import importlib.util as u, sys; sys.exit(u.find_spec("guestfs") is None)'
 
       - name: Type check
         run: just type
