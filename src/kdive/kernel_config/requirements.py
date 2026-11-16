@@ -322,14 +322,16 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         "kernel you install, with a whole-disk ext4 qcow2 as root (root=/dev/vda, and no "
         "initramfs unless your build uploads an initrd artifact or the kernel embeds its own "
         "initramfs); a remote or agent-uploaded rootfs is commonly XFS (RHEL-family base "
-        "images). kdive does not know which family your guest uses, so it asks only that the "
+        "images) or btrfs (Fedora cloud bases). kdive does not know which family your guest uses, "
+        "so it asks only that the "
         "kernel can mount at least one of them plus the virtio-blk root device - build in the "
         "one your rootfs actually uses. kdive's upload-time advisory recognizes an uploaded "
         "artifact and a disk-image target, whose guest builds its own initramfs; it cannot see "
         "an embedded initramfs, so a modular config may still draw a harmless warning on a "
         "direct-kernel kernel that in fact boots fine.",
         # Both clauses are UNLESS_INITRD (#1860). The direct-kernel boot mounts root before any
-        # module can be loaded, so EXT4_FS=m / XFS_FS=m / VIRTIO_BLK=m are a kernel that panics on
+        # module can be loaded, so EXT4_FS=m / XFS_FS=m / BTRFS_FS=m / VIRTIO_BLK=m are a
+        # kernel that panics on
         # an unmountable root - unless something can load a module first. Two facts answer that
         # and `rootfs_mount_warning` supplies both (ADR-0545): the build uploaded an initrd
         # artifact (has_initrd), or the target boots through its own bootloader and runs dracut
@@ -337,7 +339,7 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
         # clause is still not relieved for such a kernel (#1876) - which is why the summary above
         # carries a caveat that this clause's advisory does not.
         (
-            Clause(frozenset({"EXT4_FS", "XFS_FS"}), BuiltIn.UNLESS_INITRD),
+            Clause(frozenset({"BTRFS_FS", "EXT4_FS", "XFS_FS"}), BuiltIn.UNLESS_INITRD),
             Clause(frozenset({"VIRTIO_BLK"}), BuiltIn.UNLESS_INITRD),
         ),
         # Advisory, not gated: `rootfs_mount_warning` reads these advertised clauses at

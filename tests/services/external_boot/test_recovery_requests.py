@@ -430,7 +430,9 @@ def test_conflict_resolution_conflicts_when_no_activation_restricts_the_system(
     [
         (_STATE.RECOVERY_CONFLICT, _CONFLICT_ACTIONS),
         (_STATE.RECOVERY_FAILED, _CONFLICT_ACTIONS),
-        (_STATE.PREPARING, _CONFLICT_ACTIONS),
+        # An unowned preparing System is the stranded shape: teardown would foreclose settlement
+        # (ADR-0816), and the recovery tool is filtered for a caller without platform_admin.
+        (_STATE.PREPARING, ["runs.get"]),
     ],
 )
 def test_release_is_denied_outside_the_active_state(

@@ -1123,9 +1123,9 @@ evidence. Check the rebuilt effective `.config` and rerun the affected live cell
 
 The default fragment also builds in `CONFIG_BTRFS_FS=y` beside ext4 and XFS. The Fedora cloud
 base images have a btrfs root, and a kernel without the driver cannot mount it: the boot job ends
-`boot_timeout` with no named cause, because no kernel preflight names the btrfs driver
-(#3519). A fixture tree built before this symbol was added does not rebuild itself and still
-passes `verify`; rebuild it into a fresh output directory and regenerate its evidence bindings.
+`boot_timeout`. The spine preflight names `CONFIG_BTRFS_FS=y` only when its caller passes
+`root_fs="btrfs"` (#3580); no shipped caller does yet. A fixture tree built before this symbol
+was added does not rebuild itself and still passes `verify`; rebuild it into a fresh output directory and regenerate its evidence bindings.
 
 After an interrupted run, release the leftover allocation with `allocations.release` (or let the
 lease expire) and check `KDIVE_INSTALL_STAGING` (`/var/lib/kdive/install` on the demo lane) for

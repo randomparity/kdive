@@ -30,9 +30,10 @@ An authority-owned System that failed to provision is a different shape, with a 
 recovery: see [Exhausted authority System provision](exhausted-authority-system-provision.md).
 
 **Upgrade order.** Use the tool only after the database migration, the authority host, every
-worker, the reconciler and then every server run a build that contains it. An older server routes a
-settled System's teardown to the authority, and an older reconciler expires the Allocation while
-the worker's domain still runs.
+worker, the reconciler and then every server run a build that contains it. An older reconciler
+expires the Allocation while the worker's domain still runs. An older server cannot route a
+settled System's teardown to the authority (migration 0197), but it refuses that teardown with
+`external_boot_teardown_authority_unresolved`, so tear the System down through an upgraded server.
 
 ## Recover
 

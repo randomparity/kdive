@@ -122,6 +122,17 @@ def test_spine_config_scopes_filesystem_to_guest(tmp_path: Path) -> None:
         spine.check_spine_kernel_config(tmp_path, "ppc64le", "upload-build")
 
 
+def test_spine_config_names_btrfs_for_btrfs_root(tmp_path: Path) -> None:
+    config = tmp_path / ".config"
+    config.write_bytes(b"CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_EXT4_FS=y\n")
+    with pytest.raises(SpinePhaseError, match="CONFIG_BTRFS_FS=y"):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", root_fs="btrfs")
+    config.write_bytes(b"CONFIG_VIRTIO_PCI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_BTRFS_FS=y\n")
+    assert spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", root_fs="btrfs")
+    with pytest.raises(SpinePhaseError, match="unsupported guest root filesystem"):
+        spine.check_spine_kernel_config(tmp_path, "x86_64", "upload-build", root_fs="zfs")
+
+
 def test_spine_config_network_module_route_is_caller_scoped(tmp_path: Path) -> None:
     config = tmp_path / ".config"
     config.write_bytes(_BOOT_CONFIG)
