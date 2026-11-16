@@ -112,7 +112,10 @@ on error ([ADR-0817](../adr/0817-python-315-informational-lane.md)).
 The project pins 3.14 exactly, so the lane's first step relaxes `requires-python` and the exact
 `==` pins to `>=` in its own checkout and requires installable artifacts for linux/x86_64 on
 3.15. The lock stays universal, so a forced bump can appear as a fork such as
-`v3.3.4 -> v3.3.4, v3.3.9`. The edit is never committed. If `pyproject.toml` no longer carries the `==3.14.*` pin, that step fails and
+`v3.3.4 -> v3.3.4, v3.3.9`. The edit is never committed. Every uv step shares a seven-day release-age cooldown
+(`UV_EXCLUDE_NEWER="7 days"` on the job), so a release newer than a week is neither resolved nor
+installed; a hand bump of the lock to a younger release makes the lane's `lock` probe fail, and a
+fresh cp315 wheel for an old version is held back the same week. If `pyproject.toml` no longer carries the `==3.14.*` pin, that step fails and
 names the line to update. The lane then runs five probes with uv `0.13.6`: `uv lock`,
 `uv sync --locked`, `ruff check --target-version py315`, `ty check --python-version 3.15` and
 `just test`; `lock`, `sync` and `test` have step timeouts, so a hang shows as that probe's
