@@ -54,9 +54,10 @@ one read inside that transaction.
    deployment; operators running `systems.teardown` / `ops.force_teardown`.
 2. **Invariants and assets at stake** — an allocation is not ended while a System it owns may
    still hold an authority domain; the expiry and release fences agree.
-3. **Accepted failure classes** — a held allocation keeps its host-cap slot until the System is
-   torn down: bounded, logged every pass, and already true of release. A `failed` System with
-   history is held too (ADR amendment).
+3. **Accepted failure classes** — a held allocation keeps its host-cap slot until an operator
+   tears the System down (`systems.teardown` / `ops.force_teardown`); nothing ends the hold on its
+   own. It is logged every pass and is already true of release. A `failed` System with history,
+   which the orphan lane skips, is held the same way (ADR amendment).
 4. **Covered elsewhere** — ordinary teardown accepting completed unsettled histories (operator
    non-goal); settled-System resolver routing (#3598); stranded boot job (#3596).
 

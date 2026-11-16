@@ -113,7 +113,9 @@ Steps:
 
    Delete the `settled_system_awaiting_teardown` block and its import.
 4. Delete `settled_system_awaiting_teardown` from `services/external_boot/settlement.py` (no other
-   caller: `rg -n settled_system_awaiting_teardown src tests`).
+   caller: `rg -n settled_system_awaiting_teardown src tests`), and in the same step drop its
+   import from `tests/db/test_migration_0194_stranded_activation_settlement.py`, which step 6
+   then rewrites, so the module never fails to import between steps.
 5. In `test_expiry_without_a_restricting_activation_logs_no_denial`, set the seeded System to
    `torn_down` before the sweep (`UPDATE systems SET state = 'torn_down' WHERE id = %s`) and say
    so in its docstring.
