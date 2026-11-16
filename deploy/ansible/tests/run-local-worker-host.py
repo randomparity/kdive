@@ -382,6 +382,80 @@ def remote_tls_installation() -> None:
 
 
 remote_tls_installation()
+
+
+def generated_client_bundle_is_accepted() -> None:
+    tasks = yaml.safe_load(
+        (ANSIBLE / "roles/local_worker_host/tasks/remote_libvirt_tls.yml").read_text()
+    )
+    with tempfile.TemporaryDirectory(prefix="kdive-pki-bundle-") as directory:
+        base = Path(directory)
+        inventory = base / "inventory.yml"
+        inventory.write_text(
+            yaml.safe_dump(
+                {
+                    "all": {
+                        "children": {
+                            "remote_libvirt_hosts": {
+                                "hosts": {
+                                    "h1": {
+                                        "gdb_addr": "192.0.2.1",
+                                        "remote_host_fqdn": "h1.example.test",
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+        )
+        artifacts = base / "artifacts"
+        pki = subprocess.run(
+            [
+                "ansible-playbook",
+                str(ANSIBLE / "playbooks/pki.yml"),
+                "-i",
+                str(inventory),
+                "-e",
+                f"pki_artifacts_dir={artifacts} pki_mode=generate",
+            ],
+            cwd=ROOT,
+            env=ENV,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        require(pki.returncode == 0, f"pki.yml generate failed: {pki.stdout} {pki.stderr}")
+        prefix = "local_worker_host_remote_libvirt_"
+        sources = {
+            f"{prefix}client_certificate_source": artifacts / "client/clientcert.pem",
+            f"{prefix}client_key_source": artifacts / "client/clientkey.pem",
+            f"{prefix}ca_certificate_source": artifacts / "client/cacert.pem",
+        }
+        play = base / "play.yml"
+        play.write_text(
+            yaml.safe_dump(
+                [
+                    {
+                        "hosts": "localhost",
+                        "connection": "local",
+                        "gather_facts": False,
+                        "vars": {k: str(v) for k, v in sources.items()}
+                        | {"ansible_python_interpreter": sys.executable},
+                        "tasks": tasks[:3],
+                    }
+                ]
+            )
+        )
+        result = playbook(play)
+        require(
+            result.returncode == 0,
+            f"role rejects pki.yml client bundle: {result.stdout} {result.stderr}",
+        )
+    print("ok pki.yml client bundle: modes accepted by the worker role's source check")
+
+
+generated_client_bundle_is_accepted()
 live_vm_operator_identity()
 
 
