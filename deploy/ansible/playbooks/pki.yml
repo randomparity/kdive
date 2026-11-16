@@ -134,14 +134,14 @@
         provider: ownca
         ownca_path: "{{ pki_artifacts_dir }}/cacert.pem"
         ownca_privatekey_path: "{{ pki_artifacts_dir }}/cakey.pem"
-        mode: "0644"
+        mode: "0600"
       when: pki_mode == 'generate'
 
     - name: Copy the CA cert into the client bundle dir
       ansible.builtin.copy:
         src: "{{ pki_artifacts_dir }}/cacert.pem"
         dest: "{{ pki_artifacts_dir }}/client/cacert.pem"
-        mode: "0644"
+        mode: "0600"
       when: pki_mode == 'generate'
 
     # --- Optional encryption-at-rest for the private keys. Off by default so the
