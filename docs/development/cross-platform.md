@@ -114,9 +114,10 @@ The project pins 3.14 exactly, so the lane's first step relaxes `requires-python
 3.15. The lock stays universal, so a forced bump can appear as a fork such as
 `v3.3.4 -> v3.3.4, v3.3.9`. The edit is never committed. Every uv step shares a seven-day release-age cooldown
 (`UV_EXCLUDE_NEWER="7 days"` on the job), so a release newer than a week is neither resolved nor
-installed; a hand bump of the lock to a younger release makes the lane's `lock` probe fail, and a
-fresh cp315 wheel for an old version is held back the same week. If `pyproject.toml` no longer carries the `==3.14.*` pin, that step fails and
-names the line to update. The lane then runs five probes with uv `0.13.6`: `uv lock`,
+installed. `uv lock` downgrades a locked version younger than that and fails when a
+`pyproject.toml` lower bound is younger (as after a hand bump); a fresh cp315 wheel for an old
+version is held back the same week. If `pyproject.toml` no longer carries the `==3.14.*` pin, that
+step fails and names the line to update. The lane then runs five probes with uv `0.13.6`: `uv lock`,
 `uv sync --locked`, `ruff check --target-version py315`, `ty check --python-version 3.15` and
 `just test`; `lock`, `sync` and `test` have step timeouts, so a hang shows as that probe's
 failure. The job summary lists each probe's outcome, the versions `uv lock` changed, the packages

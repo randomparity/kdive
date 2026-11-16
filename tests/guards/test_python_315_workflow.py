@@ -172,4 +172,5 @@ def test_job_applies_a_release_age_cooldown_to_every_uv_step() -> None:
     assert job["env"].get("UV_EXCLUDE_NEWER") == "7 days", "uv resolves without a cooldown"
     for step in job["steps"]:
         assert "UV_EXCLUDE_NEWER" not in step.get("env", {}), f"step {step.get('name')} overrides"
-        assert "--exclude-newer" not in step.get("run", ""), f"step {step.get('name')} overrides"
+        run = step.get("run", "").lower().replace("_", "-")
+        assert "exclude-newer" not in run, f"step {step.get('name')} overrides"
