@@ -236,18 +236,28 @@ test-linux $sha="HEAD" *ARGS:
         exit 2
         ;;
     esac
-    # An xdist worker grows to about 1.2 GiB by the end of a run, and the pytest controller,
-    # PostgreSQL and SeaweedFS take about 1.2 GiB in the engine VM. Keep 1.5 GiB for them and
-    # 1.5 GiB per worker, at most 8 (the shared PostgreSQL lock limit).
+    # An xdist worker grows to 1.2-1.7 GiB by the end of a run, and the pytest controller,
+    # PostgreSQL and SeaweedFS take about 1.2 GiB in the engine VM. Below 6 GiB even one
+    # worker was OOM-killed. Keep 1.5 GiB for the rest and 1.5 GiB per worker, at most 8 (the
+    # shared PostgreSQL lock limit).
     memory="$("$engine" info --format "$memory_format" 2>/dev/null)" || memory=""
     if [[ $memory =~ ^[0-9]+$ ]]; then
-      workers=$(((memory / 1048576 - 1536) / 1536))
-      if ((workers < 1)); then
-        workers=1
-      elif ((workers > 8)); then
+      memory_mib=$((memory / 1048576))
+      if ((memory_mib < 6144)); then
+        if [[ $engine == podman ]]; then
+          fix='podman machine stop; podman machine set --memory 8192; podman machine start'
+        else
+          fix='raise the Docker Desktop memory limit (Settings > Resources) to 8 GiB'
+        fi
+        echo "test-linux: $engine has $memory_mib MiB of memory; the suite needs at least" \
+          "6144 MiB. Give the engine VM more memory: $fix" >&2
+        exit 1
+      fi
+      workers=$(((memory_mib - 1536) / 1536))
+      if ((workers > 8)); then
         workers=8
       fi
-      echo "test-linux: $engine has $((memory / 1048576)) MiB; at most $workers xdist workers" >&2
+      echo "test-linux: $engine has $memory_mib MiB; at most $workers xdist workers" >&2
     else
       workers=8
       echo "test-linux: warning: cannot read the $engine memory; at most 8 xdist workers" >&2

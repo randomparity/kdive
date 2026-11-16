@@ -119,19 +119,35 @@ def _suite_args(calls: list[str]) -> list[str]:
     return suite.split(" kdive-test-linux ", maxsplit=1)[1].split()[1:]
 
 
-def test_worker_cap_fits_a_small_engine_vm(tmp_path: Path) -> None:
-    result, calls = _run_recipe(tmp_path, "podman", memory=str(3782492160))
+@pytest.mark.parametrize(
+    ("engine", "fix"),
+    [
+        ("podman", "podman machine stop; podman machine set --memory 8192; podman machine start"),
+        ("docker", "Docker Desktop memory limit"),
+    ],
+)
+@pytest.mark.parametrize("worker_args", [[], ["-n", "1"], ["--maxprocesses=1"]])
+def test_engine_below_the_memory_floor_stops_before_any_container(
+    tmp_path: Path, engine: str, fix: str, worker_args: list[str]
+) -> None:
+    result, calls = _run_recipe(tmp_path, engine, *worker_args, memory=str(3782492160))
+
+    assert result.returncode == 1
+    assert f"test-linux: {engine} has 3607 MiB of memory" in result.stderr
+    assert "needs at least 6144 MiB" in result.stderr
+    assert fix in result.stderr
+    assert not [c for c in calls if c.startswith(("build ", "run "))]
+
+
+@pytest.mark.parametrize(("memory_gib", "workers"), [(6, 3), (8, 4), (16, 8)])
+def test_worker_cap_scales_with_engine_memory(
+    tmp_path: Path, memory_gib: int, workers: int
+) -> None:
+    result, calls = _run_recipe(tmp_path, "podman", memory=str(memory_gib * 1024**3))
 
     assert result.returncode == 0, result.stderr
-    assert _suite_args(calls) == ["--maxprocesses=1"]
-    assert "podman has 3607 MiB; at most 1 xdist workers" in result.stderr
-
-
-def test_worker_cap_scales_with_engine_memory(tmp_path: Path) -> None:
-    result, calls = _run_recipe(tmp_path, "podman", memory=str(8 * 1024**3))
-
-    assert result.returncode == 0, result.stderr
-    assert _suite_args(calls) == ["--maxprocesses=4"]
+    assert _suite_args(calls) == [f"--maxprocesses={workers}"]
+    assert f"at most {workers} xdist workers" in result.stderr
 
 
 def test_worker_cap_stays_at_eight_with_enough_memory(tmp_path: Path) -> None:
@@ -139,13 +155,7 @@ def test_worker_cap_stays_at_eight_with_enough_memory(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert _suite_args(calls) == ["--maxprocesses=8"]
-
-
-def test_worker_cap_never_drops_below_one(tmp_path: Path) -> None:
-    result, calls = _run_recipe(tmp_path, "podman", memory=str(1024**3))
-
-    assert result.returncode == 0, result.stderr
-    assert _suite_args(calls) == ["--maxprocesses=1"]
+    assert "docker has 32039 MiB; at most 8 xdist workers" in result.stderr
 
 
 def test_unreadable_memory_keeps_eight_workers_with_a_warning(tmp_path: Path) -> None:
@@ -164,7 +174,7 @@ def test_explicit_worker_count_replaces_the_memory_cap(
     tmp_path: Path, worker_args: list[str]
 ) -> None:
     result, calls = _run_recipe(
-        tmp_path, "podman", *worker_args, "tests/jobs", memory=str(3782492160)
+        tmp_path, "podman", *worker_args, "tests/jobs", memory=str(8 * 1024**3)
     )
 
     assert result.returncode == 0, result.stderr
@@ -173,7 +183,7 @@ def test_explicit_worker_count_replaces_the_memory_cap(
 
 
 def test_other_arguments_keep_the_memory_cap(tmp_path: Path) -> None:
-    result, calls = _run_recipe(tmp_path, "podman", "-k", "retry", memory=str(3782492160))
+    result, calls = _run_recipe(tmp_path, "podman", "-k", "retry", memory=str(8 * 1024**3))
 
     assert result.returncode == 0, result.stderr
-    assert _suite_args(calls) == ["--maxprocesses=1", "-k", "retry"]
+    assert _suite_args(calls) == ["--maxprocesses=4", "-k", "retry"]
