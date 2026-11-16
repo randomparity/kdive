@@ -229,9 +229,9 @@ async def _expire_one(conn: AsyncConnection, allocation_id: UUID, project: str) 
             await allocation_release.guard_external_boot_release(
                 conn, allocation_id, project=project
             )
-            # Expiring a System with external-boot history that is not torn down would orphan
-            # it: the worker refuses its ordinary teardown, and the authority teardown needs this
-            # allocation. So expiry holds it exactly as release does (ADR-0816, #3599).
+            # Expiring a System with external-boot history that is not torn down hands it to the
+            # orphan lane, whose ordinary teardown the worker refuses; so expiry holds it until an
+            # operator tears it down, exactly as release does (ADR-0816, #3599).
             await allocation_release.require_system_teardown(conn, allocation_id, project=project)
         except allocation_release.ExternalBootDenied as denied:
             # A bare `return False` here is indistinguishable from the two no-op returns
