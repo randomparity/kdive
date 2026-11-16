@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, LiteralString
+from typing import Any
 from uuid import UUID
 
 import psycopg
 
 from kdive.db import migrate
 from tests.db.external_boot_authority_support import _acknowledge, _RoleDsns
-from tests.db.stranded_activation_support import _DOMAIN, _strand, _Stranded
+from tests.db.stranded_activation_support import _call, _record_both, _strand
 
 _ROUTES = "SELECT activation_id FROM resolve_external_boot_system_teardown_dispatch_binding(%s)"
 
@@ -22,38 +22,6 @@ def _routes(role_dsns: _RoleDsns, system_id: UUID) -> list[tuple[Any, ...]]:
     # The server role is the resolver's only grantee: the call an older server makes.
     with psycopg.connect(role_dsns("kdive_server"), autocommit=True) as conn:
         return conn.execute(_ROUTES, (system_id,)).fetchall()
-
-
-def _call(role_dsns: _RoleDsns, role: str, sql: LiteralString, args: tuple[Any, ...]) -> Any:
-    with psycopg.connect(role_dsns(role), autocommit=True) as conn:
-        row = conn.execute(sql, args).fetchone()
-    assert row is not None
-    return row[0]
-
-
-def _record_both(role_dsns: _RoleDsns, stranded: _Stranded) -> None:
-    case = stranded.case
-    authority = _call(
-        role_dsns,
-        "kdive_provider_authority",
-        "SELECT record_stranded_activation_authority_absence(%s,%s,%s,%s,%s,%s,%s)",
-        (
-            case.activation_id,
-            case.authority_instance,
-            _DOMAIN,
-            None,
-            None,
-            "sha256:" + "e" * 64,
-            [],
-        ),
-    )
-    worker = _call(
-        role_dsns,
-        "kdive_worker",
-        "SELECT record_stranded_activation_worker_ownership(%s,%s,%s,%s,%s)",
-        (case.credential, stranded.observer_job, 1, case.activation_id, _DOMAIN),
-    )
-    assert (authority, worker) == ("applied", "applied")
 
 
 def test_settled_system_with_a_retired_authority_row_has_no_route(
