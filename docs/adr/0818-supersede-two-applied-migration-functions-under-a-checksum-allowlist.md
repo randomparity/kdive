@@ -31,9 +31,10 @@ byte-immutable, and no new migration can run between 0112 and 0113.
 - Migration 0199 runs `CREATE OR REPLACE` on both functions with the string bodies, so
   databases that applied the original 0112 lose the row-type dependency too. Grants are
   preserved.
-- A DB test asserts that no non-system new-style SQL function takes or returns a table row type
-  after the full chain. The DB-test Postgres image is pinned at 17.12+, so the fresh chain runs
-  on the strict version.
+- A DB test asserts that, after the full chain, no non-system new-style SQL function has a table
+  row type among its arguments (including `OUT`), its return type, or their array elements.
+  The DB-test Postgres image is pinned at 17.12+, so the fresh chain runs on the strict
+  version.
 
 Each future supersession needs its own ADR and entry. The allowlist never admits a version
 without an exact byte pair.
@@ -60,8 +61,11 @@ without an exact byte pair.
 - **Insert a sub-version migration between 0112 and 0113.** judgment: fit. It needs a new
   version grammar in the runner, `schema_migrations` and the ordering guard, and it applies an
   old-numbered file late on existing databases.
-- **Keep the 17.10 pin (do nothing).** verified: the PostgreSQL 17.12 release notes list the
-  tightened composite-type rule, and the fresh chain fails at 0113 on `postgres:17`
-  (17.12-1.pgdg13+1). Any operator-run 17.12+ server cannot install.
+- **Keep the 17.10 pin (do nothing).** verified: https://www.postgresql.org/docs/release/17.12/
+  lists the tightened composite-type rule. Applying `src/kdive/db/schema/*.sql` one file at a
+  time to `postgres:17@sha256:0d938e97…` (17.12-1.pgdg13+1, at commit d0f52ad33) fails at 0113
+  with `cannot alter table "capture_operations" because function
+  capture_launch_abort_evidence_valid(capture_operations,jsonb) uses its row type`. So any
+  operator-run 17.12+ server cannot install.
 - **Rewrite the record's checksum on upgrade.** judgment: fit. It would mutate history in
   `schema_migrations` to save one permanent allowlist row.
