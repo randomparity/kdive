@@ -74,7 +74,9 @@ silicon.
 - Verified on commit `cd023b198` with the machine raised to 8192 MiB (it reports 7902 MiB,
   so the recipe used 4 workers), from a clone under `/private`: the rootless connection
   exited 0 in 610 s and the rootful connection exited 0 in 574 s, each with 24409 passed
-  and 182 skipped. Docker Desktop (32 GiB, 8 workers) exited 0 on `54629facd` in 483 s.
+  and 182 skipped. On `8f93beb58` (only docs changed after `cd023b198`), Docker Desktop
+  (32 GiB, 8 workers) exited 0 in 375 s with 24408 passed and 183 skipped, from a worktree
+  under `/Volumes`; Podman from that worktree exited 1 in 2 s with the shared-path message.
 
 ## Consequences
 
