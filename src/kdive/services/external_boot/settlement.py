@@ -41,21 +41,6 @@ class StrandedObservationOutcome:
     message: str | None
 
 
-async def settled_system_awaiting_teardown(
-    conn: AsyncConnection, allocation_id: UUID
-) -> UUID | None:
-    """A System of ``allocation_id`` with a settled activation that is not yet torn down."""
-    cursor = await conn.execute(
-        "SELECT s.id FROM systems s WHERE s.allocation_id = %s AND s.state <> 'torn_down' "
-        "  AND EXISTS (SELECT 1 FROM external_boot_activation_settlements st "
-        "              WHERE st.system_id = s.id AND st.settled_at IS NOT NULL) "
-        "ORDER BY s.id LIMIT 1",
-        (allocation_id,),
-    )
-    row = await cursor.fetchone()
-    return None if row is None else row[0]
-
-
 def settlement_reason(reason: str) -> str | None:
     """The trimmed reason when it fits the settlement function's bound, else ``None``."""
     reason = reason.strip()

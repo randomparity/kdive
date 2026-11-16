@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, LiteralString
 from uuid import UUID, uuid4
 
 import psycopg
@@ -90,6 +90,38 @@ class _Stranded:
     case: _AuthorityCase
     observer_job: UUID
     authority: _Allocated | None
+
+
+def _call(role_dsns: _RoleDsns, role: str, sql: LiteralString, args: tuple[Any, ...]) -> Any:
+    with psycopg.connect(role_dsns(role), autocommit=True) as conn:
+        row = conn.execute(sql, args).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _record_both(role_dsns: _RoleDsns, stranded: _Stranded) -> None:
+    case = stranded.case
+    authority = _call(
+        role_dsns,
+        "kdive_provider_authority",
+        "SELECT record_stranded_activation_authority_absence(%s,%s,%s,%s,%s,%s,%s)",
+        (
+            case.activation_id,
+            case.authority_instance,
+            _DOMAIN,
+            None,
+            None,
+            "sha256:" + "e" * 64,
+            [],
+        ),
+    )
+    worker = _call(
+        role_dsns,
+        "kdive_worker",
+        "SELECT record_stranded_activation_worker_ownership(%s,%s,%s,%s,%s)",
+        (case.credential, stranded.observer_job, 1, case.activation_id, _DOMAIN),
+    )
+    assert (authority, worker) == ("applied", "applied")
 
 
 def _strand(

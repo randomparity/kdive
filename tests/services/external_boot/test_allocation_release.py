@@ -15,7 +15,11 @@ from kdive.domain.errors import ErrorCategory
 from kdive.reconciler.repairs import allocations as allocation_repairs
 from kdive.reconciler.repairs.allocations import sweep_expired_allocations
 from kdive.security import audit
-from kdive.services.allocation.release import reclaim_under_lock, release_with_backstops
+from kdive.services.allocation.release import (
+    SYSTEM_TEARDOWN_REQUIRED_REASON,
+    reclaim_under_lock,
+    release_with_backstops,
+)
 from kdive.services.external_boot.admission import DENIAL_REASON
 from tests.services.external_boot.conftest import SeedActivation
 
@@ -146,12 +150,16 @@ def test_expiry_without_a_restricting_activation_logs_no_denial(
     async def body() -> None:
         async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
             # `cleanup_complete` is what stops `get_restricting_for_system` matching, so the
-            # guard admits and the same allocation takes the reclaiming path instead.
+            # guard admits; a `torn_down` System passes the release fence (#3599), so the same
+            # allocation takes the reclaiming path instead.
             seeded = await seeded_activation(
                 conn,
                 state=ExternalBootActivationState.ABANDONED,
                 ready_reservation=True,
                 cleanup_complete=True,
+            )
+            await conn.execute(
+                "UPDATE systems SET state = 'torn_down' WHERE id = %s", (seeded.system_id,)
             )
             cursor = await conn.execute(
                 "SELECT allocation_id FROM systems WHERE id = %s", (seeded.system_id,)
@@ -301,5 +309,51 @@ def test_expiry_holds_an_allocation_whose_settled_system_still_runs(
                 "SELECT state FROM allocations WHERE id = %s", (allocation_id,)
             )
             assert await state.fetchone() == ("expired",)
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize(
+    "state", [ExternalBootActivationState.RECOVERED, ExternalBootActivationState.ABANDONED]
+)
+def test_expiry_holds_a_completed_unsettled_history_until_teardown(
+    migrated_url: str,
+    seeded_activation: SeedActivation,
+    caplog: pytest.LogCaptureFixture,
+    state: ExternalBootActivationState,
+) -> None:
+    """The worker refuses this System's orphan teardown, so expiry holds it (#3599)."""
+
+    async def body() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            # One transaction: a `recovered` row's attempt FK is checked at commit.
+            async with conn.transaction():
+                seeded = await seeded_activation(conn, state=state, cleanup_complete=True)
+            cursor = await conn.execute(
+                "UPDATE allocations SET state = 'active', lease_expiry = now() - interval '1s' "
+                "WHERE id = (SELECT allocation_id FROM systems WHERE id = %s) RETURNING id",
+                (seeded.system_id,),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            allocation_id = row[0]
+
+            with caplog.at_level(logging.INFO, logger=allocation_repairs.__name__):
+                assert await sweep_expired_allocations(conn) == 0
+            held = _repair_records(caplog, logging.WARNING)
+            assert len(held) == 1
+            message = held[0].getMessage()
+            assert str(allocation_id) in message
+            assert str(seeded.system_id) in message
+            assert SYSTEM_TEARDOWN_REQUIRED_REASON in message
+
+            await conn.execute(
+                "UPDATE systems SET state = 'torn_down' WHERE id = %s", (seeded.system_id,)
+            )
+            assert await sweep_expired_allocations(conn) == 1
+            state_row = await conn.execute(
+                "SELECT state FROM allocations WHERE id = %s", (allocation_id,)
+            )
+            assert await state_row.fetchone() == ("expired",)
 
     asyncio.run(body())

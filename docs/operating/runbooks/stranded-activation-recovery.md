@@ -61,11 +61,9 @@ refusal is written to the platform audit log, and a settlement writes its own ro
    with cleanup complete, and its reservation is released.
 
    The `runs.boot` that stranded the System usually leaves its `boot` job `running` after its
-   last attempt: unless the authority acknowledged a retry with no mutation, the reconciler does
-   not dead-letter an exhausted boot job whose authority row is still current. Settlement then
-   refuses with `job_live`. When that job's `attempt` equals its `max_attempts` and its lease
-   has lapsed, no worker holds it: cancel it with `jobs.cancel` (project `contributor`), then run
-   `observe` and `settle` again.
+   last attempt. Settlement fails that job and its Run with `lease_expired`, and audits it, when
+   its `attempt` has reached its `max_attempts`, its lease has lapsed and no worker can claim it
+   again.
 3. **Tear down on the worker.** Run `ops.force_teardown` for that System; from the CLI,
    `kdivectl ops force-teardown <system-id> --reason "<why>" --force`. A settled System's
    teardown runs on the worker that holds the domain, not on the authority. Wait for the job
@@ -99,12 +97,12 @@ on the older evidence.
 | `authority_owned` | either | The System has an authority ownership row, so the authority owns it. This tool does not apply. |
 | `not_preparing` | observe, settle | The activation has left `preparing`. Read it with `runs.get`. A settled replay returns `settled` again. |
 | `system_ended` | settle | The System is `tearing_down` or `torn_down`, so a teardown ran before settlement. See [Stuck `tearing_down` System](stuck-tearing-down-system.md). |
-| `job_live` | settle | An authority-marked job for the System is queued or running. Cancel an exhausted `boot` job with a lapsed lease as step 2 describes; wait for any other job to end. Then `observe` again. |
+| `job_live` | settle | An authority-marked job for the System is queued or running and a worker holds it or can still claim it, or the reconciler or a worker was updating an exhausted `boot` job at that moment. Wait for any live job to end, then `observe` again. |
 | `observation_missing` | settle | No observation was requested. Run `observe` first. |
 | `observation_pending` | settle | The observation job is still queued or running. Run `settle` again. |
 | `worker_domain_absent` | settle | The worker's daemon holds no domain named for the System, so this is not the worker-owned shape. Check whether a relocation moved it to the authority. |
 | `authority_domain_present` | settle | The authority's daemon holds the System's domain: this is a relocated System, not a stranded one. End that domain through the authority before observing again. |
-| `authority_objects_present` | settle | The authority's store still holds objects of the activation. The message names the recovery reference and each object. Nothing in kdive removes them yet (#3587), so remove them on the authority host, then `observe` again. |
+| `authority_objects_present` | settle | The authority's store still holds objects of the activation. The message names the recovery reference and each object. Nothing in kdive removes them, so remove them on the authority host, then `observe` again. |
 | `stranded_observation_unsupported` | settle | The System's provider, or this worker's runtime, has no stranded observation. Only local-libvirt carries one. |
 | `authority_route_missing`, `authority_route_mismatch` | settle | The worker has no authority route for the System's Resource, or its route names another instance. Fix the worker's inventory, restart the worker, then `observe` again. |
 | `worker_evidence_superseded` | settle | The database refused the worker's record: its job, attempt or worker incarnation no longer matches. Run `observe` again. |

@@ -509,9 +509,9 @@ takeover and name no shape; read the job's earliest `authority: <reason>` line:
 
   The sequence works whether or not the provision job has spent its attempts: the teardown
   supersedes the current attempt. Once the provision job's last attempt has lapsed, the
-  reconciler cancels it, and its `result_ref` is the same receipt digest. Unlike the stranded
-  `runs.boot` job in the [fixed-worker recovery](stranded-activation-recovery.md), it needs no
-  `jobs.cancel`.
+  reconciler cancels it, and its `result_ref` is the same receipt digest. Like the stranded
+  `runs.boot` job in the [fixed-worker recovery](stranded-activation-recovery.md), which
+  settlement ends, it needs no `jobs.cancel`.
 - **`authority: binding-mismatch`.** The inventory's `authority_instance` for the Resource did
   not match the installed authority's when the System was provisioned. The System recorded that
   value, and the recorded binding never changes. The teardown fails with the same reason, and
