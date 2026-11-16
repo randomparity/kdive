@@ -10,10 +10,10 @@ guard and `settled_system_awaiting_teardown`. A completed activation (`recovered
 `torn_down` with `cleanup_complete`) passes the guard, and an unsettled one passes the settled
 check, so the allocation moves to `expired` while its System is not `torn_down`.
 `repair_orphaned_systems` then enqueues an ordinary teardown, and `teardown_handler` refuses it
-(`external_boot_teardown_not_supported`) for any unsettled latest activation. The System is never
-torn down by the reconciler, and the operator's `systems.teardown` routes to the authority, which
-needs the allocation the expiry ended (#2966). `allocations.release` holds the same allocation
-through `_require_system_teardown`.
+(`external_boot_teardown_not_supported`, terminal) for any unsettled latest activation; the lane
+never recycles that row, so the System waits for an operator `systems.teardown`, which #2992 lets
+finish after expiry. `allocations.release` instead holds the same allocation through
+`_require_system_teardown`, and the issue asks expiry to do the same.
 
 ## Decision
 

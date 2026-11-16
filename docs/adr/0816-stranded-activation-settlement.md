@@ -287,16 +287,24 @@ not expired. The skip logs one warning naming the allocation, the System and
 The narrowed fence the issue offered, a latest activation that is not settled on a System that is
 not `torn_down`, holds the same set once joined with the #3551 settled fence: every System with
 history has a latest activation, settled or not. Expiring any unsettled one hands the System to
-`repair_orphaned_systems`, whose ordinary teardown the worker refuses with
-`external_boot_teardown_not_supported` on every pass. The rejected note's concern, holding genuine
-authority Systems, is that same defect: their teardown is `systems.teardown` or
-`ops.force_teardown`, which need the allocation the expiry would end (#2966).
+`repair_orphaned_systems`, whose ordinary teardown the worker refuses as a terminal
+`external_boot_teardown_not_supported`; the lane never recycles that row, so the System waits for
+an operator. Since #2992 (ADR-0620 and ADR-0584 amendments of 2026-10-01) `systems.teardown` and
+`ops.force_teardown` can still finish it after expiry, so the hold buys no new exit. It buys
+agreement with release: the reconciler stops enqueuing a teardown it knows the worker refuses,
+and the allocation ends only after its System. The rejected note's concern, holding genuine
+authority Systems, is accepted as that cost.
+
+This narrows #2992's premise that lease expiry ends an allocation whose System may still have
+external-boot history: it no longer does while that System is not `torn_down`. #2992's
+after-expiry teardown path is unchanged for allocations already ended.
 
 **Consequences.**
 
 - An allocation whose System has external-boot history keeps its lease-expired host-cap slot
-  until the System is torn down, as `allocations.release` and the orphaned-active reaper already
-  do. This includes a `failed` System, which the orphan lane skips.
+  until an operator tears the System down, as `allocations.release` and the orphaned-active
+  reaper already do; before, expiry freed the slot and left a failed orphan teardown. This
+  includes a `failed` System, which the orphan lane skips.
 - No migration and no grant change: `kdive_reconciler` has read `external_boot_activations` since
   0121. Only the reconciler changes; the upgrade order is unchanged.
 
