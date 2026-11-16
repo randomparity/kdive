@@ -24,7 +24,15 @@ class Supersession:
     decision: str
 
 
-SUPERSESSIONS: tuple[Supersession, ...] = ()
+SUPERSESSIONS: tuple[Supersession, ...] = (
+    Supersession(
+        version="0112",
+        filename="0112_capture_operation_supervision.sql",
+        superseded_sha256="ea69a7d2e4dde25195a7735c33f953a74b43adcf51aa9f7a981557e14b2ac73a",  # noqa: E501  # pragma: allowlist secret — file-content SHA-256, not a credential
+        current_sha256="7c3e31ea512bb8a030ca66e40f4591f916f61dbd15137155ba93943f381526d3",  # noqa: E501  # pragma: allowlist secret — file-content SHA-256, not a credential
+        decision="ADR-0818",
+    ),
+)
 
 
 def admits(version: str, recorded_sha256: str, current_sha256: str) -> bool:

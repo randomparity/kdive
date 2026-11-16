@@ -20,7 +20,7 @@ set -euo pipefail
 # never requests warms nothing and still passes. tests/guards/test_prepull_images_match_fixtures.py
 # parses this array and both constants and fails on any drift.
 readonly IMAGES=(
-  "postgres:17@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317"                          # tests/db/conftest.py::_POSTGRES_IMAGE  # noqa: E501  # 17
+  "postgres:17@sha256:0d938e975177bef9f1f61f3f9dbcf2e0aa0a139568f66d3415ed8892eb97f6ac"                          # tests/db/conftest.py::_POSTGRES_IMAGE  # noqa: E501  # 17
   "ghcr.io/randomparity/kdive-seaweedfs@sha256:6a4e9f013ecd9c1f86136ed3d3c7eb089c8eb13ff3eee83044ab2a2950f7ce6c" # tests/store/conftest.py::_SEAWEEDFS_IMAGE  # noqa: E501
 )
 
