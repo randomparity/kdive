@@ -209,34 +209,92 @@ test-shard shard:
 # regression evidence. It tests the committed `sha` (default HEAD), never uncommitted edits;
 # a dirty tree gets a warning. The git common directory is mounted read-only, so the run works
 # from a worktree and changes nothing in the checkout. `CONTAINER_ENGINE` selects `docker`
-# (default) or `podman`; only Docker is verified on macOS. Extra arguments go to `just test`,
-# with the same shell splitting as `test-verbose`.
+# (default) or `podman` (`podman machine` on macOS; `CONTAINER_CONNECTION` picks the
+# connection). The xdist worker cap fits the engine's memory; an explicit `-n` or
+# `--maxprocesses` replaces it. Extra arguments go to `just test`, with the same shell
+# splitting as `test-verbose`.
 test-linux $sha="HEAD" *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     engine="${CONTAINER_ENGINE:-docker}"
     case "$engine" in
-      docker) socket=/var/run/docker.sock ;;
-      podman) socket="$(podman info --format '{{{{.Host.RemoteSocket.Path}}')" ;;
+      docker)
+        socket=/var/run/docker.sock
+        engine_args=()
+        memory_format='{{{{.MemTotal}}'
+        ;;
+      podman)
+        # `podman machine` reports the socket as a URI, and SELinux in its VM denies the
+        # socket to a labeled container.
+        socket="$(podman info --format '{{{{.Host.RemoteSocket.Path}}')"
+        socket="${socket#unix://}"
+        engine_args=(--security-opt label=disable)
+        memory_format='{{{{.Host.MemTotal}}'
+        ;;
       *)
         echo "test-linux: CONTAINER_ENGINE must be docker or podman, not '$engine'" >&2
         exit 2
         ;;
     esac
+    # An xdist worker grows to 1.2-1.7 GiB by the end of a run, and the pytest controller,
+    # PostgreSQL and SeaweedFS take about 1.2 GiB in the engine VM. Below 6 GiB even one
+    # worker was OOM-killed. Keep 1.5 GiB for the rest and 1.5 GiB per worker, at most 8 (the
+    # shared PostgreSQL lock limit).
+    memory="$("$engine" info --format "$memory_format" 2>/dev/null)" || memory=""
+    if [[ $memory =~ ^[0-9]+$ ]]; then
+      memory_mib=$((memory / 1048576))
+      if ((memory_mib < 6144)); then
+        if [[ $engine == podman ]]; then
+          fix='podman machine stop; podman machine set --memory 8192; podman machine start'
+        else
+          fix='raise the Docker Desktop memory limit (Settings > Resources) to 8 GiB'
+        fi
+        echo "test-linux: $engine has $memory_mib MiB of memory; the suite needs at least" \
+          "6144 MiB. Give the engine VM more memory: $fix" >&2
+        exit 1
+      fi
+      workers=$(((memory_mib - 1536) / 1536))
+      if ((workers > 8)); then
+        workers=8
+      fi
+      echo "test-linux: $engine has $memory_mib MiB; at most $workers xdist workers" >&2
+    else
+      workers=8
+      echo "test-linux: warning: cannot read the $engine memory; at most 8 xdist workers" >&2
+    fi
+    # xdist clamps a numeric `-n` to `--maxprocesses`, so an explicit worker count in the
+    # arguments replaces the memory cap with the lock limit of 8 instead of following it.
+    set -- {{ARGS}}
+    cap=("--maxprocesses=$workers")
+    for arg in "$@"; do
+      case "$arg" in
+        -n | -n* | --numprocesses | --numprocesses=* | --maxprocesses | --maxprocesses=*)
+          cap=(--maxprocesses=8)
+          echo "test-linux: the arguments set the worker count; the memory cap is not used" >&2
+          break
+          ;;
+      esac
+    done
     commit="$(git rev-parse --verify --end-of-options "$sha^{commit}")"
     if [[ -n "$(git status --porcelain)" ]]; then
       echo "test-linux: warning: uncommitted changes are not tested; testing $commit" >&2
     fi
     common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
     "$engine" build --quiet --tag kdive-test-linux tests/container >/dev/null
-    exec "$engine" run --rm --init \
+    if ! "$engine" run --rm "${engine_args[@]}" --volume "$common_dir:/repo:ro" \
+      --entrypoint test kdive-test-linux -r /repo/HEAD; then
+      echo "test-linux: $engine cannot read the git directory $common_dir in a container;" \
+        "share that path with the engine VM, or run from a checkout under a shared path" >&2
+      exit 1
+    fi
+    exec "$engine" run --rm --init "${engine_args[@]}" \
       --volume "$common_dir:/repo:ro" \
       --volume "$socket:/var/run/docker.sock" \
       --volume kdive-test-linux-uv-cache:/home/tester/.cache/uv \
       --env PYTHONHASHSEED \
       --env TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
       --add-host host.docker.internal:host-gateway \
-      kdive-test-linux "$commit" {{ARGS}}
+      kdive-test-linux "$commit" "${cap[@]}" "$@"
 
 # Detect hash-order-dependent pytest collection directly and reproducibly (#2072). The
 # weekly suite's shared per-run seed makes every xdist worker collect identically, so

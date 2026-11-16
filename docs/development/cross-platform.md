@@ -68,13 +68,32 @@ Linux container at the engine's native architecture (arm64 on Apple silicon;
 - `just test-linux` tests `HEAD`; `just test-linux <sha>` tests another commit. Commit first:
   uncommitted edits are not tested, and the recipe warns when the tree is dirty.
 - `<sha>` must contain the `test-linux` change itself (#3072). An older commit fails inside the
-  container with `justfile does not contain recipe '--maxprocesses=8'`.
+  container with `justfile does not contain recipe '--maxprocesses=N'`.
 - `just test-linux HEAD tests/jobs` runs only the given paths.
 - The recipe works from a worktree. It mounts the git directory read-only and changes nothing
   in the checkout. A named volume, `kdive-test-linux-uv-cache`, keeps downloaded packages.
 - The container runs at most 8 xdist workers, the limit for the shared test PostgreSQL lock.
-- `CONTAINER_ENGINE=podman just test-linux` uses Podman. Only Docker Desktop is verified on
-  macOS.
+  The recipe lowers the cap to fit the engine's total memory: it keeps 1.5 GiB for the
+  pytest controller and the test backends and allows 1.5 GiB per worker, and prints the cap
+  it chose. An explicit `-n N` or `--maxprocesses=N` in the arguments replaces the memory
+  cap; `-n` stays at most 8.
+- The engine must report at least 6144 MiB of total memory. Below that, the recipe stops
+  before it starts a container and names the fix. A worker grows to about 1.7 GiB, and a
+  3.6 GiB VM OOM-killed even one worker; 6144 MiB is the set limit. A VM reports less than
+  its configured size (a 3814 MiB `podman machine` reports 3607 MiB), so set 8 GiB: run
+  `podman machine stop`, `podman machine set --memory 8192`, then `podman machine start`.
+- `CONTAINER_ENGINE=podman just test-linux` uses `podman machine`. A full run passed on
+  Podman 6.1.4 with an 8 GiB machine, rootless and rootful, and on Docker Desktop (see the
+  ADR-0717 amendment for the commits). Set `CONTAINER_CONNECTION` to choose the rootless
+  (`podman-machine-default`) or rootful (`podman-machine-default-root`) connection. The
+  recipe disables SELinux labels for the test container, because SELinux in the VM denies
+  the engine socket otherwise.
+- The engine VM must see the git directory. `podman machine` shares only `/Users`,
+  `/private` and `/var/folders` by default, so a checkout on another volume fails before
+  the suite with a message that names the directory. Use a checkout under a shared path,
+  or re-create the machine with the volume shared (`podman machine rm`, then
+  `podman machine init --volume <path>:<path>`; this drops the machine's images). Docker
+  Desktop shares `/Volumes` by default.
 - The container uses the engine's socket to start the test PostgreSQL and SeaweedFS
   containers, the same as `just test` on a Linux host with Docker.
 

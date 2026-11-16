@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Entry point of the `just test-linux` image (ADR-0717). Usage: run-suite <commit> [ARGS...]
+# The recipe puts the worker cap (`--maxprocesses=N`) first in ARGS.
 # As root, it only gives the non-root tester the group that owns the engine socket, because
 # several tests expect a permission refusal that root would not get.
 set -euo pipefail
@@ -25,4 +26,4 @@ git clone --quiet --no-checkout /repo /work/src
 cd /work/src
 git checkout --quiet --detach "$commit"
 uv sync --locked --quiet
-KDIVE_REQUIRE_DOCKER=1 exec just test --maxprocesses=8 "$@"
+KDIVE_REQUIRE_DOCKER=1 exec just test "$@"
