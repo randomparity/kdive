@@ -270,6 +270,45 @@ marked job still refuses `job_live`, and a refusal still changes nothing.
   replacements of the stored definition, the pattern migration 0150 uses, keep the change
   reviewable.
 
+### Amendment (2026-11-15): lease expiry holds every System with history (#3599)
+
+This amendment reverses the #3551 amendment's Consequence that lease expiry for a completed,
+unsettled external-boot history is unchanged, and its rejection of applying the full release
+fence to lease expiry.
+Spec: [expiry teardown fence](../workflow/specs/2026-11-15-expiry-teardown-fence-3599-design.md).
+
+**Decision.** `_expire_one` applies the release fence, `require_system_teardown` in
+`kdive.services.allocation.release`, after the admission guard and under the same locks: an
+allocation with a System that has any `external_boot_activations` row and is not `torn_down` is
+not expired. The skip logs one warning naming the allocation, the System and
+`external_boot_system_teardown_required`, and is retried each pass. The fence replaces
+`settled_system_awaiting_teardown`, whose Systems it already holds.
+
+The narrowed fence the issue offered, a latest activation that is not settled on a System that is
+not `torn_down`, holds the same set once joined with the #3551 settled fence: every System with
+history has a latest activation, settled or not. Expiring any unsettled one hands the System to
+`repair_orphaned_systems`, whose ordinary teardown the worker refuses with
+`external_boot_teardown_not_supported` on every pass. The rejected note's concern, holding genuine
+authority Systems, is that same defect: their teardown is `systems.teardown` or
+`ops.force_teardown`, which need the allocation the expiry would end (#2966).
+
+**Consequences.**
+
+- An allocation whose System has external-boot history keeps its lease-expired host-cap slot
+  until the System is torn down, as `allocations.release` and the orphaned-active reaper already
+  do. This includes a `failed` System, which the orphan lane skips.
+- No migration and no grant change: `kdive_reconciler` has read `external_boot_activations` since
+  0121. Only the reconciler changes; the upgrade order is unchanged.
+
+**Considered & rejected.**
+
+- **Narrow the fence to an unsettled latest activation.** verified: `teardown_handler` in
+  `src/kdive/jobs/handlers/systems.py` (main `8dcfe8c67`) refuses any unsettled latest activation,
+  and `settled_system_awaiting_teardown` holds any settled one; the two together are the full
+  fence, with a second query to keep.
+- **Exclude `failed` Systems.** judgment: fit. A `failed` System's authority domain can still run,
+  and release and the orphaned-active reaper hold it for that reason (#2966).
+
 ## Considered & rejected
 
 - **Do nothing and leave recovery to lease expiry.** verified: `reconcile` skips the allocation
