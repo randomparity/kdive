@@ -32,7 +32,6 @@ from kdive.services.accounting import ledger as accounting
 from kdive.services.allocation import promotion as allocation_promotion
 from kdive.services.allocation import release as allocation_release
 from kdive.services.allocation.admission.metrics import AdmissionMetrics
-from kdive.services.external_boot.settlement import settled_system_awaiting_teardown
 
 _log = logging.getLogger(__name__)
 
@@ -230,29 +229,23 @@ async def _expire_one(conn: AsyncConnection, allocation_id: UUID, project: str) 
             await allocation_release.guard_external_boot_release(
                 conn, allocation_id, project=project
             )
+            # Expiring a System with external-boot history that is not torn down would orphan
+            # it: the worker refuses its ordinary teardown, and the authority teardown needs this
+            # allocation. So expiry holds it exactly as release does (ADR-0816, #3599).
+            await allocation_release.require_system_teardown(conn, allocation_id, project=project)
         except allocation_release.ExternalBootDenied as denied:
             # A bare `return False` here is indistinguishable from the two no-op returns
             # above, and `reclaimed` does not move either way, so the skip is invisible
             # (#2519). The cause comes from the denial rather than this message: the guard
             # raises for a restricting activation (ADR-0596) and for the ADR-0623
-            # authority-ownership fence, and only `details` tells the two apart.
+            # authority-ownership fence, the teardown fence for a System with history, and
+            # only `details` tells them apart.
             _log.warning(
-                "reconciler: allocation %s not expired — the external-boot admission guard "
+                "reconciler: allocation %s not expired — the external-boot release fence "
                 "refused the release; retried next pass: %s %s",
                 allocation_id,
                 denied,
                 denied.details,
-            )
-            return False
-        # The admission guard no longer restricts a settled activation, but its worker domain runs
-        # until teardown, so the allocation stays held as release holds it (ADR-0816, #3551).
-        settled_system = await settled_system_awaiting_teardown(conn, allocation_id)
-        if settled_system is not None:
-            _log.warning(
-                "reconciler: allocation %s not expired — System %s has a settled external-boot "
-                "activation and is not torn down; run ops.force_teardown, retried next pass",
-                allocation_id,
-                settled_system,
             )
             return False
         alloc = await accounting.stamp_active_ended(conn, alloc, datetime.now(UTC))

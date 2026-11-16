@@ -220,7 +220,7 @@ _SYSTEM_AWAITING_AUTHORITY_TEARDOWN_SQL = (
 SYSTEM_TEARDOWN_REQUIRED_REASON = "external_boot_system_teardown_required"
 
 
-async def _require_system_teardown(
+async def require_system_teardown(
     conn: AsyncConnection, allocation_id: UUID, *, project: str
 ) -> None:
     """Keep the allocation until each System with external-boot history is torn down."""
@@ -285,7 +285,7 @@ async def reclaim_under_lock(
             return ReleaseOutcome(released=False, current_status=current.state.value)
         try:
             await guard_external_boot_release(conn, uid, project=project)
-            await _require_system_teardown(conn, uid, project=project)
+            await require_system_teardown(conn, uid, project=project)
         except ExternalBootDenied:
             return ReleaseOutcome(
                 released=False,
@@ -353,7 +353,7 @@ async def _release_locked(
                 current_status=current.state.value,
             )
         await guard_external_boot_release(conn, uid, project=project)
-        await _require_system_teardown(conn, uid, project=project)
+        await require_system_teardown(conn, uid, project=project)
         if current.state in _RELEASABLE:
             await _transition_and_audit(
                 conn, audit_writer, uid, current.state, AllocationState.RELEASING, project=project
