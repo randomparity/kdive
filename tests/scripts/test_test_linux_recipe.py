@@ -17,9 +17,13 @@ _STUB_ENGINE = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$STUB_LOG"
 case "$1" in
   info)
-    case "$*" in
-      *MemTotal*) printf '%s\\n' "$STUB_MEMORY" ;;
-      *) printf '%s\\n' "$STUB_SOCKET" ;;
+    # Each engine answers only its own template; podman nests MemTotal under Host.
+    case "${0##*/} $*" in
+      "podman info --format {{.Host.MemTotal}}" | "docker info --format {{.MemTotal}}")
+        printf '%s\\n' "$STUB_MEMORY"
+        ;;
+      "podman info --format {{.Host.RemoteSocket.Path}}") printf '%s\\n' "$STUB_SOCKET" ;;
+      *) echo "stub: unknown info template: $*" >&2; exit 125 ;;
     esac
     ;;
   run) [[ " $* " == *" --entrypoint "* ]] && exit "$STUB_PROBE_EXIT" ;;
