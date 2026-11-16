@@ -44,6 +44,9 @@ jobs:
     timeout-minutes: 75
     env:
       UV_PYTHON: "3.15"
+      # Release-age cooldown (ADR-0817, #3657). Job-level so `uv lock`, `uv sync --locked` and
+      # `uv run` share one cutoff: a lock-only --exclude-newer breaks `sync --locked`.
+      UV_EXCLUDE_NEWER: "7 days"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
