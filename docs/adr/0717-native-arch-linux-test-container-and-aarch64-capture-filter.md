@@ -64,8 +64,9 @@ silicon.
   to 1.2-1.7 GiB by the end of a run, and the controller, PostgreSQL and SeaweedFS take about
   1.2 GiB. The 1-worker run passed 24402 tests and lost one to the crash. Item 3 now reads:
   the recipe reads the total memory the engine reports and stops before any container,
-  naming the fix, when it is below 6144 MiB (a VM reports less than its configured size); otherwise it keeps 1.5 GiB, allows 1.5 GiB per worker, caps at 8,
-  and prints the cap. When it cannot read the memory, it warns and uses 8.
+  naming the fix, when it is below 6144 MiB (a VM reports less than its configured size).
+  Otherwise it keeps 1.5 GiB, allows 1.5 GiB per worker, caps at 8, and prints the cap.
+  When it cannot read the memory, it warns and uses 8.
   An explicit `-n` or `--maxprocesses` in the arguments replaces the cap, because xdist
   clamps a numeric `-n` to `--maxprocesses`.
 - The socket group step and `host.docker.internal` needed no change. Under rootless Podman
