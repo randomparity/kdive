@@ -380,3 +380,13 @@ def test_end_to_end_an_unimportable_supersession_list_is_a_guard_error(
     assert result.returncode == 1
     assert "cannot import kdive.db.supersessions" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_the_supersession_list_imports_without_a_venv() -> None:
+    # The venv-free CI pre-commit job runs this guard under a bare python3, so the package
+    # __init__ files and kdive.db.supersessions must stay standard-library only. -S drops
+    # site-packages, which is where any third-party import would have to come from.
+    src = Path(__file__).resolve().parents[2] / "src"
+    code = f"import sys; sys.path.insert(0, {str(src)!r}); import kdive.db.supersessions"
+    result = subprocess.run(["python3", "-S", "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
