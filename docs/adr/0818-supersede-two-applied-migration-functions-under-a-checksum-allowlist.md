@@ -4,8 +4,8 @@
 
 Accepted (2026-11-16)
 
-Amends [ADR-0015](0015-sql-migration-runner.md) (byte-immutability of applied migrations) and
-the guard of [ADR-0518](0518-the-immutability-guard-compares-against-the-base-branch.md).
+Amends [ADR-0015](0015-sql-migration-runner.md) (byte-immutability of applied migrations, enforced
+by its runner checksum and authoring-time guard).
 
 ## Context
 
