@@ -3,6 +3,8 @@
 - **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-03
 - **Deciders:** D. Christensen (core platform)
+- **Amended by:** [ADR-0818](0818-supersede-two-applied-migration-functions-under-a-checksum-allowlist.md)
+  (one exact, allowlisted byte supersession of 0112; #3612)
 
 ## Context
 
