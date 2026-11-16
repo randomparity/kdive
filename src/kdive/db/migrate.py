@@ -2,7 +2,8 @@
 
 Applies ``schema/NNNN_*.sql`` in ascending order inside one advisory-lock-guarded
 transaction, recording each applied file in ``schema_migrations``. Re-running is a
-no-op; an edited applied file fails the checksum check. The runner is synchronous —
+no-op; an edited applied file fails the checksum check unless :mod:`kdive.db.supersessions`
+lists that exact replacement (ADR-0818). The runner is synchronous —
 migration is a one-shot startup operation, distinct from the async runtime pool in
 :mod:`kdive.db.pool`.
 """
@@ -16,6 +17,8 @@ from pathlib import Path
 
 import psycopg
 from psycopg.pq import TransactionStatus
+
+from kdive.db import supersessions
 
 SCHEMA_DIR = Path(__file__).parent / "schema"
 
@@ -126,7 +129,9 @@ def apply_migrations(conn: psycopg.Connection) -> list[str]:
             migration = by_version.get(version)
             if migration is None:
                 raise MigrationError(f"applied migration {version} is missing from {SCHEMA_DIR}")
-            if migration.checksum != checksum:
+            if migration.checksum != checksum and not supersessions.admits(
+                version, checksum, migration.checksum
+            ):
                 raise MigrationError(
                     f"applied migration {migration.filename} checksum changed; "
                     "applied migrations are immutable (ADR-0015)"

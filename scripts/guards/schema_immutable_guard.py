@@ -10,7 +10,8 @@ This guard forbids modifying, deleting, or renaming any existing
 ``src/kdive/db/schema/*.sql`` file. Only *adding* a new migration is allowed. It compares
 the tree against a base ref (default ``origin/main``): ``git diff --name-status`` scoped to
 the schema directory is fed to :func:`find_violations`, and any change other than an
-addition of a schema file is rejected.
+addition of a schema file is rejected. One exception: a modification whose base and working
+bytes are an exact pair listed in ``kdive.db.supersessions`` (ADR-0818).
 
 The base ref is the whole point. Diffing against ``HEAD`` — the shape this guard shipped
 with — asks a question about the working tree, so a clean checkout compares HEAD with
@@ -33,17 +34,23 @@ clean, 1 on violations or on any of those failures.
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kdive.db.supersessions import Supersession
 
 SCHEMA_SUBDIR = "src/kdive/db/schema"
 DEFAULT_BASE_REF = "origin/main"
 
 _SCHEMA_PREFIX = f"{SCHEMA_SUBDIR}/"
 _SCHEMA_SUFFIX = ".sql"
+_GUARD_SRC = Path(__file__).resolve().parents[2] / "src"
 
 
 class GuardError(RuntimeError):
@@ -57,8 +64,13 @@ class Violation:
     status: str  # git name-status code: M, D, R…, T, etc.
     path: str  # the offending schema-file path (the source for a rename)
 
-    def message(self, base_ref: str) -> str:
-        """A one-line, actionable description naming the file and what happened to it."""
+    def message(self, base_ref: str, listed: frozenset[str] = frozenset()) -> str:
+        """A one-line, actionable description naming the file and what happened to it.
+
+        ``listed`` names the schema files that carry a reviewed supersession (ADR-0818). An
+        unmatched modification of one is also how a branch cut before that supersession merged
+        looks once the base moves on, so it gets the stale-branch reading too.
+        """
         line = (
             f"{self.path}: applied migration changed ({self.status}) relative to {base_ref}; "
             "migration files are byte-immutable — add a new NNNN_*.sql instead (ADR-0015)"
@@ -71,6 +83,12 @@ class Violation:
                 f". If this branch never touched the file, {base_ref} gained it after the "
                 f"branch diverged — merge {base_ref} in and re-run"
             )
+        if self.status.startswith("M") and self.path.rsplit("/", 1)[-1] in listed:
+            line += (
+                ". This file has a reviewed supersession (ADR-0818); if this branch never "
+                f"touched it, {base_ref} replaced it after the branch diverged — merge "
+                f"{base_ref} in and re-run"
+            )
         return line
 
 
@@ -78,7 +96,11 @@ def _is_schema_file(path: str) -> bool:
     return path.startswith(_SCHEMA_PREFIX) and path.endswith(_SCHEMA_SUFFIX)
 
 
-def find_violations(base_filenames: Iterable[str], name_status: Iterable[str]) -> list[Violation]:
+def find_violations(
+    base_filenames: Iterable[str],
+    name_status: Iterable[str],
+    approved: frozenset[str] = frozenset(),
+) -> list[Violation]:
     """Flag every change to an existing schema file in ``git diff --name-status`` output.
 
     Each line is a tab-separated record: ``<STATUS>\\t<PATH>`` for adds/edits/deletes,
@@ -95,6 +117,8 @@ def find_violations(base_filenames: Iterable[str], name_status: Iterable[str]) -
         base_filenames: Bare migration filenames present on the base ref, used only to
             prove the base was read. The diff itself carries the comparison.
         name_status: Lines of ``git diff --name-status`` output against that base ref.
+        approved: Schema paths whose in-place modification is an exact reviewed supersession
+            (ADR-0818); only their ``M`` record is spared.
 
     Returns:
         One :class:`Violation` per disallowed change, in input order.
@@ -127,9 +151,69 @@ def find_violations(base_filenames: Iterable[str], name_status: Iterable[str]) -
             continue
         # M, D, T, and any other in-place change to a tracked path.
         path = fields[1] if len(fields) > 1 else ""
+        if code == "M" and path in approved:
+            continue
         if _is_schema_file(path):
             violations.append(Violation(status, path))
     return violations
+
+
+def _supersessions() -> tuple[Supersession, ...]:
+    """The reviewed supersessions from this guard's own checkout (stdlib-only module)."""
+    if str(_GUARD_SRC) not in sys.path:
+        sys.path.insert(0, str(_GUARD_SRC))
+    try:
+        from kdive.db.supersessions import SUPERSESSIONS
+    except ImportError as exc:
+        raise GuardError(f"cannot import kdive.db.supersessions from {_GUARD_SRC}: {exc}") from exc
+    return SUPERSESSIONS
+
+
+def is_approved(
+    entries: Sequence[Supersession],
+    filename: str,
+    base_sha256: str | None,
+    work_sha256: str | None,
+) -> bool:
+    """Whether replacing ``filename``'s base bytes with its working bytes is listed exactly."""
+    return any(
+        entry.filename == filename
+        and entry.superseded_sha256 == base_sha256
+        and entry.current_sha256 == work_sha256
+        for entry in entries
+    )
+
+
+def _sha256_at(root: Path, base_ref: str, path: str) -> str | None:
+    result = subprocess.run(
+        ["git", "show", f"{base_ref}:{path}"], cwd=root, capture_output=True, check=False
+    )
+    return hashlib.sha256(result.stdout).hexdigest() if result.returncode == 0 else None
+
+
+def _sha256_of(root: Path, path: str) -> str | None:
+    target = root / path
+    return hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None
+
+
+def _approved(
+    root: Path, base_ref: str, name_status: Iterable[str], entries: Sequence[Supersession]
+) -> frozenset[str]:
+    modified = [
+        fields[1]
+        for fields in (line.split("\t") for line in name_status)
+        if len(fields) == 2 and fields[0] == "M" and _is_schema_file(fields[1])
+    ]
+    return frozenset(
+        path
+        for path in modified
+        if is_approved(
+            entries,
+            path.rsplit("/", 1)[1],
+            _sha256_at(root, base_ref, path),
+            _sha256_of(root, path),
+        )
+    )
 
 
 def _fetch_hint(base_ref: str) -> str:
@@ -202,17 +286,26 @@ def _name_status(root: Path, base_ref: str) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     base_ref = args[0] if args else DEFAULT_BASE_REF
+    entries: tuple[Supersession, ...] = ()
     try:
         root = _repo_root()
-        violations = find_violations(_base_filenames(root, base_ref), _name_status(root, base_ref))
+        base_filenames = _base_filenames(root, base_ref)
+        entries = _supersessions()
+        name_status = _name_status(root, base_ref)
+        violations = find_violations(
+            base_filenames,
+            name_status,
+            approved=_approved(root, base_ref, name_status, entries),
+        )
     except GuardError as exc:
         print(
             f"::error::schema-immutability guard could not run against {base_ref!r}: {exc}",
             file=sys.stderr,
         )
         return 1
+    listed = frozenset(entry.filename for entry in entries)
     for v in violations:
-        print(f"::error::{v.message(base_ref)}", file=sys.stderr)
+        print(f"::error::{v.message(base_ref, listed=listed)}", file=sys.stderr)
     if violations:
         print(
             f"{len(violations)} disallowed change(s) to existing migration file(s); "
