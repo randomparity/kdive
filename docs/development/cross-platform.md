@@ -82,7 +82,8 @@ Linux container at the engine's native architecture (arm64 on Apple silicon;
   and a smaller VM OOM-kills it. A VM reports less than its configured size (a 3814 MiB
   `podman machine` reports 3607 MiB), so set 8 GiB: run `podman machine stop`,
   `podman machine set --memory 8192`, then `podman machine start`.
-- `CONTAINER_ENGINE=podman just test-linux` uses `podman machine`. Set
+- `CONTAINER_ENGINE=podman just test-linux` uses `podman machine`. A full run passed on
+  Podman 6.1.4 with an 8 GiB machine, rootless and rootful, and on Docker Desktop. Set
   `CONTAINER_CONNECTION` to choose the rootless (`podman-machine-default`) or rootful
   (`podman-machine-default-root`) connection. The recipe disables SELinux labels for the
   test container, because SELinux in the VM denies the engine socket otherwise.

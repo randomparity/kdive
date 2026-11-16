@@ -71,6 +71,10 @@ silicon.
   clamps a numeric `-n` to `--maxprocesses`.
 - The socket group step and `host.docker.internal` needed no change. Under rootless Podman
   the socket is `0:0 660` in the container, so `tester` joins group `root`.
+- Verified on commit `cd023b198` with the machine raised to 8192 MiB (it reports 7902 MiB,
+  so the recipe used 4 workers), from a clone under `/private`: the rootless connection
+  exited 0 in 610 s and the rootful connection exited 0 in 574 s, each with 24409 passed
+  and 182 skipped. Docker Desktop (32 GiB, 8 workers) exited 0 on `54629facd` in 483 s.
 
 ## Consequences
 
