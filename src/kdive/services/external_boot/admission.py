@@ -137,36 +137,48 @@ _STATE_NEXT_ACTIONS: Mapping[ExternalBootActivationState, tuple[str, ...]] = {
 }
 
 
-def _teardown_exits(state: ExternalBootActivationState) -> tuple[str, ...]:
-    """The teardown exit for `state`, empty where the matrix does not admit it."""
-    if ExternalBootOperation.SYSTEM_TEARDOWN in _ADMITTED[state]:
-        return ("systems.teardown",)
-    return ()
+def _teardown_exits(state: ExternalBootActivationState, *, stranded: bool) -> tuple[str, ...]:
+    """The teardown exit for `state`, empty where the matrix does not admit it.
+
+    A stranded System is not pointed at it: settlement refuses a torn-down System
+    (`system_ended`), so teardown first forecloses the recovery (ADR-0816).
+    """
+    if stranded or ExternalBootOperation.SYSTEM_TEARDOWN not in _ADMITTED[state]:
+        return ()
+    return ("systems.teardown",)
 
 
-async def _recovery_exits(
+async def _is_stranded_shape(
     conn: AsyncConnection, system_id: UUID, state: ExternalBootActivationState
-) -> tuple[str, ...]:
-    """The stranded-activation recovery where its observation is admitted (ADR-0816).
+) -> bool:
+    """Whether `state` admits the stranded-activation observation for an unowned System.
 
-    The tool refuses an authority-owned System, so only a System with no ownership row is pointed
-    at it. ADR-0261 filtering drops it for a caller without platform_admin.
+    The recovery tool refuses an authority-owned System, so only a System with no ownership row
+    has the stranded shape (ADR-0816).
     """
     if ExternalBootOperation.OBSERVE_STRANDED_ACTIVATION not in _ADMITTED[state]:
-        return ()
-    if await authority_system_binding(conn, system_id) is not None:
-        return ()
-    return ("ops.recover_stranded_activation",)
+        return False
+    return await authority_system_binding(conn, system_id) is None
 
 
-def _escalation_hint(state: ExternalBootActivationState) -> str:
+def _recovery_exits(*, stranded: bool) -> tuple[str, ...]:
+    """The stranded-activation recovery, which ADR-0261 filtering drops without platform_admin."""
+    return ("ops.recover_stranded_activation",) if stranded else ()
+
+
+def _escalation_hint(state: ExternalBootActivationState, *, stranded: bool) -> str:
     """Say in words what breadcrumb filtering hides from a caller without project ADMIN.
 
     `systems.teardown` is project ADMIN, so ADR-0261 filtering strips it from a CONTRIBUTOR's
     breadcrumbs and leaves a bare `runs.get`. The detail names teardown only for a state whose
     matrix row admits it.
     """
-    if not _teardown_exits(state):
+    if stranded:
+        return (
+            "run ops.recover_stranded_activation first (platform_admin); systems.teardown is "
+            f"admitted while the activation is {state.value} but forecloses that recovery"
+        )
+    if not _teardown_exits(state, stranded=False):
         return f"no exit is admitted while the activation is {state.value}"
     return (
         f"systems.teardown is admitted while the activation is {state.value} "
@@ -234,15 +246,16 @@ async def check_external_boot_admission(
         operation not in _OWNING_RUN_SCOPED or run_id == activation.run_id
     ):
         return
+    stranded = await _is_stranded_shape(conn, system_id, activation.state)
     next_actions = (
         *_STATE_NEXT_ACTIONS.get(activation.state, ()),
-        *await _recovery_exits(conn, system_id, activation.state),
-        *_teardown_exits(activation.state),
+        *_recovery_exits(stranded=stranded),
+        *_teardown_exits(activation.state, stranded=stranded),
     )
     raise ExternalBootDenied(
         f"{operation.value} is denied while external-boot activation {activation.id} "
         f"holds System {system_id} in {activation.state.value}; "
-        f"{_escalation_hint(activation.state)}",
+        f"{_escalation_hint(activation.state, stranded=stranded)}",
         details={
             "reason": DENIAL_REASON,
             "activation_id": str(activation.id),

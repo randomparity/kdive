@@ -192,6 +192,19 @@ This amendment discloses the exposure only. Whether to mitigate it, accept it, o
 NIC backend is tracked in #3496 (the exposure itself in #3311, which ADR-0804 also cites) and is
 not decided here.
 
+### Amendment (2026-11-14): the session account and the exposure decision (#3590)
+
+This amendment updates two statements in the 2026-11-03 amendment above. It does not change this
+ADR's decision.
+
+- **Session account.** Under `qemu:///session`, the "invoking account" is the operator. The
+  operator account runs the session libvirt daemon and, through it, QEMU. The lifecycle installer
+  refuses a daemon under any other uid, and workers run as separate slot accounts. ADR-0810's
+  amendment of 2026-11-04 (#3514) records this.
+- **Decision status.** The sentence that the mitigation question is "not decided here" is
+  superseded in part. [ADR-0810](0810-guest-egress-host-loopback-exposure-is-accepted-and-documented.md)
+  accepted and documented the host-loopback exposure, and #3496 is closed.
+
 ## Considered & rejected
 
 - **A per-request `LibvirtProfile.guest_egress` field.** Rejected — it lets an agent grant its own
