@@ -16,10 +16,10 @@ with a bare `statfs` error. A 3.6 GiB VM OOM-killed the 8 xdist workers.
 2. Both engines: first, a probe runs the test image with the same engine flags
    and `--entrypoint test ... -r /repo/HEAD` on the read-only git mount. On failure the
    recipe exits 1, names the git directory, and says to share it or use a shared checkout.
-3. Worker cap (operator option A): from the engine's `MemTotal`, keep 1.5 GiB, then 1.5 GiB
-   per worker (2 and 3 workers still OOM), clamped to 1..8; print it. Unreadable memory: 8
-   and a warning. Explicit `-n`/`--maxprocesses` in ARGS replaces the cap; the entry script
-   stops adding `--maxprocesses=8`.
+3. Memory (operator decisions): below 6 GiB `MemTotal`, exit 1 before any container and name
+   the fix, whatever ARGS say (1 worker still OOM). Else keep 1.5 GiB, 1.5 GiB per worker,
+   at most 8; print it. Unreadable: 8, a warning. Explicit `-n`/`--maxprocesses` replaces
+   the cap; the entry script stops adding `--maxprocesses=8`.
 
 Socket gid (`0:0 660` rootless, so `tester` joins `root`) and the host gateway need no
 change; the runs prove both. The recipe comment, `docs/development/cross-platform.md` and
@@ -39,10 +39,10 @@ an ADR-0717 amendment state the verified connections, the shared path, and the c
 
 ## Success
 
-On this host, `just test-linux` at the branch head exits 0 with Podman rootless
-(`CONTAINER_CONNECTION=podman-machine-default`) and rootful (`podman-machine-default-root`)
-from a clone under a VM-shared path, and with Docker Desktop from the `/Volumes` worktree.
-A Podman run from that worktree exits 1 with the Scope 2 message.
+On this host (machine at 8 GiB), `just test-linux` at the branch head exits 0 with
+Podman rootless (`CONTAINER_CONNECTION=podman-machine-default`) and rootful (`-root`) from a
+VM-shared clone, and with Docker Desktop from the `/Volumes` worktree. Podman from that
+worktree exits 1 with the Scope 2 message.
 
 ## Validation
 
@@ -53,7 +53,7 @@ logs its arguments. Green: `just test-verbose tests/scripts/test_test_linux_reci
   `label=disable`; Docker does not.
 - Scope 2: `focused-test` — a failed probe exits 1 with the message and no suite run; a
   passed probe runs the suite.
-- Scope 3: `focused-test` — 3607 MiB gives 1, 8 GiB 4, 32 GiB 8, 1 GiB 1, unreadable
-  gives 8 and a warning, explicit `-n`/`--maxprocesses` drops the cap. All red before.
+- Scope 3: `focused-test` — 3607 MiB stops (also with `-n`), 6 GiB gives 3, 8 GiB 4,
+  32 GiB 8, unreadable 8 and a warning, explicit `-n`/`--maxprocesses` drops the cap.
 - Docs and ADR amendment: `task-test-not-applicable` — prose; `just docs-check` and
   `just records` check links and shape.

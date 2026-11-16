@@ -60,11 +60,12 @@ silicon.
 - The VM shares only `/Users`, `/private` and `/var/folders`. A probe container now checks
   that the engine can read the git directory, and the recipe stops with a message that
   names the directory and the fix when it cannot.
-- The VM's OOM killer stopped workers at eight, three and two workers: a worker grows to
-  about 1.2 GiB by the end of a run, and the controller, PostgreSQL and SeaweedFS take about
-  1.2 GiB. Item 3 now reads: the recipe reads the engine's total memory, keeps 1.5 GiB,
-  allows 1.5 GiB per worker, caps at 8, and prints the cap; when it cannot read the memory,
-  it warns and uses 8.
+- The VM's OOM killer stopped workers at eight, three, two and one workers: a worker grows
+  to 1.2-1.7 GiB by the end of a run, and the controller, PostgreSQL and SeaweedFS take about
+  1.2 GiB. The 1-worker run passed 24402 tests and lost one to the crash. Item 3 now reads:
+  the recipe reads the engine's total memory and stops before any container, naming the fix,
+  when it is below 6 GiB; otherwise it keeps 1.5 GiB, allows 1.5 GiB per worker, caps at 8,
+  and prints the cap. When it cannot read the memory, it warns and uses 8.
   An explicit `-n` or `--maxprocesses` in the arguments replaces the cap, because xdist
   clamps a numeric `-n` to `--maxprocesses`.
 - The socket group step and `host.docker.internal` needed no change. Under rootless Podman
