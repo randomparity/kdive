@@ -27,10 +27,12 @@ from kdive.mcp.tools.ops.security import breakglass
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 from kdive.serialization import validate_stored
-from kdive.services.external_boot.settlement import (
-    settle_stranded_activation,
-    settled_system_awaiting_teardown,
+from kdive.services.allocation.release import (
+    SYSTEM_TEARDOWN_REQUIRED_REASON,
+    require_system_teardown,
 )
+from kdive.services.external_boot.admission import ExternalBootDenied
+from kdive.services.external_boot.settlement import settle_stranded_activation
 from tests.db.external_boot_authority_support import (
     _acknowledge,
     _RoleDsns,
@@ -724,24 +726,27 @@ def test_settled_is_readable_by_each_role(
     assert asyncio.run(is_settled()) is True
 
 
-def test_the_reconciler_reads_a_settled_system_awaiting_teardown(
+def test_the_reconciler_reads_the_release_fence(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
-    """The lease-expiry fence runs under the reconciler role's column grant (#3551)."""
+    """Lease expiry's release fence runs under the reconciler role (#3599)."""
     stranded = _strand(migrated_url, authority_role_dsns)
     case = stranded.case
 
-    async def awaiting() -> UUID | None:
+    async def fence_details() -> dict[str, Any]:
         async with await psycopg.AsyncConnection.connect(
             authority_role_dsns("kdive_reconciler"), autocommit=True
         ) as conn:
-            return await settled_system_awaiting_teardown(conn, case.allocation_id)
+            with pytest.raises(ExternalBootDenied) as denied:
+                await require_system_teardown(conn, case.allocation_id, project="proj")
+        return denied.value.details
 
-    assert asyncio.run(awaiting()) is None
+    held = {"reason": SYSTEM_TEARDOWN_REQUIRED_REASON, "system_id": str(case.system_id)}
+    assert asyncio.run(fence_details()) == held
     _record_authority(authority_role_dsns, stranded)
     _record_worker(authority_role_dsns, stranded)
     assert _settle(authority_role_dsns, case.activation_id) == "applied"
-    assert asyncio.run(awaiting()) == case.system_id
+    assert asyncio.run(fence_details()) == held
 
 
 def test_the_recovery_tool_settles_once_through_the_real_primitive(
