@@ -44,6 +44,40 @@ change. The operator also asked that the recipe support Docker and Podman.
    all set. All other rules are unchanged, and an arch that is not in the table still fails
    closed. The capture-bootstrap manifest and its builder accept `aarch64`.
 
+### Amendment (2026-11-15): Podman on macOS and the memory-sized worker cap (#3074)
+
+This amends items 3 and 4: the first Podman run on macOS showed that item 4's Podman path
+did not work, and that item 3's fixed eight workers do not fit a small engine VM. The
+evidence is Podman 6.1.4, `podman machine` with libkrun, 3.6 GiB and no swap, on Apple
+silicon.
+
+- `podman info` returns the socket as a URI (`unix:///run/user/501/podman/podman.sock`
+  rootless, `unix:///run/podman/podman.sock` rootful), and `podman run --volume` refused it.
+  The recipe removes the `unix://` prefix.
+- SELinux in the VM denied the socket to the container (`stat: cannot statx
+  '/var/run/docker.sock': Permission denied`). For Podman, the recipe runs the container
+  with `--security-opt label=disable`. Docker gets no new flag.
+- The VM shares only `/Users`, `/private` and `/var/folders`. A probe container now checks
+  that the engine can read the git directory, and the recipe stops with a message that
+  names the directory and the fix when it cannot.
+- The VM's OOM killer stopped workers at eight, three, two and one workers: a worker grows
+  to 1.2-1.7 GiB by the end of a run, and the controller, PostgreSQL and SeaweedFS take about
+  1.2 GiB. The 1-worker run passed 24402 tests and lost one to the crash. Item 3 now reads:
+  the recipe reads the total memory the engine reports and stops before any container,
+  naming the fix, when it is below 6144 MiB (a VM reports less than its configured size).
+  Otherwise it keeps 1.5 GiB, allows 1.5 GiB per worker, caps at 8, and prints the cap.
+  When it cannot read the memory, it warns and uses 8.
+  An explicit `-n` or `--maxprocesses` in the arguments replaces the cap, because xdist
+  clamps a numeric `-n` to `--maxprocesses`.
+- The socket group step and `host.docker.internal` needed no change. Under rootless Podman
+  the socket is `0:0 660` in the container, so `tester` joins group `root`.
+- Verified on commit `cd023b198` with the machine raised to 8192 MiB (it reports 7902 MiB,
+  so the recipe used 4 workers), from a clone under `/private`: the rootless connection
+  exited 0 in 610 s and the rootful connection exited 0 in 574 s, each with 24409 passed
+  and 182 skipped. On `8f93beb58` (only docs changed after `cd023b198`), Docker Desktop
+  (32 GiB, 8 workers) exited 0 in 375 s with 24408 passed and 183 skipped, from a worktree
+  under `/Volumes`; Podman from that worktree exited 1 in 2 s with the shared-path message.
+
 ## Consequences
 
 - A macOS developer has one regression gate. A host `just test` on macOS is not regression
