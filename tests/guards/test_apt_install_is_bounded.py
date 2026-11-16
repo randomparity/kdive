@@ -48,7 +48,7 @@ _WORKFLOWS = _ROOT / ".github" / "workflows"
 #: Every workflow known to install system packages. A *minimum*, not the whole check: the
 #: bare-apt ban below runs over every workflow file, so a new one is covered without editing
 #: this tuple. This exists so silently losing a call site is also caught.
-_APT_WORKFLOWS = ("ci.yml", "test-ordering.yml", "mcp-spec-drift.yml", "live.yml")
+_APT_WORKFLOWS = ("ci.yml", "test-ordering.yml", "mcp-spec-drift.yml", "live.yml", "python-315.yml")
 
 #: A `run:` value that installs or refreshes packages, wherever it sits on the line — `run: |`
 #: block scalars and the `run: sudo apt-get install …` one-liner alike. Anchoring at the start of
