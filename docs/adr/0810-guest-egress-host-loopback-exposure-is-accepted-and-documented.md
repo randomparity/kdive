@@ -251,7 +251,7 @@ the DNS exemption for `127.0.0.53`. Guest commands ran through the QEMU guest ag
 |---|---|---|
 | Guest to `10.0.2.2` TCP service on host `127.0.0.1` | connected | blocked, timeout |
 | Guest to the host's routable address (SSH and the authority's listener) | connected | blocked, timeout |
-| Guest to `fec0::2` TCP port 22 | not run | blocked, refused |
+| Guest to `fec0::2` TCP port 22 | not run | refused (no baseline to attribute it) |
 | Guest to another host on the LAN | not run | connected |
 | Guest DNS | answered | answered |
 | Authority unit | active | failed |

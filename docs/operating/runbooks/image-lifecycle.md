@@ -373,8 +373,9 @@ the authority's session daemon and the authority service all run as `kdive-provi
 Keyed to that uid on a Fedora 44 authority host, the rule blocked the guest's loopback connections,
 but the authority failed its next readiness check, about 30 s later, with
 `tls-health: handshake-failed`. That check opens a TLS connection from the service to its own
-network listener, which routes through `lo`. Every restart failed the same way, systemd stopped
-restarting the unit after five failed starts, and workers got connection refused on the listener port.
+network listener, which routes through `lo`. Each of the four automatic restarts failed the same
+way, systemd then stopped restarting the unit, and workers got connection refused on the listener
+port.
 Do not load the rule on such a host. If it was loaded, deleting the table does not bring the unit
 back: run `systemctl reset-failed kdive-external-boot-authority.service`, then
 `systemctl start kdive-external-boot-authority.service`. An authority without a network listener
