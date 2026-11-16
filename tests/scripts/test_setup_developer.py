@@ -24,6 +24,7 @@ def _run(
     arch: str = "x86_64",
     uv_bin: str = "",
     path_entry: str = "",
+    library: Path = _LIBRARY,
 ):
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -58,7 +59,7 @@ if [[ "$1" == compose ]]; then echo 'Docker Compose version v2'; exit; fi
     script = tmp_path / "run.sh"
     script.write_text(f"""#!/bin/bash
 set -euo pipefail
-source '{_LIBRARY}'
+source '{library}'
 distro=debian
 distro_exact=ubuntu
 host_arch="$TEST_ARCH"
@@ -108,6 +109,12 @@ echo complete
     return result, log.read_text() if log.exists() else ""
 
 
+def _guestfs_installs(log: str) -> list[str]:
+    """Install-command lines naming guestfs; shfmt lines carry the checkout path."""
+    installs = ("packages ", "uv ", "archive ", "cabal ")
+    return [line for line in log.splitlines() if line.startswith(installs) and "guestfs" in line]
+
+
 def test_installs_all_developer_tool_families(tmp_path: Path) -> None:
     result, log = _run(tmp_path)
     assert result.returncode == 0, result.stderr
@@ -118,7 +125,18 @@ def test_installs_all_developer_tool_families(tmp_path: Path) -> None:
     assert "archive promtool " in log
     assert "packages libvirt-dev make" in log
     assert "complete" in result.stdout
-    assert "guestfs" not in log
+    assert not _guestfs_installs(log)
+
+
+def test_checkout_path_containing_guestfs_is_not_a_guestfs_install(tmp_path: Path) -> None:
+    checkout_lib = tmp_path / "guestfs-checkout/scripts/lib"
+    checkout_lib.mkdir(parents=True)
+    library = checkout_lib / _LIBRARY.name
+    library.write_text(_LIBRARY.read_text())
+    result, log = _run(tmp_path, library=library)
+    assert result.returncode == 0, result.stderr
+    assert "guestfs" in log
+    assert not _guestfs_installs(log)
 
 
 @pytest.mark.parametrize("failure", ["packages", "uv", "checksum", "go", "docker"])
