@@ -71,3 +71,16 @@ and the source-built packages to the job summary and warns per failure.
   pin the lane exists to bypass.
 - **Do nothing; read Dependabot failures.** verified: #2096 fails only on 3.14-contract tests
   and the image smoke, which say nothing about 3.15 itself (#3600).
+
+### Amendment (2026-11-16): the lane now applies a seven-day release-age cooldown (#3657)
+
+The Consequences bullet above records that the lane applies no release-age cooldown; that part
+no longer holds. The job sets `UV_EXCLUDE_NEWER: "7 days"` at job level, so `uv lock`,
+`uv sync --locked` and `uv run` share one cutoff (a lock-only `--exclude-newer` breaks
+`uv sync --locked`), and the guard test requires it. A release younger than seven days is not
+resolved or installed. Two costs follow: a locked version younger than seven days is downgraded
+by the lane's `lock` probe, and the probe fails (informational, gates nothing) when a
+`pyproject.toml` lower bound is itself younger, as after a hand bump; and a fresh cp315 wheel for
+an already-locked version is held back the same week. The cache-scope exposure in the same bullet
+(schedule and dispatch runs sharing the default branch's cache scope) is unchanged and remains
+open.
