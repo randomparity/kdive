@@ -8,7 +8,7 @@ import textwrap
 import time
 import uuid
 import warnings
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -387,7 +387,7 @@ def test_labels_name_the_backend_and_point_at_its_liveness_lock(tmp_path: Path) 
 
 
 @contextmanager
-def _fail_rather_than_hang(seconds: int = 5) -> Iterator[None]:
+def _fail_rather_than_hang(seconds: int = 5) -> Generator[None]:
     """Turn a blocked call into a failure, so a regression reddens instead of hanging.
 
     A test that hangs burns the whole CI job timeout and reports nothing useful. SIGALRM
@@ -863,7 +863,7 @@ def test_sweep_survives_a_foreign_container_removed_during_enumeration(
 
 
 @contextmanager
-def _raising_lock() -> Iterator[None]:
+def _raising_lock() -> Generator[None]:
     raise OSError("cannot open sweep lock")
     yield
 

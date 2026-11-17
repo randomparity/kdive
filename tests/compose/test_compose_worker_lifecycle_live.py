@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import LiteralString, cast
@@ -274,7 +274,7 @@ def _assert_migration_owner_converged(admin_dsn: str) -> None:
 @contextmanager
 def _isolated_stack(
     tmp_path: Path, *, through: str | None = None
-) -> Iterator[tuple[dict[str, str], str, str]]:
+) -> Generator[tuple[dict[str, str], str, str]]:
     token = uuid.uuid4().hex[:12]
     project = f"kdive-lifecycle-proof-{token}"
     image = f"kdive-lifecycle-proof:{token}"

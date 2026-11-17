@@ -765,7 +765,7 @@ class _ErrDomain:
 
     def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt API name
         exc = libvirt.libvirtError("boom")
-        exc.get_error_code = lambda: self._code  # ty: ignore[invalid-assignment]
+        exc.get_error_code = lambda: self._code
         raise exc
 
 

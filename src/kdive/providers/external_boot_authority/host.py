@@ -14,7 +14,7 @@ import ssl
 import stat
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -1195,7 +1195,7 @@ def _read_dsn(config: AuthorityHostConfig) -> str:
 
 
 @asynccontextmanager
-async def _database_connection(config: AuthorityHostConfig) -> AsyncIterator[AsyncConnection]:
+async def _database_connection(config: AuthorityHostConfig) -> AsyncGenerator[AsyncConnection]:
     try:
         connection = await AsyncConnection.connect(
             _read_dsn(config),
@@ -1696,7 +1696,7 @@ def _build_mutation_service(
         return None
 
     @asynccontextmanager
-    async def connections() -> AsyncIterator[AsyncConnection]:
+    async def connections() -> AsyncGenerator[AsyncConnection]:
         async with _database_connection(config) as connection:
             # Finish the readiness query's transaction before repository methods
             # establish their own durable transaction.
@@ -1780,7 +1780,7 @@ def _build_mutation_service(
     monotonic = time.monotonic
 
     @contextmanager
-    def provider_connection() -> Iterator[Any]:
+    def provider_connection() -> Generator[Any]:
         yield connection
 
     base_stager = build_authority_artifact_stager(object_store)

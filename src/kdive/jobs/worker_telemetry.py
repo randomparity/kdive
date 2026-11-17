@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable
 from typing import TYPE_CHECKING, Literal
 
 from opentelemetry.metrics import CallbackOptions, Observation
@@ -114,7 +114,7 @@ class WorkerTelemetry:
         return instance
 
     @contextlib.contextmanager
-    def job_span(self, job_kind: str) -> Iterator[JobSpan]:
+    def job_span(self, job_kind: str) -> Generator[JobSpan]:
         """Open a span over one job dispatch, recording duration on exit.
 
         Yields a :class:`JobSpan` whose :meth:`JobSpan.set_outcome` stamps the terminal

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -228,7 +228,7 @@ def _authority_service(
     tmp_path: Path, role_dsns: _RoleDsns, instance: str, adapter: _Adapter
 ) -> ExternalBootAuthorityService:
     @asynccontextmanager
-    async def connections() -> AsyncIterator[AsyncConnection]:
+    async def connections() -> AsyncGenerator[AsyncConnection]:
         async with await AsyncConnection.connect(
             role_dsns("kdive_provider_authority"), autocommit=True
         ) as conn:

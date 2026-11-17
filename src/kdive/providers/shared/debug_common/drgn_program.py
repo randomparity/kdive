@@ -49,7 +49,7 @@ def read_vmcoreinfo_build_id(data: bytes) -> str:
 
 def _require_drgn() -> Any:
     try:
-        import drgn  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
+        import drgn  # noqa: PLC0415  # ty: ignore[import-not-found]  # operator-provided
     except ImportError as exc:
         raise CategorizedError(
             "drgn is not installed on this worker host; offline introspection needs it",
@@ -73,7 +73,7 @@ class _DrgnTask:
         return self._task.comm.string_().decode("utf-8", "replace")
 
     def state(self) -> str:
-        from drgn.helpers.linux import sched  # noqa: PLC0415  # ty: ignore[unresolved-import]
+        from drgn.helpers.linux import sched  # noqa: PLC0415  # ty: ignore[import-not-found]
 
         return sched.task_state_to_char(self._task)
 
@@ -112,12 +112,12 @@ class DrgnProgramAdapter:
         self._prog = prog
 
     def iter_tasks(self) -> list[object]:
-        from drgn.helpers.linux import pid  # noqa: PLC0415  # ty: ignore[unresolved-import]
+        from drgn.helpers.linux import pid  # noqa: PLC0415  # ty: ignore[import-not-found]
 
         return [_DrgnTask(self._prog, task) for task in pid.for_each_task(self._prog)]
 
     def iter_modules(self) -> list[object]:
-        from drgn.helpers.linux import module  # noqa: PLC0415  # ty: ignore[unresolved-import]
+        from drgn.helpers.linux import module  # noqa: PLC0415  # ty: ignore[import-not-found]
 
         return [_DrgnModule(mod) for mod in module.for_each_module(self._prog)]
 
@@ -134,7 +134,7 @@ class DrgnProgramAdapter:
         return self._prog["saved_command_line"].string_().decode("utf-8", "replace")
 
     def cpus_online(self) -> int:
-        from drgn.helpers.linux import cpumask  # noqa: PLC0415  # ty: ignore[unresolved-import]
+        from drgn.helpers.linux import cpumask  # noqa: PLC0415  # ty: ignore[import-not-found]
 
         return sum(1 for _ in cpumask.for_each_online_cpu(self._prog))
 
@@ -172,7 +172,7 @@ def _page_split_reader(
     return read
 
 
-def _route_ppc64_vmalloc(drgn: Any, prog: Any, follow_phys: Callable[[Any, int], int]) -> None:
+def _route_ppc64_vmalloc(drgn: Any, prog: Any, follow_phys: Callable[[Any, int], Any]) -> None:
     """Serve ppc64 vmalloc/I/O/vmemmap reads from page tables instead of libkdumpfile (#2763)."""
     if prog.platform.arch != drgn.Architecture.PPC64:
         return
@@ -192,7 +192,7 @@ def _route_ppc64_vmalloc(drgn: Any, prog: Any, follow_phys: Callable[[Any, int],
 def open_vmcore_program(core: Path, vmlinux: Path) -> DrgnProgramAdapter:
     """Open a drgn program over a staged vmcore + vmlinux pair (the ``open_program`` seam)."""
     drgn = _require_drgn()
-    from drgn.helpers.linux.mm import (  # noqa: PLC0415  # ty: ignore[unresolved-import]
+    from drgn.helpers.linux.mm import (  # noqa: PLC0415  # ty: ignore[import-not-found]
         follow_phys,
     )
 

@@ -10,7 +10,7 @@ import logging
 import os
 import stat
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -155,7 +155,7 @@ class RemoteSystemTeardownAnchorV1(BaseModel):
 class RemoteSystemTeardownIntentV1(RemoteSystemTeardownAnchorV1):
     """Exact request and accounting owner persisted before the first host mutation."""
 
-    schema_: Literal["remote-libvirt-system-teardown-intent-v1"] = Field(
+    schema_: Literal["remote-libvirt-system-teardown-intent-v1"] = Field(  # ty: ignore[invalid-attribute-override]
         "remote-libvirt-system-teardown-intent-v1", alias="schema"
     )
     reservation: AuthorityTeardownReservationV1
@@ -456,7 +456,7 @@ class RemoteModuleVolumePreparationResponseV1(BaseModel):
 class RemoteModuleTerminalPreparationResponseV1(RemoteModuleVolumePreparationResponseV1):
     """Durable terminal appliance result and recovery alongside exact volume identities."""
 
-    schema_: Literal["remote-module-terminal-preparation-response-v1"] = Field(
+    schema_: Literal["remote-module-terminal-preparation-response-v1"] = Field(  # ty: ignore[invalid-attribute-override]
         "remote-module-terminal-preparation-response-v1", alias="schema"
     )
     result: RemoteModuleResultV1
@@ -968,7 +968,7 @@ class RemoteModuleVolumePreparationStore:
             os.close(descriptor)
 
     @contextmanager
-    def _exclusive(self) -> Iterator[None]:
+    def _exclusive(self) -> Generator[None]:
         """Hold an exclusive lock on the store directory (ADR-0787, #3472).
 
         Each acquisition opens its own file description, so threads of one process exclude

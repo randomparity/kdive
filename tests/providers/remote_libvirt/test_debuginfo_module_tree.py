@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,7 +55,7 @@ class _Store:
     @contextmanager
     def get_artifact_stream(
         self, key: str, etag: str | None, *, version_id: str | None = None
-    ) -> Iterator[SimpleNamespace]:
+    ) -> Generator[SimpleNamespace]:
         self.requests.append((key, version_id))
         if self._data is None:
             raise CategorizedError("object version is gone", category=ErrorCategory.NOT_FOUND)

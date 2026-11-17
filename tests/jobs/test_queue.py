@@ -322,9 +322,7 @@ def _fenced_payload(kind: JobKind) -> Any:
     return ReprovisionPayload(system_id=system_id, profile_digest="sha256:abc")
 
 
-@pytest.mark.parametrize(
-    "kind", sorted(STATE_FENCED_JOB_KINDS, key=lambda kind: cast(JobKind, kind).value)
-)
+@pytest.mark.parametrize("kind", sorted(STATE_FENCED_JOB_KINDS, key=lambda kind: kind.value))
 def test_enqueue_routes_state_fenced_kinds_to_the_fenced_lane(
     migrated_url: str, kind: JobKind
 ) -> None:

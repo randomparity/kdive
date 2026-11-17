@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tarfile
 import xml.etree.ElementTree as ET  # noqa: S405 - parses only self-rendered, trusted test XML
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -164,7 +164,7 @@ class _StreamKernel:
     versions: list[str | None] = field(default_factory=list)
 
     @contextmanager
-    def __call__(self, ref: str, version_id: str | None = None) -> Iterator[StreamedArtifact]:
+    def __call__(self, ref: str, version_id: str | None = None) -> Generator[StreamedArtifact]:
         self.refs.append(ref)
         self.versions.append(version_id)
         if self.fail:
@@ -1541,7 +1541,7 @@ def test_install_console_method_omits_initrd(tmp_path: Path) -> None:
         raise AssertionError("initrd fetched when no initrd_ref given")
 
     @contextmanager
-    def _stream_combined(_ref: str, _version_id: str | None = None) -> Iterator[StreamedArtifact]:
+    def _stream_combined(_ref: str, _version_id: str | None = None) -> Generator[StreamedArtifact]:
         yield StreamedArtifact(
             io.BytesIO(_combined_kernel_tar_bytes()), Sensitivity.SENSITIVE, "build"
         )
@@ -1663,7 +1663,7 @@ class _FakeStreamStore:
     @contextmanager
     def get_artifact_stream(
         self, key: str, etag: str | None, *, version_id: str | None = None
-    ) -> Iterator[StreamedArtifact]:
+    ) -> Generator[StreamedArtifact]:
         self.calls.append((key, etag, version_id))
         if self.error is not None:
             raise self.error

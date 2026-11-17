@@ -8,7 +8,7 @@ the audited egress (ADR-0243).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -94,7 +94,7 @@ def _ctx(
 
 
 @asynccontextmanager
-async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def _pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     pool = AsyncConnectionPool(url, min_size=1, max_size=4, open=False)
     await pool.open()
     try:

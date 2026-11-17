@@ -85,7 +85,7 @@ def test_ppc64le_vmcore_opens_and_is_identified_as_ppc64le() -> None:  # pragma:
         "swapped or corrupt"
     )
 
-    import drgn  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
+    import drgn  # noqa: PLC0415  # ty: ignore[import-not-found]  # operator-provided
 
     prog = drgn.Program()  # ty: ignore[unresolved-attribute]  # drgn ships no stubs (C extension)
     prog.set_core_dump(os.fspath(core))

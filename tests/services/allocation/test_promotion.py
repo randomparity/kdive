@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -53,7 +53,7 @@ _PROMOTION_LOGGER = "kdive.services.allocation.promotion"
 
 
 @asynccontextmanager
-async def _conn(url: str) -> AsyncIterator[psycopg.AsyncConnection]:
+async def _conn(url: str) -> AsyncGenerator[psycopg.AsyncConnection]:
     conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
     try:
         yield conn
@@ -591,7 +591,7 @@ def test_reap_queue_timeouts_writes_queue_timeout_failure_category(
 
 
 @asynccontextmanager
-async def _pooled_conn(url: str) -> AsyncIterator[psycopg.AsyncConnection]:
+async def _pooled_conn(url: str) -> AsyncGenerator[psycopg.AsyncConnection]:
     """A non-autocommit connection, as ``create_pool`` hands each reconciler repair."""
     conn = await psycopg.AsyncConnection.connect(url, autocommit=False)
     try:

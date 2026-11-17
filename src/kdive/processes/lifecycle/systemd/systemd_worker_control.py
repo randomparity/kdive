@@ -11,7 +11,7 @@ import stat
 import struct
 import sys
 import time
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -378,7 +378,7 @@ def service_configuration(environment: dict[str, str] | None = None) -> ServiceC
 @asynccontextmanager
 async def _concrete_lifecycle(
     configuration: ServiceConfiguration, deadline: Deadline
-) -> AsyncIterator[Lifecycle]:
+) -> AsyncGenerator[Lifecycle]:
     pool = create_pool(configuration.witness_dsn, min_size=1, max_size=1)
     async with pool:
         runner = SubprocessCommandRunner(deadline)

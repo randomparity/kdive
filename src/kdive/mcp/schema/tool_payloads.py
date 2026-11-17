@@ -167,8 +167,8 @@ _ACCEL_DESCRIPTION = (
 
 
 class EstimateRequestPayload(SelectorPayload):
-    vcpus: int = Field(description=_VCPUS_DESCRIPTION)
-    memory_gb: int = Field(description=_MEMORY_GB_DESCRIPTION)
-    window: Decimal = Field(gt=0, description=_WINDOW_DESCRIPTION, examples=[_WINDOW_EXAMPLE])
+    vcpus: int = Field(description=_VCPUS_DESCRIPTION)  # ty: ignore[invalid-mutable-override]
+    memory_gb: int = Field(description=_MEMORY_GB_DESCRIPTION)  # ty: ignore[invalid-mutable-override]
+    window: Decimal = Field(gt=0, description=_WINDOW_DESCRIPTION, examples=[_WINDOW_EXAMPLE])  # ty: ignore[invalid-mutable-override]
     cost_class: str = Field(default=_DEFAULT_COST_CLASS, description=_COST_CLASS_DESCRIPTION)
     accel: str | None = Field(default=None, description=_ACCEL_DESCRIPTION)

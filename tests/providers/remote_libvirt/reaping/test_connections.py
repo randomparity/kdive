@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any, cast
 
@@ -40,7 +40,7 @@ class _FakeFleet:
         return [config for config, _ in self._hosts]
 
     @contextmanager
-    def connection(self, config: RemoteLibvirtConfig) -> Iterator[object]:
+    def connection(self, config: RemoteLibvirtConfig) -> Generator[object]:
         conn = next(c for cfg, c in self._hosts if cfg is config)
         if isinstance(conn, Exception):
             raise conn

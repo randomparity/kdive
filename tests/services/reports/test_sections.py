@@ -8,7 +8,7 @@ model does not carry). The async bodies run via ``asyncio.run`` per the repo con
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -99,7 +99,7 @@ def test_effective_window_defaults_open_end_to_as_of() -> None:
 
 
 @asynccontextmanager
-async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def _pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     pool = AsyncConnectionPool(url, min_size=1, max_size=3, open=False)
     await pool.open()
     try:

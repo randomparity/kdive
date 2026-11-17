@@ -130,7 +130,7 @@ class AuthoritySystemMarkerV1(_ClosedValue):
 
 
 class _AuthoritySystemAttemptBinding(AuthoritySystemMarkerV1):
-    schema_: Literal["authority-system-attempt-v1"] = Field(
+    schema_: Literal["authority-system-attempt-v1"] = Field(  # ty: ignore[invalid-attribute-override]
         "authority-system-attempt-v1", alias="schema"
     )
     authority_id: UUID
@@ -181,7 +181,7 @@ class AuthoritySystemObservationV1(_ClosedValue):
 class AuthoritySystemJournalRecordV1(_AuthoritySystemAttemptBinding):
     """One member of the global per-System journal chain."""
 
-    schema_: Literal["authority-system-journal-v1"] = Field(
+    schema_: Literal["authority-system-journal-v1"] = Field(  # ty: ignore[invalid-attribute-override]
         "authority-system-journal-v1", alias="schema"
     )
     sequence: PositiveBigInt
@@ -311,7 +311,7 @@ class AuthoritySystemAbsenceFacts(_ClosedValue):
 
 
 class _AuthoritySystemProofBinding(_AuthoritySystemAttemptBinding):
-    schema_: Literal["authority-system-proof-v1"] = Field(
+    schema_: Literal["authority-system-proof-v1"] = Field(  # ty: ignore[invalid-attribute-override]
         "authority-system-proof-v1", alias="schema"
     )
 

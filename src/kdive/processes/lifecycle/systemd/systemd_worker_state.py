@@ -58,7 +58,7 @@ with warnings.catch_warnings():
 
         model_config = ConfigDict(extra="forbid", frozen=True)
 
-        schema: Literal[1]
+        schema: Literal[1]  # ty: ignore[invalid-attribute-override]
         slot: int = Field(ge=1, le=8)
         unit: Annotated[str, StringConstraints(max_length=128)]
         generation: _HEX_32

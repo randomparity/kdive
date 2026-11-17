@@ -12,7 +12,7 @@ import io
 import json
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -313,7 +313,7 @@ class _Fixture:
 
 
 @asynccontextmanager
-async def _fixture(c: HttpCaller, project: str, db: str) -> AsyncIterator[_Fixture]:
+async def _fixture(c: HttpCaller, project: str, db: str) -> AsyncGenerator[_Fixture]:
     fixture = _Fixture(project, db, HttpCaller("direct", c.base_url, c.issuer))
     primary: BaseException | None = None
     try:
@@ -556,7 +556,7 @@ async def _set_quota(c: HttpCaller, project: str, caps: Mapping[str, object]) ->
 
 
 @asynccontextmanager
-async def _restoring(restore: Callable[[], Awaitable[None]]) -> AsyncIterator[None]:
+async def _restoring(restore: Callable[[], Awaitable[None]]) -> AsyncGenerator[None]:
     """Run ``restore`` on exit; its failure is noted on a primary failure, not raised over it."""
     try:
         yield
@@ -979,7 +979,7 @@ async def _denied(run: CellRun, c: HttpCaller, project: str, db: str) -> None:
     target: list[str] = []
 
     @asynccontextmanager
-    async def setup() -> AsyncIterator[Mapping[str, object]]:
+    async def setup() -> AsyncGenerator[Mapping[str, object]]:
         async with _fixture(c, project, db) as fx:
             target.append((await fx.request()).object_id)
             yield {"allocation_id": target[0]} if tool in _BY_ALLOCATION else {}

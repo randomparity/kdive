@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Generator, Iterable, Mapping
 from typing import TYPE_CHECKING, Literal
 
 from opentelemetry.trace import SpanKind, Status, StatusCode
@@ -122,7 +122,7 @@ class ReconcilerTelemetry:
             self._lane_budget_unattempted.add(count, {"lane": lane})
 
     @contextlib.contextmanager
-    def pass_span(self) -> Iterator[_PassSpan]:
+    def pass_span(self) -> Generator[_PassSpan]:
         """Open a span over one reconcile pass, recording duration on exit."""
         if not self._enabled:
             yield _PassSpan(None)

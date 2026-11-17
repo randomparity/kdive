@@ -9,7 +9,7 @@ import logging
 import os
 import tempfile
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -147,7 +147,7 @@ class _HostDumpSpooler:
         self._options = options
 
     @contextlib.contextmanager
-    def capture_to_spool(self, system_id: UUID) -> Iterator[Path]:
+    def capture_to_spool(self, system_id: UUID) -> Generator[Path]:
         config = self._config_factory()
         with connection(
             config, self._secret_backend_factory, self._open_connection, self._pki_base_dir
@@ -164,7 +164,7 @@ class _HostDumpSpooler:
     @contextlib.contextmanager
     def _downloaded_spool(
         self, conn: Any, pool: Any, vol_name: str, system_id: UUID
-    ) -> Iterator[Path]:
+    ) -> Generator[Path]:
         pool.refresh(0)
         volume = self._resolve_volume(pool, vol_name, system_id)
         self._enforce_ceiling(volume, vol_name, system_id)

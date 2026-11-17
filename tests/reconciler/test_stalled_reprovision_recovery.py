@@ -14,7 +14,7 @@ drives it to `failed`. Two things these arms hold in place:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
 
@@ -218,7 +218,7 @@ def test_job_appearing_under_the_lock_defers_the_candidate(
         @asynccontextmanager
         async def racing_lock(
             connection: psycopg.AsyncConnection, scope: LockScope, key: UUID | str
-        ) -> AsyncIterator[None]:
+        ) -> AsyncGenerator[None]:
             async with real_lock(connection, scope, key):
                 # Autocommit, so the insert is visible to the locked re-read under READ COMMITTED.
                 racer = await connect(migrated_url)

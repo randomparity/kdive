@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -154,7 +154,7 @@ async def reconcile_images(
 
 
 @asynccontextmanager
-async def _autocommit(conn: AsyncConnection) -> AsyncIterator[None]:
+async def _autocommit(conn: AsyncConnection) -> AsyncGenerator[None]:
     """Set ``conn`` to autocommit for the block, restoring the prior mode on exit.
 
     Raises:

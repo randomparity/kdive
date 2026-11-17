@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from uuid import UUID, uuid4
@@ -45,7 +45,7 @@ async def _open_through_repository(
     ack_digest: str,
 ) -> ModuleAttemptPreparationRequestV1 | None:
     @asynccontextmanager
-    async def connections() -> AsyncIterator[AsyncConnection]:
+    async def connections() -> AsyncGenerator[AsyncConnection]:
         async with await AsyncConnection.connect(dsn, autocommit=True) as conn:
             yield conn
 

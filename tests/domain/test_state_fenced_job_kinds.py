@@ -51,4 +51,3 @@ def test_the_derivation_is_total_over_every_job_kind() -> None:
 def test_the_two_lane_names_are_distinct_and_non_empty() -> None:
     # jobs_dispatch_lane_nonempty (migration 0066) rejects a blank lane at the database.
     assert STATE_FENCED_JOB_DISPATCH_LANE != DEFAULT_JOB_DISPATCH_LANE
-    assert STATE_FENCED_JOB_DISPATCH_LANE

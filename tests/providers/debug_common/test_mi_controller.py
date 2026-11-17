@@ -56,7 +56,7 @@ class _FakeGdbController:
 
 def _controller(fake: _FakeGdbController) -> PygdbmiController:
     controller = object.__new__(PygdbmiController)
-    controller._controller = fake
+    controller._controller = fake  # ty: ignore[invalid-assignment]
     return controller
 
 

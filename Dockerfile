@@ -11,10 +11,10 @@
 # The unselected provider stages are pruned by BuildKit and never resolved, so the amd64/arm64
 # builds never touch the ppc64le path and the ppc64le build never resolves the astral image.
 ARG TARGETARCH
-FROM ghcr.io/astral-sh/uv:0.11.31@sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fcccdc8a60cfdbaf20d1a047d7437 AS uv-amd64
-FROM ghcr.io/astral-sh/uv:0.11.31@sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fcccdc8a60cfdbaf20d1a047d7437 AS uv-arm64
+FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 AS uv-amd64
+FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 AS uv-arm64
 FROM python:3.14.6-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30 AS uv-ppc64le
-RUN pip install --no-cache-dir uv==0.11.31 && cp "$(command -v uv)" /uv
+RUN pip install --no-cache-dir uv==0.13.7 && cp "$(command -v uv)" /uv
 FROM uv-${TARGETARCH} AS uv
 
 # Builder: resolve the uv environment (deps first for layer caching, then project).

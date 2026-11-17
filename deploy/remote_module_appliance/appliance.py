@@ -972,9 +972,10 @@ def _restore(document: dict[str, object]) -> dict[str, object]:
                 raise ApplianceError("RECOVERY_CONFLICT")
             destination.rename(displaced)
             _sync_path(destination.parent)
-        elif not (destination_installed is None and displaced_installed == installed):
-            if not (destination_captured == captured and displaced_installed == installed):
-                raise ApplianceError("RECOVERY_CONFLICT")
+        elif not (destination_installed is None and displaced_installed == installed) and not (
+            destination_captured == captured and displaced_installed == installed
+        ):
+            raise ApplianceError("RECOVERY_CONFLICT")
         if not absent and _manifest_or_none(destination, "recovery") is None:
             staged_tree.rename(destination)
             _remove_empty_stage(staged)

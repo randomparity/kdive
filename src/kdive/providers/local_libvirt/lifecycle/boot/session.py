@@ -15,7 +15,7 @@ import threading
 import time
 import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 - serialization follows a defused parse
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Protocol, cast
@@ -927,7 +927,7 @@ class _ConcreteSession:
         return self._binding
 
     @contextmanager
-    def projection_directory(self, projection: TargetProjectionV1) -> Iterator[int]:
+    def projection_directory(self, projection: TargetProjectionV1) -> Generator[int]:
         """Open the exact activation-owned digest directory for one closed projection."""
         self._require_open_domain()
         if (
@@ -1282,7 +1282,7 @@ class _ConcreteSession:
         guest: _Guest,
         guest_source: str,
         expected_size: int,
-    ) -> Iterator[BinaryIO]:
+    ) -> Generator[BinaryIO]:
         self._guard_guest_operation(wrapper)
         if expected_size < 0:
             raise ValueError("guest regular size must be nonnegative")

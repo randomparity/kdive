@@ -17,7 +17,7 @@ from __future__ import annotations
 import io
 import tarfile
 import xml.etree.ElementTree as ET
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import UUID
@@ -152,7 +152,7 @@ def test_console_log_element_pins_append_on() -> None:
 
 
 @contextmanager
-def _stream_combined(_ref: str, _version_id: str | None = None) -> Iterator[StreamedArtifact]:
+def _stream_combined(_ref: str, _version_id: str | None = None) -> Generator[StreamedArtifact]:
     yield StreamedArtifact(io.BytesIO(_combined_kernel_tar()), Sensitivity.SENSITIVE, "build")
 
 
@@ -160,7 +160,7 @@ def _installer(conn: FakeLibvirtConn, staging_root: Path) -> LocalLibvirtInstall
     return LocalLibvirtInstall(
         connect=lambda: conn,
         stream_kernel=_stream_combined,
-        fetch_initrd=lambda ref, dest, version_id: dest.write_bytes(b"i"),
+        fetch_initrd=lambda ref, dest, version_id: dest.write_bytes(b"i"),  # ty: ignore[invalid-argument-type]
         readiness=lambda system_id: ReadinessResult(answered=True, ok=True),
         staging_root=staging_root,
         boot_window_polls=3,

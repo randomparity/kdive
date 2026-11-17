@@ -6,7 +6,7 @@ import asyncio
 import base64
 import hashlib
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -429,7 +429,7 @@ def test_filtered_list_brackets_both_calls_and_cleans_up(tmp_path: Path) -> None
     state = [0]
 
     @asynccontextmanager
-    async def setup() -> AsyncIterator[Mapping[str, object]]:
+    async def setup() -> AsyncGenerator[Mapping[str, object]]:
         state[0] += 1
         try:
             yield {}
@@ -545,7 +545,7 @@ def test_functional_owned_moves_to_cleanup(tmp_path: Path) -> None:
 
 def _setup(state: list[int], *, leak: bool = False) -> tool_cells.Setup:
     @asynccontextmanager
-    async def setup() -> AsyncIterator[Mapping[str, object]]:
+    async def setup() -> AsyncGenerator[Mapping[str, object]]:
         state.append(1)
         yield {"image_id": "img-1"}
         if not leak:

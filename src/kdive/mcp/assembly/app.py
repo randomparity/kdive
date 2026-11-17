@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
@@ -70,7 +70,7 @@ def build_app_from_assembly(
     runtime = DebugRuntimeResolver(resolver)
 
     @asynccontextmanager
-    async def debug_lifespan(_app: FastMCP) -> AsyncIterator[dict[str, object]]:
+    async def debug_lifespan(_app: FastMCP) -> AsyncGenerator[dict[str, object]]:
         async with runtime.lifespan(pool):
             yield {}
 

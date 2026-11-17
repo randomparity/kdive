@@ -25,8 +25,17 @@ def _observation(cmdline: bytes = b"console=ttyS0\xff") -> RunningKernelObservat
 
 def test_running_observation_preserves_non_utf8_bytes_in_closed_wire() -> None:
     value = AuthorityRunningObservationV1.from_observation(_observation())
-    decoded = AuthorityRunningObservationV1.model_validate_json(value.model_dump_json())
+    decoded = AuthorityRunningObservationV1.model_validate_json(
+        value.model_dump_json(by_alias=True)
+    )
     assert decoded.to_observation() == _observation()
+
+
+def test_running_observation_rejects_unaliased_schema_key() -> None:
+    # pydantic 2.14 stopped silently dropping the field-name key of an aliased field.
+    wire = AuthorityRunningObservationV1.from_observation(_observation()).model_dump_json()
+    with pytest.raises(ValidationError, match="schema_"):
+        AuthorityRunningObservationV1.model_validate_json(wire)
 
 
 def test_running_observation_bounds_command_line_bytes() -> None:

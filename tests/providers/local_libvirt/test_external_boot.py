@@ -13,7 +13,7 @@ import os
 import stat
 import tarfile
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -1005,7 +1005,7 @@ def test_staging_move_error_retries_when_recorded_source_was_absent() -> None:
         if calls == 1:
             raise OSError("ambiguous move result")
 
-    io.move_staging_to_live = fail_once  # ty: ignore[invalid-assignment]
+    io.move_staging_to_live = fail_once
 
     advance_module_publication(
         io,
@@ -1905,7 +1905,7 @@ class _GuestTreeHandle:
         return []
 
     @contextmanager
-    def open_regular(self, path: str, *, size: int) -> Iterator[BinaryIO]:
+    def open_regular(self, path: str, *, size: int) -> Generator[BinaryIO]:
         del size
         self.calls.append(("open-regular", path))
         yield io.BytesIO(b"elf")
@@ -2768,7 +2768,7 @@ class _RealSession:
         self.preparation.actions.append("first-mutation")
 
     @contextmanager
-    def guest(self) -> Iterator[_GuestTreeHandle]:
+    def guest(self) -> Generator[_GuestTreeHandle]:
         if self.guest_fault:
             raise LookupError("guest open primary")
         yield self.guest_handle
@@ -3320,7 +3320,7 @@ class _RestartSession(_RealSession):
         return os.open(self.artifact, flags)
 
     @contextmanager
-    def guest(self) -> Iterator[_RestartGuest]:
+    def guest(self) -> Generator[_RestartGuest]:
         self.require_inactive()
         yield cast(_RestartGuest, self.guest_handle)
 
@@ -3720,7 +3720,7 @@ def test_label_write_failure_stops_activation_before_live_module_move(
             return b"system_u:object_r:modules_object_t:s0\0"
 
     @contextmanager
-    def policy(_guest: object) -> Iterator[ModuleLabelPolicy]:
+    def policy(_guest: object) -> Generator[ModuleLabelPolicy]:
         yield cast(ModuleLabelPolicy, _Policy())
 
     def install(
@@ -4968,7 +4968,7 @@ def test_real_preparation_persists_guest_policy_target_identity(
             return b"system_u:object_r:modules_dep_t:s0\0"
 
     @contextmanager
-    def policy(_guest: object) -> Iterator[ModuleLabelPolicy]:
+    def policy(_guest: object) -> Generator[ModuleLabelPolicy]:
         yield cast(ModuleLabelPolicy, _Policy())
 
     monkeypatch.setattr(external_boot_module, "guest_policy", policy)

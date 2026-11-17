@@ -16,7 +16,7 @@ import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 import libvirt
@@ -45,7 +45,7 @@ class _LibvirtConn(Protocol):
 
 
 type Connect = Callable[[], _LibvirtConn]
-type Monitor = Callable[[object, str, int], str]
+type Monitor = Callable[[Any, str, int], str]
 
 _log = logging.getLogger(__name__)
 

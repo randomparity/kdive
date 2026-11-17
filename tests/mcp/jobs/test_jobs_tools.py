@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, cast
 from uuid import uuid4
@@ -83,7 +83,7 @@ def _install_payload() -> InstallPayload:
 
 
 @asynccontextmanager
-async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def _pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     pool = AsyncConnectionPool(url, min_size=1, max_size=2, open=False)
     await pool.open()
     try:

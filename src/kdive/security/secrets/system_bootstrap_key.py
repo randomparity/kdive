@@ -14,7 +14,7 @@ import os
 import shutil
 import subprocess  # noqa: S404 - ssh-keygen uses fixed argv, no shell  # nosec B404
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 from uuid import UUID
 
@@ -147,7 +147,7 @@ async def delete_system_bootstrap_key(conn: AsyncConnection, system_id: UUID) ->
 
 
 @contextlib.contextmanager
-def materialized_private_key(private_key: str) -> Iterator[Path]:
+def materialized_private_key(private_key: str) -> Generator[Path]:
     """Yield a ``0600`` file holding ``private_key`` in a ``0700`` dir; removed on every exit path.
 
     ``ssh -i`` refuses a group/world-readable key, hence ``0600``. The dir is ``rmtree``'d in a

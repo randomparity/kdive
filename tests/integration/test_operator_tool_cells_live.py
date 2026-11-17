@@ -16,7 +16,7 @@ import os
 import secrets
 import subprocess
 import tomllib
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import partial
@@ -237,7 +237,7 @@ async def _release(caller: HttpCaller, token: str, db_url: str, allocation_id: s
 
 
 @asynccontextmanager
-async def _granted(caller: HttpCaller, db_url: str) -> AsyncIterator[dict[str, Any]]:
+async def _granted(caller: HttpCaller, db_url: str) -> AsyncGenerator[dict[str, Any]]:
     """A granted allocation in the funded project, released and checked on exit."""
     funded = _funded_project()
     operator = HttpCaller("direct", caller.base_url, caller.issuer)

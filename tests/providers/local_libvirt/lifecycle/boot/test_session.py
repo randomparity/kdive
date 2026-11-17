@@ -10,7 +10,7 @@ import selectors
 import stat
 import tempfile
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -2333,7 +2333,7 @@ def regular_storage(monkeypatch: pytest.MonkeyPatch) -> list[tuple[BinaryIO, lis
     opened: list[tuple[BinaryIO, list[int]]] = []
 
     @contextmanager
-    def tracked(mode: Literal["w+b"]) -> Iterator[BinaryIO]:
+    def tracked(mode: Literal["w+b"]) -> Generator[BinaryIO]:
         with original(mode) as content:
             sizes: list[int] = []
             opened.append((content, sizes))

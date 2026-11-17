@@ -17,7 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,7 +103,7 @@ def _write_private(path: Path, value: str) -> None:
 @contextmanager
 def materialized_pkipath(
     secret_backend: SecretBackend, refs: TlsCertRefs, *, base_dir: Path | None = None
-) -> Iterator[Path]:
+) -> Generator[Path]:
     """Resolve the cert/key/CA refs into a private per-op pkipath; delete on every exit.
 
     The directory is ``0700`` (``mkdtemp``), files ``0600``. Resolution goes through
@@ -164,7 +164,7 @@ def remote_connection[C: ClosableConn](
     *,
     open_connection: Callable[[str], C],
     pki_base_dir: Path | None = None,
-) -> Iterator[C]:
+) -> Generator[C]:
     """Open a mutual-TLS libvirt connection for one op; close it and the pkipath after.
 
     Generic over the connection slice: each plane injects an opener typed to the

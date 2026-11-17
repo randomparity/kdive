@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from datetime import timedelta
 from typing import cast
 
@@ -374,7 +374,7 @@ class _RecordingTelemetry:
         self.lane_unattempted.append(counts)
 
     @contextlib.contextmanager
-    def pass_span(self) -> Iterator[_RecordingSpan]:
+    def pass_span(self) -> Generator[_RecordingSpan]:
         yield self.span
 
 
@@ -573,7 +573,7 @@ def test_run_cancels_heartbeat_ticker_on_exit(monkeypatch: pytest.MonkeyPatch) -
             stop.set()
             return _empty_report()
 
-        reconciler.run_once = one_shot  # ty: ignore[invalid-assignment]
+        reconciler.run_once = one_shot
         await asyncio.wait_for(reconciler.run(stop), timeout=2)
 
         # Right after run() returns (still inside this loop), the never-ending ticker must

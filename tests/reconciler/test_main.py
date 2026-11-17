@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from typing import cast
 
 import pytest
@@ -82,7 +82,7 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
             events.append("open" if not wait else f"open(wait=True, timeout={timeout})")
 
         @contextlib.asynccontextmanager
-        async def connection(self, timeout: float | None = None) -> AsyncIterator[object]:
+        async def connection(self, timeout: float | None = None) -> AsyncGenerator[object]:
             events.append(f"acquire(timeout={timeout})")
             yield object()
 

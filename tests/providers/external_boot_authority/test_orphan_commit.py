@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, cast
@@ -33,7 +33,7 @@ class _Connection:
         self.uncommitted = 0
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[None]:
+    async def transaction(self) -> AsyncGenerator[None]:
         self._depth += 1
         try:
             yield
@@ -50,7 +50,7 @@ class _Connection:
 
 def _commit(conn: _Connection) -> None:
     @asynccontextmanager
-    async def connections() -> AsyncIterator[_Connection]:
+    async def connections() -> AsyncGenerator[_Connection]:
         yield conn
 
     service = RecoveryOrphanAuthorityService(

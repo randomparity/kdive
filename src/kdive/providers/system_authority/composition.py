@@ -6,7 +6,7 @@ import os
 import stat
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
@@ -414,7 +414,7 @@ def build_remote_authority_system_provider(
     _require_private_directory(state_root, owner_uid, owner_gid)
 
     @contextmanager
-    def provider_connection() -> Iterator[Any]:
+    def provider_connection() -> Generator[Any]:
         yield connection
 
     private_base_paths = {

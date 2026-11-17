@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -50,7 +50,7 @@ async def assert_reservation_owner(conn: AsyncConnection, reservation: PublishRe
 @asynccontextmanager
 async def publication_fence(
     conn: AsyncConnection, reservation: PublishReservation
-) -> AsyncIterator[None]:
+) -> AsyncGenerator[None]:
     """Fence one active attempt across object write and committed catalog registration.
 
     The short reservation revalidation commits before yielding, leaving the connection

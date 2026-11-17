@@ -35,7 +35,7 @@ Neither needs a process death to be *reachable* in production: the exception esc
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
@@ -76,7 +76,7 @@ _CATEGORY = ErrorCategory.CONFIGURATION_ERROR
 
 
 @asynccontextmanager
-async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def _pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     """A pool whose every connection waits at most 250 ms for a lock, then errors.
 
     ``lock_timeout`` arrives as a libpq connection option rather than a ``SET``, because a
@@ -98,7 +98,7 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
 
 
 @asynccontextmanager
-async def _run_row_locked(url: str, run_id: str) -> AsyncIterator[None]:
+async def _run_row_locked(url: str, run_id: str) -> AsyncGenerator[None]:
     """Hold a row lock on ``runs`` for the block, from a connection outside the pool.
 
     This is the fault: the Run's ``UPDATE`` blocks and the worker's ``lock_timeout`` turns the

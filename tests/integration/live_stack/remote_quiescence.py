@@ -190,7 +190,7 @@ def probe(
     def entered(domain: object, cmd: str, flags: int) -> str:
         if json.loads(cmd)["execute"] == "object-del":
             events.send("entered")
-        return native(domain, cmd, flags)
+        return native(domain, cmd, flags)  # ty: ignore[invalid-argument-type]
 
     try:
         with patch.object(libvirt_qemu, "qemuMonitorCommand", entered):

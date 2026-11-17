@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Protocol
 from uuid import UUID
 
@@ -112,7 +112,7 @@ class CollectorRegistry:
         self._hosting_state = asyncio.Lock()
 
     @contextlib.asynccontextmanager
-    async def reserve_hosting_state(self) -> AsyncIterator[None]:
+    async def reserve_hosting_state(self) -> AsyncGenerator[None]:
         """Serialize async leadership, registry, and cleanup state transitions."""
         async with self._hosting_state:
             yield
@@ -198,7 +198,7 @@ class ConsoleHostingLoop:
             _log.warning("console hosting tick failed; retrying next tick", exc_info=True)
 
     @contextlib.asynccontextmanager
-    async def reserve_system_object_cleanup(self, system_id: UUID) -> AsyncIterator[bool]:
+    async def reserve_system_object_cleanup(self, system_id: UUID) -> AsyncGenerator[bool]:
         """Hold current leadership and collector absence through one remote object delete."""
         async with self._registry.reserve_hosting_state():
             leader_is_current = self._is_leader and await self._lock_still_held()
@@ -349,7 +349,7 @@ class ConsoleHosting:
         return self.loop.is_leader
 
     @contextlib.asynccontextmanager
-    async def reserve_system_object_cleanup(self, system_id: UUID) -> AsyncIterator[bool]:
+    async def reserve_system_object_cleanup(self, system_id: UUID) -> AsyncGenerator[bool]:
         """Reserve the loop's current hosting state for one remote object delete."""
         async with self.loop.reserve_system_object_cleanup(system_id) as permitted:
             yield permitted

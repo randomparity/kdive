@@ -20,7 +20,7 @@ Two things these arms exist to hold in place:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Any
@@ -471,7 +471,7 @@ def test_teardown_job_appearing_under_the_lock_defers_the_candidate(
         @asynccontextmanager
         async def racing_lock(
             connection: psycopg.AsyncConnection, scope: LockScope, key: UUID | str
-        ) -> AsyncIterator[None]:
+        ) -> AsyncGenerator[None]:
             async with real_lock(connection, scope, key):
                 # A separate autocommit connection, so the insert is visible to the locked
                 # transaction's re-read under READ COMMITTED.
@@ -503,7 +503,7 @@ def test_restricting_activation_appearing_under_the_lock_defers_the_candidate(
         @asynccontextmanager
         async def racing_lock(
             connection: psycopg.AsyncConnection, scope: LockScope, key: UUID | str
-        ) -> AsyncIterator[None]:
+        ) -> AsyncGenerator[None]:
             async with real_lock(connection, scope, key):
                 racer = await connect(migrated_url)
                 await _seed_restricting_activation(racer, system_id)
@@ -536,7 +536,7 @@ def test_activation_creation_waits_for_failed_system_repair_lock(
             @asynccontextmanager
             async def racing_lock(
                 connection: psycopg.AsyncConnection, scope: LockScope, key: UUID | str
-            ) -> AsyncIterator[None]:
+            ) -> AsyncGenerator[None]:
                 nonlocal creation
                 async with real_lock(connection, scope, key):
                     creation = asyncio.create_task(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -55,7 +55,7 @@ class _Lane:
         self.credential = ""
 
     @asynccontextmanager
-    async def _authority_connection(self) -> AsyncIterator[AsyncConnection]:
+    async def _authority_connection(self) -> AsyncGenerator[AsyncConnection]:
         connection = await psycopg.AsyncConnection.connect(
             self.dsns("kdive_provider_authority"), autocommit=True
         )
@@ -65,7 +65,7 @@ class _Lane:
             await connection.close()
 
     @asynccontextmanager
-    async def worker(self) -> AsyncIterator[AsyncConnection]:
+    async def worker(self) -> AsyncGenerator[AsyncConnection]:
         async with await psycopg.AsyncConnection.connect(
             self.dsns("kdive_worker"), autocommit=True
         ) as connection:

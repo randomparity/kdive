@@ -33,7 +33,7 @@ import subprocess
 import time
 import uuid
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -468,7 +468,7 @@ def boot_throwaway_domain(
     _connect: Callable[[str], _ThrowawayConn] = connect_libvirt,
     _overlay: Callable[[Path, Path], None] = create_overlay,
     _sleep: Callable[[float], None] = time.sleep,
-) -> Iterator[LiveDomain]:
+) -> Generator[LiveDomain]:
     """Boot a throwaway libvirt domain, wait for ``wait_for``, yield it, and guarantee teardown.
 
     See the module docstring for the environment contract. ``settle_s`` sleeps after the condition
@@ -576,7 +576,7 @@ def boot_gdbstub_domain(
     wait_timeout_s: float = 30.0,
     _connect: Callable[[str], _TransientConn] = connect_libvirt,
     _lifecycle: Callable[[str], None] | None = None,
-) -> Iterator[LiveDomain]:
+) -> Generator[LiveDomain]:
     """Boot a transient gdbstub domain from caller-rendered production XML (ADR-0392).
 
     Callers render kdive's own ``render_domain_xml(..., gdb_port=, debug={gdbstub, ...})`` so the

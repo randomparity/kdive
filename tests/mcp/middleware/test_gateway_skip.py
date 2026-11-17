@@ -606,18 +606,18 @@ def test_denial_equivalence_direct_vs_gateway() -> None:
 
     # --- Direct call ---
     direct_mw = DenialAuditMiddleware(pool=_pool(object()), agent_session=lambda: None)
-    direct_mw._record = _noop_record  # ty: ignore[invalid-assignment]
+    direct_mw._record = _noop_record
 
     direct_result = asyncio.run(direct_mw.on_call_tool(_context(inner_tool), _raising(denial)))
 
     # --- Gateway call ---
     # Inner DenialAuditMW converts the denial to an envelope.
     inner_mw = DenialAuditMiddleware(pool=_pool(object()), agent_session=lambda: None)
-    inner_mw._record = _noop_record  # ty: ignore[invalid-assignment]
+    inner_mw._record = _noop_record
 
     # Outer DenialAuditMW processes tools.invoke; it sees the envelope (no exception).
     outer_mw = DenialAuditMiddleware(pool=_pool(object()), agent_session=lambda: None)
-    outer_mw._record = _noop_record  # ty: ignore[invalid-assignment]
+    outer_mw._record = _noop_record
 
     async def _gateway() -> Any:
         inner_result = await inner_mw.on_call_tool(_context(inner_tool), _raising(denial))

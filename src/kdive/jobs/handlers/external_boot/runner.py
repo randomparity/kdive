@@ -704,10 +704,13 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
             committed = activation.activation_readiness_deadline
             if committed is not None:
                 timeout = committed - ports.clock() + timedelta(seconds=30)
-        elif local_timing is not None and job.payload.get("recovery_request_v1") is not None:
-            if not starts_fresh_readiness_budget(job, activation):
-                recorded = RecoveryRequestV1.model_validate(job.payload["recovery_request_v1"])
-                timeout = recorded.readiness_deadline - ports.clock()
+        elif (
+            local_timing is not None
+            and job.payload.get("recovery_request_v1") is not None
+            and not starts_fresh_readiness_budget(job, activation)
+        ):
+            recorded = RecoveryRequestV1.model_validate(job.payload["recovery_request_v1"])
+            timeout = recorded.readiness_deadline - ports.clock()
         client = ports.authority_client_factory(
             binding,
             marker,

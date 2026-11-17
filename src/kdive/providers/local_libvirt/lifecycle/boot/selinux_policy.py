@@ -7,7 +7,7 @@ import errno
 import re
 import stat
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -113,7 +113,7 @@ def _config_values(data: bytes) -> dict[str, str]:
 
 
 @contextmanager
-def guest_policy(guest: InactiveGuest) -> Iterator[ModuleLabelPolicy | None]:
+def guest_policy(guest: InactiveGuest) -> Generator[ModuleLabelPolicy | None]:
     """Copy a bounded, inactive guest policy and evaluate it with host libselinux."""
     if not guest.exists(_CONFIG):
         yield None

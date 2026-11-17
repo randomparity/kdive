@@ -19,7 +19,7 @@ import textwrap
 import threading
 import time
 import types
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any, cast
@@ -280,7 +280,7 @@ class _FakeStore:
         )
 
     @contextmanager
-    def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
+    def get_artifact_stream(self, key: str, etag: str | None) -> Generator[StreamedArtifact]:
         self.stream_calls += 1
         assert self._data is not None
         reader = _RecordingReader(
@@ -908,7 +908,7 @@ def test_stage_gzip_shrinks_its_reservation_before_the_format_gate(
     original_format_gate = upload_staging._require_qcow2_magic
 
     @contextmanager
-    def _preallocated_partial(partial: Path) -> Iterator[int]:
+    def _preallocated_partial(partial: Path) -> Generator[int]:
         with original_flocked_partial(partial) as fd:
             os.ftruncate(fd, reserved)
             yield fd
@@ -1825,7 +1825,7 @@ def test_from_env_fetch_closes_over_the_injected_store(
     connects: list[tuple[str, bool]] = []
 
     @contextmanager
-    def fake_connect(dsn: str, *, autocommit: bool) -> Iterator[object]:
+    def fake_connect(dsn: str, *, autocommit: bool) -> Generator[object]:
         connects.append((dsn, autocommit))
         yield conn
 
@@ -2410,7 +2410,7 @@ class _CountingStore:
         )
 
     @contextmanager
-    def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
+    def get_artifact_stream(self, key: str, etag: str | None) -> Generator[StreamedArtifact]:
         with self._counter.open("a") as fh:
             fh.write("1\n")
         reader = io.BytesIO(self._data)
@@ -2520,7 +2520,7 @@ def test_two_processes_share_one_download(migrated_url: str, tmp_path: Path) -> 
 
 
 @contextmanager
-def _held_partial(dest: Path, suffix: str = "live") -> Iterator[Path]:
+def _held_partial(dest: Path, suffix: str = "live") -> Generator[Path]:
     """A ``<token>.<suffix>.partial`` held under an exclusive ``flock``, as a live fetcher holds it.
 
     Stands in for the sibling whose session advisory lock was dropped mid-download while it kept
@@ -2674,7 +2674,7 @@ class _StallingStore:
         )
 
     @contextmanager
-    def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
+    def get_artifact_stream(self, key: str, etag: str | None) -> Generator[StreamedArtifact]:
         reader = _StallingReader(self._data, self._reached, self._release)
         try:
             yield StreamedArtifact(cast(IO[bytes], reader), Sensitivity.SENSITIVE, "rootfs")
@@ -2998,7 +2998,7 @@ def test_fetch_survives_a_dead_session_when_releasing_the_lock(
             raise psycopg.OperationalError("terminating connection due to administrator command")
         return real_execute(sql, params)
 
-    conn.execute = dying_execute  # ty: ignore[invalid-assignment]
+    conn.execute = dying_execute
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
     with caplog.at_level(logging.WARNING):
@@ -3024,7 +3024,7 @@ def test_a_dead_session_does_not_mask_the_real_staging_error(tmp_path: Path) -> 
             raise psycopg.OperationalError("terminating connection due to administrator command")
         return real_execute(sql, params)
 
-    conn.execute = dying_execute  # ty: ignore[invalid-assignment]
+    conn.execute = dying_execute
     store = _FakeStore(b"actual-bytes", checksum=_sha256_b64(b"different-bytes"))
 
     with pytest.raises(CategorizedError) as error:
@@ -3122,7 +3122,7 @@ def test_a_failed_unlock_on_a_live_session_does_not_claim_the_lock_was_released(
             raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
         return real_execute(sql, params)
 
-    conn.execute = timing_out_execute  # ty: ignore[invalid-assignment]
+    conn.execute = timing_out_execute
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
     with caplog.at_level(logging.WARNING):
@@ -3151,14 +3151,14 @@ def test_stage_names_the_sweep_when_the_unguarded_partial_is_taken_mid_download(
     real_stream = store.get_artifact_stream
 
     @contextmanager
-    def sweeping_stream(key: str, etag: str | None) -> Iterator[StreamedArtifact]:
+    def sweeping_stream(key: str, etag: str | None) -> Generator[StreamedArtifact]:
         with real_stream(key, etag) as fetched:
             # A sibling sweeps once the lock manager is back, while this download is still running.
             for partial in dest.parent.glob(f"{_TOKEN}.*.partial"):
                 partial.unlink()
             yield fetched
 
-    store.get_artifact_stream = sweeping_stream  # ty: ignore[invalid-assignment]
+    store.get_artifact_stream = sweeping_stream
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(fcntl, "flock", unlockable_flock)

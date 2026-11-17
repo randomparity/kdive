@@ -11,7 +11,7 @@ import stat
 import tarfile
 import tempfile
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from typing import Annotated, BinaryIO, Literal, Protocol, cast
 
@@ -85,7 +85,7 @@ class AuthenticatedGuestTree(Protocol):
     def root_kind(self) -> Literal["absent", "directory", "other"]: ...
     def entries(self) -> Iterator[GuestTreeEntry]: ...
     @contextmanager
-    def open_regular(self, path: str, size: int) -> Iterator[BinaryIO]: ...
+    def open_regular(self, path: str, size: int) -> Generator[BinaryIO]: ...
     def prepare_restore(self, entries: Iterator[GuestTreeEntry]) -> None: ...
     def create_directory(self, entry: GuestTreeEntry) -> None: ...
     def create_regular(self, entry: GuestTreeEntry, content: BinaryIO) -> None: ...
@@ -121,7 +121,7 @@ class _SingleUseFile:
             self._closed = True
 
     @contextmanager
-    def stream(self) -> Iterator[BinaryIO]:
+    def stream(self) -> Generator[BinaryIO]:
         if self._used or self._closed:
             raise ValueError("module source capability is not reusable")
         self._used = True

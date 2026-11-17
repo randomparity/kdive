@@ -17,7 +17,7 @@ import socket
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncGenerator, Callable, Generator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -111,7 +111,7 @@ class _LiveDebugSurface:
         vmlinux: Path,
         module_fixture: _ModuleFixture | None = None,
         boot_result: dict[str, object] | None = None,
-    ) -> AsyncIterator[_LiveDebugSession]:
+    ) -> AsyncGenerator[_LiveDebugSession]:
         engine = GdbMiEngine(module_debuginfo_resolver=_module_resolver(module_fixture))
         runtime = DebugEngineRuntime(
             engine=engine,
@@ -655,7 +655,7 @@ async def _continue_to_vfs_read(
 
 
 @contextlib.asynccontextmanager
-async def _queued_ssh_read_trigger(ssh_port: int) -> AsyncIterator[None]:
+async def _queued_ssh_read_trigger(ssh_port: int) -> AsyncGenerator[None]:
     """Queue a client banner that makes guest sshd call read(2), holding the socket open."""
     _reader, writer = await asyncio.open_connection("127.0.0.1", ssh_port)
     try:
@@ -849,7 +849,7 @@ def _ephemeral_port_pair() -> tuple[int, int]:
 
 
 @contextlib.contextmanager
-def _rootfs_overlay(rootfs: Path) -> Iterator[Path]:
+def _rootfs_overlay(rootfs: Path) -> Generator[Path]:
     overlay = rootfs.with_name(f"kdive-debug-{uuid4().hex}.qcow2")
     try:
         create_overlay(rootfs, overlay)

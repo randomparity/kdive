@@ -25,7 +25,7 @@ import stat
 import time
 import uuid
 import warnings
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -153,7 +153,7 @@ def backend_container_labels(root: Path, name: str) -> dict[str, str]:
 
 
 @contextmanager
-def _liveness_held(root: Path, name: str) -> Iterator[None]:
+def _liveness_held(root: Path, name: str) -> Generator[None]:
     """Hold a shared lock on the run's liveness file for the caller's whole reference.
 
     Shared, not exclusive: every xdist worker holding a reference takes one concurrently,
@@ -221,7 +221,7 @@ def is_stale_backend_container(labels: Mapping[str, str]) -> bool:
 
 
 @contextmanager
-def _sweep_locked() -> Iterator[bool]:
+def _sweep_locked() -> Generator[bool]:
     """Safely try to own the process-external stale-backend sweep."""
     flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
     fd = os.open(_SWEEP_LOCK_PATH, flags, 0o600)
@@ -343,7 +343,7 @@ def shared_container_or_skip(
     start: Callable[[Mapping[str, str]], tuple[str, str]],
     stop: Callable[[str], None],
     require_docker: bool,
-) -> Iterator[str]:
+) -> Generator[str]:
     """Yield the shared server URL, turning a genuine Docker-down failure into a skip.
 
     Drives :func:`shared_container` but scopes the skip to *acquisition*: only when
@@ -376,7 +376,7 @@ def shared_container(
     *,
     start: Callable[[Mapping[str, str]], tuple[str, str]],
     stop: Callable[[str], None],
-) -> Iterator[str]:
+) -> Generator[str]:
     """Yield one shared container's server URL, coordinated across xdist workers.
 
     ``start(labels)`` returns ``(server_url, container_id)`` and must stamp ``labels``
@@ -441,7 +441,7 @@ def shared_container(
 
 
 @contextmanager
-def _locked(lock_path: Path) -> Iterator[None]:
+def _locked(lock_path: Path) -> Generator[None]:
     with open(lock_path, "w") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         try:

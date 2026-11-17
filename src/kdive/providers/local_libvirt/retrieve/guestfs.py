@@ -119,7 +119,7 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
     @staticmethod
     def _mount(overlay: str) -> _GuestfsHandle:
         try:
-            import guestfs  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
+            import guestfs  # noqa: PLC0415  # ty: ignore[import-not-found]  # operator-provided
         except ImportError as exc:
             raise CategorizedError(
                 "libguestfs (the guestfs Python binding) is required for local kdump capture",

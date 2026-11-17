@@ -11,7 +11,7 @@ import stat
 import tarfile
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, Literal, cast
@@ -88,7 +88,7 @@ class FakeTree:
         yield from self._entries
 
     @contextmanager
-    def open_regular(self, path: str, size: int) -> Iterator[BinaryIO]:
+    def open_regular(self, path: str, size: int) -> Generator[BinaryIO]:
         self.opened.append(path)
         value = self.contents[path]
         if len(value) != size:
@@ -803,7 +803,7 @@ def test_capture_rolls_regular_content_to_disk_and_bounds_reads(
     rolled: list[bool] = []
 
     @contextmanager
-    def tracked_spool(max_size: int = 0) -> Iterator[BinaryIO]:
+    def tracked_spool(max_size: int = 0) -> Generator[BinaryIO]:
         with original(max_size=max_size) as stream:
             yield cast(BinaryIO, stream)
             rolled.append(bool(cast(Any, stream)._rolled))

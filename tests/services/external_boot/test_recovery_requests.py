@@ -10,7 +10,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, LiteralString
@@ -105,7 +105,7 @@ class _Fixture:
 
 
 @asynccontextmanager
-async def _fixture(url: str) -> AsyncIterator[_Fixture]:
+async def _fixture(url: str) -> AsyncGenerator[_Fixture]:
     conn = await connect(url)
     try:
         async with runs_support.pool(url) as conn_pool:

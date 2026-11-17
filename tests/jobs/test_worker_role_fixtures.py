@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any, Self, cast
 
@@ -42,7 +42,7 @@ def test_authority_role_login_lifecycle_holds_the_cluster_lock(
     statements: list[object] = []
 
     @contextmanager
-    def lock(postgres_url: str) -> Iterator[None]:
+    def lock(postgres_url: str) -> Generator[None]:
         locks.append(postgres_url)
         yield
 

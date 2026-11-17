@@ -60,7 +60,7 @@ def test_remote_host_advertises_host_cpu() -> None:
         # emulatorbin=None is libvirt's "default emulator"; the binding stub mistypes it as `str`
         # (its own default is None), and an empty string makes libvirt stat an empty binary path.
         dom_caps = conn.getDomainCapabilities(
-            None,  # ty: ignore[invalid-argument-type]
+            None,
             arch,
             _DEFAULT_MACHINE,
             "kvm",
@@ -96,7 +96,7 @@ def test_host_cpu_matches_running_domain() -> None:
         machine_name = os_type.get("machine") if os_type is not None else None
         # emulatorbin=None is libvirt's "default emulator" (the stub mistypes it as `str`).
         dom_caps = conn.getDomainCapabilities(
-            None,  # ty: ignore[invalid-argument-type]
+            None,
             arch,
             machine_name or _DEFAULT_MACHINE,
             "kvm",

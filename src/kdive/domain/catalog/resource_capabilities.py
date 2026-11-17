@@ -297,16 +297,13 @@ class ResourceCapabilities:
             if any(not isinstance(entry.get(field), str) for field in _DESCRIPTOR_FIELDS):
                 continue
             descriptors.append(
-                cast(
-                    "PCIeDescriptor",
-                    {
-                        "bdf": entry["bdf"],
-                        "vendor_id": entry["vendor_id"],
-                        "device_id": entry["device_id"],
-                        "class_code": entry["class_code"],
-                        "label": entry["label"],
-                    },
-                )
+                {
+                    "bdf": entry["bdf"],
+                    "vendor_id": entry["vendor_id"],
+                    "device_id": entry["device_id"],
+                    "class_code": entry["class_code"],
+                    "label": entry["label"],
+                }
             )
         return descriptors
 

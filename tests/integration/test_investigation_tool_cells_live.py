@@ -18,7 +18,7 @@ import asyncio
 import gzip
 import os
 import secrets
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -672,7 +672,7 @@ def _target_setup(
     """A live investigation (or unbound Run) of ``project`` for the rejected call to aim at."""
 
     @asynccontextmanager
-    async def setup() -> AsyncIterator[Mapping[str, object]]:
+    async def setup() -> AsyncGenerator[Mapping[str, object]]:
         async with _investigation(base_url, issuer, project) as inv:
             if tool == "investigations.complete_rootfs_upload":
                 # A window holding bytes: a finalize that skipped the boundary would adopt them

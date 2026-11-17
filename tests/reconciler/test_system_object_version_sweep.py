@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -134,7 +134,7 @@ class _Gate:
         return self.leader
 
     @asynccontextmanager
-    async def reserve_system_object_cleanup(self, system_id: UUID) -> AsyncIterator[bool]:
+    async def reserve_system_object_cleanup(self, system_id: UUID) -> AsyncGenerator[bool]:
         yield self.leader and not self.registry.has(system_id)
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 import stat
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, cast
@@ -35,7 +35,7 @@ class _Guest:
         return {"st_mode": stat.S_IFREG | 0o644, "st_size": len(self.files[path])}
 
     @contextmanager
-    def open_regular(self, path: str, *, size: int) -> Iterator[BinaryIO]:
+    def open_regular(self, path: str, *, size: int) -> Generator[BinaryIO]:
         assert len(self.files[path]) == size
         yield io.BytesIO(self.files[path])
 

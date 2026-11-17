@@ -10,7 +10,7 @@ import hashlib
 import logging
 import os
 import stat
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -142,7 +142,7 @@ def _unlink_orphan_partials(dest: Path) -> None:
 
 
 @contextmanager
-def _flocked_partial(partial: Path) -> Iterator[int]:
+def _flocked_partial(partial: Path) -> Generator[int]:
     """Create this fetcher's partial and hold an exclusive ``flock`` on it while it stages.
 
     The liveness marker :func:`_unlink_orphan_partials` reads. Two *writers* never contend, because

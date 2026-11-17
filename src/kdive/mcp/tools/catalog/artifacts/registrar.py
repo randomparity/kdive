@@ -23,7 +23,7 @@ from kdive.serialization import JsonValue
 
 def _declaration_schema_extra(
     examples: Sequence[JsonValue], *, item_schema: dict[str, JsonValue]
-) -> dict[str, object]:
+) -> dict[str, JsonValue]:
     """Advertise the upload-declaration ``item_schema`` + ``examples`` (ADR-0173).
 
     Merged into the ``artifacts`` array parameter's advertised JSON Schema so a black-box
@@ -37,7 +37,7 @@ def _declaration_schema_extra(
     """
     return {
         "items": item_schema,
-        "examples": examples,
+        "examples": list(examples),
     }
 
 

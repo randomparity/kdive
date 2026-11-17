@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import libvirt
 import pytest
 
@@ -35,7 +37,7 @@ def _control(
         if target is not None:
             target.calls.append("prepare")
 
-    seams = {"sleep": clock.sleep, "clock": clock} if clock is not None else {}
+    seams: dict[str, Any] = {"sleep": clock.sleep, "clock": clock} if clock is not None else {}
     return LocalLibvirtControl(connect=lambda: conn, prepare_console=_prepare, **seams), domain
 
 

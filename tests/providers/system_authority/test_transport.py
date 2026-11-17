@@ -215,5 +215,5 @@ async def test_unexpected_system_failure_is_logged_without_reaching_the_peer(
     assert response == b'{"category":"provider-conflict","status":"error"}'
     [record] = [record for record in caplog.records if record.name == transport.__name__]
     assert "execute-system-operation" in record.getMessage()
-    assert record.exc_info is not None
+    assert record.exc_info
     assert record.exc_info[0] is RuntimeError

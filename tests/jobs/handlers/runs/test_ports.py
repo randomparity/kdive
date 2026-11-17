@@ -38,7 +38,7 @@ def test_is_frozen_and_slotted() -> None:
     assert RunHandlerPorts.__dataclass_params__.frozen is True
     assert not hasattr(ports, "__dict__")
     with pytest.raises(dataclasses.FrozenInstanceError):
-        ports.resolver = object()  # type: ignore[misc]
+        ports.resolver = object()  # ty: ignore[invalid-assignment]
 
 
 def test_binds_each_dependency_by_name() -> None:

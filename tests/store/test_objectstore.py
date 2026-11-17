@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from datetime import UTC
@@ -58,7 +58,7 @@ def _versioning_suspension_is_unsupported(error: ClientError) -> bool:
 
 
 @contextmanager
-def _suspend_versioning_or_skip(store: ObjectStore) -> Iterator[None]:
+def _suspend_versioning_or_skip(store: ObjectStore) -> Generator[None]:
     """Suspend fixture versioning only around a legacy-identity proof, then always re-enable it."""
     try:
         store._client.put_bucket_versioning(
@@ -1845,7 +1845,7 @@ def test_minio_suspended_versioning_exposes_legacy_null_when_supported(
     finally:
         for version_id in observed_version_ids:
             minio_store.delete_version(key, version_id)
-        if wrote_legacy_version and not observed_version_ids and not deleted_legacy_version:
+        if wrote_legacy_version and not observed_version_ids and not deleted_legacy_version:  # ty: ignore[redundant-condition]
             minio_store.delete_version(key, "null")
 
 

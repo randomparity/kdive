@@ -138,7 +138,6 @@ def test_failed_system_without_a_job_keeps_the_infrastructure_default() -> None:
     assert resp.error_category == "infrastructure_failure"
     assert resp.retryable is True
     assert resp.detail == NO_JOB_SYSTEM_FAILURE_DETAIL
-    assert resp.detail
     assert "failing_job_id" not in resp.data
 
 

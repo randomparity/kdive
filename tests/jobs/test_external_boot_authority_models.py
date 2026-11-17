@@ -380,10 +380,10 @@ def test_failure_context_accepts_only_closed_bounded_cmdline_diagnostic(
 
 def _worker() -> Worker:
     worker = object.__new__(Worker)
-    worker._pool = _Pool()  # type: ignore[invalid-assignment]
+    worker._pool = _Pool()  # ty: ignore[invalid-assignment]
     worker._incarnation_credential = SecretStr("credential")
-    worker._telemetry = SimpleNamespace(record_job_failure=lambda *_: None)
-    worker._secret_registry = SimpleNamespace()
+    worker._telemetry = SimpleNamespace(record_job_failure=lambda *_: None)  # ty: ignore[invalid-assignment]
+    worker._secret_registry = SimpleNamespace()  # ty: ignore[invalid-assignment]
     return worker
 
 

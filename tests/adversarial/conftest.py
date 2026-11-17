@@ -7,7 +7,7 @@ adversarial module races real connections against a freshly migrated schema.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -44,7 +44,7 @@ async def one(cur: psycopg.AsyncCursor[Any]) -> tuple[Any, ...]:
 
 
 @asynccontextmanager
-async def open_conn(url: str) -> AsyncIterator[psycopg.AsyncConnection]:
+async def open_conn(url: str) -> AsyncGenerator[psycopg.AsyncConnection]:
     """Yield one autocommit async connection, closed on exit."""
     conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
     try:
@@ -54,7 +54,7 @@ async def open_conn(url: str) -> AsyncIterator[psycopg.AsyncConnection]:
 
 
 @asynccontextmanager
-async def open_conns(url: str, n: int) -> AsyncIterator[list[psycopg.AsyncConnection]]:
+async def open_conns(url: str, n: int) -> AsyncGenerator[list[psycopg.AsyncConnection]]:
     """Yield ``n`` distinct autocommit async connections, all closed on exit.
 
     Distinct connections are what makes contention real: advisory locks and row

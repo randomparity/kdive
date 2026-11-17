@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -119,7 +119,7 @@ class _SuspendedCapture:
 
 
 @asynccontextmanager
-async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def _pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     pool = AsyncConnectionPool(url, min_size=2, max_size=6, open=False)
     await pool.open()
     try:

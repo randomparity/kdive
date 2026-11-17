@@ -19,7 +19,7 @@ import fcntl
 import hashlib
 import json
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
@@ -827,7 +827,7 @@ def test_reclaim_reconverges_when_both_targets_are_already_absent(
 
 
 @contextmanager
-def _held_partial(uploads: Path, inv: UUID, token: str = _TOKEN) -> Iterator[Path]:
+def _held_partial(uploads: Path, inv: UUID, token: str = _TOKEN) -> Generator[Path]:
     """A ``<token>.<uuid>.partial`` under an exclusive ``flock``, as a live fetcher holds it."""
     inv_dir = uploads / str(inv)
     inv_dir.mkdir(parents=True, exist_ok=True)

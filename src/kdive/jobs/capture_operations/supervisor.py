@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -143,7 +143,7 @@ class CapturePublicationRecoverer(Protocol):
 
 
 @contextmanager
-def capture_authority_scope(lost: asyncio.Event) -> Iterator[None]:
+def capture_authority_scope(lost: asyncio.Event) -> Generator[None]:
     """Bind worker heartbeat/stop authority to one capture handler task."""
     token = _CAPTURE_AUTHORITY_LOST.set(lost)
     try:
@@ -177,7 +177,7 @@ async def _finish_owned_cleanup(task: asyncio.Task[None]) -> None:
 
 
 @asynccontextmanager
-async def _capture_job_fence(conn: AsyncConnection, job_id: UUID) -> AsyncIterator[None]:
+async def _capture_job_fence(conn: AsyncConnection, job_id: UUID) -> AsyncGenerator[None]:
     await conn.execute(
         f"SELECT pg_advisory_lock({CAPTURE_JOB_FENCE_KEY_SQL})",  # noqa: S608
         (job_id,),
@@ -268,7 +268,7 @@ class CaptureOperationSupervisor:
     @asynccontextmanager
     async def _transition_connection(
         self, fallback: AsyncConnection
-    ) -> AsyncIterator[AsyncConnection]:
+    ) -> AsyncGenerator[AsyncConnection]:
         if self._pool is None:
             yield fallback
             return

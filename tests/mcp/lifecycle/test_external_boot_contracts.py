@@ -9,7 +9,7 @@ reaches the service and comes back as the same failure envelope.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import cast
@@ -214,7 +214,7 @@ def _ctx(
 
 
 @asynccontextmanager
-async def _harness(url: str) -> AsyncIterator[_Harness]:
+async def _harness(url: str) -> AsyncGenerator[_Harness]:
     async with runs_support.pool(url) as conn_pool:
         app = FastMCP("external-boot-contracts-test")
         resolver = provider_resolver()

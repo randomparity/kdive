@@ -32,7 +32,7 @@ import sys
 import tarfile
 import tempfile
 import time
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -182,7 +182,7 @@ class SpinePhaseError(AssertionError):
 
 
 @asynccontextmanager
-async def phase(name: str) -> AsyncIterator[None]:
+async def phase(name: str) -> AsyncGenerator[None]:
     """Run a phase; convert any failure into a ``SpinePhaseError`` naming the phase."""
     try:
         yield

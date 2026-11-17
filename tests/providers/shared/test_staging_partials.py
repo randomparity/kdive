@@ -22,7 +22,7 @@ import errno
 import fcntl
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -36,7 +36,7 @@ from kdive.providers.shared.staging.staging_partials import (
 
 
 @contextmanager
-def _flocked(partial: Path) -> Iterator[None]:
+def _flocked(partial: Path) -> Generator[None]:
     """Hold an exclusive ``flock`` on ``partial``, as a staging fetcher holds its own."""
     fd = os.open(partial, os.O_RDONLY)
     try:

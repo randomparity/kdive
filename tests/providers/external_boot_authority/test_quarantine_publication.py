@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -38,7 +38,7 @@ from tests.jobs.handlers.external_boot.vehicle import build_vehicle
 
 
 @asynccontextmanager
-async def _authority_connection(dsn: str) -> AsyncIterator[psycopg.AsyncConnection]:
+async def _authority_connection(dsn: str) -> AsyncGenerator[psycopg.AsyncConnection]:
     async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
         yield conn
 
