@@ -68,7 +68,7 @@ the structural pins above and `just lint-workflows`.
 - [ ] Add under `native:` `outputs: lifecycle_drift: ${{ steps.native-spine.outputs.lifecycle_drift }}`.
 - [ ] Append job `lifecycle-drift` (ubuntu-latest, `timeout-minutes: 10`,
   `needs: native`, `if: always() && github.event_name == 'schedule' && needs.native.outputs.lifecycle_drift == 'true'`,
-  `permissions: {contents: read, issues: write}`, env `GH_TOKEN`, `GH_REPO`, `RUN_URL`
+  `permissions: {contents: read, issues: write}`, `concurrency: {group: live-native-drift-report, cancel-in-progress: false}`, env `GH_TOKEN`, `GH_REPO`, `RUN_URL`
   built from `github.server_url/repository/actions/runs/run_id`). One step:
   ```
   title="Native live_vm runner lifecycle protocol drift"
@@ -78,7 +78,7 @@ the structural pins above and `just lint-workflows`.
   gh issue create --title "$title" --label type:bug --label status:needs-triage \
     --body "..."
   ```
-  Body: the installed lifecycle protocol does not match main; run link; reprovision the runner
+  Body: the installed lifecycle protocol does not match this checkout or could not be probed; run link; reprovision the runner
   (operator action) then confirm with a `workflow_dispatch` run; filed by `live.yml`.
 - [ ] Confirm green; `just lint-workflows`; commit `feat(ci): file an issue on native lifecycle drift`.
 

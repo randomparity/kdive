@@ -24,10 +24,12 @@ the probe, `live.yml` owns CI wiring; no ownership move, no compatibility path.
    `cleanup_required=true` and every mutation.
 3. The `native` job exposes `lifecycle_drift`. A new `lifecycle-drift` job (`needs: native`,
    `if: always() && github.event_name == 'schedule' && needs.native.outputs.lifecycle_drift == 'true'`)
-   holds `issues: write` and `contents: read` only, runs `gh` with no checkout, and opens one
+   holds `issues: write` and `contents: read` only, has its own concurrency group
+   (`cancel-in-progress: false`), runs `gh` with no checkout, and opens one
    issue titled `Native live_vm runner lifecycle protocol drift` unless an open issue with that
    exact title exists. Closed issues do not suppress filing: a later drift is new work.
-   The body links the run and states reprovisioning is an operator action.
+   The body says the installed protocol does not match this checkout or could not be probed,
+   links the run, and states reprovisioning is an operator action.
 4. Workflow-level permissions stay `contents: read`.
 
 ### Failure model
@@ -36,8 +38,8 @@ the probe, `live.yml` owns CI wiring; no ownership move, no compatibility path.
   report job; GitHub Issues API via `GITHUB_TOKEN`.
 - Invariants: the report job gets no checkout and no project code; the probe still precedes
   every mutating step; the native job still fails on drift (the run stays red).
-- Accepted: a duplicate issue from two simultaneous scheduled runs (concurrency group
-  serialises them); a drift issue not filed when the runner is offline (no job runs; the
+- Accepted: a duplicate issue from overlapping report jobs (the report job's own concurrency
+  group serialises them); a `gh`/API failure fails the report job, the red run stays the signal, no retry; a drift issue not filed when the runner is offline (no job runs; the
   existing red/cancelled run is the signal); `workflow_dispatch` runs file nothing (a human is
   watching).
 - Covered elsewhere: runner reprovisioning (operator); non-lifecycle scheduled failures and
