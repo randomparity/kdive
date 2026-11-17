@@ -307,7 +307,9 @@ def test_sparse_reader_extracts_real_ext4_without_dense_local_allocation(
     preparation = RemoteModulePreparationExecutor()
     async_reader = replace(reader, preparation_executor=preparation)
 
-    async def read(recovery: RemoteModuleRecoveryRefV1, deadline: float) -> bytes | None:
+    async def read(
+        recovery: RemoteModuleRecoveryRefV1 | RemoteModuleRecoveryRefV2, deadline: float
+    ) -> bytes | None:
         return await async_reader.read_recovery_async(recovery, deadline=deadline)
 
     operation = RemoteModuleOperationV1.model_validate(operation_document())

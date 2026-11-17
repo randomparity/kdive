@@ -178,10 +178,10 @@ def operation_is_permitted(purpose: str, operation: AuthorityOperation) -> bool:
     return operation in _PURPOSE_OPERATIONS.get(purpose, frozenset())
 
 
-class _AuthorityBinding(_ClosedValue):
-    schema_: Literal["external-boot-authority-v1"] = Field(
-        "external-boot-authority-v1", alias="schema"
-    )
+class _AuthorityBindingFields(_ClosedValue):
+    """Binding fields shared by documents that narrow the schema discriminator."""
+
+    schema_: str = Field(alias="schema")
     authority_id: UUID
     generation: PositiveBigInt
     system_id: UUID
@@ -205,6 +205,12 @@ class _AuthorityBinding(_ClosedValue):
         if self.operation not in _PURPOSE_OPERATIONS[self.purpose]:
             raise ValueError("authority operation is not allowed for its purpose")
         return self
+
+
+class _AuthorityBinding(_AuthorityBindingFields):
+    schema_: Literal["external-boot-authority-v1"] = Field(
+        "external-boot-authority-v1", alias="schema"
+    )
 
 
 class AuthorityTakeoverRequestV1(_AuthorityBinding):
@@ -279,10 +285,10 @@ class AuthorityMutationRequestV1(_AuthorityBinding):
         return self
 
 
-class AuthorityTeardownMutationRequestV1(_AuthorityBinding):
+class AuthorityTeardownMutationRequestV1(_AuthorityBindingFields):
     """One authority-owned System teardown without recovery-point assumptions."""
 
-    schema_: Literal["external-boot-authority-teardown-request-v1"] = Field(  # ty: ignore[invalid-attribute-override]
+    schema_: Literal["external-boot-authority-teardown-request-v1"] = Field(
         "external-boot-authority-teardown-request-v1", alias="schema"
     )
     attempt_id: UUID

@@ -238,12 +238,10 @@ class LocalPreStopIntentV1(_ClosedValue):
         return self
 
 
-class LocalSystemTeardownAnchorV1(_ClosedValue):
-    """Path-free authority request and mutation-started anchor used for observation."""
+class _LocalSystemTeardownFields(_ClosedValue):
+    """Teardown facts shared by the anchor and the intent, which narrow the schema differently."""
 
-    schema_: Literal["local-libvirt-system-teardown-anchor-v1"] = Field(
-        "local-libvirt-system-teardown-anchor-v1", alias="schema"
-    )
+    schema_: str = Field(alias="schema")
     authority_id: UUID
     generation: Annotated[int, Field(ge=1)]
     binding: ExternalBootActivationBinding
@@ -261,10 +259,18 @@ class LocalSystemTeardownAnchorV1(_ClosedValue):
         return "sha256:" + hashlib.sha256(_system_teardown_anchor_bytes(self)).hexdigest()
 
 
-class LocalSystemTeardownIntentV1(LocalSystemTeardownAnchorV1):
+class LocalSystemTeardownAnchorV1(_LocalSystemTeardownFields):
+    """Path-free authority request and mutation-started anchor used for observation."""
+
+    schema_: Literal["local-libvirt-system-teardown-anchor-v1"] = Field(
+        "local-libvirt-system-teardown-anchor-v1", alias="schema"
+    )
+
+
+class LocalSystemTeardownIntentV1(_LocalSystemTeardownFields):
     """Exact authority request and reservation persisted before teardown mutation."""
 
-    schema_: Literal["local-libvirt-system-teardown-intent-v1"] = Field(  # ty: ignore[invalid-attribute-override]
+    schema_: Literal["local-libvirt-system-teardown-intent-v1"] = Field(
         "local-libvirt-system-teardown-intent-v1", alias="schema"
     )
     reservation: AuthorityTeardownReservationV1
@@ -273,7 +279,7 @@ class LocalSystemTeardownIntentV1(LocalSystemTeardownAnchorV1):
     def identity(self) -> str:
         return "sha256:" + hashlib.sha256(_system_teardown_intent_bytes(self)).hexdigest()
 
-    def matches_anchor(self, anchor: LocalSystemTeardownAnchorV1) -> bool:
+    def matches_anchor(self, anchor: _LocalSystemTeardownFields) -> bool:
         return (
             self.authority_id,
             self.generation,
@@ -300,7 +306,7 @@ class LocalSystemTeardownIntentV1(LocalSystemTeardownAnchorV1):
             anchor.journal_digest,
         )
 
-    def anchor_subject_matches(self, anchor: LocalSystemTeardownAnchorV1) -> bool:
+    def anchor_subject_matches(self, anchor: _LocalSystemTeardownFields) -> bool:
         """Compare the subject fields an anchor carries; it has no reservation (#2921)."""
         return (
             self.binding,
@@ -1116,7 +1122,7 @@ class LocalSystemTeardownIO(Protocol):
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
     ) -> AuthoritySystemTeardownFacts: ...
     def observe_system_teardown(
-        self, anchor: LocalSystemTeardownAnchorV1, authority: OpaqueProviderRef
+        self, anchor: _LocalSystemTeardownFields, authority: OpaqueProviderRef
     ) -> AuthoritySystemTeardownFacts: ...
     def system_teardown_recovery_point(
         self, intent: LocalSystemTeardownIntentV1, authority: OpaqueProviderRef
@@ -1861,7 +1867,7 @@ class RealLocalExternalBootIO:
             )
 
     def observe_system_teardown(
-        self, anchor: LocalSystemTeardownAnchorV1, authority: OpaqueProviderRef
+        self, anchor: _LocalSystemTeardownFields, authority: OpaqueProviderRef
     ) -> AuthoritySystemTeardownFacts:
         with self._open_system_teardown(anchor, authority) as session:
             inspection = session.inspect()
@@ -2049,7 +2055,7 @@ class RealLocalExternalBootIO:
 
     @contextmanager
     def _open_system_teardown(
-        self, intent: LocalSystemTeardownAnchorV1, authority: OpaqueProviderRef
+        self, intent: _LocalSystemTeardownFields, authority: OpaqueProviderRef
     ) -> Generator[LocalSystemTeardownSession]:
         lease = self._resolve_operation_lease(authority)
         session = self._session_factory.open_teardown(lease, _expected_binding(intent.binding))
@@ -2079,7 +2085,7 @@ def _recovery_point_of(
 
 
 def _system_teardown_facts(
-    intent: LocalSystemTeardownAnchorV1,
+    intent: _LocalSystemTeardownFields,
     inspection: LocalSystemTeardownInspection,
     recovery_absent: bool,
     completed_at: datetime | None,
@@ -3093,7 +3099,7 @@ class LocalLibvirtExternalBoot:
         return cast(LocalSystemTeardownIO, self._io).teardown_system(intent, authority)
 
     def observe_system_teardown(
-        self, intent: LocalSystemTeardownAnchorV1, authority: OpaqueProviderRef
+        self, intent: _LocalSystemTeardownFields, authority: OpaqueProviderRef
     ) -> AuthoritySystemTeardownFacts:
         return cast(LocalSystemTeardownIO, self._io).observe_system_teardown(intent, authority)
 
@@ -3752,7 +3758,7 @@ def _system_teardown_intent_bytes(intent: LocalSystemTeardownIntentV1) -> bytes:
     ).encode()
 
 
-def _system_teardown_anchor_bytes(intent: LocalSystemTeardownAnchorV1) -> bytes:
+def _system_teardown_anchor_bytes(intent: _LocalSystemTeardownFields) -> bytes:
     return json.dumps(
         intent.model_dump(mode="json", by_alias=True),
         sort_keys=True,

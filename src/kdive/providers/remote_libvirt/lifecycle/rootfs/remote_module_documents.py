@@ -397,21 +397,10 @@ class RemoteModuleResultV1(_RemoteModuleDocument):
                 raise ValueError(f"result {field} does not match operation")
 
 
-class RemoteModuleRecoveryRefV1(_RemoteModuleDocument):
-    """Opaque durable evidence sufficient to reopen one appliance attempt.
+class _RemoteModuleRecoveryRefFields(_RemoteModuleDocument):
+    """Recovery-reference fields shared by every protocol version."""
 
-    This is the provider-private half of the ADR-0585 recovery point: the ADR has Core store the
-    appliance result "and the exact scratch-volume reference" before activation, and this document
-    is that pairing. It never crosses the appliance boundary and has no appliance schema.
-
-    Three names sit close together, so read them precisely. The document the appliance writes is
-    ``remote-module-result-v1`` in ``deploy/remote_module_appliance/result-v1.schema.json`` and
-    ``RemoteModuleResultV1`` here, but ADR-0585 calls that same document
-    ``remote-module-recovery-v1``; the ADR and the shipped schema disagree, and the schema is what
-    the appliance enforces. This class is neither of those.
-    """
-
-    protocol: Literal["remote-module-recovery-ref-v1"] = "remote-module-recovery-ref-v1"
+    protocol: str
     system_id: _CanonicalUuid
     run_id: _CanonicalUuid
     plan_identity: Digest
@@ -450,10 +439,27 @@ class RemoteModuleRecoveryRefV1(_RemoteModuleDocument):
             raise ValueError("recovery authority does not match reference")
 
 
-class RemoteModuleRecoveryRefV2(RemoteModuleRecoveryRefV1):
+class RemoteModuleRecoveryRefV1(_RemoteModuleRecoveryRefFields):
+    """Opaque durable evidence sufficient to reopen one appliance attempt.
+
+    This is the provider-private half of the ADR-0585 recovery point: the ADR has Core store the
+    appliance result "and the exact scratch-volume reference" before activation, and this document
+    is that pairing. It never crosses the appliance boundary and has no appliance schema.
+
+    Three names sit close together, so read them precisely. The document the appliance writes is
+    ``remote-module-result-v1`` in ``deploy/remote_module_appliance/result-v1.schema.json`` and
+    ``RemoteModuleResultV1`` here, but ADR-0585 calls that same document
+    ``remote-module-recovery-v1``; the ADR and the shipped schema disagree, and the schema is what
+    the appliance enforces. This class is neither of those.
+    """
+
+    protocol: Literal["remote-module-recovery-ref-v1"] = "remote-module-recovery-ref-v1"
+
+
+class RemoteModuleRecoveryRefV2(_RemoteModuleRecoveryRefFields):
     """Recovery reference carrying authenticated source-volume geometry."""
 
-    protocol: Literal["remote-module-recovery-ref-v2"] = "remote-module-recovery-ref-v2"  # ty: ignore[invalid-attribute-override]
+    protocol: Literal["remote-module-recovery-ref-v2"] = "remote-module-recovery-ref-v2"
     source_capacity_bytes: Annotated[
         int,
         Field(strict=True, ge=4096, le=10_499_653_632, multiple_of=4096),
