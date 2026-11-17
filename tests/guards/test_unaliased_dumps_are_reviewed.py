@@ -10,6 +10,10 @@ The scanner is syntactic: it cannot see a receiver's type. Every ``model_dump``-
 therefore listed in ``_ALLOWED`` by file, with a count and a reason a reviewer has checked. A new
 dump in any file turns the guard red until its receiver is read; the fix is to pass
 ``by_alias=True`` or to extend the entry with the reason the dump is safe.
+
+Known gap, accepted in the spec's failure model: the guard compares counts, so adding an alias to a
+model already dumped bare in a listed file, or swapping one dump for another in the same file,
+stays green.
 """
 
 from __future__ import annotations
@@ -25,11 +29,13 @@ _DUMP_NAMES = frozenset({"model_dump", "model_dump_json", "dump_python", "dump_j
 
 _NO_ALIAS = "receivers, and the models nested in them, declare no alias"
 _MIXED_LOCAL = (
-    "line 237 dumps an alias-bearing anchor by Python names on purpose "
+    "the anchor dump in execute_system_teardown is alias-bearing, dumped by Python names "
+    "on purpose "
     "(exclude schema_, same-class validate); the other dumps receive models with no alias"
 )
 _MIXED_REMOTE = (
-    "lines 164, 165 and 3613 dump alias-bearing intent/anchor models by Python names on purpose "
+    "the anchor dumps in matches_anchor and execute_system_teardown are alias-bearing, dumped "
+    "by Python names on purpose "
     "(exclude schema_, same-class validate); the other dumps receive models with no alias"
 )
 
