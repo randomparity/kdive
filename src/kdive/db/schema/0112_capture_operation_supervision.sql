@@ -338,7 +338,7 @@ CREATE FUNCTION public.capture_launch_abort_evidence_valid(
 LANGUAGE sql
 IMMUTABLE
 SET search_path = ''
-RETURN jsonb_typeof(p_evidence) = 'object'
+AS $fn$ SELECT jsonb_typeof(p_evidence) = 'object'
    AND (p_evidence ->> 'evidence_kind') = 'closed_gate_boundary_token_scan_v1'
    AND (p_evidence -> 'gate_closed') = 'true'::jsonb
    AND (p_evidence -> 'boundary_scan_complete') = 'true'::jsonb
@@ -347,7 +347,7 @@ RETURN jsonb_typeof(p_evidence) = 'object'
    AND (p_evidence ->> 'host_instance') = p_operation.host_instance
    AND jsonb_typeof(p_evidence -> 'launch_token') = 'string'
    AND (p_evidence ->> 'launch_token') = p_operation.launch_token
-   AND (p_evidence -> 'launch_token_absent') = 'true'::jsonb;
+   AND (p_evidence -> 'launch_token_absent') = 'true'::jsonb $fn$;
 
 CREATE FUNCTION public.capture_recovery_authorized(
     p_owner public.worker_incarnations,
@@ -356,7 +356,7 @@ CREATE FUNCTION public.capture_recovery_authorized(
 LANGUAGE sql
 IMMUTABLE
 SET search_path = ''
-RETURN p_owner.state = 'terminated'
+AS $fn$ SELECT p_owner.state = 'terminated'
    AND p_owner.terminated_at IS NOT NULL
    AND p_owner.outcome IS NOT NULL
    AND p_owner.authority_kind = p_replacement.authority_kind
@@ -376,7 +376,7 @@ RETURN p_owner.state = 'terminated'
                p_replacement.authority_kind, p_replacement.authority_binding
            )
        )
-   );
+   ) $fn$;
 
 CREATE FUNCTION public.capture_recovery_context(
     p_credential_hash bytea,

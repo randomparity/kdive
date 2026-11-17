@@ -19,7 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.guards.schema_immutable_guard import GuardError, find_violations
+from kdive.db.supersessions import Supersession
+from scripts.guards.schema_immutable_guard import GuardError, find_violations, is_approved
 
 _EXISTING = "src/kdive/db/schema/0003_reprovision_job_kind.sql"
 _NEW = "src/kdive/db/schema/0069_new_migration.sql"
@@ -114,6 +115,45 @@ def test_a_modification_message_does_not_offer_it() -> None:
     # A modification has only one cause, so the hint would be noise at best.
     message = find_violations(_BASE, [f"M\t{_EXISTING}"])[0].message("origin/main")
     assert "re-run" not in message
+
+
+_ENTRY = Supersession("0003", "0003_reprovision_job_kind.sql", "a" * 64, "b" * 64, "ADR-0818")
+
+
+def test_is_approved_for_the_exact_pair() -> None:
+    assert is_approved((_ENTRY,), "0003_reprovision_job_kind.sql", "a" * 64, "b" * 64)
+
+
+@pytest.mark.parametrize(
+    ("filename", "base", "work"),
+    [
+        ("0018_resources_kind_fault_inject.sql", "a" * 64, "b" * 64),
+        ("0003_reprovision_job_kind.sql", "c" * 64, "b" * 64),
+        ("0003_reprovision_job_kind.sql", "a" * 64, "c" * 64),
+        ("0003_reprovision_job_kind.sql", None, "b" * 64),
+        ("0003_reprovision_job_kind.sql", "a" * 64, None),
+    ],
+)
+def test_is_approved_refuses_anything_else(
+    filename: str, base: str | None, work: str | None
+) -> None:
+    assert not is_approved((_ENTRY,), filename, base, work)
+
+
+def test_find_violations_spares_only_an_approved_modification() -> None:
+    lines = [f"M\t{_EXISTING}", f"D\t{_EXISTING}", "M\tsrc/kdive/db/schema/0018_x.sql"]
+    hits = find_violations(_BASE, lines, approved=frozenset({_EXISTING}))
+    assert [(v.status, v.path) for v in hits] == [
+        ("D", _EXISTING),
+        ("M", "src/kdive/db/schema/0018_x.sql"),
+    ]
+
+
+def test_an_unmatched_modification_of_a_listed_file_offers_the_stale_branch_reading() -> None:
+    (hit,) = find_violations(_BASE, [f"M\t{_EXISTING}"])
+    listed = frozenset({"0003_reprovision_job_kind.sql"})
+    assert "merge origin/main in" in hit.message("origin/main", listed=listed)
+    assert "merge origin/main in" not in hit.message("origin/main")
 
 
 def test_a_base_with_no_migrations_is_a_hard_error() -> None:
@@ -325,3 +365,28 @@ def test_end_to_end_outside_a_repository_is_a_failure(repo: Path) -> None:
     result = _run(repo, cwd=repo.parent)
     assert result.returncode == 1
     assert "not inside a git repository" in result.stderr
+
+
+def test_end_to_end_an_unimportable_supersession_list_is_a_guard_error(
+    repo: Path, tmp_path: Path
+) -> None:
+    # A copy of the guard whose own checkout has no src/kdive, run with -S so no venv
+    # site-packages can supply the module either: the import must fail closed, with a message.
+    real = Path(__file__).resolve().parents[2] / "scripts/guards/schema_immutable_guard.py"
+    copy = tmp_path / "elsewhere/scripts/guards/schema_immutable_guard.py"
+    copy.parent.mkdir(parents=True)
+    copy.write_bytes(real.read_bytes())
+    result = subprocess.run(["python3", "-S", str(copy)], cwd=repo, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "cannot import kdive.db.supersessions" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_the_supersession_list_imports_without_a_venv() -> None:
+    # The venv-free CI pre-commit job runs this guard under a bare python3, so the package
+    # __init__ files and kdive.db.supersessions must stay standard-library only. -S drops
+    # site-packages, which is where any third-party import would have to come from.
+    src = Path(__file__).resolve().parents[2] / "src"
+    code = f"import sys; sys.path.insert(0, {str(src)!r}); import kdive.db.supersessions"
+    result = subprocess.run(["python3", "-S", "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
