@@ -422,6 +422,10 @@ the Prerequisites above before retrying. A third string,
 `checkout lifecycle compatibility probe failed`, points the other way — at this checkout's own
 environment rather than at the installed runner, so run `uv sync` here first.
 
+The check's exit status tells the two apart: the two `reprovision the runner` messages exit 3,
+the status `.github/workflows/live.yml` uses to file its scheduled drift issue, and
+`checkout lifecycle compatibility probe failed` exits 1.
+
 Recovery also reads the database through functions this checkout's migrations create, and
 in this procedure `stack-services.sh`, which also applies them, runs only after `recover`. After an
 upgrade, apply them first:
