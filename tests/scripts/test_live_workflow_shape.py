@@ -110,6 +110,8 @@ def test_native_spine_reports_lifecycle_drift_and_still_fails() -> None:
     assert marker in spine
     assert '[[ "$lifecycle_rc" == 0 ]] || exit "$lifecycle_rc"' in spine
     assert spine.index(marker) < spine.index('echo "cleanup_required=true"')
+    guard = 'if [[ "$lifecycle_rc" == 3 ]]; then'
+    assert spine.index(guard) < spine.index(marker)
     outputs = _load(_LIVE)["jobs"]["native"]["outputs"]
     assert outputs == {"lifecycle_drift": "${{ steps.native-spine.outputs.lifecycle_drift }}"}
 
