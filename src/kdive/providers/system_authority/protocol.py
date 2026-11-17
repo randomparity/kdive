@@ -106,12 +106,10 @@ class AuthoritySystemJournalPhase(StrEnum):
     TERMINAL = "terminal"
 
 
-class AuthoritySystemMarkerV1(_ClosedValue):
-    """Server-derived marker stored on an authority-owned System job."""
+class _AuthoritySystemMarkerFields(_ClosedValue):
+    """Marker fields shared by every document that narrows the schema discriminator."""
 
-    schema_: Literal["authority-system-marker-v1"] = Field(
-        "authority-system-marker-v1", alias="schema"
-    )
+    schema_: str = Field(alias="schema")
     system_id: UUID
     allocation_id: UUID
     resource_id: UUID
@@ -129,15 +127,26 @@ class AuthoritySystemMarkerV1(_ClosedValue):
         return _bounded(value)
 
 
-class _AuthoritySystemAttemptBinding(AuthoritySystemMarkerV1):
-    schema_: Literal["authority-system-attempt-v1"] = Field(  # ty: ignore[invalid-attribute-override]
-        "authority-system-attempt-v1", alias="schema"
+class AuthoritySystemMarkerV1(_AuthoritySystemMarkerFields):
+    """Server-derived marker stored on an authority-owned System job."""
+
+    schema_: Literal["authority-system-marker-v1"] = Field(
+        "authority-system-marker-v1", alias="schema"
     )
+
+
+class _AuthoritySystemAttemptFields(_AuthoritySystemMarkerFields):
     authority_id: UUID
     generation: PositiveBigInt
     attempt_id: UUID
     operation_digest: Digest
     bootstrap_identity: Digest
+
+
+class _AuthoritySystemAttemptBinding(_AuthoritySystemAttemptFields):
+    schema_: Literal["authority-system-attempt-v1"] = Field(
+        "authority-system-attempt-v1", alias="schema"
+    )
 
 
 class AuthoritySystemTakeoverRequestV1(_AuthoritySystemAttemptBinding):
@@ -178,10 +187,10 @@ class AuthoritySystemObservationV1(_ClosedValue):
     composite_state: Digest
 
 
-class AuthoritySystemJournalRecordV1(_AuthoritySystemAttemptBinding):
+class AuthoritySystemJournalRecordV1(_AuthoritySystemAttemptFields):
     """One member of the global per-System journal chain."""
 
-    schema_: Literal["authority-system-journal-v1"] = Field(  # ty: ignore[invalid-attribute-override]
+    schema_: Literal["authority-system-journal-v1"] = Field(
         "authority-system-journal-v1", alias="schema"
     )
     sequence: PositiveBigInt
@@ -310,8 +319,8 @@ class AuthoritySystemAbsenceFacts(_ClosedValue):
         return self
 
 
-class _AuthoritySystemProofBinding(_AuthoritySystemAttemptBinding):
-    schema_: Literal["authority-system-proof-v1"] = Field(  # ty: ignore[invalid-attribute-override]
+class _AuthoritySystemProofBinding(_AuthoritySystemAttemptFields):
+    schema_: Literal["authority-system-proof-v1"] = Field(
         "authority-system-proof-v1", alias="schema"
     )
 
