@@ -390,7 +390,7 @@ def test_the_owning_run_may_detach_in_every_restricting_state(
     assert _detach_check(monkeypatch, state, None) is None
 
 
-@pytest.mark.parametrize("state", list(_EVERY_RESTRICTED_STATE))
+@pytest.mark.parametrize("state", sorted(_EVERY_RESTRICTED_STATE, key=str))
 def test_a_different_run_may_also_detach_in_every_restricting_state(
     monkeypatch: pytest.MonkeyPatch, state: ExternalBootActivationState
 ) -> None:
