@@ -692,6 +692,8 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, kvm, x64]
     timeout-minutes: 90
+    outputs:
+      lifecycle_drift: ${{ steps.native-spine.outputs.lifecycle_drift }}
     concurrency:
       # Distinct per-job group so a long native boot does not cross-block the hosted tcg gate.
       group: live-native-${{ github.ref }}
@@ -729,7 +731,13 @@ jobs:
           # Persistent native runners keep their privileged lifecycle contract under Ansible
           # ownership (ADR-0582). Check that it matches this checkout before the reaper or stack
           # can mutate state. A mismatch names reprovisioning; this job never installs the contract.
-          scripts/live-stack/worker-lifecycle.sh compatibility
+          # Exit 3 means the runner needs reprovisioning; surface it to the report job, still fail.
+          lifecycle_rc=0
+          scripts/live-stack/worker-lifecycle.sh compatibility || lifecycle_rc=$?
+          if [[ "$lifecycle_rc" == 3 ]]; then
+            echo "lifecycle_drift=true" >> "$GITHUB_OUTPUT"
+          fi
+          [[ "$lifecycle_rc" == 0 ]] || exit "$lifecycle_rc"
           echo "cleanup_required=true" >> "$GITHUB_OUTPUT"
 
           # Use the exact dedicated session endpoint published by provisioning for the fixed
@@ -936,3 +944,50 @@ jobs:
           KDIVE_LIBVIRT_URI="$(load_published_libvirt_uri)"
           export KDIVE_LIBVIRT_URI
           scripts/live-stack/stack-down.sh
+
+  # Holds the only elevated grant in this workflow and runs nothing but `gh`: no checkout, no
+  # project code. Scheduled runs only; a workflow_dispatch run has a human watching it.
+  lifecycle-drift:
+    name: file the lifecycle drift tracking issue
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: native
+    if: always() && github.event_name == 'schedule' && needs.native.outputs.lifecycle_drift == 'true'
+    concurrency:
+      group: live-native-drift-report
+      cancel-in-progress: false
+    permissions:
+      contents: read # gh needs repo read to search issues
+      issues: write # open the drift tracking issue, this job's only output
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open a tracking issue unless one is already open
+        run: |
+          set -euo pipefail
+          title="Native live_vm runner lifecycle protocol drift"
+          existing="$(gh issue list --state open --search "\"${title}\" in:title" \
+            --json number,title \
+            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+          if [[ -n "${existing}" ]]; then
+            echo "already tracked as #${existing}; nothing to file"
+            exit 0
+          fi
+          body_file="$(mktemp)"
+          {
+            echo "The scheduled native live_vm job found that the lifecycle protocol installed on the"
+            echo "self-hosted runner does not match this checkout, or could not be probed. The job"
+            echo "stops before starting the stack, so the native suite did not exercise \`main\`."
+            echo
+            echo "Run: ${RUN_URL}"
+            echo
+            echo "Reprovisioning the runner is an operator action; this job never installs the"
+            echo "contract. After reprovisioning, confirm with a \`workflow_dispatch\` run."
+            echo
+            echo "Filed by \`.github/workflows/live.yml\`. It files again only after this issue closes."
+          } > "${body_file}"
+          gh issue create --title "${title}" \
+            --label "type:bug" --label "status:needs-triage" \
+            --body-file "${body_file}"

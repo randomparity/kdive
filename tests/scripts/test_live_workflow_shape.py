@@ -103,6 +103,34 @@ def test_native_spine_checks_lifecycle_compatibility_before_destructive_setup() 
     )
 
 
+def test_native_spine_reports_lifecycle_drift_and_still_fails() -> None:
+    """Exit 3 from the probe becomes a job output; the step keeps the probe's failing status."""
+    spine = _native_spine()
+    marker = 'echo "lifecycle_drift=true" >> "$GITHUB_OUTPUT"'
+    assert marker in spine
+    assert '[[ "$lifecycle_rc" == 0 ]] || exit "$lifecycle_rc"' in spine
+    assert spine.index(marker) < spine.index('echo "cleanup_required=true"')
+    outputs = _load(_LIVE)["jobs"]["native"]["outputs"]
+    assert outputs == {"lifecycle_drift": "${{ steps.native-spine.outputs.lifecycle_drift }}"}
+
+
+def test_lifecycle_drift_job_is_scheduled_only_and_least_privilege() -> None:
+    doc = _load(_LIVE)
+    job = doc["jobs"]["lifecycle-drift"]
+    assert job["needs"] == "native"
+    assert "github.event_name == 'schedule'" in job["if"]
+    assert "needs.native.outputs.lifecycle_drift == 'true'" in job["if"]
+    assert job["permissions"] == {"contents": "read", "issues": "write"}
+    assert job["concurrency"]["cancel-in-progress"] is False
+    assert not any("checkout" in step.get("uses", "") for step in job["steps"])
+    script = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "--state open" in script
+    assert "gh issue create" in script
+    assert doc["permissions"] == {"contents": "read"}
+    others = (n for n in doc["jobs"] if n != "lifecycle-drift")
+    assert all("issues" not in doc["jobs"][n].get("permissions", {}) for n in others)
+
+
 def _native_guest_image() -> str:
     prefix = "export KDIVE_GUEST_IMAGE="
     found = [ln.strip() for ln in _native_spine().splitlines() if ln.strip().startswith(prefix)]
