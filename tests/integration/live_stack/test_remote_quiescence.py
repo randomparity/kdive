@@ -354,3 +354,26 @@ def test_native_child_materializes_only_under_parent_owned_root(
             proof.mutate(configuration, "owned-domain", "owned-node", 12345, send, str(owned))
         assert receive.recv() == "entered"
     assert materialized and all(path.parent == owned for path in materialized)
+
+
+def test_remote_lane_gate_skips_a_host_without_a_provider_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("REMOTE_PROVIDER_SSH", raising=False)
+    with pytest.raises(pytest.skip.Exception, match="REMOTE_PROVIDER_SSH unset"):
+        proof.require_remote_lane()
+
+
+def test_remote_lane_gate_admits_a_configured_provider_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REMOTE_PROVIDER_SSH", "operator@provider.invalid")
+    proof.require_remote_lane()
+
+
+def test_remote_lane_gate_fails_loud_on_a_malformed_destination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REMOTE_PROVIDER_SSH", "not a destination")
+    with pytest.raises(ValueError, match="REMOTE_PROVIDER_SSH"):
+        proof.require_remote_lane()
