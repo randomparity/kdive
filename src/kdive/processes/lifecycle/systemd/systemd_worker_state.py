@@ -56,9 +56,9 @@ with warnings.catch_warnings():
     class SlotState(BaseModel):
         """Immutable non-secret facts retained for one fixed worker slot."""
 
-        model_config = ConfigDict(extra="forbid", frozen=True)
+        model_config = ConfigDict(extra="forbid", frozen=True, serialize_by_alias=True)
 
-        schema: Literal[1]  # ty: ignore[invalid-attribute-override]
+        schema_: Literal[1] = Field(alias="schema")
         slot: int = Field(ge=1, le=8)
         unit: Annotated[str, StringConstraints(max_length=128)]
         generation: _HEX_32
@@ -542,7 +542,7 @@ class SlotStore:
             if candidate.phase is not SlotPhase.PREPARED:
                 raise StateConflict("first persisted state must be prepared")
             return
-        immutable = ("schema", "slot", "unit", "generation", "incarnation", "credential_hash")
+        immutable = ("schema_", "slot", "unit", "generation", "incarnation", "credential_hash")
         if any(getattr(retained, field) != getattr(candidate, field) for field in immutable):
             raise StateConflict("persist cannot change immutable incarnation facts")
         if retained == candidate:

@@ -127,14 +127,12 @@ def _activation_binding(request: _AuthorityRequest) -> ExternalBootActivationBin
     )
 
 
-class RemoteSystemTeardownAnchorV1(BaseModel):
-    """Path-free authority request and mutation-started anchor for remote teardown."""
+class _RemoteSystemTeardownFields(BaseModel):
+    """Teardown facts shared by the anchor and the intent, which narrow the schema differently."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True, strict=True)
 
-    schema_: Literal["remote-libvirt-system-teardown-anchor-v1"] = Field(
-        "remote-libvirt-system-teardown-anchor-v1", alias="schema"
-    )
+    schema_: str = Field(alias="schema")
     authority_id: UUID
     generation: Annotated[int, Field(ge=1)]
     binding: ExternalBootActivationBinding
@@ -152,20 +150,28 @@ class RemoteSystemTeardownAnchorV1(BaseModel):
         return "sha256:" + hashlib.sha256(_canonical_model_bytes(self)).hexdigest()
 
 
-class RemoteSystemTeardownIntentV1(RemoteSystemTeardownAnchorV1):
+class RemoteSystemTeardownAnchorV1(_RemoteSystemTeardownFields):
+    """Path-free authority request and mutation-started anchor for remote teardown."""
+
+    schema_: Literal["remote-libvirt-system-teardown-anchor-v1"] = Field(
+        "remote-libvirt-system-teardown-anchor-v1", alias="schema"
+    )
+
+
+class RemoteSystemTeardownIntentV1(_RemoteSystemTeardownFields):
     """Exact request and accounting owner persisted before the first host mutation."""
 
-    schema_: Literal["remote-libvirt-system-teardown-intent-v1"] = Field(  # ty: ignore[invalid-attribute-override]
+    schema_: Literal["remote-libvirt-system-teardown-intent-v1"] = Field(
         "remote-libvirt-system-teardown-intent-v1", alias="schema"
     )
     reservation: AuthorityTeardownReservationV1
 
-    def matches_anchor(self, anchor: RemoteSystemTeardownAnchorV1) -> bool:
+    def matches_anchor(self, anchor: _RemoteSystemTeardownFields) -> bool:
         left = self.model_dump(exclude={"schema_", "reservation"})
         right = anchor.model_dump(exclude={"schema_"})
         return left == right
 
-    def anchor_subject_matches(self, anchor: RemoteSystemTeardownAnchorV1) -> bool:
+    def anchor_subject_matches(self, anchor: _RemoteSystemTeardownFields) -> bool:
         """Compare the subject fields an anchor carries; it has no reservation (#2921)."""
         return (
             self.binding,
@@ -367,14 +373,12 @@ class RemoteModulePreparationBeginResponseV1(BaseModel):
         return self
 
 
-class RemoteModuleVolumePreparationResponseV1(BaseModel):
-    """Exact bounded volume geometry returned by the authenticated provider host."""
+class _RemoteModuleVolumePreparationFields(BaseModel):
+    """Volume geometry shared by the preparation and terminal responses."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, validate_by_alias=True)
 
-    schema_: Literal["remote-module-volume-preparation-response-v1"] = Field(
-        "remote-module-volume-preparation-response-v1", alias="schema"
-    )
+    schema_: str = Field(alias="schema")
     source: RemotePreparedVolumeV1
     scratch: RemotePreparedVolumeV1
 
@@ -399,13 +403,6 @@ class RemoteModuleVolumePreparationResponseV1(BaseModel):
         ):
             raise ValueError("prepared module volumes do not form one exact attempt")
         return self
-
-    @classmethod
-    def from_prepared(cls, volumes: PreparedModuleVolumes) -> Self:
-        return cls(
-            source=RemotePreparedVolumeV1.model_validate(asdict(volumes.source)),
-            scratch=RemotePreparedVolumeV1.model_validate(asdict(volumes.scratch)),
-        )
 
     def prepared(self) -> PreparedModuleVolumes:
         return PreparedModuleVolumes(source=self.source.prepared(), scratch=self.scratch.prepared())
@@ -453,10 +450,25 @@ class RemoteModuleVolumePreparationResponseV1(BaseModel):
         return value
 
 
-class RemoteModuleTerminalPreparationResponseV1(RemoteModuleVolumePreparationResponseV1):
+class RemoteModuleVolumePreparationResponseV1(_RemoteModuleVolumePreparationFields):
+    """Exact bounded volume geometry returned by the authenticated provider host."""
+
+    schema_: Literal["remote-module-volume-preparation-response-v1"] = Field(
+        "remote-module-volume-preparation-response-v1", alias="schema"
+    )
+
+    @classmethod
+    def from_prepared(cls, volumes: PreparedModuleVolumes) -> Self:
+        return cls(
+            source=RemotePreparedVolumeV1.model_validate(asdict(volumes.source)),
+            scratch=RemotePreparedVolumeV1.model_validate(asdict(volumes.scratch)),
+        )
+
+
+class RemoteModuleTerminalPreparationResponseV1(_RemoteModuleVolumePreparationFields):
     """Durable terminal appliance result and recovery alongside exact volume identities."""
 
-    schema_: Literal["remote-module-terminal-preparation-response-v1"] = Field(  # ty: ignore[invalid-attribute-override]
+    schema_: Literal["remote-module-terminal-preparation-response-v1"] = Field(
         "remote-module-terminal-preparation-response-v1", alias="schema"
     )
     result: RemoteModuleResultV1
@@ -1126,7 +1138,7 @@ class RemoteModuleVolumePreparationStore:
         return adopted
 
     def reopen_system_teardown(
-        self, anchor: RemoteSystemTeardownAnchorV1
+        self, anchor: _RemoteSystemTeardownFields
     ) -> RemoteSystemTeardownRecordV1 | None:
         """Reopen the record this anchor owns; ``None`` when it never reached ``begin``.
 
@@ -3211,7 +3223,7 @@ class RemoteExternalBootCoordinator:
         return self._store.begin_system_teardown(intent)
 
     def reopen_system_teardown(
-        self, anchor: RemoteSystemTeardownAnchorV1
+        self, anchor: _RemoteSystemTeardownFields
     ) -> RemoteSystemTeardownRecordV1 | None:
         return self._store.reopen_system_teardown(anchor)
 

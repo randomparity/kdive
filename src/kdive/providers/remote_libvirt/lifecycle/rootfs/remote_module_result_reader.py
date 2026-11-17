@@ -24,6 +24,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance imp
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleRecoveryRefV1,
+    RemoteModuleRecoveryRefV2,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
@@ -57,7 +58,9 @@ def _pool_name(reference: str) -> str:
     return name
 
 
-def _result_volume(recovery: RemoteModuleRecoveryRefV1) -> PreparedVolume:
+def _result_volume(
+    recovery: RemoteModuleRecoveryRefV1 | RemoteModuleRecoveryRefV2,
+) -> PreparedVolume:
     name = recovery.scratch_volume.ref.rsplit("/", 1)[-1]
     owner = parse_module_volume_name(name)
     if (
@@ -199,12 +202,18 @@ class SparseRemoteModuleResultReader:
             )
 
     def read_recovery(
-        self, recovery: RemoteModuleRecoveryRefV1, *, deadline: float | None = None
+        self,
+        recovery: RemoteModuleRecoveryRefV1 | RemoteModuleRecoveryRefV2,
+        *,
+        deadline: float | None = None,
     ) -> bytes | None:
         return self.read_volume(_result_volume(recovery), deadline=deadline)
 
     async def read_recovery_async(
-        self, recovery: RemoteModuleRecoveryRefV1, *, deadline: float | None = None
+        self,
+        recovery: RemoteModuleRecoveryRefV1 | RemoteModuleRecoveryRefV2,
+        *,
+        deadline: float | None = None,
     ) -> bytes | None:
         if self.preparation_executor is None:
             raise CategorizedError(
