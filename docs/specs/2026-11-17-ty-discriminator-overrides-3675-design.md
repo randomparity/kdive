@@ -3,51 +3,41 @@
 ## Problem
 
 ty 0.0.99 reports `invalid-attribute-override` when a pydantic subclass re-declares an inherited
-field with a different `Literal`. #3674 silenced the nine sites with per-line ignores, and each new
-model in these families must repeat one. Eight of the nine narrow a discriminator (seven `schema_`,
-one `protocol`) that a concrete parent already pinned to a sibling `Literal`; the ninth,
-`SlotState.schema`, shadows the deprecated `BaseModel.schema` method.
+field with a different `Literal`. #3674 silenced nine sites with per-line ignores. Eight narrow a
+discriminator (seven `schema_`, one `protocol`) that a concrete parent pinned to a sibling
+`Literal`; the ninth, `SlotState.schema`, shadows the deprecated `BaseModel.schema` method.
 
-Families (parent -> narrowing subclass): `AuthoritySystemMarkerV1` -> `_AuthoritySystemAttemptBinding`
--> `AuthoritySystemJournalRecordV1`, `_AuthoritySystemProofBinding`; `_AuthorityBinding` ->
-`AuthorityTeardownMutationRequestV1`; `LocalSystemTeardownAnchorV1` -> `LocalSystemTeardownIntentV1`;
-`RemoteSystemTeardownAnchorV1` -> `RemoteSystemTeardownIntentV1`;
-`RemoteModuleVolumePreparationResponseV1` -> `RemoteModuleTerminalPreparationResponseV1`;
-`RemoteModuleRecoveryRefV1` -> `RemoteModuleRecoveryRefV2`.
+## Scope
 
-## Decision
-
-- **Widen the shared declaration, narrow in each concrete model.** A field typed `str` in a base
-  may be narrowed to a `Literal` by a subclass without a diagnostic; a `Literal` parent cannot be
-  narrowed to a different `Literal`. Where a concrete model is also the parent of a narrowing
-  subclass, the shared fields, validators and methods move to a new private base that declares
-  the discriminator as `str` with the same alias and no default. The former parent and every
-  former subclass then declare their own `Literal` and default. Pydantic keeps a re-declared field
-  at its base position, so field order, aliases, defaults and validation of every concrete model
+- A `str` field in a base may be narrowed to a `Literal`; a `Literal` may not become another
+  `Literal`. Where a concrete model is also the parent of a narrowing subclass, its shared
+  fields, validators and methods move to a new private base declaring the discriminator as `str`
+  (same alias, no default). The former parent and each subclass declare their own `Literal` and
+  default. Pydantic keeps a re-declared field at its base position, so order, aliases and defaults
   are unchanged. The new bases are never instantiated.
-- **Rename `SlotState.schema` to `schema_` with `alias="schema"`.** The change adds
-  `serialize_by_alias=True` to the model config (it is absent today), so `state.json` bytes and `model_dump()` keys stay `schema`;
-  constructors keep passing `schema=1` through the alias. The `immutable` tuple names the
-  attribute.
-- Rejected: restating the parent as a `Literal` union (changes what the parent validates);
-  `Final`/`ClassVar` (not valid pydantic fields); keeping the ignore (the issue's problem).
-- Changed `isinstance` relations (a former subclass is no longer a subclass of its former concrete
-  parent) are accepted only where `just type` and the tests show nothing relies on them.
+- Families (parent -> narrowing subclass): `AuthoritySystemMarkerV1` ->
+  `_AuthoritySystemAttemptBinding` -> `AuthoritySystemJournalRecordV1`, `_AuthoritySystemProofBinding`;
+  `_AuthorityBinding` -> `AuthorityTeardownMutationRequestV1`; `LocalSystemTeardownAnchorV1` ->
+  `LocalSystemTeardownIntentV1`; `RemoteSystemTeardownAnchorV1` -> `RemoteSystemTeardownIntentV1`;
+  `RemoteModuleVolumePreparationResponseV1` -> `RemoteModuleTerminalPreparationResponseV1`;
+  `RemoteModuleRecoveryRefV1` -> `RemoteModuleRecoveryRefV2`.
+- `SlotState.schema` becomes `schema_` with `alias="schema"`, and the config gains
+  `serialize_by_alias=True`, so `state.json` and `model_dump()` keep the key `schema`.
+- Out of scope (operator-approved): any change to a wire format, alias or what validation accepts;
+  `tests/guards`.
 
-## Out of scope
+## Success
 
-Any change to a wire format, an alias or what validation accepts (operator-approved exclusion).
-`tests/guards` (sibling quest #3676).
+`rg 'ty: ignore\[invalid-attribute-override\]' src deploy` is empty, `just type` and `just lint`
+are green, and no concrete model's schema, serialized bytes or accept/reject behaviour changes.
 
-## Failure model
+## Validation
 
-If a narrowed model silently lost its default or alias, validation would reject or accept a
-document it did not before. Each restructured family therefore keeps a test pair: the concrete
-model's `model_dump(by_alias=True)` equals its pre-change bytes, and a document carrying a sibling
-model's schema string is rejected. The `SlotState` pair also pins `model_dump_json()`.
-
-## Verification
-
-`rg 'ty: ignore\[invalid-attribute-override\]' src deploy` is empty; `just type`, `just lint` and the
-existing wire tests of each family pass; the new byte-equality tests pass on the pre-change commit
-and the branch.
+- focused-test: `tests/providers/test_discriminator_schemas.py` pins a hash of
+  `model_json_schema(by_alias=True)` for every model in the six modules, taken before the change.
+  Controlled fault: dropping one default or alias turns it red.
+- focused-test: `tests/processes/lifecycle/systemd/test_systemd_worker_state.py` pins the
+  `model_dump_json()` prefix and `model_dump()` key of `SlotState`.
+- Existing family tests stay green; a lost discriminator default would fail them and the hashes.
+- Failure model: a narrowed model that lost its default or alias would reject or accept a
+  document it did not before; the schema hash and `SlotState` byte test observe exactly that.

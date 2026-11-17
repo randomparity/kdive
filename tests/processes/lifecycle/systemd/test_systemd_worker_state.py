@@ -737,3 +737,11 @@ def test_environment_carries_the_inventory_only_when_one_is_sent(
         [*today.splitlines(), "KDIVE_SYSTEMS_TOML=/etc/kdive/systems.toml"]
     )
     assert "KDIVE_SECRETS_ROOT" not in rendered
+
+
+def test_state_serializes_the_schema_field_under_its_durable_name(
+    started_state: SlotState,
+) -> None:
+    assert started_state.model_dump_json().startswith('{"schema":1,"slot":1,')
+    assert started_state.model_dump()["schema"] == 1
+    assert SlotState.model_validate_json(started_state.model_dump_json()) == started_state
