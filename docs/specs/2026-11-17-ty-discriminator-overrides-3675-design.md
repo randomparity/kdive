@@ -4,9 +4,16 @@
 
 ty 0.0.99 reports `invalid-attribute-override` when a pydantic subclass re-declares an inherited
 field with a different `Literal`. #3674 silenced the nine sites with per-line ignores, and each new
-model in these families must repeat one. Seven sites narrow a schema discriminator (`schema_`, one
-`protocol`) that a concrete parent already pinned to a sibling `Literal`; the eighth,
+model in these families must repeat one. Eight of the nine narrow a discriminator (seven `schema_`,
+one `protocol`) that a concrete parent already pinned to a sibling `Literal`; the ninth,
 `SlotState.schema`, shadows the deprecated `BaseModel.schema` method.
+
+Families (parent -> narrowing subclass): `AuthoritySystemMarkerV1` -> `_AuthoritySystemAttemptBinding`
+-> `AuthoritySystemJournalRecordV1`, `_AuthoritySystemProofBinding`; `_AuthorityBinding` ->
+`AuthorityTeardownMutationRequestV1`; `LocalSystemTeardownAnchorV1` -> `LocalSystemTeardownIntentV1`;
+`RemoteSystemTeardownAnchorV1` -> `RemoteSystemTeardownIntentV1`;
+`RemoteModuleVolumePreparationResponseV1` -> `RemoteModuleTerminalPreparationResponseV1`;
+`RemoteModuleRecoveryRefV1` -> `RemoteModuleRecoveryRefV2`.
 
 ## Decision
 
@@ -18,8 +25,8 @@ model in these families must repeat one. Seven sites narrow a schema discriminat
   former subclass then declare their own `Literal` and default. Pydantic keeps a re-declared field
   at its base position, so field order, aliases, defaults and validation of every concrete model
   are unchanged. The new bases are never instantiated.
-- **Rename `SlotState.schema` to `schema_` with `alias="schema"`.** The model sets
-  `serialize_by_alias=True`, so `state.json` bytes and `model_dump()` keys stay `schema`;
+- **Rename `SlotState.schema` to `schema_` with `alias="schema"`.** The change adds
+  `serialize_by_alias=True` to the model config (it is absent today), so `state.json` bytes and `model_dump()` keys stay `schema`;
   constructors keep passing `schema=1` through the alias. The `immutable` tuple names the
   attribute.
 - Rejected: restating the parent as a `Literal` union (changes what the parent validates);
