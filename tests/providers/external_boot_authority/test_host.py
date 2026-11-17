@@ -10,7 +10,7 @@ import socket
 import stat
 import tempfile
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -2488,7 +2488,7 @@ class _CountingQuiescence:
         self.entered = 0
 
     @asynccontextmanager
-    async def __call__(self) -> AsyncIterator[None]:
+    async def __call__(self) -> AsyncGenerator[None]:
         self.entered += 1
         yield
 

@@ -7,7 +7,7 @@ import importlib.util
 import json
 import os
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -120,7 +120,7 @@ def _fake_lane(
         return coroutine
 
     @asynccontextmanager
-    async def over_http(_url: str, _token: str) -> AsyncIterator[_Op]:
+    async def over_http(_url: str, _token: str) -> AsyncGenerator[_Op]:
         yield _Op(calls)
 
     async def fixture(_db: str, config: Any, ledger: Any) -> None:
@@ -605,7 +605,7 @@ def _fake_remote_lane(
         assert config.ownership_prefix != _FILE_PREFIX
 
     @asynccontextmanager
-    async def over_http(_url: str, _token: str) -> AsyncIterator[_Op]:
+    async def over_http(_url: str, _token: str) -> AsyncGenerator[_Op]:
         yield _Op(calls)
 
     async def body(system: authority_lane.AuthoritySystem) -> dict[str, object]:
@@ -843,7 +843,7 @@ def test_remote_refused_provision_only_releases(
             return await super().call_tool(name, **args)
 
     @asynccontextmanager
-    async def over_http(_url: str, _token: str) -> AsyncIterator[_Op]:
+    async def over_http(_url: str, _token: str) -> AsyncGenerator[_Op]:
         yield _Refusing(calls)
 
     monkeypatch.setattr(authority_lane.LiveStackClient, "over_http", over_http)
@@ -915,7 +915,7 @@ class _BodyCompleted(_Op):
 
 def _completed_over_http(calls: list[str]) -> Any:
     @asynccontextmanager
-    async def over_http(_url: str, _token: str) -> AsyncIterator[_Op]:
+    async def over_http(_url: str, _token: str) -> AsyncGenerator[_Op]:
         yield _BodyCompleted(calls)
 
     return over_http

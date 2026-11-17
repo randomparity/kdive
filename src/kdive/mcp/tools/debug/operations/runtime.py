@@ -26,7 +26,7 @@ import functools
 import logging
 import shutil
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -391,7 +391,7 @@ class DebugRuntimeResolver:
                 )
 
     @asynccontextmanager
-    async def lifespan(self, pool: AsyncConnectionPool) -> AsyncIterator[None]:
+    async def lifespan(self, pool: AsyncConnectionPool) -> AsyncGenerator[None]:
         stopped = asyncio.Event()
 
         async def sweep():

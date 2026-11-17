@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -100,7 +100,7 @@ class _ThirdIdentityAdapter:
 
 
 @asynccontextmanager
-async def _authority_connection(dsn: str) -> AsyncIterator[AsyncConnection]:
+async def _authority_connection(dsn: str) -> AsyncGenerator[AsyncConnection]:
     async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as connection:
         yield connection
 

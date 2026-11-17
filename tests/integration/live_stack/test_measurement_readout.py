@@ -34,6 +34,7 @@ from tests.integration.live_stack.measurement import (
     ppc64le_bundle_preflight,
     read_measurement_record,
 )
+from tests.support.otel import span_context
 
 _RUN_ID = "11111111-2222-3333-4444-555555555555"
 _OTHER_RUN_ID = "99999999-8888-7777-6666-555555555555"
@@ -65,8 +66,7 @@ def _server_log_line(payload: dict[str, Any]) -> str:
         observed_timestamp=None,
         severity_text="INFO",
         body=f"{_MEASUREMENT_EVENT} {json.dumps(payload, sort_keys=True)}",
-        trace_id=0x0123456789ABCDEF0123456789ABCDEF,
-        span_id=0xFEDCBA9876543210,
+        context=span_context(0x0123456789ABCDEF0123456789ABCDEF, 0xFEDCBA9876543210),
         attributes={},
     )
     readable = ReadableLogRecord(

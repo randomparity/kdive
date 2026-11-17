@@ -15,7 +15,7 @@ kwargs (mirrors `tests/adversarial/test_provider_state_races.py`'s `_TrackingPro
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncGenerator, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -187,7 +187,7 @@ async def _billing_started(pool: AsyncConnectionPool, allocation_id: UUID) -> bo
 
 
 @asynccontextmanager
-async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def _pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     pool = AsyncConnectionPool(url, min_size=1, max_size=2, open=False)
     await pool.open()
     try:

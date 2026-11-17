@@ -325,7 +325,7 @@ def test_a_loop_dying_while_stop_is_unset_ends_the_worker(migrated_url: str) -> 
                 return None
 
             # Stand in for a loop dying: `ty` rejects the bound/unbound signature mismatch.
-            worker.run_once = exploding_run_once  # ty: ignore[invalid-assignment]
+            worker.run_once = exploding_run_once
 
             # Must return rather than hang: the surviving `default` loop is cancelled.
             with pytest.raises(_LoopDied):

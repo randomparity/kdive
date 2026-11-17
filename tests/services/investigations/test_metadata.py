@@ -16,7 +16,6 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.security.authz.context import RequestContext
 from kdive.services.investigations.common import (
-    ExternalRefKey,
     InvestigationErrorReason,
     InvestigationServiceError,
 )
@@ -31,11 +30,7 @@ _CTX = cast(RequestContext, object())
 
 def test_unlink_rejects_a_ref_key_without_a_natural_key() -> None:
     with pytest.raises(InvestigationServiceError) as err:
-        asyncio.run(
-            unlink_external_ref_record(
-                _POOL, _CTX, uuid4(), cast(ExternalRefKey, {}), raw_id="raw-1"
-            )
-        )
+        asyncio.run(unlink_external_ref_record(_POOL, _CTX, uuid4(), {}, raw_id="raw-1"))
     assert err.value.reason is InvestigationErrorReason.INVALID_EXTERNAL_REF
     assert err.value.object_id == "raw-1"
     assert err.value.detail == "ref key must carry a non-empty tracker and id"
@@ -44,9 +39,7 @@ def test_unlink_rejects_a_ref_key_without_a_natural_key() -> None:
 def test_unlink_rejects_a_ref_key_with_an_empty_tracker() -> None:
     with pytest.raises(InvestigationServiceError) as err:
         asyncio.run(
-            unlink_external_ref_record(
-                _POOL, _CTX, uuid4(), cast(ExternalRefKey, {"tracker": "", "id": "x"}), raw_id="r"
-            )
+            unlink_external_ref_record(_POOL, _CTX, uuid4(), {"tracker": "", "id": "x"}, raw_id="r")
         )
     assert err.value.reason is InvestigationErrorReason.INVALID_EXTERNAL_REF
 

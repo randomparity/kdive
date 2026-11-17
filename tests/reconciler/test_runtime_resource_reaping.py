@@ -340,7 +340,7 @@ def test_reap_candidate_failure_logs_exception_context(
             record for record in caplog.records if "reaping runtime resource" in record.getMessage()
         ]
         assert len(warnings) == 1
-        assert warnings[0].exc_info is not None
+        assert warnings[0].exc_info
         assert isinstance(warnings[0].exc_info[1], RuntimeError)
 
     asyncio.run(_run())

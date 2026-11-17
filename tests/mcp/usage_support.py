@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, Generator
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -51,7 +51,7 @@ class _Capture(logging.Handler):
 
 
 @contextlib.contextmanager
-def _write_must_not_fail(logger_name: str, prefix: str) -> Iterator[None]:
+def _write_must_not_fail(logger_name: str, prefix: str) -> Generator[None]:
     """Turn a middleware's swallowed write failure into a named assertion.
 
     A swallowed failure surfaces only as an empty result set — the bare ``IndexError``
@@ -92,7 +92,7 @@ def denial_audit_must_not_fail() -> contextlib.AbstractContextManager[None]:
 
 
 @contextlib.asynccontextmanager
-async def warm_pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def warm_pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     """A pool whose connection is established before the caller gets it.
 
     ``open()`` defaults to ``wait=False``, which returns before any connection exists and

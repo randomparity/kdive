@@ -105,7 +105,7 @@ class _TimeoutGdbController:
 
 def _pygdbmi_controller(controller: object) -> PygdbmiController:
     wrapped = object.__new__(PygdbmiController)
-    wrapped._controller = controller
+    wrapped._controller = controller  # ty: ignore[invalid-assignment]
     return wrapped
 
 

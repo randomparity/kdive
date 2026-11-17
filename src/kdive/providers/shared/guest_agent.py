@@ -156,7 +156,7 @@ def qemu_agent_command(domain: GuestDomain, command: str, timeout: int, flags: i
             details={"dependency": "libvirt_qemu"},
         ) from exc
 
-    return libvirt_qemu.qemuAgentCommand(domain, command, timeout, flags)
+    return libvirt_qemu.qemuAgentCommand(domain, command, timeout, flags)  # ty: ignore[invalid-argument-type]
 
 
 def _exit_status(payload: dict[str, Any]) -> int:

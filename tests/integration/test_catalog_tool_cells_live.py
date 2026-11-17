@@ -17,7 +17,7 @@ import asyncio
 import hashlib
 import os
 import secrets
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from functools import partial
 from pathlib import Path
@@ -286,7 +286,7 @@ async def _shapes_list(caller: HttpCaller, grants: Grants, *, db_url: str) -> di
 @asynccontextmanager
 async def _owned_shape(
     base_url: str, issuer: OidcIssuer, db_url: str, project: str
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str]:
     """A fresh ``cov-`` shape name; removed on exit if the body left it in the catalog."""
     name = f"cov-{secrets.token_hex(4)}"
     operator = HttpCaller("direct", base_url, issuer)
@@ -307,7 +307,7 @@ async def _owned_shape(
 @asynccontextmanager
 async def _granted(
     base_url: str, issuer: OidcIssuer, db_url: str, sizing: Mapping[str, object]
-) -> AsyncIterator[dict[str, Any]]:
+) -> AsyncGenerator[dict[str, Any]]:
     """A granted allocation of ``sizing`` in the funded project; released and checked on exit.
 
     The allocation row stays as history in the funded project (ADR-0069 keeps released rows);
@@ -520,7 +520,7 @@ def _image_setup(
     """A private image of ``project`` for the duration of a rejected ``images.delete``."""
 
     @asynccontextmanager
-    async def setup() -> AsyncIterator[Mapping[str, object]]:
+    async def setup() -> AsyncGenerator[Mapping[str, object]]:
         async with _uploading(base_url, issuer, db_url, project) as upload:
             operator = HttpCaller("direct", base_url, issuer)
             token = operator.token(_operator(project))
@@ -535,7 +535,7 @@ def _shape_setup(
     """A ``cov-`` shape for a rejected ``shapes.set``/``shapes.delete`` to aim at."""
 
     @asynccontextmanager
-    async def setup() -> AsyncIterator[Mapping[str, object]]:
+    async def setup() -> AsyncGenerator[Mapping[str, object]]:
         async with _owned_shape(base_url, issuer, db_url, project) as name:
             operator = HttpCaller("direct", base_url, issuer)
             shape = {"name": name, "vcpus": 1, "memory_mb": 1024, "disk_gb": 1}

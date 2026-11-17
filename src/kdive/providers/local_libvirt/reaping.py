@@ -20,7 +20,7 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 import libvirt
@@ -105,7 +105,7 @@ class _CaptureConn(Protocol):
 
 
 type CaptureConnect = Callable[[], _CaptureConn]
-type CaptureMonitor = Callable[[object, str, int], str]
+type CaptureMonitor = Callable[[Any, str, int], str]
 
 
 def _close_capture_conn(conn: _CaptureConn) -> None:

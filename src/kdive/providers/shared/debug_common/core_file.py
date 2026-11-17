@@ -23,7 +23,7 @@ DMESG_UNAVAILABLE = (
 
 def open_core_program(core: Path) -> Any:  # pragma: no cover - live_vm (drgn)
     try:
-        import drgn  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
+        import drgn  # noqa: PLC0415  # ty: ignore[import-not-found]  # operator-provided
     except ImportError as exc:
         raise CategorizedError(
             "drgn is not installed on this worker host; core build-id/dmesg needs it",
@@ -49,7 +49,7 @@ def read_core_build_id_from_file(core: Path) -> str:  # pragma: no cover - live_
 
 def read_core_dmesg_from_file(core: Path) -> bytes:  # pragma: no cover - live_vm (drgn)
     """The kernel log buffer from an ELF/kdump core (drgn ``get_dmesg``)."""
-    from drgn.helpers.linux.printk import (  # noqa: PLC0415  # ty: ignore[unresolved-import]
+    from drgn.helpers.linux.printk import (  # noqa: PLC0415  # ty: ignore[import-not-found]
         get_dmesg,
     )
 

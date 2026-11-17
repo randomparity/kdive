@@ -11,7 +11,7 @@ returned sensitivity).
 from __future__ import annotations
 
 import io
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Generator, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -593,7 +593,7 @@ class ObjectStore:
     @contextmanager
     def get_artifact_stream(
         self, key: str, etag: str | None, *, version_id: str | None = None
-    ) -> Iterator[artifact_types.StreamedArtifact]:
+    ) -> Generator[artifact_types.StreamedArtifact]:
         """Yield a streaming reader over the object at ``key`` plus its sensitivity class.
 
         Same GET/error/metadata contract as :meth:`get_artifact` (they share :meth:`_open_get`),
@@ -701,7 +701,7 @@ class ObjectStore:
         # sensitivity read below a ``TypeError`` that neither this ``except`` nor any caller's
         # catches — the same escape as a missing required field, by way of an optional one.
         raw_metadata: Mapping[str, Any] = reply.optional("Metadata", dict) or {}
-        metadata = MappingProxyType(cast(dict[str, str], dict(raw_metadata)))
+        metadata = MappingProxyType(dict(raw_metadata))
         try:
             sensitivity = Sensitivity(metadata["sensitivity"])
         except (KeyError, ValueError) as _exc:

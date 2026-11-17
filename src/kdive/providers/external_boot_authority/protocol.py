@@ -282,7 +282,7 @@ class AuthorityMutationRequestV1(_AuthorityBinding):
 class AuthorityTeardownMutationRequestV1(_AuthorityBinding):
     """One authority-owned System teardown without recovery-point assumptions."""
 
-    schema_: Literal["external-boot-authority-teardown-request-v1"] = Field(
+    schema_: Literal["external-boot-authority-teardown-request-v1"] = Field(  # ty: ignore[invalid-attribute-override]
         "external-boot-authority-teardown-request-v1", alias="schema"
     )
     attempt_id: UUID

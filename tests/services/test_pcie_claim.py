@@ -10,7 +10,7 @@ queries allocations); the rest is in-memory.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -38,7 +38,7 @@ _GPU = PCIeDescriptor(
 
 
 @asynccontextmanager
-async def _conn(url: str) -> AsyncIterator[psycopg.AsyncConnection]:
+async def _conn(url: str) -> AsyncGenerator[psycopg.AsyncConnection]:
     conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
     try:
         yield conn

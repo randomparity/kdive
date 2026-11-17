@@ -575,6 +575,6 @@ def open_libguestfs_guest() -> _Guest:
     `_open_guest_context` owns all of that, and only after `require_inactive()`, so an opener
     that did any of it here would move guest access outside that gate.
     """
-    import guestfs  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
+    import guestfs  # noqa: PLC0415  # ty: ignore[import-not-found]  # operator-provided
 
     return cast("_Guest", guestfs.GuestFS(python_return_dict=True))

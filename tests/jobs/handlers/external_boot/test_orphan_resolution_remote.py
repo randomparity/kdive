@@ -9,7 +9,7 @@ private store. The pieces are covered separately; this joins them over PostgreSQ
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -61,7 +61,7 @@ _PROVIDER_KIND = "remote-libvirt"
 
 
 @asynccontextmanager
-async def _authority_connection(dsn: str) -> AsyncIterator[psycopg.AsyncConnection]:
+async def _authority_connection(dsn: str) -> AsyncGenerator[psycopg.AsyncConnection]:
     async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as connection:
         yield connection
 
@@ -150,7 +150,7 @@ class _Chain:
 @asynccontextmanager
 async def _published_chain(
     migrated_url: str, authority_role_dsns: Callable[[str], str], tmp_path: Path
-) -> AsyncIterator[_Chain]:
+) -> AsyncGenerator[_Chain]:
     vehicle = build_vehicle()
     seed_record = _record(
         system_id=str(vehicle.system_id),

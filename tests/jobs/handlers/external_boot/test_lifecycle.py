@@ -1147,7 +1147,7 @@ def test_teardown_consumes_the_typed_authority_response_and_terminal_head(
         await _seed_core_owned_teardown_rows(seed, case)
         result = await _run_operation(authority_role_dsns, seed, case, "teardown")
         assert result.result.operation == "teardown"
-        response = cast(_TeardownResult, result.result).response
+        response = result.result.response
 
         receipt = await _one(
             seed,

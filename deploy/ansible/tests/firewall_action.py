@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 # Loaded by the pinned Ansible harness environment, outside the project Python environment.
-from ansible.plugins.action import ActionBase  # ty: ignore[unresolved-import]
+from ansible.plugins.action import ActionBase  # ty: ignore[import-not-found]
 
 
 class ActionModule(ActionBase):

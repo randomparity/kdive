@@ -8,12 +8,12 @@ QMP/HMP caller goes through :func:`qemu_monitor_command`.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import cast
+from typing import Any, cast
 
 import libvirt
 import libvirt_qemu
 
-type Monitor = Callable[[object, str, int], str]
+type Monitor = Callable[[Any, str, int], str]
 
 
 def qemu_monitor_command(domain: object, cmd: str, flags: int) -> str:

@@ -10,7 +10,7 @@ import secrets
 import socket
 import sys
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from functools import partial
@@ -904,7 +904,7 @@ async def _gc_handoff(db: str, inv: _Investigation) -> None:
 
 
 @asynccontextmanager
-async def _owned(c: HttpCaller, project: str, db: str) -> AsyncIterator[_Investigation]:
+async def _owned(c: HttpCaller, project: str, db: str) -> AsyncGenerator[_Investigation]:
     inv = None
     primary = None
     try:

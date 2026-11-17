@@ -62,3 +62,17 @@ def non_sampled_ambient_context() -> Context:
         trace_flags=TraceFlags(TraceFlags.DEFAULT),
     )
     return set_span_in_context(NonRecordingSpan(span_context))
+
+
+def span_context(trace_id: int, span_id: int) -> Context:
+    """A context whose current span carries the ids, for ``LogRecord(context=...)``."""
+    return set_span_in_context(
+        NonRecordingSpan(
+            SpanContext(
+                trace_id=trace_id,
+                span_id=span_id,
+                is_remote=False,
+                trace_flags=TraceFlags(TraceFlags.DEFAULT),
+            )
+        )
+    )

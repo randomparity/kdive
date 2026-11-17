@@ -23,7 +23,7 @@ with a reconciler transaction on one image-publication fence (ADR-0525).
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from enum import StrEnum
 from typing import LiteralString
@@ -94,7 +94,7 @@ def _lock_key(scope: LockScope, key: UUID | str) -> int:
 @asynccontextmanager
 async def advisory_xact_lock(
     conn: AsyncConnection, scope: LockScope, key: UUID | str
-) -> AsyncIterator[None]:
+) -> AsyncGenerator[None]:
     """Hold a transaction-scoped advisory lock for ``(scope, key)`` over the block.
 
     Blocks until any current holder's transaction ends, then yields. The lock is
@@ -241,7 +241,7 @@ async def try_capture_job_fence(conn: AsyncConnection, job_id: UUID) -> bool:
 @asynccontextmanager
 async def scoped_session_advisory_lock(
     conn: AsyncConnection, scope: LockScope, key: UUID | str
-) -> AsyncIterator[None]:
+) -> AsyncGenerator[None]:
     """Hold the session form of the exact scoped advisory key over the block.
 
     Unlike the separately salted leadership helper, this intentionally shares
@@ -332,7 +332,7 @@ async def session_advisory_lock_held(conn: AsyncConnection, name: str) -> bool:
 
 
 @asynccontextmanager
-async def session_advisory_lock(conn: AsyncConnection, name: str) -> AsyncIterator[None]:
+async def session_advisory_lock(conn: AsyncConnection, name: str) -> AsyncGenerator[None]:
     """Hold a **session-scoped** advisory lock named ``name`` for the whole ``with`` block.
 
     Unlike :func:`advisory_xact_lock`, this lock survives transaction boundaries: it is

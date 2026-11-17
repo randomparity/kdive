@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 
 import pytest
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
@@ -38,7 +38,7 @@ class FakePool:
         self.events.append("open" if not wait else f"open(wait=True, timeout={timeout})")
 
     @contextlib.asynccontextmanager
-    async def connection(self, timeout: float | None = None) -> AsyncIterator[object]:
+    async def connection(self, timeout: float | None = None) -> AsyncGenerator[object]:
         self.events.append(f"acquire(timeout={timeout})")
         yield object()
 

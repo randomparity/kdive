@@ -13,7 +13,7 @@ import stat
 import tarfile
 import tempfile
 import unicodedata
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -264,7 +264,7 @@ class LocalSystemTeardownAnchorV1(_ClosedValue):
 class LocalSystemTeardownIntentV1(LocalSystemTeardownAnchorV1):
     """Exact authority request and reservation persisted before teardown mutation."""
 
-    schema_: Literal["local-libvirt-system-teardown-intent-v1"] = Field(
+    schema_: Literal["local-libvirt-system-teardown-intent-v1"] = Field(  # ty: ignore[invalid-attribute-override]
         "local-libvirt-system-teardown-intent-v1", alias="schema"
     )
     reservation: AuthorityTeardownReservationV1
@@ -867,7 +867,7 @@ class LibguestfsAuthenticatedGuestTree:
                 yield self._entry(path)
 
     @contextmanager
-    def open_regular(self, path: str, size: int) -> Iterator[BinaryIO]:
+    def open_regular(self, path: str, size: int) -> Generator[BinaryIO]:
         remote = self._remote(path)
         opened = self._guest.lstatns(remote)
         if opened["st_size"] != size or not stat.S_ISREG(opened["st_mode"]):
@@ -1758,7 +1758,7 @@ class RealLocalExternalBootIO:
         expected: ExpectedOperationOwnership,
         *,
         local_timing: LocalExternalBootTimingV1 | None = None,
-    ) -> Iterator[LocalExternalBootOperation]:
+    ) -> Generator[LocalExternalBootOperation]:
         lease = self._resolve_operation_lease(authority)
         session = (
             self._session_factory.open(lease, expected)
@@ -1786,7 +1786,7 @@ class RealLocalExternalBootIO:
     @contextmanager
     def open_pinned(
         self, authority: OpaqueProviderRef, expected: ExpectedOperationOwnership
-    ) -> Iterator[None]:
+    ) -> Generator[None]:
         pin = self._session_factory.open_pinned(self._resolve_operation_lease(authority), expected)
         try:
             yield
@@ -2050,7 +2050,7 @@ class RealLocalExternalBootIO:
     @contextmanager
     def _open_system_teardown(
         self, intent: LocalSystemTeardownAnchorV1, authority: OpaqueProviderRef
-    ) -> Iterator[LocalSystemTeardownSession]:
+    ) -> Generator[LocalSystemTeardownSession]:
         lease = self._resolve_operation_lease(authority)
         session = self._session_factory.open_teardown(lease, _expected_binding(intent.binding))
         try:

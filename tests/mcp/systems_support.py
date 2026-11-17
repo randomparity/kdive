@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -298,7 +298,7 @@ def ctx(
 
 
 @asynccontextmanager
-async def pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     conn_pool = AsyncConnectionPool(url, min_size=1, max_size=4, open=False)
     await conn_pool.open()
     try:

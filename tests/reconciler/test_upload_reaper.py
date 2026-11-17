@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncGenerator, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -924,7 +924,7 @@ def test_lock_scope_rejects_unknown_owner_kind() -> None:
 
 
 @asynccontextmanager
-async def _owner_lock_held(url: str, owner_id: UUID) -> AsyncIterator[None]:
+async def _owner_lock_held(url: str, owner_id: UUID) -> AsyncGenerator[None]:
     """Hold the ``runs`` advisory lock for ``owner_id`` on a separate connection over the block.
 
     Models the holder that motivates #1554: chunked ``complete_build`` takes ``LockScope.RUN``

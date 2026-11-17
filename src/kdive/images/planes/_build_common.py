@@ -6,7 +6,7 @@ import hashlib
 import re
 import subprocess  # noqa: S404 - libguestfs tools use fixed argv, no shell  # nosec B404
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -180,7 +180,7 @@ def run_guestfs_tool(
 
 
 @contextmanager
-def build_workspace(workspace: Path, *, prefix: str) -> Iterator[Path]:
+def build_workspace(workspace: Path, *, prefix: str) -> Generator[Path]:
     """Create the persistent workspace and yield a temporary per-build directory."""
     workspace.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=workspace, prefix=prefix) as work:

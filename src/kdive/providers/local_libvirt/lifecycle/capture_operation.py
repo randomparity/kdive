@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from contextlib import suppress
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 import libvirt
@@ -26,7 +26,7 @@ class _ProbeConnection(Protocol):
 
 
 type Connect = Callable[[], _ProbeConnection]
-type Monitor = Callable[[object, str, int], str]
+type Monitor = Callable[[Any, str, int], str]
 
 
 def _ordered_reply(raw: str, *, allow_not_found: bool = False) -> object:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -75,7 +75,7 @@ _DIGEST = "sha256:" + "a" * 64
 
 
 @asynccontextmanager
-async def _authority_connection(dsn: str) -> AsyncIterator[psycopg.AsyncConnection]:
+async def _authority_connection(dsn: str) -> AsyncGenerator[psycopg.AsyncConnection]:
     async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as connection:
         yield connection
 

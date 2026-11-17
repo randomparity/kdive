@@ -291,7 +291,7 @@ def test_asyncio_pump_runner_throttles_idle_collector(monkeypatch: pytest.Monkey
             idle.pump_calls += 1
             return False  # "no data": forces the idle-backoff branch every iteration
 
-        idle.pump_once = _idle_pump  # ty: ignore[invalid-assignment]
+        idle.pump_once = _idle_pump
 
         await runner._pump_step(idle)
         await runner._pump_step(idle)
@@ -320,7 +320,7 @@ def test_asyncio_pump_runner_isolates_pump_exception_and_continues() -> None:
                 raise RuntimeError("transient pump failure")
             return True
 
-        collector.pump_once = _pump  # ty: ignore[invalid-assignment]
+        collector.pump_once = _pump
 
         await runner._pump_step(collector)
         await runner._pump_step(collector)
@@ -384,7 +384,7 @@ def test_console_hosting_loop_fails_closed_when_lock_check_raises() -> None:
         async def _boom() -> bool:
             raise RuntimeError("lock backend unreachable")
 
-        lock.is_held = _boom  # ty: ignore[invalid-assignment]
+        lock.is_held = _boom
         await loop.tick()
 
         assert loop.is_leader is False

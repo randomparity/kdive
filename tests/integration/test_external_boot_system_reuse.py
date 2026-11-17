@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -102,7 +102,7 @@ def test_second_activation_after_completed_release(
         authority_dsn = authority_role_dsns("kdive_provider_authority")
 
         @asynccontextmanager
-        async def authority_connection() -> AsyncIterator[AsyncConnection]:
+        async def authority_connection() -> AsyncGenerator[AsyncConnection]:
             async with await psycopg.AsyncConnection.connect(
                 authority_dsn, autocommit=True
             ) as connection:

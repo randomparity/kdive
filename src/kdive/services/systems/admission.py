@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -529,7 +529,7 @@ async def _locked_allocation_system(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     alloc_id: UUID,
-) -> AsyncIterator[LockedAllocationSystem | MissingAllocation]:
+) -> AsyncGenerator[LockedAllocationSystem | MissingAllocation]:
     # Resolve the allocation's project (immutable) before locking so the PROJECT lock key
     # is known up front; a missing/foreign allocation is a not-found-shaped config error.
     async with pool.connection() as probe:

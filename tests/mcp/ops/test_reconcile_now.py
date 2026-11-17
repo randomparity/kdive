@@ -15,7 +15,7 @@ primary test contract). These tests prove the three acceptance criteria:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any, cast
@@ -58,7 +58,7 @@ def _ports() -> ops_reconcile.ReconcileRepairPorts:
 
 
 @asynccontextmanager
-async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def _pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     pool = AsyncConnectionPool(url, min_size=1, max_size=5, open=False)
     await pool.open()
     try:

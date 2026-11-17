@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from psycopg.rows import dict_row
@@ -34,7 +34,7 @@ def _ctx(
 
 
 @asynccontextmanager
-async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def _pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     pool = AsyncConnectionPool(url, min_size=1, max_size=4, open=False)
     await pool.open()
     try:

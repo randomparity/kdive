@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 from typing import cast
 
@@ -68,7 +68,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
             events.append("open" if not wait else f"open(wait=True, timeout={timeout})")
 
         @contextlib.asynccontextmanager
-        async def connection(self, timeout: float | None = None) -> AsyncIterator[object]:
+        async def connection(self, timeout: float | None = None) -> AsyncGenerator[object]:
             events.append(f"acquire(timeout={timeout})")
             yield object()
 

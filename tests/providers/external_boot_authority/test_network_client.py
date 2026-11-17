@@ -8,7 +8,7 @@ import socket
 import ssl
 import stat
 import traceback
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
@@ -88,7 +88,7 @@ async def _server(
     *,
     tls: bool = True,
     version: ssl.TLSVersion = ssl.TLSVersion.TLSv1_3,
-) -> AsyncIterator[RemoteAuthorityBinding]:
+) -> AsyncGenerator[RemoteAuthorityBinding]:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = context.maximum_version = version
     context.verify_mode = ssl.CERT_REQUIRED

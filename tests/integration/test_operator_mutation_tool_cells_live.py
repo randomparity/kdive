@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -352,7 +352,7 @@ class _Hosts:
 
 
 @asynccontextmanager
-async def _hosts(caller: HttpCaller, db_url: str) -> AsyncIterator[_Hosts]:
+async def _hosts(caller: HttpCaller, db_url: str) -> AsyncGenerator[_Hosts]:
     hosts = _Hosts(_direct(caller), db_url)
     async with _cleaning(hosts.remove, "the cell's runtime hosts"):
         yield hosts
@@ -1201,12 +1201,12 @@ def _setup(caller: HttpCaller, db_url: str, tool: str, project: str) -> Setup | 
     """A real target for an authorization cell: a runtime host or a private image of ``project``."""
 
     @asynccontextmanager
-    async def host() -> AsyncIterator[Mapping[str, object]]:
+    async def host() -> AsyncGenerator[Mapping[str, object]]:
         async with _hosts(caller, db_url) as hosts:
             yield {"resource_id": str((await hosts.add(project))["id"])}
 
     @asynccontextmanager
-    async def image() -> AsyncIterator[Mapping[str, object]]:
+    async def image() -> AsyncGenerator[Mapping[str, object]]:
         actor = _direct(caller)
         async with _uploading(caller.base_url, caller.issuer, db_url, project) as upload:
             yield {

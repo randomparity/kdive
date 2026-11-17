@@ -453,7 +453,7 @@ class RemoteModuleRecoveryRefV1(_RemoteModuleDocument):
 class RemoteModuleRecoveryRefV2(RemoteModuleRecoveryRefV1):
     """Recovery reference carrying authenticated source-volume geometry."""
 
-    protocol: Literal["remote-module-recovery-ref-v2"] = "remote-module-recovery-ref-v2"
+    protocol: Literal["remote-module-recovery-ref-v2"] = "remote-module-recovery-ref-v2"  # ty: ignore[invalid-attribute-override]
     source_capacity_bytes: Annotated[
         int,
         Field(strict=True, ge=4096, le=10_499_653_632, multiple_of=4096),

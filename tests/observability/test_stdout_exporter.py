@@ -47,7 +47,8 @@ def _make_record(
     attributes: dict[str, Any] | None = None,
     scope_name: str | None = "my.logger",
 ) -> ReadableLogRecord:
-    log_record = LogRecord(
+    # `context=` cannot express one id present and the other absent, which cases below need.
+    log_record = LogRecord(  # ty: ignore[deprecated]
         timestamp=timestamp,
         observed_timestamp=observed_timestamp,
         severity_text=severity_text,

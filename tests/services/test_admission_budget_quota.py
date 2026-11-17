@@ -9,7 +9,7 @@ idempotency, and the all-or-nothing denial (no row on any failing check).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -47,7 +47,7 @@ SEL = Selector(vcpus=2, memory_gb=4, cost_class="local")
 
 
 @asynccontextmanager
-async def _conn(url: str) -> AsyncIterator[psycopg.AsyncConnection]:
+async def _conn(url: str) -> AsyncGenerator[psycopg.AsyncConnection]:
     conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
     try:
         yield conn

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from typing import Any
 from uuid import uuid4
@@ -140,7 +140,7 @@ def _empty_bucket(client: Any, bucket: str) -> None:
 @contextmanager
 def _acquire_seaweedfs_endpoint(
     tmp_path_factory: pytest.TempPathFactory, *, require_docker: bool
-) -> Iterator[tuple[str, str, str]]:
+) -> Generator[tuple[str, str, str]]:
     """Yield (endpoint, access_key, secret_key): the override if set, else a shared
     container. Extracted so the override / require-docker / skip decisions are directly
     testable (the tests monkeypatch ``_start_seaweedfs``)."""

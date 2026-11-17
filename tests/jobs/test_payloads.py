@@ -62,7 +62,7 @@ def _authority_system_marker(
 
 
 def test_recovery_request_requires_digest_and_aware_deadline() -> None:
-    valid = {"request_identity": "sha256:" + "a" * 64}
+    valid: dict[str, Any] = {"request_identity": "sha256:" + "a" * 64}
     with pytest.raises(ValueError, match="timezone"):
         RecoveryRequestV1(**valid, readiness_deadline=datetime(2026, 9, 6))
     with pytest.raises(ValueError, match="request_identity"):
@@ -73,7 +73,7 @@ def test_recovery_request_requires_digest_and_aware_deadline() -> None:
 
 
 def test_local_recovery_timing_round_trips_and_legacy_request_remains_readable() -> None:
-    values = {
+    values: dict[str, Any] = {
         "request_identity": "sha256:" + "a" * 64,
         "readiness_deadline": datetime(2026, 9, 26, tzinfo=UTC),
     }
@@ -139,7 +139,7 @@ def test_authority_system_marker_cannot_ride_unrelated_job_kind() -> None:
     marker = _authority_system_marker(system_id)
     payload = SystemPayload.model_construct(
         system_id=str(system_id), authority_system_v1=marker
-    ).model_dump(mode="json", exclude_none=True)
+    ).model_dump(mode="json", exclude_none=True, by_alias=True)
 
     with pytest.raises(PayloadValidationError, match="may not ride a force_crash payload"):
         dump_payload(JobKind.FORCE_CRASH, payload)

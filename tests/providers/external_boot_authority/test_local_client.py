@@ -7,7 +7,7 @@ import inspect
 import json
 import ssl
 import traceback
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
@@ -115,7 +115,7 @@ async def _server(
     socket_path: Path,
     material: dict[str, Path],
     handler: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]],
-) -> AsyncIterator[None]:
+) -> AsyncGenerator[None]:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_3
     context.verify_mode = ssl.CERT_REQUIRED

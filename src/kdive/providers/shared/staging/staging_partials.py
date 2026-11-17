@@ -39,7 +39,7 @@ import errno
 import fcntl
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -83,7 +83,7 @@ class _Liveness(enum.Enum):
 
 
 @contextmanager
-def _probed(partial: Path) -> Iterator[_Liveness]:
+def _probed(partial: Path) -> Generator[_Liveness]:
     """Classify ``partial``'s ``flock`` state, holding the descriptor for the caller's block.
 
     The descriptor stays open — and on :attr:`_Liveness.UNHELD` the lock stays *held* — for the

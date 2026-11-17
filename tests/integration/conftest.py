@@ -8,7 +8,7 @@ per-plane MCP suites use, kept here so the integration module imports one place.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from psycopg_pool import AsyncConnectionPool
@@ -22,7 +22,7 @@ from tests.store.conftest import minio_store  # noqa: F401
 
 
 @asynccontextmanager
-async def open_pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def open_pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     """Yield an open async pool for ``url``, closed on exit."""
     pool = AsyncConnectionPool(url, min_size=1, max_size=4, open=False)
     await pool.open()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import xml.etree.ElementTree as ET
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -87,7 +87,7 @@ class _Connections:
         return self._config
 
     @contextmanager
-    def connection(self, config: RemoteLibvirtConfig) -> Iterator[libvirt.virConnect]:
+    def connection(self, config: RemoteLibvirtConfig) -> Generator[libvirt.virConnect]:
         conn = libvirt.open(config.uri)
         try:
             yield conn
@@ -181,7 +181,7 @@ def stable_volume_xml(xml: str) -> str:
 @contextmanager
 def rootfs_case(
     contract: RootfsContract, *, allowed_roots: tuple[Path, ...] | None = None
-) -> Iterator[RootfsCase]:
+) -> Generator[RootfsCase]:
     connections = _Connections(contract)
     provisioner = RemoteLibvirtProvisioning(
         secret_registry=SecretRegistry(),

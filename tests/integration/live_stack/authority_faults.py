@@ -21,7 +21,7 @@ import asyncio
 import json
 import subprocess  # noqa: S404 - fixed argv, no shell  # nosec B404
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -264,7 +264,7 @@ async def _settle(barrier: Barrier) -> None:
 @asynccontextmanager
 async def held(
     barrier: Barrier, run_id: str, operation: str, checkpoint: Checkpoint
-) -> AsyncIterator[Barrier]:
+) -> AsyncGenerator[Barrier]:
     """Arm one exact operation; on every exit release it and require the barrier idle."""
     await barrier.arm(run_id, operation, checkpoint)
     try:

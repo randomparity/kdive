@@ -251,7 +251,7 @@ def test_missing_sizing_snapshot_does_not_promote_as_zero(
     errors = [
         record.exc_info[1]
         for record in caplog.records
-        if record.exc_info is not None and str(queued) in record.message
+        if record.exc_info and str(queued) in record.message
     ]
     assert any(
         isinstance(exc, CategorizedError)

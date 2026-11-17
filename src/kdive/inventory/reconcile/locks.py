@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from psycopg import AsyncConnection
@@ -24,14 +24,14 @@ def resource_identity_lock_key(kind: ResourceKind, name: str) -> str:
 @asynccontextmanager
 async def resource_identity_lock(
     conn: AsyncConnection, kind: ResourceKind, name: str
-) -> AsyncIterator[None]:
+) -> AsyncGenerator[None]:
     """Hold the transaction-scoped per-identity lock for ``(kind, name)`` over the block."""
     async with advisory_xact_lock(conn, LockScope.RESOURCE, resource_identity_lock_key(kind, name)):
         yield
 
 
 @asynccontextmanager
-async def inventory_pass_lock(conn: AsyncConnection) -> AsyncIterator[None]:
+async def inventory_pass_lock(conn: AsyncConnection) -> AsyncGenerator[None]:
     """Hold the session-scoped inventory lock for a whole reconcile pass."""
     async with session_advisory_lock(conn, INVENTORY_RECONCILE):
         yield

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -343,7 +343,7 @@ def _profile(provider: object) -> dict[str, Any]:
 
 
 @asynccontextmanager
-async def _conn(url: str) -> AsyncIterator[psycopg.AsyncConnection]:
+async def _conn(url: str) -> AsyncGenerator[psycopg.AsyncConnection]:
     """An ``autocommit=True`` connection.
 
     The mode is a requirement, not a style choice: ``AsyncConnection.connect()`` defaults to

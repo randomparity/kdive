@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -3705,7 +3705,7 @@ def test_reconciler_orphan_recheck_skips_system_that_began_reprovisioning(
     @asynccontextmanager
     async def _reprovision_then_lock(
         conn: psycopg.AsyncConnection, scope: LockScope, key: UUID
-    ) -> AsyncIterator[None]:
+    ) -> AsyncGenerator[None]:
         await SYSTEMS.update_state(conn, key, SystemState.REPROVISIONING)
         async with real_lock(conn, scope, key):
             yield

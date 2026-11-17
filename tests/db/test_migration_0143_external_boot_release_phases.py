@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -220,7 +220,7 @@ def test_recovering_release_takeover_refuses_wrong_job_stale_worker_and_bad_term
     """The narrow recovering-release exception keeps its job, worker, and journal fences."""
 
     @asynccontextmanager
-    async def authority_connection() -> AsyncIterator[AsyncConnection]:
+    async def authority_connection() -> AsyncGenerator[AsyncConnection]:
         connection = await psycopg.AsyncConnection.connect(
             authority_role_dsns("kdive_provider_authority"), autocommit=True
         )

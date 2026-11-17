@@ -72,7 +72,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any, LiteralString
 
@@ -219,7 +219,7 @@ async def _authenticated_app(
     *,
     recorders: _Recorders | None = None,
     roleless_member: bool = False,
-) -> AsyncIterator[Any]:
+) -> AsyncGenerator[Any]:
     """A real app, with a verified viewer token bound to the in-flight request context.
 
     The token is minted and then verified by the *same* ``JWTVerifier`` instance the app is

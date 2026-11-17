@@ -16,8 +16,8 @@ def _document(name: str) -> dict[str, Any]:
 
 def test_cryptography_direct_pin_and_lock_match_current_policy() -> None:
     project = _document("pyproject.toml")
-    assert "cryptography==50.0.0" in project["project"]["dependencies"]
+    assert "cryptography==50.0.2" in project["project"]["dependencies"]
 
     lock = _document("uv.lock")
     cryptography = next(package for package in lock["package"] if package["name"] == "cryptography")
-    assert cryptography["version"] == "50.0.0"
+    assert cryptography["version"] == "50.0.2"

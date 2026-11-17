@@ -285,13 +285,10 @@ def _parameter_digest(parameters: object) -> list[JsonValue]:
         return []
     raw_required = parameters.get("required")
     required = set(raw_required) if isinstance(raw_required, list) else set()
-    return cast(
-        "list[JsonValue]",
-        [
-            {"name": str(name), "type": _type_name(schema), "required": str(name) in required}
-            for name, schema in properties.items()
-        ],
-    )
+    return [
+        {"name": str(name), "type": _type_name(schema), "required": str(name) in required}
+        for name, schema in properties.items()
+    ]
 
 
 def describe_tool(

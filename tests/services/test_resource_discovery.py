@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import psycopg
@@ -51,7 +51,7 @@ class _Discovery:
 
 
 @asynccontextmanager
-async def _pg(url: str) -> AsyncIterator[psycopg.AsyncConnection]:
+async def _pg(url: str) -> AsyncGenerator[psycopg.AsyncConnection]:
     conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
     try:
         yield conn

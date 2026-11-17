@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -145,7 +145,7 @@ def _payload(**kw: object) -> ImageBuildPayload:
 
 
 @asynccontextmanager
-async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def _pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     async with AsyncConnectionPool(url, min_size=2, max_size=10) as pool:
         yield pool
 

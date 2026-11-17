@@ -12,7 +12,7 @@ production and are out of scope here.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from uuid import uuid4
 
@@ -107,7 +107,7 @@ class _FakeConn:
         self.committed = False
 
     @contextmanager
-    def cursor(self) -> Iterator[_FakeCursor]:
+    def cursor(self) -> Generator[_FakeCursor]:
         yield self._cursor
 
     def commit(self) -> None:
@@ -116,7 +116,7 @@ class _FakeConn:
 
 def _patch_db(monkeypatch: pytest.MonkeyPatch, conn: _FakeConn) -> None:
     @contextmanager
-    def _connect(_conninfo: str) -> Iterator[_FakeConn]:
+    def _connect(_conninfo: str) -> Generator[_FakeConn]:
         yield conn
 
     monkeypatch.setattr(wiring.psycopg, "connect", _connect)

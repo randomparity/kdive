@@ -6,7 +6,7 @@ import gzip
 import io
 import struct
 import tarfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -83,7 +83,7 @@ def ctx(role: Role = Role.OPERATOR) -> RequestContext:
 
 
 @asynccontextmanager
-async def pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     conn_pool = AsyncConnectionPool(url, min_size=1, max_size=4, open=False)
     await conn_pool.open()
     try:

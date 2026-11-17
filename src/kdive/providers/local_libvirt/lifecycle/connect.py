@@ -70,7 +70,7 @@ _MAX_FORWARD_PORT = 65535
 
 
 def _config_error(message: str, *, reason: str | None = None) -> CategorizedError:
-    details = {"reason": reason} if reason is not None else {}
+    details: dict[str, object] = {"reason": reason} if reason is not None else {}
     return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR, details=details)
 
 

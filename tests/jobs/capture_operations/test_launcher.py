@@ -36,8 +36,8 @@ _MANIFEST_BUILDER = _ROOT / "scripts/generate/build-capture-bootstrap-manifest.p
 
 
 def test_launcher_collaborators_have_direct_test_ownership() -> None:
-    assert manifest_attestation.verify_capture_bootstrap_manifest
-    assert spool._dispose_operation_spool
+    assert callable(manifest_attestation.verify_capture_bootstrap_manifest)
+    assert callable(spool._dispose_operation_spool)
 
 
 def _request() -> CaptureRequest:

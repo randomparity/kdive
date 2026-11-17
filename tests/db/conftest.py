@@ -24,7 +24,7 @@ owning run holds while alive, so a concurrent suite's container is never taken
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 
@@ -86,7 +86,7 @@ def _cluster_global_role_lock(
     *,
     timeout_ms: int = 60_000,
     _on_connect: Callable[[int], None] | None = None,
-) -> Iterator[None]:
+) -> Generator[None]:
     """Serialize test operations that can mutate cluster-global runtime roles."""
     if timeout_ms <= 0:
         raise ValueError("cluster-global role lock timeout_ms must be greater than zero")
@@ -170,7 +170,7 @@ def _drop_worker_db(server_url: str, dbname: str) -> None:
 @contextmanager
 def _acquire_pg_server(
     tmp_path_factory: pytest.TempPathFactory, *, require_docker: bool
-) -> Iterator[str]:
+) -> Generator[str]:
     """Yield the shared server URL: the override if set, else a shared container.
 
     Extracted from the fixture so the override / require-docker / skip decisions are

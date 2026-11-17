@@ -180,9 +180,9 @@ def test_provider_diagnostics_registration_includes_local_and_remote_libvirt() -
     assert {"local-libvirt", "remote-libvirt"} <= set(by_provider)
     # Remote contributes server-vantage checks; both declare worker-vantage checks (multiarch_gdb
     # for local, tls + gdbstub_acl for remote), so both carry unavailable-worker descriptors.
-    assert by_provider["remote-libvirt"].checks
-    assert by_provider["local-libvirt"].unavailable_worker_checks
-    assert by_provider["remote-libvirt"].unavailable_worker_checks
+    assert callable(by_provider["remote-libvirt"].checks)
+    assert callable(by_provider["local-libvirt"].unavailable_worker_checks)
+    assert callable(by_provider["remote-libvirt"].unavailable_worker_checks)
 
 
 def test_provider_diagnostics_omits_local_libvirt_when_disabled(

@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 import secrets
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -59,7 +59,7 @@ async def _attempt(remove: Removal) -> list[str]:
 
 
 @asynccontextmanager
-async def _cleaning(remove: Removal, what: str) -> AsyncIterator[None]:
+async def _cleaning(remove: Removal, what: str) -> AsyncGenerator[None]:
     """Run ``remove`` on exit; a failed body keeps its error and gains the cleanup problems."""
     try:
         yield
@@ -235,7 +235,7 @@ async def _queue_host(db_url: str, project: str) -> str:
 @asynccontextmanager
 async def _queued_allocations(
     caller: HttpCaller, db_url: str, host: str
-) -> AsyncIterator[list[str]]:
+) -> AsyncGenerator[list[str]]:
     """Hold one grant and both queue selector forms; withdraw before freeing capacity."""
     project = _funded_project()
     quota_rows = await _rows(db_url, "SELECT * FROM quotas WHERE project = %s", (project,))
@@ -451,7 +451,7 @@ class _Upload:
 @asynccontextmanager
 async def _uploading(
     base_url: str, issuer: OidcIssuer, db_url: str, project: str, *, name: str = _UPLOAD_NAME
-) -> AsyncIterator[_Upload]:
+) -> AsyncGenerator[_Upload]:
     """Quarantine the staged image's bytes for ``project``; on exit remove its images, objects."""
     image = _staged_image()
     key = f"uploads/q/{project}/{name}.qcow2"

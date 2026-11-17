@@ -24,7 +24,7 @@ import logging
 import multiprocessing as mp
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -38,7 +38,7 @@ _TOKEN = "dGVzdC10b2tlbg"  # an arbitrary base64url content-address token
 
 
 @contextmanager
-def _held_partial(inv_dir: Path, token: str = _TOKEN) -> Iterator[Path]:
+def _held_partial(inv_dir: Path, token: str = _TOKEN) -> Generator[Path]:
     """A ``<token>.<uuid>.partial`` under an exclusive ``flock``, as a live fetcher holds it.
 
     Stands in for the detached ``asyncio.to_thread`` download that keeps writing after a

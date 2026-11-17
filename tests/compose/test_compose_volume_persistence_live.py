@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -301,7 +301,7 @@ def test_bucket_visibility_fails_at_its_deadline() -> None:
 
 
 @contextmanager
-def _isolated_stack() -> Iterator[tuple[dict[str, str], str, str, str]]:
+def _isolated_stack() -> Generator[tuple[dict[str, str], str, str, str]]:
     if sys.platform != "linux" or threading.current_thread() is not threading.main_thread():
         raise RuntimeError("Compose proof requires the Linux main thread for phase deadlines")
     previous_timer = signal.getitimer(signal.ITIMER_REAL)

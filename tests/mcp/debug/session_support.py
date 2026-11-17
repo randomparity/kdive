@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -103,7 +103,7 @@ def request_context(
 
 
 @asynccontextmanager
-async def pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+async def pool(url: str) -> AsyncGenerator[AsyncConnectionPool]:
     """Open and close the debug-test connection pool."""
     connection_pool = AsyncConnectionPool(url, min_size=1, max_size=4, open=False)
     await connection_pool.open()

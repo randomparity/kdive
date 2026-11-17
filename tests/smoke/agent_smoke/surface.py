@@ -18,7 +18,7 @@ not silent swallowing.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
 
@@ -64,7 +64,7 @@ def agent_claims() -> dict[str, Any]:
 
 
 @contextmanager
-def _as_agent() -> Iterator[None]:
+def _as_agent() -> Generator[None]:
     """Run the block with the walk's agent token in the request context.
 
     ``client_id`` here is the SDK's own field and nothing downstream reads it: profile

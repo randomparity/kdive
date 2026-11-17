@@ -12,7 +12,7 @@ import platform
 import secrets
 import struct
 import tarfile
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
@@ -188,7 +188,7 @@ async def _attempt(remove: Removal) -> list[str]:
 
 
 @asynccontextmanager
-async def _cleaning(remove: Removal, what: str) -> AsyncIterator[None]:
+async def _cleaning(remove: Removal, what: str) -> AsyncGenerator[None]:
     """Run ``remove`` on exit; a failed body keeps its error and gains the cleanup problems."""
     try:
         yield
@@ -233,7 +233,7 @@ async def _settle(inv: _Investigation) -> list[str]:
             return []
         return [f"{tool} {args}: {_failure(result)}"]
 
-    steps = [partial(purge, key) for key in sorted(inv.keys)]
+    steps: list[Removal] = [partial(purge, key) for key in sorted(inv.keys)]
     steps += [partial(call, "runs.cancel", {"run_id": run}, "canceled") for run in inv.runs]
     closing = {"investigation_id": inv.id, "summary": "coverage cell finished"}
     steps.append(partial(call, "investigations.close", closing, "closed"))
@@ -244,7 +244,7 @@ async def _settle(inv: _Investigation) -> list[str]:
 
 
 @asynccontextmanager
-async def _closing(inv: _Investigation) -> AsyncIterator[_Investigation]:
+async def _closing(inv: _Investigation) -> AsyncGenerator[_Investigation]:
     async with _cleaning(partial(_settle, inv), f"investigation {inv.id}"):
         yield inv
 
@@ -252,7 +252,7 @@ async def _closing(inv: _Investigation) -> AsyncIterator[_Investigation]:
 @asynccontextmanager
 async def _investigation(
     base_url: str, issuer: OidcIssuer, project: str, *, refs: tuple[dict[str, str], ...] = (_REF_A,)
-) -> AsyncIterator[_Investigation]:
+) -> AsyncGenerator[_Investigation]:
     """An open investigation of ``project`` with a description and ``refs``; closed on exit."""
     fixture = HttpCaller("direct", base_url, issuer)
     token = fixture.token(_contributor(project))

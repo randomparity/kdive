@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
@@ -660,7 +660,7 @@ class ExternalBootAuthorityService:
             raise failure
 
     @asynccontextmanager
-    async def quiesce_anchors(self) -> AsyncIterator[None]:
+    async def quiesce_anchors(self) -> AsyncGenerator[None]:
         """Hold new anchors and wait out in-flight ones, so every lane file equals its head.
 
         ADR-0584 amendment (#2899): only the periodic readiness check enters this, once per

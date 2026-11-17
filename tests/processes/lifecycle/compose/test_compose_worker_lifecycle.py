@@ -8,7 +8,7 @@ import tarfile
 import threading
 import time
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -68,7 +68,7 @@ def _lifecycle(
             created = True
         return container_id if created and argv[-4:] == ("ps", "--all", "-q", "worker") else ""
 
-    cleanup_arguments = (
+    cleanup_arguments: dict[str, Any] = (
         {"cleanup_managed_volumes": lambda: events.append(("cleanup-volumes", None))}
         if clean_managed_volumes
         else {}
