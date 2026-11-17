@@ -20,6 +20,7 @@ from uuid import UUID, uuid4
 import libvirt
 import libvirt_qemu
 import psycopg
+import pytest
 
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.providers.ports.traffic import RemoteCaptureConfiguration
@@ -43,7 +44,9 @@ from scripts.coverage_campaign.evidence import Context, InputBindings
 from tests.integration.live_stack.evidence import key_values
 from tests.integration.live_stack.image_smoke import os_matches
 from tests.integration.live_stack.remote_lifecycle import (
+    HOST_SSH_ENV,
     REMOTE_REPRESENTATIVES,
+    destination,
     observer,
     on_remote_system,
     remote_host,
@@ -355,6 +358,17 @@ def guest_identity(configuration: RemoteCaptureConfiguration, domain: str) -> di
     image = REMOTE_REPRESENTATIVES["enterprise"]
     assert os_matches(image, fields), "guest identity differs from bound catalog image"
     return {"guest_os": f"{image.distro}:{image.version}", "guest_arch": image.arch}
+
+
+def require_remote_lane() -> None:
+    """Skip a host with no remote provider lane, as the ``live_vm_remote`` family does.
+
+    The carrier keeps the bare ``live_vm`` marker, so the native ``live_vm`` tier collects it on a
+    host that has no provider host at all. An unset destination is that absent lane; a malformed
+    one still fails loud through :func:`destination`.
+    """
+    if destination() is None:
+        pytest.skip(f"{HOST_SSH_ENV} unset; this host has no remote provider lane")
 
 
 def cells() -> list[Cell]:
