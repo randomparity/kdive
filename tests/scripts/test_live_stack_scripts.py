@@ -164,6 +164,41 @@ def test_lifecycle_compatibility_command_succeeds_without_a_lifecycle_request(
     assert result.stdout == ""
 
 
+def test_lifecycle_compatibility_command_exits_3_on_mismatch(tmp_path: Path) -> None:
+    """Exit 3 is the machine-readable "reprovision the runner" signal the workflow keys on."""
+    lifecycle = _copied_lifecycle(tmp_path, _installed_protocol_python(tmp_path, "0:incompatible"))
+
+    result = subprocess.run(
+        ["bash", str(lifecycle), "compatibility"],
+        cwd=tmp_path,
+        env={**os.environ, "KDIVE_PYTHON": sys.executable, "PYTHONPATH": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 3
+    assert "reprovision the runner" in result.stderr
+
+
+def test_lifecycle_compatibility_command_exits_3_when_installed_protocol_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    lifecycle = _copied_lifecycle(tmp_path, tmp_path / "missing-python")
+
+    result = subprocess.run(
+        ["bash", str(lifecycle), "compatibility"],
+        cwd=tmp_path,
+        env={**os.environ, "KDIVE_PYTHON": sys.executable, "PYTHONPATH": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 3
+    assert "installed lifecycle protocol is unavailable" in result.stderr
+
+
 def test_lifecycle_matching_protocol_ignores_shadows_and_reaches_request(tmp_path: Path) -> None:
     from kdive.processes.lifecycle.systemd.systemd_worker_contract import (
         lifecycle_protocol_identity,
