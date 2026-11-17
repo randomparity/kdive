@@ -37,6 +37,9 @@ require_exact_file() {
   }
 }
 
+# Exit status that tells CI the runner needs reprovisioning (live.yml keys its drift issue on it).
+readonly DRIFT_STATUS=3
+
 require_compatible_lifecycle() {
   local expected installed
   expected="$("$py" -I -c \
@@ -50,11 +53,11 @@ require_compatible_lifecycle() {
     'from kdive.processes.lifecycle.systemd.systemd_worker_contract import lifecycle_protocol_identity; print(lifecycle_protocol_identity())' \
     2>/dev/null)" || {
     echo "installed lifecycle protocol is unavailable; reprovision the runner" >&2
-    return 1
+    return "$DRIFT_STATUS"
   }
   [[ "$installed" == "$expected" ]] || {
     echo "installed lifecycle protocol does not match this checkout; reprovision the runner" >&2
-    return 1
+    return "$DRIFT_STATUS"
   }
 }
 
