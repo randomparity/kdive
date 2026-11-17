@@ -18,7 +18,7 @@ non-DB tests saw an alias-bearing receiver dumped without `by_alias` at four `sr
 Charter: WORK:SCOPE q3676-86642b29 on #3676. One new test file,
 `tests/guards/test_unaliased_dumps_are_reviewed.py`; no `src/` change, no ownership move.
 
-1. An AST scanner walks `src/` and `deploy/` and collects calls to `model_dump`,
+1. An AST scanner walks `*.py` under `src/` and `deploy/` (a file that fails to parse fails the guard) and collects calls to `model_dump`,
    `model_dump_json`, `dump_python` and `dump_json` that carry neither a `by_alias=` keyword
    nor a `**` argument (a `**` argument cannot be judged, so it is collected as well).
 2. A reviewed allowlist maps repo-relative file path to `(count, reason)`. The guard fails for
@@ -39,7 +39,10 @@ dumps emit or rewrite the 73 sites, which the charter excludes.
   validation are unchanged by this work.
 - Accepted: the scanner is syntactic, so it cannot see the receiver's type; the reviewed reason
   carries that judgment, and the tracer evidence above is how it was formed. A dump built by
-  `getattr` or `functools.partial` is not seen; none exists at this base.
+  `getattr` or `functools.partial` is not seen; none exists at this base. Adding an alias to a
+  model dumped in a `no alias` file, or swapping one dump for another in the same file, leaves
+  the count unchanged and is not caught; keying by function would cost more than that risk.
+  The `no alias` reasons were checked against the alias-bearing model set when written.
 - Covered elsewhere: runtime rejection by pydantic itself (`extra_forbidden`).
 
 ## Success
