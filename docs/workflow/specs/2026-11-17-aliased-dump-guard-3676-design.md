@@ -20,12 +20,12 @@ Charter: WORK:SCOPE q3676-86642b29 on #3676. One new test file,
 
 1. An AST scanner walks `*.py` under `src/` and `deploy/` (a file that fails to parse fails the guard) and collects calls to `model_dump`,
    `model_dump_json`, `dump_python` and `dump_json` that carry neither a `by_alias=` keyword
-   nor a `**` argument (a `**` argument cannot be judged, so it is collected as well).
+   nor a `**` argument (a `**` argument may carry it and is not judged; none exists at this base).
 2. A reviewed allowlist maps repo-relative file path to `(count, reason)`. The guard fails for
    a file with collected calls and no entry, for a count that differs in either direction, and
    for an entry whose file is gone or has no collected call. A new dump in an allowlisted file
    therefore reddens until a reviewer adjusts the count and reads the reason again.
-3. Two reasons exist: the receivers and the models nested in them declare no alias, or the
+3. Reasons: the receivers and the models nested in them declare no alias, or the
    call dumps by Python names on purpose (feeding a same-class `model_validate`). An explicit
    `by_alias=False` passes the scanner because it states the choice.
 
