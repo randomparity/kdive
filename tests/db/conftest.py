@@ -39,7 +39,7 @@ from tests.support import xdist_backend
 # silently change what the schema-test gate asserts (ADR-0505 shape, #1921).
 # To update: `docker pull postgres:17` and replace the digest with the new one.
 _POSTGRES_IMAGE = (
-    "postgres:17@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317"  # noqa: E501  # 17
+    "postgres:17@sha256:0d938e975177bef9f1f61f3f9dbcf2e0aa0a139568f66d3415ed8892eb97f6ac"  # noqa: E501  # 17
 )
 
 
