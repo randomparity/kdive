@@ -24,7 +24,9 @@ install the project. The 3.14.6 digests stay. Moving the interpreter major is a 
 decision owned by ADR-0817.
 
 **pydantic 2.14.3.** Cause: 101 `BaseModel` classes declare `schema_: ... = Field(...,
-alias="schema")` under `extra="forbid"`. Through 2.14.0 an input key equal to the *field
+alias="schema")` with a `Field` default, in closed models (`extra="forbid"`, `validate_by_alias=True`). Reproduced on
+`AuthorityRunningObservationV1` itself; a minimal toy model with a different shape did not drop the
+key, so the silent drop depends on more than `extra="forbid"`. Through 2.14.0 an input key equal to the *field
 name* of an aliased field was silently dropped (neither used nor reported as extra); from
 2.14.3 it raises `extra_forbidden`. The behaviour is the documented one (validate by alias
 only), so no model changes. Wire and persistence paths already serialize with
