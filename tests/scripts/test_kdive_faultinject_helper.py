@@ -256,3 +256,11 @@ def test_unreadable_parameter_file_exits_5_with_only_the_json_error(debugfs: Pat
     proc = run(debugfs, "read", "failslab")
     assert proc.returncode == 5
     assert json.loads(proc.stderr)["error"] == "debugfs_io"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a read-only file")
+def test_unwritable_parameter_file_exits_5_with_only_the_json_error(debugfs: Path) -> None:
+    (debugfs / "failslab" / "space").chmod(0o444)
+    proc = run(debugfs, "set", "failslab", "space=4")
+    assert proc.returncode == 5
+    assert json.loads(proc.stderr)["error"] == "debugfs_io"
