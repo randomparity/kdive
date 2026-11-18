@@ -5,6 +5,111 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-11-17
+
+### Added
+
+- Fit the xdist worker cap to the engine memory
+- Stop below 6 GiB of engine memory and name the fix
+- Admit exact reviewed migration supersessions (#3612)
+- File an issue on native lifecycle drift
+
+### Changed
+
+- Use the local operation in external boot _commit
+- Clamp the worker cap with if, not a nested ternary
+- Declare pydantic discriminators so Literal narrowing needs no ty ignore
+
+### Documentation
+
+- Overlay binds by host_uri, renames the row, warns when unmatched
+- State the reconcile-first ordering for the egress lookup
+- Design the settled teardown route fence (#3598)
+- Apply design review to the settled route fence plan
+- Record the database settled-route fence
+- Design the guestfs-aware CI type check (#3588)
+- Resolve design review findings for #3588
+- Correct the libvirt-dev apt worst case in the #3588 spec
+- Design the btrfs spine preflight (#3580)
+- Resolve btrfs preflight design review notes (#3580)
+- Wrap btrfs preflight spec line (#3580)
+- State the btrfs preflight (#3580)
+- Correct the authority-cell preflight claim (#3580)
+- Amend 0313 egress note with session account and 0810 decision (#3590)
+- Record the #3517 tombstone re-check under the lock in ADR-0787 (#3591)
+- Settlement ends the stranded exhausted boot job
+- Apply the design review's findings
+- Carry the scope audit's live-testing runbook fix
+- Drop the manual cancel from stranded recovery
+- Match the plan to the built lock test
+- Design a non-gating Python 3.15 CI lane (#3600)
+- Record ADR-0817 for the Python 3.15 informational lane (#3600)
+- Bound the 3.15 lane to x86_64 and make the override portable (#3600)
+- Say the 3.15 lane requires cp315 artifacts, not a narrower lock (#3600)
+- Record the 3.15 lane's cache-scope and no-cooldown residuals (#3600)
+- Design the loopback rule proof on an authority host (#3581)
+- Record start-limit recovery and redaction scan in the #3581 design
+- Record the loopback rule on a provider authority host (#3581)
+- Align restart count and IPv6 row in the #3581 record
+- Hold lease expiry behind the release fence (#3599)
+- Settle #3599 design review notes
+- Correct the #3599 amendment's #2992 premise
+- Correct the expiry fence comment's premise
+- State the cooldown's lock effects accurately
+- Design python 3.15 lock bumps and size baseline (#3658)
+- Tighten #3658 plan lock check after design review
+- Design podman support for just test-linux (#3074)
+- Define the probe and the proof checkouts (#3074)
+- Amend ADR-0717 for podman machine and the worker cap
+- Record the 6 GiB floor and the 1-worker OOM
+- State the floor as the memory the engine reports
+- Wrap the ADR-0717 amendment at 100 columns
+- Record the podman machine proof runs
+- Tie proof claims to commits and fix the volume hint
+- Design the PostgreSQL 17.12 migration-chain fix (#3612)
+- Resolve #3612 design review findings
+- Narrow ADR-0818's amendment claim to ADR-0015
+- Design the native lifecycle drift alert
+- Fold design review findings
+- Record the #3673 dependency-landing decisions
+- Tighten the pydantic cause statement in the #3673 spec
+- Document exit statuses of lifecycle compatibility check
+- Scope exit 3 to the compatibility subcommand
+- Design the aliased-dump guard for #3676
+- Fold design-review notes into the #3676 design
+- Design the ty discriminator override removal (#3675)
+- List the narrowing families and the serialize_by_alias change (#3675)
+
+### Fixed
+
+- Attach oversized release notes and allow re-publishing a tag
+- Audit the requester of an ordinary teardown recycle
+- Refuse a settled System's authority teardown route
+- Stop steering a stranded preparing denial at teardown
+- Count BTRFS_FS as a bootable root filesystem (#3582)
+- Settle ends the stranded exhausted boot job
+- Report 3.15 lane failures and bound its probes (#3600)
+- Disable the 3.15 lane's uv cache and pin a checksummed uv (#3600)
+- Hold the 3.15 lane's resolution to a 7-day cooldown (#3600)
+- Hold expiry for Systems with external-boot history
+- Write pki.yml client bundle files 0600
+- Mount the podman machine socket and probe the git dir
+- Size the worker cap from the measured VM footprint
+- Let an explicit -n replace the memory cap
+- Keep the 8-worker limit for an explicit -n
+- Allow 1.5 GiB per xdist worker
+- Supersede 0112's row-type predicates for PostgreSQL 17.12 (#3612)
+- Exit 3 from the lifecycle compatibility probe on drift
+- Adapt the tree to ruff 0.17, ty 0.0.99 and pydantic 2.14
+- Skip the remote quiescence carrier on a host without a provider lane
+
+### Build
+
+- Bump beartype, cffi, grpcio, markupsafe in uv.lock (#3658)
+- Bump the python-dependencies group across 1 directory with 15 updates
+- Bump the docker-images group across 1 directory with 2 updates
+- Pin uv 0.13.7 on every arch and keep python 3.14 base
+
 ## [0.5.0] - 2026-11-14
 
 ### ⚠ Breaking Changes
@@ -9851,6 +9956,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add psycopg-pool and testcontainers; pin .sql to LF
 
+[0.5.1]: https://github.com/randomparity/kdive/compare/v0.5.0..v0.5.1
 [0.5.0]: https://github.com/randomparity/kdive/compare/v0.4.0..v0.5.0
 [0.4.0]: https://github.com/randomparity/kdive/compare/v0.3.0..v0.4.0
 [0.3.0]: https://github.com/randomparity/kdive/compare/v0.2.0..v0.3.0
