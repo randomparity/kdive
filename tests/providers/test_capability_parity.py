@@ -58,6 +58,11 @@ _WAIVERS: dict[str, str] = {
         "the stranded observation serves local-libvirt, where #3138 and ADR-0752's inventory "
         "declaration live; a remote stranded System stays stranded (ADR-0816 amendment, #3574)."
     ),
+    "port:fault_injection": (
+        "the read-only fault-injection inspector reads guest debugfs over the loopback SSH forward "
+        "local-libvirt renders on every domain; remote-libvirt guest-agent allowed_programs is "
+        "excluded from #3683 (ADR-0825)."
+    ),
     "port:platform_root_cmdline": (
         "remote's in-guest bootloader owns the root device; injecting a platform root= would "
         "override the grub root=UUID= inherited via grubby --copy-default (ADR-0183, #587)."

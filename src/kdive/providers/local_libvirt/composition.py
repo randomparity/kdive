@@ -45,6 +45,7 @@ from kdive.providers.external_boot_authority.settings import (
 )
 from kdive.providers.infra.reaping import CaptureReaper, InfraReaper
 from kdive.providers.local_libvirt.config import local_guest_egress_for_resource
+from kdive.providers.local_libvirt.debug.fault_inject import LocalLibvirtFaultInjection
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
@@ -487,6 +488,7 @@ def build_runtime(
         crash_postmortem=retrieve,
         vmcore_introspector=vmcore_introspector,
         live_introspector=live_introspector,
+        fault_injection=LocalLibvirtFaultInjection(secret_registry=secret_registry),
         external_boot=external_boot,
         external_boot_preparation=external_boot,
         external_boot_recovery_objects=external_boot,

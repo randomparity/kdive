@@ -29,6 +29,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootPreparationPorts,
     ExternalBootRecoveryObjectPorts,
 )
+from kdive.providers.ports.fault_injection import FaultInjectionInspector
 from kdive.providers.ports.lifecycle import (
     Booter,
     Connector,
@@ -203,6 +204,8 @@ class ProviderRuntime:
     authority: AuthorityCapability | None = None
     # What this runtime's own daemon defines. Absent where no stranded observation runs (ADR-0816).
     domain_presence: DomainPresence | None = None
+    # Read-only guest fault-injection inspector (ADR-0825). Local-libvirt only; no support flag.
+    fault_injection: FaultInjectionInspector | None = None
 
     def __post_init__(self) -> None:
         _require_capability_port_parity(
