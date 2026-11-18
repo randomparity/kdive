@@ -22,7 +22,6 @@ from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     MiRecord,
     frame_variables,
     mi_int,
-    result_payload_dict,
     stack_frames,
 )
 from kdive.security.secrets.redaction import Redactor
@@ -47,7 +46,7 @@ class _StackHost(Protocol):
 
     def _redact_frame(self, frame: GdbFrame) -> GdbFrame: ...
 
-    def _current_thread(self, attachment: GdbMiAttachment) -> str: ...
+    def read_thread_id(self, attachment: GdbMiAttachment) -> str: ...
 
 
 class GdbMiStackCommands:
@@ -105,7 +104,7 @@ class GdbMiStackCommands:
         )
         if not rows:
             raise no_frame
-        thread = self._current_thread(attachment)
+        thread = self.read_thread_id(attachment)
         records = self._stack_command(
             attachment,
             f"-stack-list-variables --thread {thread} --frame {level} --simple-values",
@@ -126,19 +125,6 @@ class GdbMiStackCommands:
         )
         redacted = self._redactor().redact_value(detail.model_dump(mode="json"))
         return _bounded(GdbFrameDetail.model_validate(redacted))
-
-    def _current_thread(self: _StackHost, attachment: GdbMiAttachment) -> str:
-        if attachment.selected_thread is not None:
-            return attachment.selected_thread
-        records = self.execute_mi_command(attachment, "-thread-list-ids")
-        thread = result_payload_dict(records).get("current-thread-id")
-        if not isinstance(thread, str) or not thread.isdigit():
-            raise CategorizedError(
-                "gdb/MI reported no current thread",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"code": "no_current_thread"},
-            )
-        return thread
 
     def _stack_command(
         self: _StackHost,
