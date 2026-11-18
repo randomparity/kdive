@@ -12,7 +12,11 @@ from collections.abc import Callable
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.debug.live_introspect import _live_ssh_argv
-from kdive.providers.ports.fault_injection import FAULT_KNOB_PARAMETERS, FaultKnobState
+from kdive.providers.ports.fault_injection import (
+    FAULT_KNOB_PARAMETERS,
+    REPLY_BYTE_CAP,
+    FaultKnobState,
+)
 from kdive.providers.shared.ssh_connect_retry import (
     SshRetryPolicy,
     classify_ssh_failure,
@@ -22,7 +26,6 @@ from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _HELPER = "/usr/local/sbin/kdive-faultinject"
-_REPLY_BYTE_CAP = 4096
 _SSH_TIMEOUT_S = 15
 _SSH_RETRY = SshRetryPolicy(deadline_s=10.0)
 _EXIT_DEBUGFS_NOT_MOUNTED = 3
@@ -155,7 +158,7 @@ class LocalLibvirtFaultInjection:
             raise _config_error("helper_not_installed")
         if exit_status != 0:
             raise _infra_error("helper_failed", exit_status)
-        if len(stdout) > _REPLY_BYTE_CAP:
+        if len(stdout) > REPLY_BYTE_CAP:
             raise _infra_error("helper_output_too_large")
         text = Redactor(registry=self._secret_registry).redact_text(
             stdout.decode("utf-8", "replace")

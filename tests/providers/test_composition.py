@@ -27,6 +27,7 @@ from kdive.providers.core.discovery_registration import (
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.infra.reaping import OwnedDomain
+from kdive.providers.local_libvirt.debug.fault_inject import LocalLibvirtFaultInjection
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
 from kdive.providers.ports.handles import (
@@ -258,6 +259,12 @@ def test_default_runtime_exposes_rootfs_build_plane() -> None:
 
     assert runtime.rootfs is not None
     assert isinstance(runtime.rootfs.build_plane, LocalLibvirtRootfsBuildPlane)
+
+
+def test_default_runtime_wires_the_fault_injection_inspector() -> None:
+    runtime = composition.build_local_runtime(secret_registry=SecretRegistry())
+
+    assert isinstance(runtime.fault_injection, LocalLibvirtFaultInjection)
 
 
 def test_provider_runtime_discovery_hook_is_optional() -> None:

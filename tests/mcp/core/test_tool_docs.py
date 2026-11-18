@@ -112,6 +112,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "jobs.cancel": ("tests/mcp/jobs/test_jobs_tools.py",),
     "jobs.list": ("tests/mcp/jobs/test_jobs_tools.py",),
     "jobs.wait": ("tests/mcp/jobs/test_jobs_tools.py",),
+    "faultinject.inspect": ("tests/mcp/debug/test_faultinject_inspect.py",),
     "introspect.from_vmcore": ("tests/mcp/debug/test_introspect_tools.py",),
     "introspect.run": ("tests/mcp/debug/test_introspect_tools.py",),
     "introspect.script": ("tests/mcp/debug/test_introspect_tools.py",),

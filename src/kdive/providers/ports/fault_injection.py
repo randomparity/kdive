@@ -19,6 +19,13 @@ FAULT_KNOB_PARAMETERS: Mapping[str, tuple[str, ...]] = {
 }
 
 
+# The agent-facing limits of one read, stated in the tool docstring: the reply cap in bytes and the
+# worst-case call time in seconds (one retry window plus one attempt; a test ties the provider's
+# timeouts to this figure).
+REPLY_BYTE_CAP = 4096
+READ_WORST_CASE_SECONDS = 25
+
+
 @dataclass(frozen=True, slots=True)
 class FaultKnobState:
     """One knob's state; ``parameters`` is empty when the kernel lacks the knob."""

@@ -15,7 +15,11 @@ from kdive.providers.local_libvirt.debug.fault_inject import (
     parse_helper_state,
 )
 from kdive.providers.local_libvirt.debug.live_introspect import _live_ssh_argv
-from kdive.providers.ports.fault_injection import FAULT_KNOB_PARAMETERS, FaultKnobState
+from kdive.providers.ports.fault_injection import (
+    FAULT_KNOB_PARAMETERS,
+    READ_WORST_CASE_SECONDS,
+    FaultKnobState,
+)
 from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -158,3 +162,7 @@ def test_argv_refuses_a_non_loopback_handle() -> None:
     with pytest.raises(CategorizedError) as caught:
         _live_ssh_argv(handle, SecretRegistry(), ["read"], "/k", program=mod._HELPER)
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_worst_case_call_time_matches_the_documented_figure() -> None:
+    assert mod._SSH_TIMEOUT_S + mod._SSH_RETRY.deadline_s == READ_WORST_CASE_SECONDS

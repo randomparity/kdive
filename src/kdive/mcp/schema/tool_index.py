@@ -28,6 +28,7 @@ NAMESPACE_TOC: dict[str, str] = {
     "audit": "Audit log queries across operations",
     "control": "In-guest power cycling and crash injection (NMI / panic)",
     "debug": "Live GDB-based kernel debugging sessions (breakpoints, registers, memory)",
+    "faultinject": "Read-only guest kernel fault-injection (failslab, fail_page_alloc) state",
     "fixtures": "Test fixture profile validation",
     "images": "Kernel and rootfs image lifecycle (build, publish, expire)",
     "introspect": "drgn kernel introspection — live attach and vmcore offline analysis",
@@ -202,6 +203,9 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     ),
     "introspect.run": frozenset({"drgn", "live", "introspect", "kernel", "script", "attach"}),
     "introspect.script": frozenset({"drgn", "script", "live", "introspect", "kernel", "run"}),
+    "faultinject.inspect": frozenset(
+        {"fault", "injection", "failslab", "fail_page_alloc", "debugfs", "inspect", "armed"}
+    ),
     # vmcore plane
     "vmcore.fetch": frozenset({"vmcore", "crash", "dump", "fetch", "download", "retrieve"}),
     # postmortem

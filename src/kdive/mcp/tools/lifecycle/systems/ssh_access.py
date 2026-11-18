@@ -57,7 +57,7 @@ _UNPROVISIONED_DETAIL = (
 )
 
 
-async def _recorded_endpoint(
+async def recorded_endpoint(
     conn: AsyncConnection, resolver: ProviderResolver, system: System
 ) -> tuple[tuple[str, int] | None, int | None]:
     """The System's SSH endpoint, and the authority-reported port a job must carry (ADR-0811).
@@ -96,7 +96,7 @@ async def ssh_info(
                     system_id, ErrorCategory.READINESS_FAILURE, detail=_NOT_READY_DETAIL
                 )
             try:
-                recorded, forward = await _recorded_endpoint(conn, resolver, system)
+                recorded, forward = await recorded_endpoint(conn, resolver, system)
                 fenced = forward is not None and await ordinary_mutation_is_fenced(conn, uid)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(system_id, exc)
@@ -175,7 +175,7 @@ async def authorize_ssh_key(
             except ExternalBootDenied as exc:
                 return _external_boot_denial(system_id, exc, ctx)
             try:
-                recorded, forward = await _recorded_endpoint(conn, resolver, system)
+                recorded, forward = await recorded_endpoint(conn, resolver, system)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(system_id, exc)
             if recorded is None:
@@ -249,7 +249,7 @@ async def check_ssh_reachable(
                         data={"reason": "authority_system_preactivation_mutation_fenced"},
                     )
             try:
-                recorded, forward = await _recorded_endpoint(conn, resolver, system)
+                recorded, forward = await recorded_endpoint(conn, resolver, system)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(system_id, exc)
             if recorded is None:
