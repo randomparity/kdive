@@ -21,7 +21,7 @@ from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
 from kdive.security.secrets.redaction import Redactor
 
 MAX_THREADS = 128
-_INVALID_THREAD_RE = re.compile(r"invalid thread id|not known", re.IGNORECASE)
+_INVALID_THREAD_RE = re.compile(r"invalid thread id", re.IGNORECASE)
 
 
 def thread_option(attachment: GdbMiAttachment) -> str:

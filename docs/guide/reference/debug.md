@@ -32,7 +32,8 @@ succeed, so use 'out' or a breakpoint with debug.continue.
 Walk the stopped kernel's stack on a live DebugSession. Requires contributor.
 
 The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); there
-is no stack to unwind while the kernel runs.
+is no stack to unwind while the kernel runs. Walks the CPU chosen with debug.select_thread,
+else gdb's current thread (debug.list_threads shows both).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -252,7 +253,8 @@ Requires contributor.
 Inspect one selected stack frame on a live DebugSession. Requires contributor.
 
 The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); frame
-selection is only valid at a halt.
+selection is only valid at a halt. Reads the CPU chosen with debug.select_thread, else gdb's
+current thread (debug.list_threads shows both).
 
 data.frame holds the frame's location plus args and locals, each a name, gdb's type and,
 for a scalar or pointer, gdb's printed value (a struct or array shows its type only). Up
@@ -289,6 +291,8 @@ Read named registers from a live DebugSession. Requires contributor.
 The target must be stopped first (halt it with debug.interrupt or hit a breakpoint);
 registers are only meaningful at a halt. Each requested register is returned in `data`
 keyed by its name, with the value as a hexadecimal string (e.g. "0xffffffff81000000").
+Reads the CPU chosen with debug.select_thread, else gdb's current thread
+(debug.list_threads shows both).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

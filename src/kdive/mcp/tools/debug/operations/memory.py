@@ -124,6 +124,8 @@ def _register_debug_read_registers(
         The target must be stopped first (halt it with debug.interrupt or hit a breakpoint);
         registers are only meaningful at a halt. Each requested register is returned in `data`
         keyed by its name, with the value as a hexadecimal string (e.g. "0xffffffff81000000").
+        Reads the CPU chosen with debug.select_thread, else gdb's current thread
+        (debug.list_threads shows both).
         """
         return await run_engine_op_with_resolver(
             pool,
