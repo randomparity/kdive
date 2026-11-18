@@ -30,6 +30,7 @@ from kdive.providers.shared.debug_common.gdbmi.commands.disassembly import (
     MAX_DISASSEMBLE_INSTRUCTIONS,
 )
 from kdive.providers.shared.debug_common.gdbmi.commands.stack import MAX_BACKTRACE_FRAMES
+from kdive.providers.shared.debug_common.gdbmi.commands.threads import MAX_THREADS
 from kdive.providers.shared.debug_common.gdbmi.core import engine as gdbmi
 from kdive.providers.shared.debug_common.gdbmi.core.engine import (
     MAX_MEMORY_READ_BYTES,
@@ -3045,9 +3046,9 @@ def test_list_threads_returns_threads_and_current(tmp_path: Path) -> None:
 
 
 def test_list_threads_truncates_at_max(tmp_path: Path) -> None:
-    rows = [_thread_row(str(n), n - 1) for n in range(1, 131)]
+    rows = [_thread_row(str(n), n - 1) for n in range(1, MAX_THREADS + 3)]
     listing = _engine().list_threads(_attachment(_thread_controller(*rows), tmp_path))
-    assert len(listing.threads) == 128
+    assert len(listing.threads) == MAX_THREADS
     assert listing.truncated is True
 
 

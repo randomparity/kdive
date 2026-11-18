@@ -86,7 +86,7 @@ class GdbMiThreadCommands:
             current_thread_id=current if isinstance(current, str) and current.isdigit() else None,
             selected_thread_id=attachment.selected_thread,
         )
-        redacted = self._redactor().redact_value(listing.model_dump(mode="json"))
+        redacted = self._redactor().redact_value(listing.model_dump(mode="json", by_alias=True))
         return GdbThreadList.model_validate(redacted)
 
     def select_thread(
@@ -103,7 +103,9 @@ class GdbMiThreadCommands:
         if row is None:
             raise _unknown_thread(thread_id)
         attachment.selected_thread = str(thread_id)
-        redacted = self._redactor().redact_value(_thread_from(row).model_dump(mode="json"))
+        redacted = self._redactor().redact_value(
+            _thread_from(row).model_dump(mode="json", by_alias=True)
+        )
         return GdbThread.model_validate(redacted)
 
 

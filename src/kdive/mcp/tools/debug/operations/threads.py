@@ -41,7 +41,8 @@ def _list_threads_op(session_id: str) -> _EngineOp:
     def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
         result = engine.list_threads(attachment)
         threads: list[JsonValue] = [
-            thread.model_dump(mode="json", exclude_none=True) for thread in result.threads
+            thread.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for thread in result.threads
         ]
         data: dict[str, JsonValue] = {
             "thread_count": len(threads),
@@ -71,7 +72,7 @@ def _select_thread_op(session_id: str, thread_id: int) -> _EngineOp:
             suggested_next_actions=["debug.read_registers", "debug.backtrace"],
             data={
                 "thread_id": thread.id,
-                "thread": thread.model_dump(mode="json", exclude_none=True),
+                "thread": thread.model_dump(mode="json", by_alias=True, exclude_none=True),
             },
         )
 
