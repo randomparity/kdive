@@ -49,6 +49,7 @@ def _read_registers_op(session_id: str, registers: list[str]) -> _EngineOp:
     def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
         values = engine.read_registers(attachment, registers)
         rendered = {str(k): str(v) for k, v in values.items()}
+        rendered["thread_id"] = engine.read_thread_id(attachment)
         return ToolResponse.success(
             session_id,
             "read",
@@ -125,7 +126,8 @@ def _register_debug_read_registers(
         registers are only meaningful at a halt. Each requested register is returned in `data`
         keyed by its name, with the value as a hexadecimal string (e.g. "0xffffffff81000000").
         Reads the CPU chosen with debug.select_thread, else gdb's current thread
-        (debug.list_threads shows both).
+        (debug.list_threads shows both). data.thread_id, a reserved key beside the register
+        names, is the id of the thread that was read, a decimal string and not a register value.
         """
         return await run_engine_op_with_resolver(
             pool,

@@ -28,6 +28,7 @@ from kdive.images.families._fedora_customize import (
     cloud_init_first_boot_steps,
     drgn_helper_steps,
     drgn_version_marker_steps,
+    faultinject_helper_steps,
     makedumpfile_version_marker_steps,
 )
 from kdive.images.families.base import CustomizeContext, _mac_tag
@@ -128,6 +129,7 @@ class DebianFamily:
         # (above, ADR-0288) DHCPs the NIC on first boot.
         if ctx.kind == "debug":
             steps += drgn_helper_steps()
+            steps += faultinject_helper_steps()
             steps += makedumpfile_version_marker_steps()
         # Record the shipped drgn version only when the introspection package is installed
         # (``python3-drgn`` on debian), so the ``live_drgn`` signal resolves for this built image

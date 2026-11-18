@@ -453,6 +453,7 @@ def test_read_registers_returns_direct_values(migrated_url: str) -> None:
                             },
                         }
                     ],
+                    "-thread-list-ids": _thread_ids("1"),
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
@@ -464,7 +465,7 @@ def test_read_registers_returns_direct_values(migrated_url: str) -> None:
                 _op_for("read_registers", runtime, session_id, registers=["rax", "rcx"]),
             )
         assert resp.status == "read"
-        assert resp.data == {"rax": "0xdead", "rcx": "0xcafe"}
+        assert resp.data == {"rax": "0xdead", "rcx": "0xcafe", "thread_id": "1"}
 
     asyncio.run(_run())
 
@@ -802,7 +803,8 @@ def test_backtrace_returns_walked(migrated_url: str) -> None:
                                 ]
                             },
                         }
-                    ]
+                    ],
+                    "-thread-list-ids": _thread_ids("1"),
                 }
             )
             runtime = _runtime(_CountingAttach(controller))
@@ -814,6 +816,7 @@ def test_backtrace_returns_walked(migrated_url: str) -> None:
                 _op_for("backtrace", runtime, session_id, max_frames=64),
             )
         assert resp.status == "walked"
+        assert resp.data["thread_id"] == "1"
         assert resp.data["frame_count"] == 2
         assert resp.data["truncated"] is False
         frames = cast("list[dict[str, Any]]", resp.data["frames"])
@@ -961,6 +964,132 @@ def test_list_and_select_thread_report_the_selection(migrated_url: str) -> None:
             assert selected.data["thread_id"] == "2"
             after = await call("list_threads")
             assert after.data["selected_thread_id"] == "2"
+
+    asyncio.run(_run())
+
+
+def _thread_ids(current: str) -> list[dict[str, Any]]:
+    return [{"type": "result", "message": "done", "payload": {"current-thread-id": current}}]
+
+
+def _register_values(value: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "result",
+            "message": "done",
+            "payload": {"register-values": [{"number": "0", "value": value}]},
+        }
+    ]
+
+
+_REGISTER_NAMES: list[dict[str, Any]] = [
+    {"type": "result", "message": "done", "payload": {"register-names": ["rax"]}}
+]
+
+
+def test_select_thread_null_clears_the_selection(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {"-thread-info": _thread_info("1", "2"), "-thread-info 2": _thread_info("2")}
+            )
+            runtime = _runtime(_CountingAttach(controller))
+
+            async def call(op: str, **kwargs: Any) -> ToolResponse:
+                return await run_engine_op_with_runtime(
+                    pool,
+                    request_context(),
+                    session_id,
+                    runtime,
+                    _op_for(op, runtime, session_id, **kwargs),
+                )
+
+            await call("select_thread", thread_id=2)
+            written = len(controller.written)
+            cleared = await call("select_thread", thread_id=None)
+            assert cleared.status == "cleared"
+            assert cleared.data == {"thread_id": None}
+            assert len(controller.written) == written, "clearing sent an MI command"
+            assert "selected_thread_id" not in (await call("list_threads")).data
+            again = await call("select_thread", thread_id=None)
+            assert (again.status, again.data) == ("cleared", {"thread_id": None})
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("selected", "echoed", "register_command"),
+    [
+        (None, "1", "-data-list-register-values x"),
+        (2, "2", "-data-list-register-values --thread 2 x"),
+    ],
+)
+def test_read_registers_echoes_the_thread_it_read(
+    selected: int | None, echoed: str, register_command: str, migrated_url: str
+) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-thread-info 2": _thread_info("2"),
+                    "-thread-list-ids": _thread_ids("1"),
+                    "-data-list-register-names": _REGISTER_NAMES,
+                    register_command: _register_values("0xdead"),
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            for op, kwargs in (
+                ("select_thread", {"thread_id": selected}),
+                ("read_registers", {"registers": ["rax"]}),
+            ):
+                resp = await run_engine_op_with_runtime(
+                    pool,
+                    request_context(),
+                    session_id,
+                    runtime,
+                    _op_for(op, runtime, session_id, **kwargs),
+                )
+            assert resp.data == {"rax": "0xdead", "thread_id": echoed}
+            assert ("-thread-list-ids" in controller.written) is (selected is None)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(("selected", "echoed"), [(None, "1"), (2, "2")])
+def test_backtrace_echoes_the_thread_it_walked(
+    selected: int | None, echoed: str, migrated_url: str
+) -> None:
+    frames: list[dict[str, object]] = [
+        {"type": "result", "message": "done", "payload": {"stack": [{"level": "0"}]}}
+    ]
+    command = "-stack-list-frames" + ("" if selected is None else f" --thread {selected}")
+
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-thread-info 2": _thread_info("2"),
+                    "-thread-list-ids": _thread_ids("1"),
+                    command: frames,
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            for op, kwargs in (
+                ("select_thread", {"thread_id": selected}),
+                ("backtrace", {"max_frames": 4}),
+            ):
+                resp = await run_engine_op_with_runtime(
+                    pool,
+                    request_context(),
+                    session_id,
+                    runtime,
+                    _op_for(op, runtime, session_id, **kwargs),
+                )
+            assert resp.status == "walked"
+            assert resp.data["thread_id"] == echoed
 
     asyncio.run(_run())
 

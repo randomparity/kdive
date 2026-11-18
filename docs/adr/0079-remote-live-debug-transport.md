@@ -55,6 +55,13 @@ We will scope remote live-debug by what must cross the network:
 - **vmcore postmortem: on the worker** — fetch the vmcore object from the store (uploaded via
   the presigned-PUT path, ADR-0078) and run drgn/crash locally; no live reachability.
 
+### Amendment (2026-11-18): a second reviewed in-guest program (#3682)
+
+This amends the single-program allowlist claim above, which names `kdive-drgn` as the only
+reviewed in-guest program. [ADR-0822](0822-guest-exec-allowlist-adds-kdive-faultinject.md) adds
+`kdive-faultinject` with a fixed subcommand and bounded-parameter contract. The drgn claims are
+unchanged.
+
 ## Consequences
 
 - **The full M1.2 spine works remotely**, including the "attach" step (gdb-MI over direct TCP),

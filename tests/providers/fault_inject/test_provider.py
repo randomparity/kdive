@@ -356,8 +356,14 @@ def test_debug_engine_threads(tmp_path: Path) -> None:
     )
 
     assert [t.id for t in engine.list_threads(attachment).threads] == ["1"]
-    assert engine.select_thread(attachment, thread_id=1).id == "1"
+    assert engine.read_thread_id(attachment) == "1"
+    selected = engine.select_thread(attachment, thread_id=1)
+    assert selected is not None
+    assert selected.id == "1"
     assert engine.list_threads(attachment).selected_thread_id == "1"
+    assert engine.read_thread_id(attachment) == "1"
+    assert engine.select_thread(attachment, thread_id=None) is None
+    assert engine.list_threads(attachment).selected_thread_id is None
     with pytest.raises(CategorizedError) as exc:
         engine.select_thread(attachment, thread_id=2)
     assert exc.value.details["code"] == "unknown_thread"

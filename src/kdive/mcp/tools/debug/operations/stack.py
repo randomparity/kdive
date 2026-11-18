@@ -52,7 +52,12 @@ def _backtrace_op(session_id: str, max_frames: int) -> _EngineOp:
             session_id,
             "walked",
             suggested_next_actions=["debug.read_frame", "debug.read_registers"],
-            data={"frame_count": len(frames), "truncated": result.truncated, "frames": frames},
+            data={
+                "thread_id": engine.read_thread_id(attachment),
+                "frame_count": len(frames),
+                "truncated": result.truncated,
+                "frames": frames,
+            },
         )
 
     return op
@@ -122,7 +127,8 @@ def _register_debug_backtrace(
 
         The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); there
         is no stack to unwind while the kernel runs. Walks the CPU chosen with debug.select_thread,
-        else gdb's current thread (debug.list_threads shows both).
+        else gdb's current thread (debug.list_threads shows both). data.thread_id is the id of the
+        thread that was walked.
         """
         return await run_engine_op_with_resolver(
             pool,

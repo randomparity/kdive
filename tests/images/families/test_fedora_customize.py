@@ -19,6 +19,7 @@ from kdive.images.families._fedora_customize import (
     cloud_init_first_boot_steps,
     drgn_helper_steps,
     drgn_version_marker_steps,
+    faultinject_helper_steps,
     makedumpfile_version_marker_steps,
     readiness_unit,
 )
@@ -54,6 +55,15 @@ def test_drgn_helper_steps_fail_loud_when_source_is_absent(
     monkeypatch.setattr(_fedora_customize, "drgn_helper_source", lambda: tmp_path / "missing")
     with pytest.raises(CategorizedError) as exc:
         drgn_helper_steps()
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_faultinject_helper_steps_fail_loud_when_source_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_fedora_customize, "faultinject_helper_source", lambda: tmp_path / "gone")
+    with pytest.raises(CategorizedError) as exc:
+        faultinject_helper_steps()
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
