@@ -21,10 +21,10 @@ already omit `--thread` when nothing is selected (`thread_option`), so no MI cha
 
 Fault-inject: `select_thread(None)` clears; `read_thread_id` returns the selection or `"1"`.
 
-MCP: `debug.select_thread` takes `thread_id: int | None`; `None` returns status `cleared`,
+MCP: `debug.select_thread` takes `thread_id: int | None = None`; `None` returns status `cleared`,
 `data={"thread_id": null}`. `_read_registers_op` and `_backtrace_op` call
-`engine.read_thread_id` first and add `thread_id` to `data` (flat map for registers, a reserved
-key beside the register names). Docstrings and `Field` text name the clear value and the field and
+`engine.read_thread_id` after the read succeeds and add `thread_id` to `data` (flat map for
+registers, a reserved key beside the register names). Docstrings and `Field` text name the clear value and the field and
 drop "cannot be cleared"; the generated tool reference, CLI verb (`--thread-id` becomes optional;
 omitting it clears), toolset docs and resource content follow.
 

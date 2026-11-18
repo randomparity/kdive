@@ -90,8 +90,11 @@ class GdbMiThreadCommands:
         return GdbThreadList.model_validate(redacted)
 
     def select_thread(
-        self: _ThreadHost, attachment: GdbMiAttachment, *, thread_id: int
-    ) -> GdbThread:
+        self: _ThreadHost, attachment: GdbMiAttachment, *, thread_id: int | None
+    ) -> GdbThread | None:
+        if thread_id is None:
+            attachment.selected_thread = None
+            return None
         if not isinstance(thread_id, int) or isinstance(thread_id, bool) or thread_id < 1:
             raise config_error(
                 f"thread_id must be a positive integer, got {thread_id!r}",
@@ -107,6 +110,20 @@ class GdbMiThreadCommands:
             _thread_from(row).model_dump(mode="json", by_alias=True)
         )
         return GdbThread.model_validate(redacted)
+
+    def read_thread_id(self: _ThreadHost, attachment: GdbMiAttachment) -> str:
+        """The thread a read uses: the selection, else gdb's current thread (ADR-0824)."""
+        if attachment.selected_thread is not None:
+            return attachment.selected_thread
+        records = self.execute_mi_command(attachment, "-thread-list-ids")
+        thread = result_payload_dict(records).get("current-thread-id")
+        if not isinstance(thread, str) or not thread.isdigit():
+            raise CategorizedError(
+                "gdb/MI reported no current thread",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"code": "no_current_thread"},
+            )
+        return thread
 
 
 def _checked_rows(records: list[MiRecord]) -> list[dict[str, Any]]:

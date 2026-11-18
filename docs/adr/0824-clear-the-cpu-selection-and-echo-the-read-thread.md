@@ -18,21 +18,23 @@ itself race another contributor (#3691).
 
 ## Decision
 
-**Clear.** `debug.select_thread` takes `thread_id: int | None`. `null` sets the attachment's
-`selected_thread` to `None` and sends no MI command, so no gdb state can fail it. Like every
-other op it is refused while the guest runs. The result has status `cleared` and `data={"thread_id": null}`. Later reads
-omit `--thread`, as they do before any selection, and `debug.list_threads` omits
-`selected_thread_id`. Clearing with nothing selected succeeds and reports the same result. A
-positive integer behaves as in ADR-0819; every other value keeps `bad_thread_id`. The call is
-audited either way.
+**Clear.** `debug.select_thread` takes `thread_id: int | None`, default `null`, so the generated
+CLI verb, which can pass no null, clears by omitting `--thread-id`. `null`, or omission, sets the
+attachment's `selected_thread` to `None` and sends no MI command, so no gdb state can fail it.
+Like every other op it is refused while the guest runs. The result has status `cleared` and
+`data={"thread_id": null}`. Later reads omit `--thread`, as they do before any selection, and
+`debug.list_threads` omits `selected_thread_id`. Clearing with nothing selected succeeds and
+reports the same result. A positive integer behaves as in ADR-0819; every other value keeps
+`bad_thread_id`. The call is audited either way.
 
 **Echo.** `debug.read_registers` and `debug.backtrace` add `thread_id`, a string like the ids in
 `debug.list_threads`, to `data`: the selected thread, else gdb's current thread. The engine port
 gains `read_thread_id(attachment)`, which returns `selected_thread` or asks gdb with
 `-thread-list-ids` (`no_current_thread` when gdb reports none; this is the lookup
 `debug.read_frame` already performs, moved to the shared command class). The operation resolves
-it before the read, so the id names the CPU the read was sent to; with a selection it costs no MI
-command.
+it after the read succeeds, so a read that fails keeps its own error (`inferior_running`, say)
+and the lookup never replaces it; the target is stopped, so the id is the CPU the read used. With
+a selection it costs no MI command.
 
 **`read_registers` shape.** `data` stays a flat map of register name to hexadecimal string, with
 `thread_id` as one reserved extra key. A register request whose name is `thread_id` cannot

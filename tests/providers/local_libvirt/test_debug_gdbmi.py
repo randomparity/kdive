@@ -3074,10 +3074,57 @@ def test_list_threads_malformed(
 def test_select_thread_records_selection(tmp_path: Path) -> None:
     attachment = _attachment(_thread_controller(_thread_row("2", 1)), tmp_path)
     thread = _engine().select_thread(attachment, thread_id=2)
+    assert thread is not None
     assert thread.id == "2"
     assert attachment.selected_thread == "2"
     listing = _engine().list_threads(attachment)
     assert listing.selected_thread_id == "2"
+
+
+def test_select_thread_none_clears_without_an_mi_command(tmp_path: Path) -> None:
+    controller = _thread_controller(_thread_row("2", 1))
+    attachment = _attachment(controller, tmp_path)
+    engine = _engine()
+    engine.select_thread(attachment, thread_id=2)
+    written = list(controller.written)
+    assert engine.select_thread(attachment, thread_id=None) is None
+    assert attachment.selected_thread is None
+    assert controller.written == written
+    assert engine.list_threads(attachment).selected_thread_id is None
+    assert engine.select_thread(attachment, thread_id=None) is None
+
+
+def test_reads_after_a_clear_omit_thread(tmp_path: Path) -> None:
+    controller = _register_controller()
+    controller._responses.update({"-thread-info 2": _done({"threads": [_thread_row("2", 1)]})})
+    attachment = _attachment(controller, tmp_path)
+    engine = _engine()
+    engine.select_thread(attachment, thread_id=2)
+    engine.select_thread(attachment, thread_id=None)
+    assert engine.read_registers(attachment, ["rax"]) == {"rax": "0xdead"}
+    assert "-data-list-register-values x" in controller.written
+    assert not any("--thread" in command for command in controller.written)
+
+
+def test_read_thread_id_prefers_the_selection_else_asks_gdb(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-thread-list-ids": _done({"thread-ids": {"thread-id": "3"}, "current-thread-id": "3"})
+        }
+    )
+    attachment = _attachment(controller, tmp_path)
+    assert _engine().read_thread_id(attachment) == "3"
+    assert controller.written == ["-thread-list-ids"]
+    attachment.selected_thread = "2"
+    assert _engine().read_thread_id(attachment) == "2"
+    assert controller.written == ["-thread-list-ids"]
+
+
+def test_read_thread_id_without_a_current_thread(tmp_path: Path) -> None:
+    controller = _FakeMiController(responses={"-thread-list-ids": _done({})})
+    with pytest.raises(CategorizedError) as exc:
+        _engine().read_thread_id(_attachment(controller, tmp_path))
+    assert exc.value.details["code"] == "no_current_thread"
 
 
 @pytest.mark.parametrize("bad", [0, -1, True, "2"])

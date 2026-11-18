@@ -63,9 +63,16 @@ def _list_threads_op(session_id: str) -> _EngineOp:
     return op
 
 
-def _select_thread_op(session_id: str, thread_id: int) -> _EngineOp:
+def _select_thread_op(session_id: str, thread_id: int | None) -> _EngineOp:
     def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
         thread = engine.select_thread(attachment, thread_id=thread_id)
+        if thread is None:
+            return ToolResponse.success(
+                session_id,
+                "cleared",
+                suggested_next_actions=["debug.read_registers", "debug.list_threads"],
+                data={"thread_id": None},
+            )
         return ToolResponse.success(
             session_id,
             "selected",
@@ -101,7 +108,7 @@ def _register_debug_list_threads(
         target_id, details (QEMU puts the CPU number here: thread 2 is "CPU#1"), state, and the
         func and addr of the thread's innermost frame; data.truncated says whether rows were cut.
         data.current_thread_id is the thread gdb itself has current, which a stop moves.
-        data.selected_thread_id appears once debug.select_thread has chosen one; reads then use it.
+        data.selected_thread_id appears while debug.select_thread has one chosen; reads then use it.
         """
         return await run_engine_op_with_resolver(
             pool, current_context(), session_id, runtime, _list_threads_op(session_id)
@@ -121,21 +128,26 @@ def _register_debug_select_thread(
             str, Field(description="The live DebugSession whose CPU selection to set.")
         ],
         thread_id: Annotated[
-            int,
+            int | None,
             Field(
                 description=(
                     "Thread id to select: a positive integer from debug.list_threads data.threads."
+                    " Omit it or pass null to clear the selection."
                 )
             ),
-        ],
+        ] = None,
     ) -> ToolResponse:
-        """Select the guest CPU that later register and stack reads use. Requires contributor.
+        """Select (or clear) the guest CPU that register and stack reads use. Requires contributor.
 
         The target must be stopped first (halt it with debug.interrupt or hit a breakpoint).
-        Until the session ends, debug.read_registers, debug.backtrace and debug.read_frame read
-        the selected thread, even after a stop makes another thread current in gdb. The selection
-        belongs to the session, so every contributor on it shares it, and it cannot be cleared
-        except by starting a new session. data.thread_id and data.thread report the selection.
+        Until the selection is cleared or the session ends, debug.read_registers,
+        debug.backtrace and debug.read_frame read the selected thread, even after a stop makes
+        another thread current in gdb. The selection belongs to the session, so every contributor
+        on it shares it. data.thread_id and data.thread report the selection.
+
+        Omitting thread_id, or passing null, clears the selection: reads use gdb's current thread
+        again, nothing is selected, the status is cleared and data.thread_id is null. Clearing
+        when nothing is selected succeeds the same way.
 
         A thread_id that is not a positive integer fails with configuration_error (data.code
         bad_thread_id). An id gdb does not list fails with debug_attach_failure (data.code

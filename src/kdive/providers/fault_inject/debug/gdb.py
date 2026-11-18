@@ -149,7 +149,12 @@ class FaultInjectDebugEngine:
             selected_thread_id=attachment.selected_thread,
         )
 
-    def select_thread(self, attachment: GdbMiAttachment, *, thread_id: int) -> GdbThread:
+    def select_thread(
+        self, attachment: GdbMiAttachment, *, thread_id: int | None
+    ) -> GdbThread | None:
+        if thread_id is None:
+            attachment.selected_thread = None
+            return None
         if thread_id != 1:
             raise CategorizedError(
                 f"gdb lists no thread {thread_id}",
@@ -158,6 +163,9 @@ class FaultInjectDebugEngine:
             )
         attachment.selected_thread = "1"
         return _SYNTHETIC_THREAD
+
+    def read_thread_id(self, attachment: GdbMiAttachment) -> str:
+        return attachment.selected_thread or "1"
 
     def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrameDetail:
         del attachment
