@@ -32,12 +32,12 @@ Expected implementation size: 900–1100 changed lines (L) — source ~350 (port
 Interfaces. Consumes `TransportHandleData`, `run_ssh_with_retry`, `ssh_failure_details`, `Redactor`, `CategorizedError`. Provides:
 `FaultKnobState(present: bool, parameters: Mapping[str, int])` with `.armed -> bool`; `FAULT_KNOB_PARAMETERS: Mapping[str, tuple[str, ...]]`;
 `FaultInjectionInspector.read_state(self, *, transport_handle: str, key_path: str) -> dict[str, FaultKnobState]`;
-`LocalLibvirtFaultInjection(secret_registry, run_helper=None)` with `from_env(*, secret_registry)`.
-The seam `run_helper(transport_handle, key_path) -> tuple[int, bytes]` returns `(exit_code, stdout_capped_to_cap_plus_one)` and raises `CategorizedError(TRANSPORT_FAILURE)` for ssh exit 255 or a timeout.
+`LocalLibvirtFaultInjection(*, secret_registry, run_helper=None)`; the default seam is the real SSH exec, composition constructs it directly.
+The seam `run_helper(transport_handle, key_path) -> tuple[int, bytes]` returns `(exit_code, stdout_capped_to_cap_plus_one)` and raises `CategorizedError(TRANSPORT_FAILURE, details={reason, exit_status})` for ssh exit 255 or a timeout, with no stderr text.
 
 Verification:
-- Contract: reply parsing and validation. Mode: focused-test. `test_fault_inject.py::test_parse_*`; red: ImportError; green: `just test-verbose tests/providers/local_libvirt/test_fault_inject.py`. Cases: both knobs present; one absent; unknown knob key; missing parameter; bool or string value; extra top-level key; invalid JSON; over 4096 bytes.
-- Contract: exit-code mapping. Mode: focused-test, same file: exit 3/4/127 give the three `configuration_error` reasons, 255 `transport_failure`, 2/5/other `infrastructure_failure`; `armed` truth table (probability 0, times 0, times -1).
+- Contract: reply parsing and validation. Mode: focused-test. `test_fault_inject.py::test_parse_*`; red: ImportError; green: `just test-verbose tests/providers/local_libvirt/test_fault_inject.py`. Cases: a parameter table check against the helper's own `read` output (`FAULT_KNOB_PARAMETERS` equals the names `deploy/remote-libvirt-guest-helpers/kdive-faultinject` emits); error data holds no stderr text; both knobs present; one absent; unknown knob key; missing parameter; bool or string value; extra top-level key; invalid JSON; over 4096 bytes.
+- Contract: exit-code mapping. Mode: focused-test, same file: exit 3/4/127 and an all-absent reply give the three `configuration_error` reasons (one absent knob succeeds), 255 `transport_failure`, 2/5/other `infrastructure_failure`; `armed` truth table (probability 0, times 0, times -1).
 - Contract: redaction. Mode: focused-test: a registered secret in stdout is masked before parsing (reply then fails shape validation).
 - Contract: argv. Mode: focused-test in `test_introspect_drgn.py` (default program unchanged) and `test_fault_inject.py` (argv ends `-- /usr/local/sbin/kdive-faultinject read`, non-loopback handle refused).
 
@@ -45,22 +45,22 @@ Steps: write the tests, run red, implement the port module, the runtime field, t
 
 ## Task 2 — MCP handler, registration, composition
 
-Interfaces. Consumes Task 1 port; `SYSTEMS.get`, `require_role`, `authority_ssh_forward_port`, `resolver.binding_for_system`, `connector.recorded_ssh_endpoint`, `load_system_bootstrap_private_key`, `materialized_private_key`, `capability_unsupported`. Provides `inspect_faults(pool, ctx, system_id, *, resolver, secret_registry) -> ToolResponse` and `register(app, pool, *, resolver, secret_registry)`.
+Interfaces. Consumes Task 1 port; `SYSTEMS.get`, `require_role`, `_recorded_endpoint` from `mcp/tools/lifecycle/systems/ssh_access.py` (renamed `recorded_endpoint`, same signature, callers updated; it wraps `authority_ssh_forward_port`, `binding_for_system` and `recorded_ssh_endpoint`), `load_system_bootstrap_private_key`, `materialized_private_key`, `capability_unsupported`. The handler needs the binding's runtime, so it also calls `resolver.binding_for_system`. Provides `inspect_faults(pool, ctx, system_id, *, resolver, secret_registry) -> ToolResponse` and `register(app, pool, *, resolver, secret_registry)`.
 
 Verification:
 - Contract: handler behavior and error mapping. Mode: focused-test `tests/mcp/debug/test_faultinject_inspect.py`; red: ImportError; green: `just test-verbose tests/mcp/debug/test_faultinject_inspect.py`. Cases: success shape; invalid id; not found; foreign project; viewer allowed and a no-role caller denied; not ready; provider without port; no SSH forward; each port error propagates as its category and `data.reason`; the port runs via `asyncio.to_thread` with the key file removed after the call.
 - Contract: composition wiring. Mode: focused-test: extend the existing local-libvirt composition test to assert `runtime.fault_injection` is set and other providers' is `None`.
 - Contract: registration. Mode: focused-test `tests/mcp/core/test_app.py` tool list and `test_tool_docs.py`.
 
-Steps: tests red, implement handler and registrar, wire composition and `tool_registration.py`, green, lint, type, commit `feat(mcp): add faultinject.inspect (#3683)`.
+Steps: tests red, implement handler and registrar, wire composition and `tool_registration.py`; in the same commit add the exposure `_VIEWER` entry, the tool-index keywords and the `_BEHAVIOR_TESTS_BY_TOOL` entry so the registration guards stay green; green, lint, type, commit `feat(mcp): add faultinject.inspect (#3683)`.
 
-## Task 3 — Classification, docs, generated surfaces
+## Task 3 — Docs and generated surfaces
 
-Mode and contracts: exposure `_VIEWER`, tool index keywords, `_BEHAVIOR_TESTS_BY_TOOL` entry, reference docs, toolset, safety-and-rbac row, resources mirror, generated CLI verbs, obligations rows. Mode: focused-test: `just test-verbose tests/mcp/core/test_exposure.py tests/mcp/core/test_tool_docs.py tests/mcp/test_tool_index.py tests/guards`; red: the guards fail until each entry exists; plus the generator check recipes (`just docs-check`, `just cli-verbs-check` or the repository's equivalent, `just coverage-check`), run after regeneration. Commit `feat(mcp): classify and document faultinject.inspect (#3683)`.
+Mode and contracts: reference docs, toolset, safety-and-rbac row, resources mirror, generated CLI verbs. Mode: focused-test: `just docs-check`, `just cli-verbs-check` and `just resources-docs-check` are red until `just docs`/`just cli-verbs`/`just resources-docs` regenerate (the toolset and safety rows are written by hand); guards `just test-verbose tests/guards tests/mcp/core/test_tool_docs.py`. Commit `docs(mcp): document faultinject.inspect (#3683)`.
 
 ## Task 4 — Live cell and proof
 
-Contract: live_stack tool cell `tool/faultinject.inspect/default/{authentication,authorization,functional,project-isolation,validation}` bound in `tests/integration/live_stack/`, additive only. Mode: task-test-not-applicable for the cell source until run: it executes only on a live stack, so the focused observation is the live run itself; the structural binding is checked by `tests/integration/live_stack/test_tool_cells.py` in the ordinary suite. Live steps: rebuild a debug image with the helper, prove the image and both venvs carry the branch (grep a symbol only this branch adds), bring up the stack through `demo-up.sh`, provision a System, run the cell, then show the configuration_error path (guest without debugfs mounted or helper removed), tear down, record redacted evidence on the issue via `--body-file`.
+Contract: live_stack tool cell `tool/faultinject.inspect/default/{authentication,authorization,functional,project-isolation,validation}` bound in `tests/integration/live_stack/`, additive only. Mode: task-test-not-applicable for the cell source until run: it executes only on a live stack, so the focused observation is the live run itself; the structural binding is checked by `tests/integration/live_stack/test_tool_cells.py` in the ordinary suite. Obligations rows land in the same commit as the cell, checked by `just coverage-check`. Live steps: rebuild a debug image with the helper, prove the image and both venvs carry the branch (grep a symbol only this branch adds), bring up the stack through `demo-up.sh`, provision a System, run the cell, then show the configuration_error path (guest without debugfs mounted or helper removed), tear down, record redacted evidence on the issue via `--body-file`.
 
 ## Self-review
 

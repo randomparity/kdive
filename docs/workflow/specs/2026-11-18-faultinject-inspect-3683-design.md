@@ -29,14 +29,20 @@ Ownership: no transition. The optional port sits beside `domain_presence` on `Pr
   `{"present": false, "armed": false}`. `armed` is `probability > 0 and times != 0`.
 - Errors: unknown or foreign-project System `not_found`; invalid id the existing invalid-id error;
   System not `ready` `readiness_failure`; viewer role missing is denied by `require_role`;
-  provider without the port `configuration_error` `reason=capability_unsupported`; no SSH forward
+  provider without the port `configuration_error` `reason=capability_unsupported` with
+  `capability=fault_injection` and `supported=["local-libvirt"]`; no SSH forward
   `configuration_error` `reason=ssh_not_provisioned`; helper exit 3 `configuration_error`
-  `reason=debugfs_not_mounted`; exit 4 `reason=fault_injection_unsupported`; exit 127
-  `reason=helper_not_installed`; each with a remediation sentence; ssh exit 255 `transport_failure`;
-  other exit, reply over 4096 bytes, or invalid shape `infrastructure_failure`.
+  `reason=debugfs_not_mounted`; a reply with both knobs absent (the helper exits 0 for `read` with no
+  knob) or exit 4 `reason=fault_injection_unsupported`; exit 127 `reason=helper_not_installed`;
+  each with a remediation sentence; one absent knob is a successful read; ssh exit 255
+  `transport_failure`; other exit, reply over 4096 bytes, or invalid shape
+  `infrastructure_failure`. Error `data` holds only the closed `reason` and exit status, never ssh
+  stderr or guest text.
 - Limit contract: the helper reply is capped at 4096 bytes per call, applied to guest stdout before
   parsing; an over-cap reply is `infrastructure_failure` and a retry changes nothing; the tool
   never returns truncated data.
+- Timeouts: 15 s per SSH attempt, 10 s retry deadline (about 25 s worst case per call).
+- The docstring states that while a knob is armed the guest may fail this call itself.
 - `suggested_next_actions`: `["systems.get"]`. The reset tool is not named because it does not
   exist yet (#3684, recorded as a follow-up).
 - The wrapper docstring and `Field` text carry the contract above, including the definition of
@@ -50,8 +56,10 @@ Ownership: no transition. The optional port sits beside `domain_presence` on `Pr
 2. Invariants and assets: no caller text reaches argv or a path; the per-System bootstrap key is
    never logged or returned and its temp file is removed; the pool connection is not held across
    SSH; the response cannot exceed the byte bound or carry guest-authored strings.
-3. Accepted failure classes: worst-case 80 s thread block per call (bounded by the SSH retry
-   deadline plus one attempt, acceptable for a single read); a guest whose root has altered the
+3. Accepted failure classes: a thread block of about 25 s per call (retry deadline plus one attempt), no per-System
+   in-flight guard; stdout is buffered by `subprocess` before the 4096-byte cap, as on the drgn-live
+   path, because the guest is the operator-owned debug target; an armed knob can make this call
+   fail with `transport_failure` or `infrastructure_failure` (documented, recovery is #3684 reset); a guest whose root has altered the
    helper returns `infrastructure_failure` or arbitrary validated integers (the guest is the
    debug target, not a trust anchor); concurrent calls on one System run in parallel (reads only).
 4. Covered elsewhere: set/reset safety and a `times` cap (#3684); helper argv validation

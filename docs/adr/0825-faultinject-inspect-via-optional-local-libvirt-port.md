@@ -35,10 +35,17 @@ much of the helper's output reaches the agent.
   the redactor, and accepted only if it is the exact `{"knobs":{...}}` shape with the two
   allowlisted knobs, the closed parameter names for each, and integer values. The tool re-emits
   the validated integers plus a derived `armed` flag per knob; guest stderr is never returned.
-- **Error mapping.** Helper exit 3 or 4, and a missing program (exit 127), are
-  `configuration_error` with `data.reason` `debugfs_not_mounted`, `fault_injection_unsupported`
-  or `helper_not_installed` and a remediation sentence. SSH exit 255 is `transport_failure`.
-  Any other exit, an over-cap reply or an invalid reply is `infrastructure_failure`.
+- **Error mapping.** The fixed argv is `read` with no knob, which the helper answers with exit 0
+  and `{"present":false}` for a knob the kernel lacks (exit 4 is only reachable with a named
+  knob). So a reply with both knobs absent is `configuration_error`
+  `reason=fault_injection_unsupported`; one absent knob is a successful read. Helper exit 3 is
+  `debugfs_not_mounted`, exit 127 is `helper_not_installed`, and exit 4 is also mapped to
+  `fault_injection_unsupported` as a guard. Each carries a remediation sentence. SSH exit 255 is
+  `transport_failure`; any other exit, an over-cap reply or an invalid reply is
+  `infrastructure_failure`. Error `data` carries only a closed `reason` and the exit status, never
+  ssh stderr or guest text.
+- **Own timeout.** The read uses a 15 s per-attempt timeout and a 10 s retry deadline, not the
+  drgn-live 60 s and 20 s, so a stuck guest holds a thread for at most about 25 s.
 
 ## Consequences
 
@@ -48,8 +55,12 @@ much of the helper's output reaches the agent.
 - A caller at viewer can read root debugfs state through the System's bootstrap key. The read is
   one fixed argv with no caller text, and the state is not secret; set and reset stay out of
   scope.
-- `read_state` is synchronous and blocks a thread for up to the SSH retry deadline plus one
-  attempt (about 80 s worst case); concurrent calls are bounded by the thread pool, not by a lock.
+- `read_state` is synchronous and blocks a thread for at most the retry deadline plus one attempt
+  (about 25 s); concurrent calls are bounded by the thread pool, not by a lock. The 4096-byte
+  cap is applied after `subprocess` has buffered the guest stdout, as the drgn-live path does;
+  the guest is the operator-owned debug target.
+- While a knob is armed the guest may fail the SSH round trip itself (`transport_failure` or
+  `infrastructure_failure`); #3684's reset is the recovery, and the wrapper docstring says so.
 - A guest image built before #3694 has no helper; the tool reports `helper_not_installed`
   rather than failing opaquely.
 
@@ -58,14 +69,15 @@ much of the helper's output reaches the agent.
 - **Extend the `LiveIntrospector` port with a fault-injection method.** judgment: it is
   session-keyed and every provider adapter would have to implement or refuse a method that
   has nothing to do with drgn.
-- **Add a `ProviderSupport.supports_fault_injection` flag with parity.** judgment: the issue
-  excludes a new flag, and nothing outside this tool reads it yet; #3684 can add one if a
-  second reader appears.
-- **Enqueue a worker job like `systems.check_ssh_reachable`.** judgment: a single bounded read
-  has no long-running step, and a job would make the agent poll for a few integers.
-- **Run through a debug session (`introspect.script`).** judgment: that path needs a contributor
-  and an open drgn-live session and executes caller Python, which ADR-0822 rejected for writes
-  and which is wrong for a viewer-level read.
+- **Add a `ProviderSupport.supports_fault_injection` flag with parity.** verified: the charter
+  of #3683 excludes a new `ProviderSupport` flag (WORK:SCOPE exclusions, 2026-11-18), and
+  `rg supports_ src/kdive/mcp` shows no reader a second flag would serve.
+- **Enqueue a worker job like `systems.check_ssh_reachable`.** judgment: the read is one bounded
+  round trip of a few integers; a job adds queueing, a poll and a dedup key for no benefit.
+- **Run through a debug session (`introspect.script`).** verified: `introspect.script` is
+  `_docmeta.mutating()` and needs an open drgn-live session and contributor
+  (`mcp/tools/debug/introspection/registrar.py`), and ADR-0822 rejected the same route for
+  writes; it executes caller Python.
 - **Return the helper's JSON verbatim.** judgment: forwarding guest-controlled text makes the
   agent contract depend on the guest; a validated integer shape keeps the redactor and the byte
   bound meaningful.
