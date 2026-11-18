@@ -5,8 +5,7 @@
 Accepted (2026-11-18)
 
 Implementation is tracked by #3686 (port, tools, fault-inject), #3687 (libvirt) and #3688
-(PowerVM through the HMC). Nothing in this record is implemented yet. The device class below was
-put to the operator in the pull request before merge.
+(PowerVM through the HMC). Nothing in this record is implemented yet.
 
 ## Context
 
@@ -125,14 +124,19 @@ list foreign devices: kdive reports and removes only what it plugged, so the boo
 NIC cannot be unplugged by this surface.
 
 **System states and concurrency.** Plug and un-plug are admitted only on a `READY` System: a
-`PAUSED` guest has suspended vCPUs and cannot answer an eject, and every other state has no
-settled guest. They are allowed during a live Run, like snapshot. Admission takes the per-System
-advisory lock and refuses with `conflict` when another plug or un-plug job is active on the System.
-The exclusion runs both ways: `control.power`, `systems.snapshot`, `systems.restore`,
-`systems.reprovision` and `systems.teardown` refuse with `conflict` while a plug or un-plug job is
-queued or running, as `_active_snapshot_op` does for snapshot jobs, so provider calls on one domain
-never overlap. A System holds at most 8 ledger rows. The limits are chosen here because the issue
-asks for the tool's limit contract; the spec states all five parts.
+`PAUSED` guest has suspended vCPUs and cannot answer an eject, and every other state has no settled
+guest. They are allowed during a live Run, like snapshot. Admission takes the per-System advisory
+lock and refuses with `conflict` when another plug or un-plug job is active on the System. The
+exclusion runs both ways: `control.power`, `systems.snapshot`, `systems.restore`, and
+`systems.reprovision` refuse with `conflict` while a plug or un-plug job is queued or running, as
+`_active_snapshot_op` does for snapshot jobs, each check inside the System advisory lock. Teardown
+is exempt, so a stuck job cannot block reclaim: its `release_all` runs and a racing plug job finds
+the System gone and fails. The worker re-checks `READY` and the row at job start. Other domain-
+touching jobs (`force_crash`, SysRq, vmcore capture, debug) are not excluded; a provider fault from
+one surfaces as `INFRASTRUCTURE_FAILURE`. `READY` does not prove the guest runs (power OFF changes
+no System state), so the port raises `INFRASTRUCTURE_FAILURE` with `data.reason: domain_not_running`
+for a stopped domain. A System holds at most 8 ledger rows. The limits are chosen here because the
+issue asks for the tool's limit contract; the spec states all five parts.
 
 **Asynchronous completion and un-plug of a device in use.** The worker waits for the provider to
 settle: a `settled=False` plug or un-plug is polled with `is_attached` once a second, up to 60 s for
@@ -140,15 +144,16 @@ plug and 30 s for un-plug, measured on the worker's monotonic clock from the sta
 call. At the deadline the job fails `CONTROL_FAILURE` with `data.reason: settle_timeout` and the row
 becomes `failed`. An operator `jobs.cancel` mid-call is the same case as a dead worker: the row
 stays `plugging` or `unplugging` until the reconciler repair fails it. A guest that holds the device
-either gets an explicit provider refusal (`unplug_refused`, the row returns to `attached`) or never
-answers (`settle_timeout`, the row becomes `failed`); the device stays in the guest in both cases.
-Retrying `systems.unplug_device` on a `failed` row is safe and removes the row once the device is
-gone.
+either gets an explicit provider refusal (`unplug_refused`; the row returns to the state the un-plug
+started from) or never answers (`settle_timeout`, the row becomes `failed`); the device stays in the
+guest in both cases. Retrying `systems.unplug_device` on a `failed` row is safe and removes the row
+once the device is gone.
 
-**What invalidates the ledger.** The `systems` row survives teardown and reprovision, so no
-cascade fires: their workers call `release_all` best effort and delete the System's ledger rows,
-as they do for snapshots (`delete_snapshots_for_system`). A `control.power` OFF or CYCLE, and
-a snapshot restore, replace the running device set: when they succeed, their worker moves the
+**What invalidates the ledger.** The `systems` row survives teardown and reprovision, so no cascade
+fires: their workers, and the system-reclaim job that calls `delete_snapshots_for_system`, call
+`release_all` best effort and delete the System's ledger rows. A plug the port rejects with
+`configuration_error` deletes its row, since nothing was attached. A `control.power` OFF or CYCLE,
+and a snapshot restore, replace the running device set: when they succeed, their worker moves the
 System's `attached` rows to `lost`. `unplug_device` on a `lost` row takes the normal path: the
 provider finds the device absent, frees any backing volume, and the row is deleted. The reconciler
 moves a `plugging` or `unplugging` row with no active job to `failed` (`repair_stalled_device_ops`),
