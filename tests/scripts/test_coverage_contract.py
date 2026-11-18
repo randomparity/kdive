@@ -858,7 +858,7 @@ def test_debug_owners_and_carrier_follow_the_approved_split(inventory: Inventory
     cells = [
         c for c in build_contract(inventory=inventory).cells if c.operation.startswith("debug.")
     ]
-    assert len({c.operation for c in cells}) == 21
+    assert len({c.operation for c in cells}) == 23
     for cell in cells:
         expected = (
             2818
@@ -871,12 +871,12 @@ def test_debug_owners_and_carrier_follow_the_approved_split(inventory: Inventory
     local = [c for c in cells if c.provider == "local-libvirt"]
     owned = [c for c in local if c.owner == 2813]
     kinds = Counter(c.kind for c in owned)
-    assert (len(owned), kinds["functional"], kinds["rejection"]) == (440, 88, 352)
+    assert (len(owned), kinds["functional"], kinds["rejection"]) == (480, 96, 384)
     assert not [c for c in owned if c.id.endswith("/capability")]
-    assert len(local) == 880 and {c.node_id for c in local} == {_DEBUG_NODE}
+    assert len(local) == 960 and {c.node_id for c in local} == {_DEBUG_NODE}
     remote = [c for c in cells if c.provider == "remote-libvirt"]
     # As for local: the remote ppc64le cells (#2818's) share the provider-qualified ids.
-    assert len(remote) == 880 and {c.node_id for c in remote} == {_DEBUG_NODE}
+    assert len(remote) == 960 and {c.node_id for c in remote} == {_DEBUG_NODE}
 
 
 _CLI_GROUPS = (2811, *_SPLIT)
