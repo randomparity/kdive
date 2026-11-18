@@ -27,8 +27,8 @@ the Ansible `guest_base_image` helper list. Its contract:
   never joined into a path from caller text.
 - Parameters and bounds (min..max, `reset` default): `probability` 0..100 (0), `interval`
   1..1000000 (1), `times` -1..1000000 (1), `space` 0..1073741824 (0), `verbose` 0..2 (2), and for
-  `fail_page_alloc` only `min-order` 0..10 (0). The defaults are the kernel's compiled-in
-  `FAULT_ATTR_INITIALIZER` values (`include/linux/fault-inject.h`). A value matches
+  `fail_page_alloc` only `min-order` 0..10 (1). The defaults are the kernel's compiled-in
+  `FAULT_ATTR_INITIALIZER` values (`include/linux/fault-inject.h`) and, for `min-order`, the `.min_order = 1` in `mm/fail_page_alloc.c`. A value matches
   `^(-1|0|[1-9][0-9]{0,9})$` and then its range; each parameter may appear once and `set` needs at
   least one pair. `task-filter` and the gfp flags are not exposed.
 - Every pair is validated before any write, so a rejected `set` writes nothing. `set` writes

@@ -40,7 +40,7 @@ param_bounds() { # <param> -> "min max default"
   times) echo "-1 1000000 1" ;;
   space) echo "0 1073741824 0" ;;
   verbose) echo "0 2 2" ;;
-  min-order) echo "0 10 0" ;;
+  min-order) echo "0 10 1" ;;
   esac
 }
 

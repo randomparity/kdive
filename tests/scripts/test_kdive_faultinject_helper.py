@@ -25,7 +25,7 @@ DEFAULTS = {
     "times": 1,
     "space": 0,
     "verbose": 2,
-    "min-order": 0,
+    "min-order": 1,
 }
 BOUNDS = {
     "probability": (0, 100),
