@@ -1668,6 +1668,12 @@ remote-libvirt cells (#3080), which block without a provider host, so select the
   exposure, proves its effect against the worker's libvirt domain and the guest, then releases the
   allocation and proves the domain undefined, the disks gone and capacity returned. The
   `systems.provision` cell provisions through the cell's exposure itself.
+- `faultinject.inspect` (#3683, ADR-0825) is a local-libvirt cell of this file with no remote
+  counterpart: the remote cells are the contract's capability_unsupported refusal and stay
+  unbound. Its functional cell calls the tool at viewer and compares each knob with the guest's
+  own `/sys/kernel/debug/<knob>` files read over SSH. It needs a staged `fedora-kdive-ready-44`
+  built after #3694, because an older image has no `kdive-faultinject` and the tool then answers
+  `helper_not_installed`.
 - A rejection cell aims at one target per stack: a System provisioned, observed, torn down and
   released by the first rejection cell, whose project then must not change. Every role check of
   these tools runs before any state check, so a torn-down System and a released Allocation are
