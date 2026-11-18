@@ -1,0 +1,153 @@
+#!/bin/bash
+# kdive-faultinject — reviewed in-guest helper for the debugfs fault-injection knobs (ADR-0822).
+#
+# Installed at /usr/local/sbin/kdive-faultinject and invoked with fixed argv, never a shell string.
+# It is the only kdive program that writes guest debugfs: knob and parameter names are a closed
+# allowlist and every value is a bounded integer, so no caller text reaches a path or a write.
+#
+#   read [knob]                 Print {"knobs":{"<knob>":{"present":true,<param>:<int>,…}}}. With no
+#                               knob, every allowlisted knob; an absent one is {"present":false}.
+#   set <knob> <param>=<int>…   Validate every pair, then write them (probability last); print state.
+#   reset [knob]                Write the kernel defaults of the exposed parameters (probability
+#                               first); print state.
+#
+# Knobs: failslab, fail_page_alloc. Exit codes: 0 ok; 2 usage, unknown knob or parameter, bad or
+# out-of-range value (nothing written); 3 debugfs not mounted; 4 knob directory absent from the
+# kernel; 5 a parameter file is unreadable, unwritable or not an integer. Every failure also prints
+# {"error":"<code>","detail":"…"} on stderr.
+set -euo pipefail
+
+# A test seam: callers pass argv only and must not forward this variable.
+debugfs_root="${FAULTINJECT_DEBUGFS_ROOT:-/sys/kernel/debug}"
+
+die() { # die <exit-code> <error-code> <detail>
+  printf '{"error":"%s","detail":"%s"}\n' "$2" "$3" >&2
+  exit "$1"
+}
+
+knob_params() { # the parameters a knob exposes, in write order (probability is first)
+  case "$1" in
+  failslab) echo "probability interval times space verbose" ;;
+  fail_page_alloc) echo "probability interval times space verbose min-order" ;;
+  *) die 2 unknown_knob "unknown knob (expected failslab|fail_page_alloc)" ;;
+  esac
+}
+
+param_bounds() { # <param> -> "min max default"
+  case "$1" in
+  probability) echo "0 100 0" ;;
+  interval) echo "1 1000000 1" ;;
+  times) echo "-1 1000000 1" ;;
+  space) echo "0 1073741824 0" ;;
+  verbose) echo "0 2 2" ;;
+  min-order) echo "0 10 0" ;;
+  esac
+}
+
+require_debugfs() {
+  [ -n "$(ls -A "$debugfs_root" 2>/dev/null)" ] ||
+    die 3 debugfs_not_mounted "debugfs is not mounted at $debugfs_root"
+}
+
+knob_present() { [ -d "$debugfs_root/$1" ]; }
+
+require_knob() {
+  knob_present "$1" || die 4 knob_absent "$1 is absent from this kernel (CONFIG_FAULT_INJECTION)"
+}
+
+is_int() { [[ "$1" =~ ^(-1|0|[1-9][0-9]{0,9})$ ]]; }
+
+knob_json() { # one present knob's state as a JSON object
+  local knob="$1" param value out='{"present":true'
+  for param in $(knob_params "$knob"); do
+    value="$(tr -d '\n' <"$debugfs_root/$knob/$param" 2>/dev/null)" ||
+      die 5 debugfs_io "cannot read $knob/$param"
+    is_int "$value" || die 5 unparseable_value "$knob/$param is not an integer"
+    out+=",\"$param\":$value"
+  done
+  printf '%s}' "$out"
+}
+
+print_state() { # print_state <knob>…
+  local knob sep="" out='{"knobs":{'
+  for knob in "$@"; do
+    out+="$sep\"$knob\":"
+    if knob_present "$knob"; then out+="$(knob_json "$knob")"; else out+='{"present":false}'; fi
+    sep=","
+  done
+  printf '%s}}\n' "$out"
+}
+
+write_param() { # write_param <knob> <param> <int>
+  [ -f "$debugfs_root/$1/$2" ] || die 5 debugfs_io "$1/$2 is missing"
+  printf '%s\n' "$3" >"$debugfs_root/$1/$2" 2>/dev/null || die 5 debugfs_io "cannot write $1/$2"
+}
+
+cmd_read() {
+  [ "$#" -le 1 ] || die 2 usage "usage: read [knob]"
+  if [ "$#" -eq 1 ]; then knob_params "$1" >/dev/null; fi
+  require_debugfs
+  if [ "$#" -eq 1 ]; then
+    require_knob "$1"
+    print_state "$1"
+  else
+    print_state failslab fail_page_alloc
+  fi
+}
+
+cmd_set() {
+  [ "$#" -ge 2 ] || die 2 usage "usage: set <knob> <param>=<int>…"
+  local knob="$1" pair param value min max _default allowed seen=" "
+  local -A wanted=()
+  shift
+  allowed=" $(knob_params "$knob") "
+  for pair in "$@"; do
+    [[ "$pair" == ?*=* ]] || die 2 usage "expected <param>=<int>"
+    param="${pair%%=*}" value="${pair#*=}"
+    [[ "$allowed" == *" $param "* ]] || die 2 unknown_param "$knob has no such parameter"
+    [[ "$seen" != *" $param "* ]] || die 2 usage "parameter given twice: $param"
+    seen+="$param "
+    is_int "$value" || die 2 bad_value "$param must match -1|0|[1-9][0-9]{0,9}"
+    read -r min max _default <<<"$(param_bounds "$param")"
+    { [ "$value" -ge "$min" ] && [ "$value" -le "$max" ]; } ||
+      die 2 out_of_range "$param=$value outside $min..$max"
+    wanted[$param]="$value"
+  done
+  require_debugfs
+  require_knob "$knob"
+  for param in $(knob_params "$knob"); do
+    if [ "$param" != probability ] && [ -n "${wanted[$param]+x}" ]; then
+      write_param "$knob" "$param" "${wanted[$param]}"
+    fi
+  done
+  if [ -n "${wanted[probability]+x}" ]; then write_param "$knob" probability "${wanted[probability]}"; fi
+  print_state "$knob"
+}
+
+cmd_reset() {
+  [ "$#" -le 1 ] || die 2 usage "usage: reset [knob]"
+  local knobs=(failslab fail_page_alloc) knob param min max default
+  if [ "$#" -eq 1 ]; then
+    knob_params "$1" >/dev/null
+    knobs=("$1")
+  fi
+  require_debugfs
+  if [ "$#" -eq 1 ]; then require_knob "$1"; fi
+  for knob in "${knobs[@]}"; do
+    knob_present "$knob" || continue
+    for param in $(knob_params "$knob"); do
+      read -r min max default <<<"$(param_bounds "$param")"
+      write_param "$knob" "$param" "$default"
+    done
+  done
+  print_state "${knobs[@]}"
+}
+
+subcommand="${1:-}"
+if [ "$#" -gt 0 ]; then shift; fi
+case "$subcommand" in
+read) cmd_read "$@" ;;
+set) cmd_set "$@" ;;
+reset) cmd_reset "$@" ;;
+*) die 2 usage "unknown subcommand: expected read|set|reset" ;;
+esac

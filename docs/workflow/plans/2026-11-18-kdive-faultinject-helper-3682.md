@@ -57,6 +57,7 @@ Files: `_fedora_customize.py` adds, beside the drgn constants,
 FAULTINJECT_HELPER_GUEST_PATH = "/usr/local/sbin/kdive-faultinject"
 FAULTINJECT_HELPER_REPO_RELPATH = ("deploy", "remote-libvirt-guest-helpers", "kdive-faultinject")
 
+
 def faultinject_helper_source() -> Path: ...
 def faultinject_helper_steps() -> list[Step]: ...
 ```
