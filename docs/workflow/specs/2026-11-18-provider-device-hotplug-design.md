@@ -66,7 +66,9 @@ target row is `plugging`/`unplugging`), and, for plug only, `device_limit` (8 ro
 denial is `authorization_denied`. Both mutating tools are audited with `transition` `plug_device` /
 `unplug_device`.
 
-The wrapper docstrings must carry the limits below. Both job kinds join `ACTIVE_JOB_KINDS` and
+The wrapper docstrings must carry the limits below. Both job kinds enqueue with `max_attempts=1`
+(the port's categories are retryable, and a re-run would meet a row already moved to `failed`); a
+worker crash is covered by the reconciler repair. Both job kinds join `ACTIVE_JOB_KINDS` and
 `STATE_FENCED_JOB_KINDS`, are not in `CONTRIBUTOR_CANCELABLE_JOB_KINDS`, and register handlers in
 `jobs/assembly.py`.
 
@@ -103,7 +105,8 @@ The worker sets `settle_deadline` when it starts the job, and commits `provider_
 `identity` as soon as `plug` returns, before it polls. `unplug` returning `False` means accepted and
 not settled, so the worker polls `is_attached`; a retried job whose row is already deleted succeeds,
 and one whose row is `failed` proceeds. Teardown, reprovision and the system-reclaim job call
-`release_all` best effort and delete the System's rows with a new `delete_devices_for_system`,
+`release_all` best effort and delete the System's rows with a new `delete_devices_for_system`
+(system-reclaim runs it under its own flag, as `reclaim_snapshot_ledger` gates the snapshot delete),
 called beside `delete_snapshots_for_system`; the foreign-key cascade only covers the eventual
 System-row delete. `repair_stalled_device_ops` (reconciler) moves `plugging`/`unplugging` rows that
 have no active job of the matching kind to `failed`, without provider I/O. The power worker and the
@@ -150,8 +153,9 @@ domain absent), `CONFIGURATION_ERROR` + `unknown_network`. No new `ErrorCategory
    power cycles; disk space is not charged to a quota; a plug racing teardown can orphan a volume
    that `release_all` ran too early to see; a guest that ignores an eject shows as `settle_timeout`,
    not as a distinct state.
-4. Covered elsewhere: forced un-plug, pre-existing volumes, PCIe and SR-IOV, vFC and CPU/memory hot-plug are unowned deferrals (ADR-0823); PowerVM transport is #1822 and #1818; real-POWER proof is
-   the `verification:ppc64le` gate on #3688.
+4. Covered elsewhere: forced un-plug, pre-existing volumes, PCIe and SR-IOV, vFC and CPU/memory
+   hot-plug are unowned deferrals (ADR-0823); PowerVM transport is #1822 and #1818; real-POWER proof
+   is the `verification:ppc64le` gate on #3688.
 
 ## Child issues
 

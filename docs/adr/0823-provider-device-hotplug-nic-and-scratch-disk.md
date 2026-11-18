@@ -131,19 +131,21 @@ exclusion runs both ways: `control.power`, `systems.snapshot`, `systems.restore`
 `systems.reprovision` refuse with `conflict` while a plug or un-plug job is queued or running, as
 `_active_snapshot_op` does for snapshot jobs, each check inside the System advisory lock. Teardown
 is exempt, so a stuck job cannot block reclaim: its `release_all` runs and a racing plug job finds
-the System gone and fails. The worker re-checks `READY` and the row at job start. Other jobs that touch
-the domain (`force_crash`, SysRq, vmcore capture, debug) are not excluded; a provider fault from
-one surfaces as `INFRASTRUCTURE_FAILURE`. `READY` does not prove the guest runs (power OFF changes
-no System state), so the port raises `INFRASTRUCTURE_FAILURE` with `data.reason: domain_not_running`
-for a stopped domain. A System holds at most 8 ledger rows. The limits are chosen here because the
-issue asks for the tool's limit contract; the spec states all five parts.
+the System gone and fails. The worker re-checks `READY` and the row at job start. Other jobs that
+touch the domain (`force_crash`, SysRq, vmcore capture, debug) are not excluded; a provider fault
+from one surfaces as `INFRASTRUCTURE_FAILURE`. `READY` does not prove the guest runs (power OFF
+changes no System state), so the port raises `INFRASTRUCTURE_FAILURE` with `data.reason:
+domain_not_running` for a stopped domain. A System holds at most 8 ledger rows. The limits are
+chosen here because the issue asks for the tool's limit contract; the spec states all five parts.
 
 **Asynchronous completion and un-plug of a device in use.** The worker waits for the provider to
 settle: a `settled=False` plug or un-plug is polled with `is_attached` once a second, up to 60 s for
 plug and 30 s for un-plug, measured on the worker's monotonic clock from the start of the provider
 call. At the deadline the job fails `CONTROL_FAILURE` with `data.reason: settle_timeout` and the row
-becomes `failed`. An operator `jobs.cancel` mid-call is the same case as a dead worker: the row
-stays `plugging` or `unplugging` until the reconciler repair fails it. A guest that holds the device
+becomes `failed`. Both job kinds enqueue with `max_attempts=1`: a failure is recorded on the row and
+the agent retries by tool call, never by an automatic re-run against a row that already says
+`failed`. An operator `jobs.cancel` mid-call is the same case as a dead worker: the row stays
+`plugging` or `unplugging` until the reconciler repair fails it. A guest that holds the device
 either gets an explicit provider refusal (`unplug_refused`; the row returns to the state the un-plug
 started from) or never answers (`settle_timeout`, the row becomes `failed`); the device stays in the
 guest in both cases. Retrying `systems.unplug_device` on a `failed` row is safe and removes the row
