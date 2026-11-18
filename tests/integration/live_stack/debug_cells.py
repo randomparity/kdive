@@ -94,12 +94,14 @@ TOOLS = (
     "debug.list_breakpoints",
     "debug.list_modules",
     "debug.list_sessions",
+    "debug.list_threads",
     "debug.list_watchpoints",
     "debug.load_module_symbols",
     "debug.read_frame",
     "debug.read_memory",
     "debug.read_registers",
     "debug.resolve_symbol",
+    "debug.select_thread",
     "debug.set_breakpoint",
     "debug.set_watchpoint",
     "debug.start_session",
@@ -122,6 +124,7 @@ _EXTRA: dict[str, dict[str, object]] = {
     "debug.read_memory": {"address": 4096, "byte_count": 8},
     "debug.read_registers": {"registers": ["rip"]},
     "debug.resolve_symbol": {"name": "vfs_read"},
+    "debug.select_thread": {"thread_id": 1},
     "debug.set_breakpoint": {"location": "vfs_read"},
     "debug.set_watchpoint": {"symbol": "jiffies_64", "byte_count": 8},
 }
@@ -1066,6 +1069,54 @@ async def read_frame_body(s: Session) -> dict[str, object]:
     }
 
 
+def _thread_ids(env: ToolResponse) -> list[str]:
+    listed = env.data.get("threads")
+    assert isinstance(listed, list) and listed, "no threads listed"
+    rows = [cast(dict[str, Any], t) for t in listed if isinstance(t, dict)]
+    ids = [str(t.get("id")) for t in rows]
+    assert env.data.get("thread_count") == len(ids), "thread_count differs from the rows"
+    assert ids == [str(n) for n in range(1, len(ids) + 1)], f"thread ids are {ids}"
+    for row in rows:
+        cpu = int(str(row["id"])) - 1
+        assert str(row.get("details", "")).startswith(f"CPU#{cpu} "), f"thread row is {row}"
+    return ids
+
+
+async def list_threads_body(s: Session) -> dict[str, object]:
+    """Every gdbstub thread is listed as one vCPU, and gdb's current thread is one of them."""
+    session_id = await s.start()
+    await s.stop_in_vfs_read(session_id)
+    env = await s.exposed(session_id=session_id)
+    await s.end(session_id)
+    ids = _thread_ids(env)
+    assert env.data.get("current_thread_id") in ids, "the current thread is not listed"
+    assert "selected_thread_id" not in env.data, "a thread is selected before any selection"
+    return {"threads": len(ids), "cpu_numbers_match": True}
+
+
+async def select_thread_body(s: Session) -> dict[str, object]:
+    """A selection is reported, read registers follow it, and an unlisted id is refused."""
+    session_id = await s.start()
+    rip = await s.stop_in_vfs_read(session_id)
+    listing = await s.op("debug.list_threads", session_id=session_id)
+    ids = _thread_ids(listing)
+    current = str(listing.data["current_thread_id"])
+    env = await s.exposed(session_id=session_id, thread_id=int(current))
+    assert env.status == "selected" and env.data.get("thread_id") == current, "not selected"
+    assert await s.register(session_id) == rip, "the current thread's rip changed"
+    other = next((n for n in ids if n != current), None)
+    if other is not None:
+        await s.op("debug.select_thread", session_id=session_id, thread_id=int(other))
+        assert await s.register(session_id, "rsp") >= KERNEL_BASE, "rsp is not a kernel address"
+        after = await s.op("debug.list_threads", session_id=session_id)
+        assert after.data.get("selected_thread_id") == other, "the selection is not reported"
+    refused = await s.raw("debug.select_thread", session_id=session_id, thread_id=len(ids) + 1000)
+    await s.end(session_id)
+    assert refused.error_category == ErrorCategory.DEBUG_ATTACH_FAILURE.value, "unlisted accepted"
+    assert refused.data.get("code") == "unknown_thread", f"refused with {refused.data}"
+    return {"threads": len(ids), "selected": other or current, "unknown_refused": True}
+
+
 def _module_row(env: ToolResponse) -> dict[str, Any]:
     listed = env.data.get("modules")
     assert isinstance(listed, list), "no modules listed"
@@ -1117,12 +1168,14 @@ BODIES: dict[str, Callable[[Session], Awaitable[dict[str, object]]]] = {
     "debug.list_breakpoints": list_breakpoints_body,
     "debug.list_modules": list_modules_body,
     "debug.list_sessions": list_body,
+    "debug.list_threads": list_threads_body,
     "debug.list_watchpoints": list_watchpoints_body,
     "debug.load_module_symbols": load_module_symbols_body,
     "debug.read_frame": read_frame_body,
     "debug.read_memory": read_memory_body,
     "debug.read_registers": read_registers_body,
     "debug.resolve_symbol": resolve_body,
+    "debug.select_thread": select_thread_body,
     "debug.set_breakpoint": set_breakpoint_body,
     "debug.set_watchpoint": set_watchpoint_body,
     "debug.start_session": start_body,

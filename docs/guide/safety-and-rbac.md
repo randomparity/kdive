@@ -106,12 +106,14 @@ visible to every authenticated token regardless of grants.
 | `debug.list_breakpoints` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.list_modules` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.list_sessions` | viewer | ✓ | ✓ | ✓ | ✓ |  |  |  |
+| `debug.list_threads` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.list_watchpoints` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.load_module_symbols` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.read_frame` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.read_memory` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.read_registers` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.resolve_symbol` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
+| `debug.select_thread` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.set_breakpoint` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.set_watchpoint` | contributor |  | ✓ | ✓ | ✓ |  |  |  |
 | `debug.start_session` | contributor |  | ✓ | ✓ | ✓ |  |  |  |

@@ -162,6 +162,8 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "debug.resolve_symbol": _CONTRIBUTOR,
     "debug.backtrace": _CONTRIBUTOR,
     "debug.read_frame": _CONTRIBUTOR,
+    "debug.list_threads": _CONTRIBUTOR,
+    "debug.select_thread": _CONTRIBUTOR,
     "debug.disassemble": _CONTRIBUTOR,
     "debug.set_watchpoint": _CONTRIBUTOR,
     "debug.list_watchpoints": _CONTRIBUTOR,

@@ -160,6 +160,8 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "debug.resolve_symbol": frozenset({"symbol", "resolve", "address", "lookup", "debug"}),
     "debug.backtrace": frozenset({"backtrace", "stack", "frames", "call", "trace", "unwind"}),
     "debug.read_frame": frozenset({"frame", "stack", "inspect", "select", "backtrace", "debug"}),
+    "debug.list_threads": frozenset({"threads", "cpus", "cpu", "vcpu", "list", "debug"}),
+    "debug.select_thread": frozenset({"thread", "cpu", "vcpu", "select", "core", "debug"}),
     "debug.disassemble": frozenset(
         {"disassemble", "disasm", "instructions", "asm", "opcodes", "code"}
     ),

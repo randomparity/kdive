@@ -203,6 +203,24 @@ List the caller's debug sessions, filterable by run/system/project/state. Viewer
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 
+## `debug.list_threads`
+
+`implemented` · `read-only`
+
+List the guest CPUs (gdbstub threads) on a live DebugSession. Requires contributor.
+
+The target must be stopped first (halt it with debug.interrupt or hit a breakpoint).
+
+data.threads holds up to 128 rows, each an id (a positive integer string), gdb's
+target_id, details (QEMU puts the CPU number here: thread 2 is "CPU#1"), state, and the
+func and addr of the thread's innermost frame; data.truncated says whether rows were cut.
+data.current_thread_id is the thread gdb itself has current, which a stop moves.
+data.selected_thread_id appears once debug.select_thread has chosen one; reads then use it.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | string | yes | The live DebugSession whose gdbstub CPUs to list. |
+
 ## `debug.list_watchpoints`
 
 `implemented` · `read-only`
@@ -287,6 +305,28 @@ Resolve a kernel symbol to its address on a live DebugSession. Requires contribu
 |---|---|---|---|
 | `name` | string | yes | Bare C global or function symbol name to resolve to its address (e.g. 'd_hash_shift'). Read its value with debug.read_memory. This resolves an address only; to read a struct field or array member by name (some_struct->field[3].member), use the drgn path introspect.script instead. |
 | `session_id` | string | yes | The live DebugSession to resolve the symbol on. |
+
+## `debug.select_thread`
+
+`implemented`
+
+Select the guest CPU that later register and stack reads use. Requires contributor.
+
+The target must be stopped first (halt it with debug.interrupt or hit a breakpoint).
+Until the session ends, debug.read_registers, debug.backtrace and debug.read_frame read
+the selected thread, even after a stop makes another thread current in gdb. The selection
+belongs to the session, so every contributor on it shares it, and it cannot be cleared
+except by starting a new session. data.thread_id and data.thread report the selection.
+
+A thread_id that is not a positive integer fails with configuration_error (data.code
+bad_thread_id). An id gdb does not list fails with debug_attach_failure (data.code
+unknown_thread), as does a later read once the selected thread has gone away; call
+debug.list_threads and select again.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | string | yes | The live DebugSession whose CPU selection to set. |
+| `thread_id` | integer | yes | Thread id to select: a positive integer from debug.list_threads data.threads. |
 
 ## `debug.set_breakpoint`
 

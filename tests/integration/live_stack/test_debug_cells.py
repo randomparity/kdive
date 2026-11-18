@@ -130,7 +130,7 @@ def _cells(provider: str = "local-libvirt") -> list[Cell]:
 @pytest.mark.parametrize("provider", ["local-libvirt", REMOTE])
 def test_rejection_covers_every_boundary_of_every_tool(provider: str) -> None:
     cells = [c for c in _cells(provider) if c.kind == "rejection"]
-    assert len(cells) == 352
+    assert len(cells) == 384
     assert not [c for c in cells if c.id.endswith("/capability")]
     pairs = {(c.operation, boundary_of(c), variant_of(c)) for c in cells}
     assert {tool for tool, _, _ in pairs} == set(TOOLS)

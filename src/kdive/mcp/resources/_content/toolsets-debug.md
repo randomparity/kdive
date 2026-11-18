@@ -62,6 +62,8 @@ halted. Use `out`, or a breakpoint and `debug.continue`, there. End the session 
 
 ## Inspecting state
 
+- `debug.list_threads` — list the guest CPUs (gdbstub threads) and which one reads use.
+- `debug.select_thread` — choose the CPU that register and stack reads act on.
 - `debug.read_registers` — read the CPU registers at the halt.
 - `debug.read_memory` — read kernel memory at an address.
 - `debug.resolve_symbol` — resolve a symbol name to an address.
