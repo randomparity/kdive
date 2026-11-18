@@ -19,8 +19,8 @@ itself race another contributor (#3691).
 ## Decision
 
 **Clear.** `debug.select_thread` takes `thread_id: int | None`. `null` sets the attachment's
-`selected_thread` to `None` and sends no MI command, so it needs no stopped target and cannot
-fail on gdb state. The result has status `cleared` and `data={"thread_id": null}`. Later reads
+`selected_thread` to `None` and sends no MI command, so no gdb state can fail it. Like every
+other op it is refused while the guest runs. The result has status `cleared` and `data={"thread_id": null}`. Later reads
 omit `--thread`, as they do before any selection, and `debug.list_threads` omits
 `selected_thread_id`. Clearing with nothing selected succeeds and reports the same result. A
 positive integer behaves as in ADR-0819; every other value keeps `bad_thread_id`. The call is

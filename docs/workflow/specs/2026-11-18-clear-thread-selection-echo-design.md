@@ -33,7 +33,7 @@ omitting it clears), toolset docs and resource content follow.
 1. Actors and deployments: unchanged from ADR-0819's spec (contributor on a live gdbstub session;
    local and remote libvirt engines; x86_64 and ppc64le).
 2. Invariants: results of a session that never selected a thread differ only by `thread_id`; no
-   schema change; clearing sends no MI command; `bad_thread_id` still precedes any MI command.
+   schema change; clearing sends no MI command and, like every op, is refused while the guest runs; `bad_thread_id` still precedes any MI command.
 3. Accepted: the selection is still shared per session and ends at re-attach; the id echoed names
    the CPU asked for, and a thread that vanished still fails as `unknown_thread` (registers) or
    by gdb's own error; one extra `-thread-list-ids` per unselected read.
