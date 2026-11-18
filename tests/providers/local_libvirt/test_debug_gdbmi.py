@@ -3011,3 +3011,136 @@ def test_actual_attach_validates_target_and_cleans_up_failure(
         assert attachment.controller is controller
         assert not controller.exited
     assert target in controller.written
+
+
+def _thread_row(thread: str, cpu: int) -> dict[str, object]:
+    """A QEMU gdbstub ``-thread-info`` row as gdb 17.2 prints it: CPU only in ``details``."""
+    return {
+        "id": thread,
+        "target-id": f"Thread 1.{thread}",
+        "details": f"CPU#{cpu} [halted ]",
+        "state": "stopped",
+        "frame": {"level": "0", "addr": "0x000000000000fff0", "func": "??"},
+    }
+
+
+def _thread_controller(*rows: dict[str, object]) -> _FakeMiController:
+    return _FakeMiController(
+        responses={
+            "-thread-info": _done({"threads": list(rows), "current-thread-id": "2"}),
+            "-thread-info 2": _done({"threads": [_thread_row("2", 1)]}),
+            "-thread-info 9": _done({"threads": []}),
+        }
+    )
+
+
+def test_list_threads_returns_threads_and_current(tmp_path: Path) -> None:
+    controller = _thread_controller(_thread_row("1", 0), _thread_row("2", 1))
+    listing = _engine().list_threads(_attachment(controller, tmp_path))
+    assert [t.id for t in listing.threads] == ["1", "2"]
+    assert listing.threads[1].details == "CPU#1 [halted ]"
+    assert listing.threads[1].func == "??"
+    assert (listing.current_thread_id, listing.selected_thread_id) == ("2", None)
+    assert listing.truncated is False
+
+
+def test_list_threads_truncates_at_max(tmp_path: Path) -> None:
+    rows = [_thread_row(str(n), n - 1) for n in range(1, 131)]
+    listing = _engine().list_threads(_attachment(_thread_controller(*rows), tmp_path))
+    assert len(listing.threads) == 128
+    assert listing.truncated is True
+
+
+@pytest.mark.parametrize(
+    ("payload", "code"),
+    [
+        (None, "malformed_thread_info"),
+        ({"threads": "not-a-list"}, "malformed_thread_info"),
+        ({"threads": [{"id": "x"}]}, "malformed_thread_info"),
+        ({"threads": []}, "no_threads"),
+    ],
+)
+def test_list_threads_malformed(
+    payload: dict[str, object] | None, code: str, tmp_path: Path
+) -> None:
+    controller = _FakeMiController(responses={"-thread-info": _done(payload)})
+    with pytest.raises(CategorizedError) as exc:
+        _engine().list_threads(_attachment(controller, tmp_path))
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == code
+
+
+def test_select_thread_records_selection(tmp_path: Path) -> None:
+    attachment = _attachment(_thread_controller(_thread_row("2", 1)), tmp_path)
+    thread = _engine().select_thread(attachment, thread_id=2)
+    assert thread.id == "2"
+    assert attachment.selected_thread == "2"
+    listing = _engine().list_threads(attachment)
+    assert listing.selected_thread_id == "2"
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "2"])
+def test_select_thread_rejects_bad_id(bad: object, tmp_path: Path) -> None:
+    controller = _thread_controller()
+    with pytest.raises(CategorizedError) as exc:
+        _engine().select_thread(_attachment(controller, tmp_path), thread_id=cast("int", bad))
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["code"] == "bad_thread_id"
+    assert controller.written == []
+
+
+def test_select_thread_unknown_thread(tmp_path: Path) -> None:
+    attachment = _attachment(_thread_controller(), tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        _engine().select_thread(attachment, thread_id=9)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "unknown_thread"
+    assert attachment.selected_thread is None
+
+
+def test_select_thread_then_reads_pass_thread(tmp_path: Path) -> None:
+    controller = _register_controller()
+    controller._responses.update(
+        {
+            "-thread-info 2": _done({"threads": [_thread_row("2", 1)]}),
+            "-data-list-register-values --thread 2 x": controller._responses[
+                "-data-list-register-values x"
+            ],
+            "-stack-list-frames --thread 2": _done({"stack": [{"level": "0", "func": "f"}]}),
+            "-stack-list-frames --thread 2 0 0": _done({"stack": [{"level": "0", "func": "f"}]}),
+            "-stack-list-variables --thread 2 --frame 0 --simple-values": _done({"variables": []}),
+        }
+    )
+    attachment = _attachment(controller, tmp_path)
+    engine = _engine()
+    engine.select_thread(attachment, thread_id=2)
+    assert engine.read_registers(attachment, ["rax"]) == {"rax": "0xdead"}
+    assert engine.backtrace(attachment, max_frames=4).frames[0].func == "f"
+    assert engine.read_frame(attachment, level=0).func == "f"
+    assert controller.written.index("-thread-info 2") < controller.written.index(
+        "-data-list-register-values --thread 2 x"
+    )
+    assert "-thread-list-ids" not in controller.written
+
+
+def test_read_with_stale_selection_is_unknown_thread(tmp_path: Path) -> None:
+    error: list[dict[str, object]] = [
+        {"type": "result", "message": "error", "payload": {"msg": "Invalid thread id: 3"}}
+    ]
+    controller = _register_controller()
+    controller._responses.update(
+        {
+            "-data-list-register-values --thread 3 x": error,
+            "-stack-list-frames --thread 3": error,
+        }
+    )
+    attachment = _attachment(controller, tmp_path)
+    attachment.selected_thread = "3"
+    for read in (
+        lambda: _engine().read_registers(attachment, ["rax"]),
+        lambda: _engine().backtrace(attachment, max_frames=4),
+    ):
+        with pytest.raises(CategorizedError) as exc:
+            read()
+        assert exc.value.details["code"] == "unknown_thread"
+    assert attachment.selected_thread == "3"

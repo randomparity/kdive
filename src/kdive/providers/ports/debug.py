@@ -37,6 +37,27 @@ class GdbFrameDetail(GdbFrame):
     truncated: bool = False
 
 
+class GdbThread(ProviderModel):
+    """One gdbstub thread (a QEMU vCPU) from gdb/MI ``-thread-info`` (ADR-0819)."""
+
+    id: str
+    target_id: str | None = None
+    details: str | None = None
+    name: str | None = None
+    state: str | None = None
+    func: str | None = None
+    addr: str | None = None
+
+
+class GdbThreadList(ProviderModel):
+    """The bounded thread list plus gdb's current and kdive's selected thread."""
+
+    threads: list[GdbThread]
+    truncated: bool = False
+    current_thread_id: str | None = None
+    selected_thread_id: str | None = None
+
+
 class GdbStopRecord(ProviderModel):
     """A parsed gdb/MI stop record."""
 
@@ -191,6 +212,10 @@ class GdbMiAttachment:
     loaded_modules: set[str] = field(default_factory=set)
     guest_arch: str | None = None
     execution: GdbExecution = "halted"
+
+    # The CPU a contributor selected with ``select_thread`` (ADR-0819); stack and register
+    # reads pass it to gdb as ``--thread``. None keeps gdb's own current thread.
+    selected_thread: str | None = None
 
     staging_dir: Path | None = None
     cleanup_pending: bool = False
@@ -369,6 +394,32 @@ class GdbMiEngine(Protocol):
                 ``max_frames`` (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
                 ``inferior_running`` when the target is running, ``no_frames`` when gdb returns
                 no usable frame data, or for other gdb/MI command failures;
+                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
+    def list_threads(self, attachment: GdbMiAttachment) -> GdbThreadList:
+        """List gdbstub threads (QEMU vCPUs) through gdb/MI, bounded to 128 (ADR-0819).
+
+        Raises:
+            CategorizedError: ``DEBUG_ATTACH_FAILURE`` / ``malformed_thread_info`` for a reply
+                with no thread list or a thread without a numeric id, ``no_threads`` for an empty
+                list, or for other gdb/MI command failures; ``INFRASTRUCTURE_FAILURE`` for
+                command timeouts.
+        """
+        ...
+
+    def select_thread(self, attachment: GdbMiAttachment, *, thread_id: int) -> GdbThread:
+        """Select the thread later register and stack reads act on (ADR-0819).
+
+        Sends no ``-thread-select``: it checks the id with ``-thread-info`` and records it on
+        the attachment, so gdb's own current thread is untouched.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_thread_id`` for a non-positive or
+                non-integer id (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
+                ``unknown_thread`` when gdb lists no such thread, ``malformed_thread_info`` for
+                a thread row without a numeric id, or other gdb/MI command failures;
                 ``INFRASTRUCTURE_FAILURE`` for command timeouts.
         """
         ...

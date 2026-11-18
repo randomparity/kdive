@@ -349,6 +349,20 @@ def test_debug_engine_backtrace_and_read_frame(tmp_path: Path) -> None:
     assert [variable.name for variable in frame.args] == ["fmt"]
 
 
+def test_debug_engine_threads(tmp_path: Path) -> None:
+    engine = FaultInjectDebugEngine()
+    attachment = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id=str(_RUN), transcript_path=tmp_path / "thr.log"
+    )
+
+    assert [t.id for t in engine.list_threads(attachment).threads] == ["1"]
+    assert engine.select_thread(attachment, thread_id=1).id == "1"
+    assert engine.list_threads(attachment).selected_thread_id == "1"
+    with pytest.raises(CategorizedError) as exc:
+        engine.select_thread(attachment, thread_id=2)
+    assert exc.value.details["code"] == "unknown_thread"
+
+
 def test_debug_engine_disassemble(tmp_path: Path) -> None:
     engine = FaultInjectDebugEngine()
     attachment = fault_inject_attach_seam(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Lock
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import (
     GdbBacktrace,
     GdbBreakpointRef,
@@ -17,12 +18,17 @@ from kdive.providers.ports.debug import (
     GdbModule,
     GdbModuleList,
     GdbStopRecord,
+    GdbThread,
+    GdbThreadList,
     GdbVariable,
     GdbWatchpointRef,
 )
 
 _SYNTHETIC_MODULE = "fault_inject_demo"
 _SYNTHETIC_MODULE_BASE = "0xffffffffa0000000"
+_SYNTHETIC_THREAD = GdbThread(
+    id="1", target_id="Thread 1.1", details="CPU#0 [halted ]", state="stopped"
+)
 
 
 class _SyntheticGdbController:
@@ -135,6 +141,23 @@ class FaultInjectDebugEngine:
             ],
             truncated=False,
         )
+
+    def list_threads(self, attachment: GdbMiAttachment) -> GdbThreadList:
+        return GdbThreadList(
+            threads=[_SYNTHETIC_THREAD],
+            current_thread_id="1",
+            selected_thread_id=attachment.selected_thread,
+        )
+
+    def select_thread(self, attachment: GdbMiAttachment, *, thread_id: int) -> GdbThread:
+        if thread_id != 1:
+            raise CategorizedError(
+                f"gdb lists no thread {thread_id}",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"code": "unknown_thread", "thread_id": thread_id},
+            )
+        attachment.selected_thread = "1"
+        return _SYNTHETIC_THREAD
 
     def read_frame(self, attachment: GdbMiAttachment, *, level: int) -> GdbFrameDetail:
         del attachment
