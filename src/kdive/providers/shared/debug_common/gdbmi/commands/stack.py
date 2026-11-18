@@ -14,6 +14,10 @@ from kdive.providers.ports.debug import (
     GdbVariable,
 )
 from kdive.providers.shared.debug_common.gdbmi._errors import config_error
+from kdive.providers.shared.debug_common.gdbmi.commands.threads import (
+    stale_thread_error,
+    thread_option,
+)
 from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     MiRecord,
     frame_variables,
@@ -68,7 +72,9 @@ class GdbMiStackCommands:
             details={"code": "no_frames"},
         )
         rows = stack_frames(
-            self._stack_command(attachment, "-stack-list-frames", missing=no_frames)
+            self._stack_command(
+                attachment, f"-stack-list-frames{thread_option(attachment)}", missing=no_frames
+            )
         )
         if not rows:
             raise no_frames
@@ -91,7 +97,11 @@ class GdbMiStackCommands:
             details={"code": "no_frame_at_level", "level": level},
         )
         rows = stack_frames(
-            self._stack_command(attachment, f"-stack-list-frames {level} {level}", missing=no_frame)
+            self._stack_command(
+                attachment,
+                f"-stack-list-frames{thread_option(attachment)} {level} {level}",
+                missing=no_frame,
+            )
         )
         if not rows:
             raise no_frame
@@ -118,6 +128,8 @@ class GdbMiStackCommands:
         return _bounded(GdbFrameDetail.model_validate(redacted))
 
     def _current_thread(self: _StackHost, attachment: GdbMiAttachment) -> str:
+        if attachment.selected_thread is not None:
+            return attachment.selected_thread
         records = self.execute_mi_command(attachment, "-thread-list-ids")
         thread = result_payload_dict(records).get("current-thread-id")
         if not isinstance(thread, str) or not thread.isdigit():
@@ -139,6 +151,9 @@ class GdbMiStackCommands:
         try:
             return self.execute_mi_command(attachment, command)
         except CategorizedError as exc:
+            stale = stale_thread_error(exc, attachment)
+            if stale is not None:
+                raise stale from exc
             if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
                 payload = exc.details.get("payload")
                 msg = payload.get("msg") if isinstance(payload, dict) else None

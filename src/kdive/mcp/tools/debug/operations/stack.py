@@ -121,7 +121,8 @@ def _register_debug_backtrace(
         """Walk the stopped kernel's stack on a live DebugSession. Requires contributor.
 
         The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); there
-        is no stack to unwind while the kernel runs.
+        is no stack to unwind while the kernel runs. Walks the CPU chosen with debug.select_thread,
+        else gdb's current thread (debug.list_threads shows both).
         """
         return await run_engine_op_with_resolver(
             pool,
@@ -153,7 +154,8 @@ def _register_debug_read_frame(
         """Inspect one selected stack frame on a live DebugSession. Requires contributor.
 
         The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); frame
-        selection is only valid at a halt.
+        selection is only valid at a halt. Reads the CPU chosen with debug.select_thread, else gdb's
+        current thread (debug.list_threads shows both).
 
         data.frame holds the frame's location plus args and locals, each a name, gdb's type and,
         for a scalar or pointer, gdb's printed value (a struct or array shows its type only). Up

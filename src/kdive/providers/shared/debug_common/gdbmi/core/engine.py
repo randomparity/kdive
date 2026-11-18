@@ -44,6 +44,7 @@ from kdive.providers.shared.debug_common.gdbmi.commands.modules import GdbMiModu
 from kdive.providers.shared.debug_common.gdbmi.commands.registers import GdbMiRegisterCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.stack import GdbMiStackCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.symbols import GdbMiSymbolCommands
+from kdive.providers.shared.debug_common.gdbmi.commands.threads import GdbMiThreadCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.watchpoints import GdbMiWatchpointCommands
 from kdive.providers.shared.debug_common.gdbmi.core import execution as mi_execution
 from kdive.providers.shared.debug_common.gdbmi.core import mi_controller
@@ -115,6 +116,7 @@ class GdbMiEngine(
     GdbMiRegisterCommands,
     GdbMiSymbolCommands,
     GdbMiStackCommands,
+    GdbMiThreadCommands,
     GdbMiDisassemblyCommands,
     GdbMiWatchpointCommands,
     GdbMiModuleCommands,

@@ -104,7 +104,8 @@ class CapabilityRequirement:
 
 
 # The Debug-plane ops that write an audit_log row on success: state-mutating engine ops
-# (breakpoints/watchpoints/continue/interrupt/symbol-load) and the sensitive raw-memory read.
+# (breakpoints/watchpoints/continue/interrupt/symbol-load, and the session-wide CPU selection of
+# ADR-0819) and the sensitive raw-memory read.
 # Bounded pure reads (list_*, read_registers, resolve_symbol, backtrace, read_frame,
 # disassemble) are not audited — the session attach/detach rows plus the per-session transcript
 # already attribute them.
@@ -119,6 +120,7 @@ _AUDITED_OPS: frozenset[str] = frozenset(
         "debug.interrupt",
         "debug.advance",
         "debug.load_module_symbols",
+        "debug.select_thread",
     }
 )
 

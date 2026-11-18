@@ -27,6 +27,7 @@ import kdive.mcp.tools.debug.operations.modules as ops_modules
 import kdive.mcp.tools.debug.operations.registrar as debug_ops_registrar
 import kdive.mcp.tools.debug.operations.runtime as debug_runtime
 import kdive.mcp.tools.debug.operations.stack as ops_stack
+import kdive.mcp.tools.debug.operations.threads as ops_threads
 import kdive.mcp.tools.debug.operations.watchpoints as ops_watchpoints
 from kdive.domain.capacity.state import DebugSessionState
 from kdive.domain.catalog.resources import ResourceKind
@@ -149,6 +150,8 @@ _OP_FACTORIES: dict[str, Any] = {
     "advance": ops_execution._advance_op,
     "backtrace": ops_stack._backtrace_op,
     "read_frame": ops_stack._read_frame_op,
+    "list_threads": ops_threads._list_threads_op,
+    "select_thread": ops_threads._select_thread_op,
     "disassemble": ops_stack._disassemble_op,
     "set_watchpoint": ops_watchpoints._set_watchpoint_op,
     "list_watchpoints": ops_watchpoints._list_watchpoints_op,
@@ -216,6 +219,7 @@ def test_op_audit_descriptor_covers_only_mutating_and_sensitive_ops() -> None:
         "debug.interrupt",
         "debug.advance",
         "debug.load_module_symbols",
+        "debug.select_thread",
     } == debug_runtime._AUDITED_OPS
     assert debug_runtime._op_audit("debug.read_memory", address="0x1", byte_count=4) == (
         debug_runtime._OpAudit(
@@ -266,6 +270,7 @@ async def _call_registered_debug_tool(
         ops_memory,
         ops_execution,
         ops_stack,
+        ops_threads,
         ops_watchpoints,
         ops_modules,
     ):
@@ -661,6 +666,30 @@ def test_advance_writes_one_audit_row_per_mode(
     asyncio.run(_run())
 
 
+def test_select_thread_writes_one_audit_row(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController({"-thread-info 2": _thread_info("2")})
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await _call_registered_debug_tool(
+                pool,
+                runtime,
+                tool="debug.select_thread",
+                arguments={"session_id": session_id, "thread_id": 2},
+                ctx=request_context(),
+                monkeypatch=monkeypatch,
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert resp.status == "selected"
+        assert len(rows) == 1
+        assert (rows[0][1], rows[0][5]) == ("debug.select_thread", "select_thread")
+
+    asyncio.run(_run())
+
+
 def test_resolve_symbol_returns_resolved(migrated_url: str) -> None:
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
@@ -886,6 +915,72 @@ def test_read_frame_returns_read(migrated_url: str) -> None:
         assert frame["args"] == [{"name": "fd", "type": "int", "value": "7"}]
         assert frame["locals"] == []
         assert "truncated" not in frame
+
+    asyncio.run(_run())
+
+
+def _thread_info(*ids: str) -> list[dict[str, object]]:
+    rows = [
+        {"id": n, "target-id": f"Thread 1.{n}", "details": f"CPU#{int(n) - 1} [halted ]"}
+        for n in ids
+    ]
+    return [
+        {
+            "type": "result",
+            "message": "done",
+            "payload": {"threads": rows, "current-thread-id": "1"},
+        }
+    ]
+
+
+def test_list_and_select_thread_report_the_selection(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {"-thread-info": _thread_info("1", "2"), "-thread-info 2": _thread_info("2")}
+            )
+            runtime = _runtime(_CountingAttach(controller))
+
+            async def call(op: str, **kwargs: Any) -> ToolResponse:
+                return await run_engine_op_with_runtime(
+                    pool,
+                    request_context(),
+                    session_id,
+                    runtime,
+                    _op_for(op, runtime, session_id, **kwargs),
+                )
+
+            before = await call("list_threads")
+            assert before.status == "listed"
+            assert before.data["thread_count"] == 2
+            assert before.data["current_thread_id"] == "1"
+            assert "selected_thread_id" not in before.data
+            selected = await call("select_thread", thread_id=2)
+            assert selected.status == "selected"
+            assert selected.data["thread_id"] == "2"
+            after = await call("list_threads")
+            assert after.data["selected_thread_id"] == "2"
+
+    asyncio.run(_run())
+
+
+def test_select_thread_unknown_thread_fails(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController({"-thread-info 9": _thread_info()})
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op_with_runtime(
+                pool,
+                request_context(),
+                session_id,
+                runtime,
+                _op_for("select_thread", runtime, session_id, thread_id=9),
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "debug_attach_failure"
+        assert resp.data["code"] == "unknown_thread"
 
     asyncio.run(_run())
 
@@ -1771,6 +1866,8 @@ _GUARDED_OPS: dict[str, dict[str, Any]] = {
     "advance": {"mode": "out", "timeout_sec": 1.0},
     "backtrace": {"max_frames": 4},
     "read_frame": {"level": 0},
+    "list_threads": {},
+    "select_thread": {"thread_id": 1},
     "disassemble": {"symbol": "panic", "address": None, "instruction_count": 4},
     "set_watchpoint": {"symbol": "jiffies_64", "address": None, "byte_count": 8},
     "list_watchpoints": {},

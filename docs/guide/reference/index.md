@@ -37,12 +37,14 @@
 | [`debug.list_breakpoints`](debug.md#debuglist_breakpoints) | `implemented` |
 | [`debug.list_modules`](debug.md#debuglist_modules) | `implemented` |
 | [`debug.list_sessions`](debug.md#debuglist_sessions) | `implemented` |
+| [`debug.list_threads`](debug.md#debuglist_threads) | `implemented` |
 | [`debug.list_watchpoints`](debug.md#debuglist_watchpoints) | `implemented` |
 | [`debug.load_module_symbols`](debug.md#debugload_module_symbols) | `implemented` |
 | [`debug.read_frame`](debug.md#debugread_frame) | `implemented` |
 | [`debug.read_memory`](debug.md#debugread_memory) | `implemented` |
 | [`debug.read_registers`](debug.md#debugread_registers) | `implemented` |
 | [`debug.resolve_symbol`](debug.md#debugresolve_symbol) | `implemented` |
+| [`debug.select_thread`](debug.md#debugselect_thread) | `implemented` |
 | [`debug.set_breakpoint`](debug.md#debugset_breakpoint) | `implemented` |
 | [`debug.set_watchpoint`](debug.md#debugset_watchpoint) | `implemented` |
 | [`debug.start_session`](debug.md#debugstart_session) | `implemented` |

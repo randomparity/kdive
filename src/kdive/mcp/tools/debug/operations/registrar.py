@@ -15,11 +15,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResol
     from kdive.mcp.tools.debug.operations.memory import register as register_memory
     from kdive.mcp.tools.debug.operations.modules import register as register_modules
     from kdive.mcp.tools.debug.operations.stack import register as register_stack
+    from kdive.mcp.tools.debug.operations.threads import register as register_threads
     from kdive.mcp.tools.debug.operations.watchpoints import register as register_watchpoints
 
     register_breakpoints(app, pool, runtime)
     register_memory(app, pool, runtime)
     register_execution(app, pool, runtime)
     register_stack(app, pool, runtime)
+    register_threads(app, pool, runtime)
     register_watchpoints(app, pool, runtime)
     register_modules(app, pool, runtime)

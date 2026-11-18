@@ -8,6 +8,10 @@ from typing import Protocol
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.shared.debug_common.gdbmi._errors import config_error
+from kdive.providers.shared.debug_common.gdbmi.commands.threads import (
+    stale_thread_error,
+    thread_option,
+)
 from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     MiRecord,
     register_values_by_number,
@@ -46,9 +50,15 @@ class GdbMiRegisterCommands:
         ordered_names = parsed_register_names(
             self.execute_mi_command(attachment, "-data-list-register-names")
         )
-        by_number = register_values_by_number(
-            self.execute_mi_command(attachment, "-data-list-register-values x")
-        )
+        command = f"-data-list-register-values{thread_option(attachment)} x"
+        try:
+            records = self.execute_mi_command(attachment, command)
+        except CategorizedError as exc:
+            stale = stale_thread_error(exc, attachment)
+            if stale is not None:
+                raise stale from exc
+            raise
+        by_number = register_values_by_number(records)
         registers: dict[str, object] = {}
         for name in requested:
             if name in ordered_names:

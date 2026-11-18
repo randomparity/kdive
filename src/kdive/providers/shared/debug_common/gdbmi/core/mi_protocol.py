@@ -111,6 +111,16 @@ def frame_variables(records: list[MiRecord]) -> list[dict[str, Any]] | None:
     return _dict_rows(variables) if isinstance(variables, list) else None
 
 
+def thread_rows(records: list[MiRecord]) -> list[dict[str, Any]] | None:
+    """The thread dicts from a ``-thread-info`` result, or None when gdb sent no list.
+
+    gdb/MI emits ``threads=[{id,target-id,details,frame={...},state},...]``; QEMU's gdbstub puts
+    the CPU number only in ``details`` (``CPU#1 [halted ]``) and sends no ``name``.
+    """
+    threads = result_payload_dict(records).get("threads")
+    return _dict_rows(threads) if isinstance(threads, list) else None
+
+
 def disassembly_rows(records: list[MiRecord]) -> list[dict[str, Any]]:
     """The instruction dicts from a ``-data-disassemble`` result.
 

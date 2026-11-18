@@ -58,6 +58,7 @@ UNGUARDED_TOOLS: dict[str, str] = {
     "debug.continue": "in-session debugger control on an already-admitted attach",
     "debug.interrupt": "in-session debugger control on an already-admitted attach",
     "debug.load_module_symbols": "in-session debugger control on an already-admitted attach",
+    "debug.select_thread": "in-session debugger control on an already-admitted attach",
     "debug.set_breakpoint": "in-session debugger control on an already-admitted attach",
     "debug.set_watchpoint": "in-session debugger control on an already-admitted attach",
     "images.delete": "image catalog administration; touches no System",
