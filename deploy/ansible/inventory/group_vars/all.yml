@@ -34,6 +34,7 @@ kdive_image_defaults:
     - kdive-install-kernel
     - kdive-capture-vmcore
     - kdive-drgn
+    - kdive-faultinject
   include_kernel_debuginfo: false
   crashkernel: "256M"  # applied only when include_kernel_debuginfo | bool
   arches: [x86_64]

@@ -165,6 +165,13 @@ def test_debug_steps_stage_kdive_drgn_helper(tmp_path: Path) -> None:
     assert "chmod 0755 /usr/local/sbin/kdive-drgn" in rendered(steps)
 
 
+def test_debug_steps_stage_kdive_faultinject_helper(tmp_path: Path) -> None:
+    # ADR-0822: the reviewed debugfs fault-injection helper rides every debug image.
+    steps = _steps(_ctx(tmp_path, is_cloud_image=True))
+    assert upload_source(steps, "/usr/local/sbin/kdive-faultinject").is_file()
+    assert "chmod 0755 /usr/local/sbin/kdive-faultinject" in rendered(steps)
+
+
 def test_virt_builder_base_installs_cloud_init_and_seeds_machine_id(tmp_path: Path) -> None:
     steps = _steps(_ctx(tmp_path, is_cloud_image=False))
     assert "cloud-init" in installed(steps)
@@ -177,6 +184,7 @@ def test_build_steps_omit_kdump_nmi_and_drgn_helper(tmp_path: Path) -> None:
     assert "kdump-tools.service" not in text
     assert "unknown_nmi_panic" not in text
     assert "kdive-drgn" not in text
+    assert "kdive-faultinject" not in text
 
 
 def test_ssh_enable_is_coupled_to_the_debug_kind(tmp_path: Path) -> None:

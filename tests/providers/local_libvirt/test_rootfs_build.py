@@ -834,10 +834,20 @@ def test_family_steps_stage_kdive_drgn_helper_for_a_debug_image(tmp_path: Path) 
     assert "chmod 0755 /usr/local/sbin/kdive-drgn" in rendered(steps), "helper is read-executable"
 
 
+def test_family_steps_stage_kdive_faultinject_helper_for_a_debug_image(tmp_path: Path) -> None:
+    # ADR-0822: the debugfs fault-injection helper is staged beside kdive-drgn, same debug gate.
+    steps = _rhel_steps(tmp_path, packages=("drgn",))
+    helper_src = upload_source(steps, "/usr/local/sbin/kdive-faultinject")
+    assert str(helper_src).endswith("deploy/remote-libvirt-guest-helpers/kdive-faultinject")
+    assert "chmod 0755 /usr/local/sbin/kdive-faultinject" in rendered(steps)
+
+
 def test_family_steps_omit_drgn_helper_for_a_non_debug_image(tmp_path: Path) -> None:
     # A non-debug (e.g. build-host) image carries no drgn and no introspection contract, so it gets
     # no kdive-drgn helper — gated on `drgn in packages`.
-    assert "kdive-drgn" not in rendered(_rhel_steps(tmp_path, packages=("gcc", "make")))
+    text = rendered(_rhel_steps(tmp_path, packages=("gcc", "make")))
+    assert "kdive-drgn" not in text
+    assert "kdive-faultinject" not in text
 
 
 def test_family_steps_fail_loud_when_drgn_helper_source_is_absent(
