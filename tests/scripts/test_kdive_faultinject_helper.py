@@ -151,6 +151,8 @@ def test_every_bound_is_accepted_at_its_edge_and_refused_beyond(debugfs: Path, p
         ("set", "failslab", "probability=-1"),
         ("set", "failslab", "space=12345678901"),
         ("set", "failslab", "probability=1", "probability=2"),
+        ("set", "failslab", "interval times=1"),
+        ("set", "failslab", "Probability=1"),
         ("set", "failslab"),
         ("set", "failslab", "interval=5", "probability=999"),
         ("set", "failslab", "interval=5", "bogus=1"),
@@ -246,3 +248,11 @@ def test_missing_parameter_file_exits_5_and_is_not_created(debugfs: Path) -> Non
     assert proc.returncode == 5
     assert not (debugfs / "failslab" / "space").exists()
     assert run(debugfs, "read", "failslab").returncode == 5
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
+def test_unreadable_parameter_file_exits_5_with_only_the_json_error(debugfs: Path) -> None:
+    (debugfs / "failslab" / "verbose").chmod(0)
+    proc = run(debugfs, "read", "failslab")
+    assert proc.returncode == 5
+    assert json.loads(proc.stderr)["error"] == "debugfs_io"

@@ -26,7 +26,7 @@ tree. A caller must not forward it; #3683 owns that.
 ## Failure model
 
 - Actors and deployments: a kdive worker running the helper as root in a local-libvirt debug
-  guest over SSH with fixed argv; a contributor running the unit tests on a Linux or macOS host.
+  guest over SSH with fixed argv; a contributor running the unit tests on a Linux host with bash 4 or later.
 - Invariants: no caller text reaches a path or a write beyond the closed knob and parameter names
   and a bounded integer; a rejected `set` writes nothing; stdout is valid JSON or empty.
 - Accepted: a mid-sequence write error leaves earlier parameters written (exit 5 reports it; the

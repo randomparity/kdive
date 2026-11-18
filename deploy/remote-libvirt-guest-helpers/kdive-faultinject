@@ -46,7 +46,7 @@ param_bounds() { # <param> -> "min max default"
 
 require_debugfs() {
   [ -n "$(ls -A "$debugfs_root" 2>/dev/null)" ] ||
-    die 3 debugfs_not_mounted "debugfs is not mounted at $debugfs_root"
+    die 3 debugfs_not_mounted "debugfs is not mounted"
 }
 
 knob_present() { [ -d "$debugfs_root/$1" ]; }
@@ -60,7 +60,7 @@ is_int() { [[ "$1" =~ ^(-1|0|[1-9][0-9]{0,9})$ ]]; }
 knob_json() { # one present knob's state as a JSON object
   local knob="$1" param value out='{"present":true'
   for param in $(knob_params "$knob"); do
-    value="$(tr -d '\n' <"$debugfs_root/$knob/$param" 2>/dev/null)" ||
+    value="$(tr -d '\n' 2>/dev/null <"$debugfs_root/$knob/$param")" ||
       die 5 debugfs_io "cannot read $knob/$param"
     is_int "$value" || die 5 unparseable_value "$knob/$param is not an integer"
     out+=",\"$param\":$value"
@@ -80,7 +80,7 @@ print_state() { # print_state <knob>…
 
 write_param() { # write_param <knob> <param> <int>
   [ -f "$debugfs_root/$1/$2" ] || die 5 debugfs_io "$1/$2 is missing"
-  printf '%s\n' "$3" >"$debugfs_root/$1/$2" 2>/dev/null || die 5 debugfs_io "cannot write $1/$2"
+  printf '%s\n' "$3" 2>/dev/null >"$debugfs_root/$1/$2" || die 5 debugfs_io "cannot write $1/$2"
 }
 
 cmd_read() {
@@ -104,7 +104,7 @@ cmd_set() {
   for pair in "$@"; do
     [[ "$pair" == ?*=* ]] || die 2 usage "expected <param>=<int>"
     param="${pair%%=*}" value="${pair#*=}"
-    [[ "$allowed" == *" $param "* ]] || die 2 unknown_param "$knob has no such parameter"
+    [[ "$param" =~ ^[a-z-]+$ && "$allowed" == *" $param "* ]] || die 2 unknown_param "no such parameter"
     [[ "$seen" != *" $param "* ]] || die 2 usage "parameter given twice: $param"
     seen+="$param "
     is_int "$value" || die 2 bad_value "$param must match -1|0|[1-9][0-9]{0,9}"
