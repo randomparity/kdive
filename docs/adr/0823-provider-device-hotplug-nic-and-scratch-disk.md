@@ -131,8 +131,8 @@ exclusion runs both ways: `control.power`, `systems.snapshot`, `systems.restore`
 `systems.reprovision` refuse with `conflict` while a plug or un-plug job is queued or running, as
 `_active_snapshot_op` does for snapshot jobs, each check inside the System advisory lock. Teardown
 is exempt, so a stuck job cannot block reclaim: its `release_all` runs and a racing plug job finds
-the System gone and fails. The worker re-checks `READY` and the row at job start. Other domain-
-touching jobs (`force_crash`, SysRq, vmcore capture, debug) are not excluded; a provider fault from
+the System gone and fails. The worker re-checks `READY` and the row at job start. Other jobs that touch
+the domain (`force_crash`, SysRq, vmcore capture, debug) are not excluded; a provider fault from
 one surfaces as `INFRASTRUCTURE_FAILURE`. `READY` does not prove the guest runs (power OFF changes
 no System state), so the port raises `INFRASTRUCTURE_FAILURE` with `data.reason: domain_not_running`
 for a stopped domain. A System holds at most 8 ledger rows. The limits are chosen here because the
