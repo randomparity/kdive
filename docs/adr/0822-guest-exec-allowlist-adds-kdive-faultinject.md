@@ -27,14 +27,18 @@ the Ansible `guest_base_image` helper list. Its contract:
   never joined into a path from caller text.
 - Parameters and bounds (min..max, `reset` default): `probability` 0..100 (0), `interval`
   1..1000000 (1), `times` -1..1000000 (1), `space` 0..1073741824 (0), `verbose` 0..2 (2), and for
-  `fail_page_alloc` only `min-order` 0..10 (0). Values are base-10 integers of at most ten digits.
-  `task-filter` and the gfp flags are not exposed.
-- Every pair is validated before any write, so a rejected `set` writes nothing.
+  `fail_page_alloc` only `min-order` 0..10 (0). The defaults are the kernel's compiled-in
+  `FAULT_ATTR_INITIALIZER` values (`include/linux/fault-inject.h`). A value matches
+  `^(-1|0|[1-9][0-9]{0,9})$` and then its range; each parameter may appear once and `set` needs at
+  least one pair. `task-filter` and the gfp flags are not exposed.
+- Every pair is validated before any write, so a rejected `set` writes nothing. `set` writes
+  `probability` last and `reset` writes it first, so a partial write never leaves injection armed
+  with other parameters half-applied.
 - Success prints one JSON object, `{"knobs":{"<knob>":{"present":true,<param>:<int>,...}}}`; `read`
   with no knob reports an absent knob as `{"present":false}`.
 - Failures print `{"error":"<code>","detail":"..."}` on stderr and exit: 2 usage, unknown knob or
-  parameter, or bad value; 3 debugfs not mounted; 4 knob absent from the kernel; 5 debugfs I/O
-  failed. A caller maps 3 and 4 to `configuration_error`.
+  parameter, or bad value; 3 debugfs not mounted; 4 knob directory absent from the kernel; 5 a
+  parameter file is unreadable, unwritable or not an integer. A caller maps 3 and 4 to `configuration_error`.
 
 The helper never mounts debugfs. Debugfs counts as mounted when its root is a non-empty directory.
 
@@ -45,7 +49,8 @@ new program ships here (#3683, #3684).
 
 - The guest exec surface now includes a root debugfs writer. Its bounded argv is the control; a
   future knob needs a new amendment, a new bound table and tests.
-- `reset` restores the kernel defaults, which are not necessarily the values found before `set`.
+- `reset` restores only the exposed parameters to the kernel defaults, not the values found
+  before `set`; `task-filter` and the gfp flags are never touched.
 - An image built earlier lacks the helper until rebuilt; callers treat a missing program as a
   configuration problem.
 - `times` and `probability` can fail allocations for every task in the guest, including the SSH
@@ -60,5 +65,7 @@ new program ships here (#3683, #3684).
 - **Writing debugfs through `kdive-drgn run-script`.** judgment: that mode runs caller-supplied
   Python under ADR-0240's separate gating; routing fixed writes through it hides them from the
   allowlist.
+- **Fixed ssh one-liners per knob with no helper.** judgment: each caller would own its own
+  validation, and the reviewed program the allowlist names would not exist.
 - **A Python helper.** judgment: the guest carries bash for every sibling helper, and Python adds a
   guest dependency the debug images do not otherwise promise.

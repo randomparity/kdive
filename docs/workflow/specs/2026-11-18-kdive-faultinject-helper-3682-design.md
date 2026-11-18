@@ -21,7 +21,7 @@ Out (owners): MCP tools (#3683, #3684); other knobs, providers, free-form writes
 image rebuild or guest proof (#3683).
 
 The helper reads `FAULTINJECT_DEBUGFS_ROOT` (default `/sys/kernel/debug`) so tests can use a fake
-tree. Argv alone reaches it in production, so the variable is not caller-reachable.
+tree. A caller must not forward it; #3683 owns that.
 
 ## Failure model
 
@@ -31,7 +31,7 @@ tree. Argv alone reaches it in production, so the variable is not caller-reachab
   and a bounded integer; a rejected `set` writes nothing; stdout is valid JSON or empty.
 - Accepted: a mid-sequence write error leaves earlier parameters written (exit 5 reports it; the
   knobs are ephemeral guest state); `reset` restores kernel defaults, not prior values; a kernel
-  with different parameter files reports exit 5 or 4; fault injection can break the guest's own
+  whose knob directory lacks a parameter file reports exit 5 (an absent directory is exit 4); fault injection can break the guest's own
   tasks, which is the feature and is scoped by the caller.
 - Covered elsewhere: who may invoke the helper (SSH bootstrap key, ADR-0289); mapping exits to
   tool errors and any guest proof (#3683).
@@ -40,9 +40,10 @@ tree. Argv alone reaches it in production, so the variable is not caller-reachab
 
 1. `read`, `set` and `reset` behave per the ADR on a fake tree for both knobs, including the
    per-knob parameter sets and every bound at its min and max.
-2. A knob name, parameter name or value outside the allowlist, including path separators,
-   `..`, whitespace, shell metacharacters, a sign or digit-count violation, exits 2 and writes
-   nothing, for every `set` argument position.
+2. A knob, parameter or value outside the allowlist exits 2 and writes nothing: path separators,
+   `..`, whitespace, shell metacharacters, `+5`, `-0`, leading zeros, over ten digits, a repeated
+   parameter, `set <knob>` with no pair, in every `set` argument position. The value pattern is
+   `^(-1|0|[1-9][0-9]{0,9})$` and then the range. `set` writes `probability` last; `reset` first.
 3. Missing or empty debugfs exits 3; a missing knob directory exits 4 for a named knob and reports
    `present:false` for `read` with no knob.
 4. A Debian debug image, a Fedora/RHEL debug image and a SUSE image with `drgn` stage the helper

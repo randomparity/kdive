@@ -41,9 +41,10 @@ Steps: (1) write the test cases: read all and one; set writes each parameter and
 state; set with several pairs; reset writes defaults; bounds min/max accepted and min-1/max+1
 rejected for every parameter (exit 2, files unchanged); unknown knob, unknown parameter, parameter
 valid for the other knob (`min-order` on failslab), `../x`, `a/b`, `probability=1;id`, `=5`, empty
-value, `+5`, `--5`, 11 digits (all exit 2, no file changed, also with a good pair before the bad
+value, `+5`, `--5`, `-0`, `007`, a negative on a parameter whose minimum is 0, 11 digits, a repeated
+parameter, `set failslab` with no pair (all exit 2, no file changed, also with a good pair before the bad
 one); missing root and empty root exit 3; knob dir missing exits 4 for `read failslab`, and
-`read` with none reports `present:false`; unreadable non-integer file exits 5; stdout parses as
+`read` with none reports `present:false`; unreadable, missing or non-integer parameter file exits 5; stdout parses as
 JSON on success, stderr parses as JSON with `error` on failure; no subcommand and an unknown
 subcommand exit 2. (2) Run, see red. (3) Write the helper. (4) Run, see green; run
 `just lint-shell`. (5) Commit `feat(guest): add the kdive-faultinject helper (#3682)`.
@@ -86,7 +87,9 @@ Verification:
   `test_family_selection_preserves_installed_helper_path` gains `kdive-faultinject` in its helper
   parametrization; red because `_helper_args` raises for an item missing from the list if it is
   not listed (else the parametrization passes by construction and the catalog assertion below
-  is the red); a catalog test asserts every catalog row lists the helper. Green:
+  is the red); a test asserts `kdive-faultinject` is in `kdive_image_defaults.helpers` and no catalog row
+  overrides `helpers` without it. Write-order: a test with a recording writer asserts `set` writes
+  `probability` last and `reset` first. Green:
   `just test-verbose tests/deploy/test_guest_base_image_helpers.py`.
 - Mode: task-test-not-applicable. Surface: README prose; no executable consumer.
 
