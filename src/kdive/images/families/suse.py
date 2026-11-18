@@ -18,6 +18,7 @@ from kdive.images.families._fedora_customize import (
     cloud_init_first_boot_steps,
     drgn_helper_steps,
     drgn_version_marker_steps,
+    faultinject_helper_steps,
     makedumpfile_version_marker_steps,
 )
 from kdive.images.families.base import CustomizeContext, _mac_tag
@@ -173,6 +174,7 @@ class SuseFamily:
         steps += cloud_init_first_boot_steps(ctx, cloud_cfg_content=_SUSE_CLOUD_CFG_CONTENT)
         if "drgn" in ctx.packages:
             steps += drgn_helper_steps()
+            steps += faultinject_helper_steps()
             steps += drgn_version_marker_steps()
         steps += makedumpfile_version_marker_steps()
         steps.append(

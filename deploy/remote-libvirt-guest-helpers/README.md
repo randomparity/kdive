@@ -13,9 +13,19 @@ verify its userland before provisioning.
 | `/usr/local/sbin/kdive-install-kernel` | `install`, `boot-id`, `boot`, `kdump-status` | [remote install/boot](../../src/kdive/providers/remote_libvirt/lifecycle/install.py) |
 | `/usr/local/sbin/kdive-capture-vmcore` | `inspect`, `upload` | [remote retrieve](../../src/kdive/providers/remote_libvirt/retrieve/) |
 | `/usr/local/sbin/kdive-drgn` | `tasks`, `modules`, `sysinfo`, `run-script` | [remote introspection](../../src/kdive/providers/remote_libvirt/debug/introspect.py) |
+| `/usr/local/sbin/kdive-faultinject` | `read`, `set`, `reset` | none yet; local-libvirt debug images carry it for the #918 fault-injection tools ([ADR-0822](../../docs/adr/0822-guest-exec-allowlist-adds-kdive-faultinject.md)) |
 
 The executable helpers in this directory own argv/stdout details and pass `just lint-shell`.
 When changing a helper protocol, update its provider consumer and tests together.
+
+`kdive-faultinject` reads and writes the `failslab` and `fail_page_alloc` debugfs knobs. Knob and
+parameter names are a closed list, values are bounded integers, and a rejected `set` writes
+nothing. Success prints one JSON object on stdout; failures print `{"error":...}` on stderr with
+exit 2 (usage or bad value), 3 (debugfs not mounted), 4 (knob absent from the kernel) or 5 (a
+parameter file unreadable, unwritable or not an integer). The bounds and defaults are in
+[ADR-0822](../../docs/adr/0822-guest-exec-allowlist-adds-kdive-faultinject.md). It is staged in the
+Debian, Fedora/RHEL and SUSE debug images and by the `guest_base_image` helper list, so an image
+built earlier lacks it until rebuilt.
 
 ## Baked-in units
 

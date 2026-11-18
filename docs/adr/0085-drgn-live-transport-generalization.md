@@ -103,6 +103,12 @@ capability naming in Decision 1 is chosen so the realization can later evolve pe
 re-touching the agent surface or the core routing (see Consequences and the recorded future
 direction).
 
+### Amendment (2026-11-18): a second reviewed in-guest program (#3682)
+
+This amends Decision 5, which names the fixed `kdive-drgn` helpers as the in-guest realization.
+[ADR-0822](0822-guest-exec-allowlist-adds-kdive-faultinject.md) adds `kdive-faultinject` beside
+it; the drgn transport and its helpers are unchanged.
+
 ## Consequences
 
 - **Remote in-guest drgn becomes reachable end-to-end** through `debug.start_session` +

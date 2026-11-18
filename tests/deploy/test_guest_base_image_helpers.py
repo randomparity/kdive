@@ -101,7 +101,7 @@ def test_helper_install_propagates_restorecon_failure(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("distro", ["ubuntu", "debian", "fedora", "rocky", "opensuse-leap"])
-@pytest.mark.parametrize("helper", ["kdive-install-kernel", "kdive-drgn"])
+@pytest.mark.parametrize("helper", ["kdive-install-kernel", "kdive-drgn", "kdive-faultinject"])
 def test_family_selection_preserves_installed_helper_path(distro: str, helper: str) -> None:
     args = _helper_args(distro, helper)
     family = (
@@ -112,6 +112,16 @@ def test_family_selection_preserves_installed_helper_path(distro: str, helper: s
     assert args[:2] == ["--copy-in", f"/tmp/helpers/{family}{helper}:/usr/local/sbin/"]
     assert f"chown root:root /usr/local/sbin/{helper}" in args
     assert f"chmod 0755 /usr/local/sbin/{helper}" in args
+
+
+def test_every_catalog_image_installs_the_faultinject_helper() -> None:
+    group_vars = yaml.safe_load((BUILD_ONE.parents[3] / "inventory/group_vars/all.yml").read_text())
+    assert "kdive-faultinject" in group_vars["kdive_image_defaults"]["helpers"]
+    for row in group_vars["kdive_image_catalog"]:
+        assert "kdive-faultinject" in row.get(
+            "helpers", group_vars["kdive_image_defaults"]["helpers"]
+        )
+    assert (BUILD_ONE.parents[4] / "remote-libvirt-guest-helpers/kdive-faultinject").is_file()
 
 
 def test_leap_source_pin_reaches_existing_downloader() -> None:

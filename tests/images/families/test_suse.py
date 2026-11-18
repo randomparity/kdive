@@ -122,6 +122,8 @@ def test_steps_bake_cloud_init_and_conditional_provenance(tmp_path: Path) -> Non
     assert _POST_PATH in tumbleweed_text and _POST_PATH in leap_text
     assert "kdive-drgn" in tumbleweed_text
     assert "kdive-drgn" not in leap_text
+    assert "/usr/local/sbin/kdive-faultinject" in tumbleweed_text
+    assert "kdive-faultinject" not in leap_text
 
 
 @pytest.mark.parametrize("distro", ["opensuse-tumbleweed", "opensuse-leap"])

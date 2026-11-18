@@ -257,6 +257,35 @@ def drgn_helper_steps() -> list[Step]:
     return [UploadFile(helper, DRGN_HELPER_GUEST_PATH, mode="0755")]
 
 
+# The reviewed debugfs fault-injection helper (ADR-0822, #3682) rides every image that carries
+# ``kdive-drgn``: the same debug-image gate, the same read-executable upload.
+FAULTINJECT_HELPER_GUEST_PATH = "/usr/local/sbin/kdive-faultinject"
+FAULTINJECT_HELPER_REPO_RELPATH = ("deploy", "remote-libvirt-guest-helpers", "kdive-faultinject")
+
+
+def faultinject_helper_source() -> Path:
+    """Resolve the reviewed ``kdive-faultinject`` helper from the source tree (ADR-0822)."""
+    return Path(__file__).parents[4].joinpath(*FAULTINJECT_HELPER_REPO_RELPATH)
+
+
+def faultinject_helper_steps() -> list[Step]:
+    """Stage the reviewed ``kdive-faultinject`` in-guest helper, read-executable (ADR-0822).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` if the helper is not a readable file in the
+            source tree, so a debug image never ships without the program a caller expects.
+    """
+    helper = faultinject_helper_source()
+    if not helper.is_file():
+        raise CategorizedError(
+            "the kdive-faultinject in-guest helper is missing from the source tree; cannot build "
+            "a debug rootfs that can inject faults",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"helper": str(helper)},
+        )
+    return [UploadFile(helper, FAULTINJECT_HELPER_GUEST_PATH, mode="0755")]
+
+
 def fadump_capture_unit_source() -> Path:
     """Resolve the one authoritative ``fadump-capture.service`` unit from the source tree."""
     return Path(__file__).parents[4].joinpath(*FADUMP_CAPTURE_UNIT_REPO_RELPATH)
@@ -335,13 +364,13 @@ def drgn_version_marker_steps() -> list[Step]:
 
 
 def debug_image_steps(packages: tuple[str, ...]) -> list[Step]:
-    """Stage the drgn helper for an ``rhel`` debug image (ADR-0220, #724).
+    """Stage the drgn and fault-injection helpers for an ``rhel`` debug image (ADR-0220, ADR-0822).
 
     Non-debug images (no ``drgn`` in ``packages``) get no steps.
     """
     if "drgn" not in packages:
         return []
-    return drgn_helper_steps()
+    return [*drgn_helper_steps(), *faultinject_helper_steps()]
 
 
 def retained_kernel_step(hint: str) -> RunCommand:
