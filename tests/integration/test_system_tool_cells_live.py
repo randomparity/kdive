@@ -220,19 +220,31 @@ def _guest_knob(endpoint: Endpoint, key: Path, knob: str) -> dict[str, object]:
 
 
 async def _inspect(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
-    env = await _call(caller, "faultinject.inspect", {"system_id": guest.system_id}, token)
+    guest_views = {
+        knob: await asyncio.to_thread(_guest_knob, guest.endpoint, guest.key, knob)
+        for knob in _KNOBS
+    }
+    env = await caller.call("faultinject.inspect", {"system_id": guest.system_id}, token)
+    assert isinstance(env, ToolResponse), "expected one envelope"
+    if not any(view["present"] for view in guest_views.values()):
+        # A kernel built without fault injection exposes neither knob: the tool refuses with the
+        # fixed remediation instead of reporting two absent knobs.
+        assert env.error_category == ErrorCategory.CONFIGURATION_ERROR.value, env.error_category
+        assert env.data.get("reason") == "fault_injection_unsupported", env.data
+        return {"guest_knobs": "absent", "refused": "fault_injection_unsupported"}
+    assert env.error_category is None, f"{env.error_category}: {env.detail}"
     knobs = data_mapping(env, "knobs")
     assert set(knobs) == set(_KNOBS), f"knobs {sorted(knobs)}"
-    for knob in _KNOBS:
+    for knob, guest_view in guest_views.items():
         reported = cast(dict[str, object], knobs[knob])
-        guest_view = await asyncio.to_thread(_guest_knob, guest.endpoint, guest.key, knob)
         compared = {k: reported[k] for k in guest_view if k in reported}
         assert compared == guest_view, f"{knob}: tool {reported} vs guest {guest_view}"
-        assert reported["armed"] is (
+        armed = (
             bool(reported["present"])
             and cast(int, reported["probability"]) > 0
             and reported["times"] != 0
-        ), f"{knob} armed flag {reported}"
+        )
+        assert reported["armed"] is armed, f"{knob} armed flag {reported}"
     return {"knobs": len(knobs), "matches_guest_debugfs": True}
 
 
