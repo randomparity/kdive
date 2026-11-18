@@ -27,6 +27,7 @@ from kdive.mcp.tools.catalog import (
 )
 from kdive.mcp.tools.catalog import images as catalog_images
 from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_tools
+from kdive.mcp.tools.debug import faultinject
 from kdive.mcp.tools.debug.introspection import registrar as introspect
 from kdive.mcp.tools.debug.operations.runtime import DebugRuntimeResolver
 from kdive.mcp.tools.debug.sessions import registrar as debug_tools
@@ -182,6 +183,15 @@ def _introspection_tools_registrar(
     return _register
 
 
+def _faultinject_tools_registrar(
+    resolver: ProviderResolver, secret_registry: SecretRegistry
+) -> PlaneRegistrar:
+    def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+        faultinject.register(app, pool, resolver=resolver, secret_registry=secret_registry)
+
+    return _register
+
+
 def _diagnostics_tools_registrar() -> PlaneRegistrar:
     def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         def _service_factory(
@@ -303,6 +313,7 @@ def build_plane_registrars(assembly: AppAssembly) -> tuple[PlaneRegistrar, ...]:
             assembly.debug_session_telemetry,
         ),
         _introspection_tools_registrar(assembly.resolver, assembly.secret_registry),
+        _faultinject_tools_registrar(assembly.resolver, assembly.secret_registry),
         _pool_only_plane_registrar(ops_queue_tools.register),
         *recovery,
         _pool_only_plane_registrar(ops_tuning_tools.register),

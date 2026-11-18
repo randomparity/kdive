@@ -35,6 +35,7 @@ import pytest
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
+from kdive.providers.ports.fault_injection import FAULT_KNOB_PARAMETERS
 from scripts.coverage_campaign.contract import Cell
 from tests.integration.live_stack.cleanup import domain_disks
 from tests.integration.live_stack.image_smoke import Endpoint, os_matches, ssh
@@ -70,6 +71,7 @@ from tests.mcp.json_data import data_mapping, data_str
 pytestmark = pytest.mark.live_stack
 
 TOOLS = (
+    "faultinject.inspect",
     "systems.authorize_ssh_key",
     "systems.check_ssh_reachable",
     "systems.provision",
@@ -79,6 +81,7 @@ TOOLS = (
 )
 # Each tool's project gate, and the role one rank below it (none below viewer).
 _GATES = {
+    "faultinject.inspect": "viewer",
     "systems.authorize_ssh_key": "contributor",
     "systems.check_ssh_reachable": "viewer",
     "systems.provision": "contributor",
@@ -198,6 +201,55 @@ async def _ssh_info(caller: HttpCaller, token: str, guest: Guest) -> dict[str, o
     return {"user": coords.get("user"), "port_matches_domain": True, "guest_is_domain": True}
 
 
+_DEBUGFS = "/sys/kernel/debug"
+_KNOBS = ("failslab", "fail_page_alloc")
+# Local-libvirt only (ADR-0825): the remote cells stay unbound and the contract classes them as a
+# capability_unsupported refusal.
+_LOCAL_ONLY = frozenset({"faultinject.inspect"})
+
+
+def _guest_knob(endpoint: Endpoint, key: Path, knob: str) -> dict[str, object]:
+    """The guest's own debugfs view of one knob, read over SSH without the helper."""
+    probe = f"test -d {_DEBUGFS}/{knob} || {{ echo absent; exit 0; }}; cd {_DEBUGFS}/{knob} && "
+    names = " ".join(FAULT_KNOB_PARAMETERS[knob])
+    show = f"for f in {names}; do [ -f $f ] && echo $f=$(cat $f); done; true"
+    result = ssh(endpoint, key, probe + show)
+    assert result.returncode == 0, f"reading {knob} exited {result.returncode}"
+    if result.stdout.strip() == "absent":
+        return {"present": False}
+    pairs = (line.split("=", 1) for line in result.stdout.split() if "=" in line)
+    return {"present": True, **{name: int(value) for name, value in pairs}}
+
+
+async def _inspect(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
+    guest_views = {
+        knob: await asyncio.to_thread(_guest_knob, guest.endpoint, guest.key, knob)
+        for knob in _KNOBS
+    }
+    env = await caller.call("faultinject.inspect", {"system_id": guest.system_id}, token)
+    assert isinstance(env, ToolResponse), "expected one envelope"
+    if not any(view["present"] for view in guest_views.values()):
+        # A kernel built without fault injection exposes neither knob: the tool refuses with the
+        # fixed remediation instead of reporting two absent knobs.
+        assert env.error_category == ErrorCategory.CONFIGURATION_ERROR.value, env.error_category
+        assert env.data.get("reason") == "fault_injection_unsupported", env.data
+        return {"guest_knobs": "absent", "refused": "fault_injection_unsupported"}
+    assert env.error_category is None, f"{env.error_category}: {env.detail}"
+    knobs = data_mapping(env, "knobs")
+    assert set(knobs) == set(_KNOBS), f"knobs {sorted(knobs)}"
+    for knob, guest_view in guest_views.items():
+        reported = cast(dict[str, object], knobs[knob])
+        compared = {k: reported[k] for k in guest_view if k in reported}
+        assert compared == guest_view, f"{knob}: tool {reported} vs guest {guest_view}"
+        armed = (
+            bool(reported["present"])
+            and cast(int, reported["probability"]) > 0
+            and reported["times"] != 0
+        )
+        assert reported["armed"] is armed, f"{knob} armed flag {reported}"
+    return {"knobs": len(knobs), "matches_guest_debugfs": True}
+
+
 async def _authorize(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
     before = _keys(await asyncio.to_thread(ssh, guest.endpoint, guest.key, _KEYS))
     key, public = await asyncio.to_thread(_keypair, guest.scratch / "second")
@@ -256,6 +308,7 @@ async def _teardown(caller: HttpCaller, token: str, guest: Guest) -> dict[str, o
 
 
 _FUNCTIONAL: dict[str, Body] = {
+    "faultinject.inspect": _inspect,
     "systems.authorize_ssh_key": _authorize,
     "systems.check_ssh_reachable": _check,
     "systems.provision": _provision,
@@ -336,7 +389,11 @@ def _cells() -> list[Cell]:
         c
         for c in tool_cells(TOOLS)
         if (c.provider == "local-libvirt" and c.guest_arch == host)
-        or (c.provider == "remote-libvirt" and c.guest_arch in REMOTE_LANE_FAMILIES)
+        or (
+            c.provider == "remote-libvirt"
+            and c.guest_arch in REMOTE_LANE_FAMILIES
+            and c.operation not in _LOCAL_ONLY
+        )
     ]
 
 

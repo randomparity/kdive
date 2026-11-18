@@ -174,9 +174,18 @@ def _validate_ssh_target(transport_handle: str) -> int:
 
 
 def _live_ssh_argv(
-    transport_handle: str, secret_registry: SecretRegistry, drgn_args: list[str], key_path: str
+    transport_handle: str,
+    secret_registry: SecretRegistry,
+    drgn_args: list[str],
+    key_path: str,
+    *,
+    program: str = _DRGN_HELPER,
 ) -> list[str]:
-    """Build the fixed loopback SSH argv for an in-guest ``kdive-drgn`` invocation."""
+    """Build the fixed loopback SSH argv for an in-guest reviewed-program invocation.
+
+    ``program`` defaults to ``kdive-drgn``; ``kdive-faultinject`` is the other reviewed program
+    (ADR-0822, ADR-0825). Callers pass fixed arguments only, never caller text.
+    """
     port = _validate_ssh_target(transport_handle)
     del secret_registry  # key content is registered by the caller (the tool boundary)
     return [
@@ -195,7 +204,7 @@ def _live_ssh_argv(
         str(port),
         f"{_SSH_USER}@{_LOOPBACK_HOST}",
         "--",
-        _DRGN_HELPER,
+        program,
         *drgn_args,
     ]
 
