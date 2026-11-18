@@ -5,8 +5,8 @@
 Accepted (2026-11-18)
 
 Implementation is tracked by #3686 (port, tools, fault-inject), #3687 (libvirt) and #3688
-(PowerVM through the HMC). Nothing in this record is implemented yet. The device class below is a
-proposal for operator review.
+(PowerVM through the HMC). Nothing in this record is implemented yet. The device class below was
+put to the operator in the pull request before merge.
 
 ## Context
 
@@ -26,11 +26,12 @@ active RMC connection to the guest, and the HMC refuses a remove the guest still
 
 ## Decision
 
-**Device class (proposed).** The first release plugs two kinds, `nic` and `disk`.
+**Device class.** The first release plugs two kinds, `nic` and `disk`.
 
 - `nic`: a network interface. libvirt virtio NIC; PowerVM virtual Ethernet client adapter.
-- `disk`: a new, empty scratch disk of a requested size that kdive creates and owns. libvirt
-  virtio-blk volume; PowerVM virtual SCSI client adapter mapped to a new volume.
+- `disk`: a new, empty scratch disk of a requested size that kdive creates and owns, in the format
+  the provider's own snapshots need. libvirt virtio-blk qcow2 volume; PowerVM virtual SCSI client
+  adapter mapped to a new volume, advertised only if #3688 proves it on a real LPAR.
 
 These are the only two kinds both provider families attach with one dynamic call and a result the
 guest can observe (`ip link`, `lsblk`). Deferred, each unowned until an issue names it:
@@ -53,8 +54,9 @@ hotplug_devices: frozenset[HotplugDeviceKind] = frozenset()
 
 fault-inject advertises both. local-libvirt and remote-libvirt advertise the kinds #3687 proves
 live. PowerVM advertises the kinds #3688 proves on a real LPAR. A provider that does not set it
-refuses with the existing `capability_unsupported` envelope (`configuration_error`,
-`data.reason: capability_unsupported`, `data.capability: hotplug:<kind>`). `systems.get` adds
+refuses with the existing `capability_unsupported` envelope (`configuration_error`; `data` carries
+`reason: capability_unsupported`, `capability: hotplug:<kind>`, `provider` and the sorted
+`supported` kinds). `systems.get` adds
 `data.hotplug_devices`, a sorted list, as it does for `supports_snapshots`.
 
 **Port.** `ProviderRuntime.device_hotplug: DeviceHotplugger | None`, keyed on the provider domain
@@ -79,17 +81,22 @@ class DeviceHotplugger(Protocol):
     def plug(self, domain_name: str, spec: DeviceSpec) -> PlugOutcome: ...
     def unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool: ...
     def is_attached(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool: ...
+    def release_all(self, domain_name: str) -> None: ...  # teardown and reprovision, best effort
 ```
 
 `plug` and `unplug` are idempotent: plugging an already-attached `device_id` returns its outcome,
-and unplugging an absent device returns `True` after freeing any backing volume it still holds.
-The handle is `None` only when a worker died between the provider call and the ledger commit; the
-provider then finds the device by `device_id`, or raises `unplug_refused` with
-`data.reason: handle_unknown` when it cannot. `unplug` never forces the guest: the provider
-issues the graceful request only (libvirt without the force flag, HMC remove without a forced
-mode) and, once the device is gone, frees the backing volume of a `disk`. A provider refusal
-raises `CategorizedError` `CONTROL_FAILURE` with `data.reason: unplug_refused`; a fault is
-`INFRASTRUCTURE_FAILURE`; an unknown network is `CONFIGURATION_ERROR` with `unknown_network`.
+and unplugging an absent device returns `True` after freeing any backing volume it still holds. The
+handle is `None` only when a worker died between the provider call and the ledger commit; the
+provider then finds the device by `device_id`, or raises `unplug_refused` with `data.reason:
+handle_unknown` when it cannot. `unplug` returns `True` when the device is gone and `False` when the
+provider accepted the request and has not finished; a retry that finds its ledger row gone is a
+success. `release_all` removes every kdive-plugged device and backing volume of the domain, like
+`Snapshotter.delete_all`. Every call carries its own timeout bounded by the job's remaining window.
+`unplug` never forces the guest: the provider issues the graceful request only (libvirt without the
+force flag, HMC remove without a forced mode) and, once the device is gone, frees the backing volume
+of a `disk`. A provider refusal raises `CategorizedError` `CONTROL_FAILURE` with `data.reason:
+unplug_refused`; a fault is `INFRASTRUCTURE_FAILURE`; an unknown network is `CONFIGURATION_ERROR`
+with `unknown_network`.
 
 **Tools.** Three `systems.*` tools. Plug and un-plug are worker jobs (`JobKind.PLUG_DEVICE`,
 `JobKind.UNPLUG_DEVICE`) because the provider call can wait on the guest. Each writes its ledger
@@ -120,20 +127,27 @@ NIC cannot be unplugged by this surface.
 **System states and concurrency.** Plug and un-plug are admitted only on a `READY` System: a
 `PAUSED` guest has suspended vCPUs and cannot answer an eject, and every other state has no
 settled guest. They are allowed during a live Run, like snapshot. Admission takes the per-System
-advisory lock and refuses with `conflict` when another plug or un-plug job is active on the System,
-so provider calls on one domain never overlap. A System holds at most 8 ledger rows.
+advisory lock and refuses with `conflict` when another plug or un-plug job is active on the System.
+The exclusion runs both ways: `control.power`, `systems.snapshot`, `systems.restore`,
+`systems.reprovision` and `systems.teardown` refuse with `conflict` while a plug or un-plug job is
+queued or running, as `_active_snapshot_op` does for snapshot jobs, so provider calls on one domain
+never overlap. A System holds at most 8 ledger rows. The limits are chosen here because the issue
+asks for the tool's limit contract; the spec states all five parts.
 
 **Asynchronous completion and un-plug of a device in use.** The worker waits for the provider to
-settle: a `settled=False` plug or un-plug is polled with `is_attached` once a second, up to 60 s
-for plug and 30 s for un-plug, measured on the worker's monotonic clock from the start of the
-provider call. At the deadline the job fails `CONTROL_FAILURE` with `data.reason: settle_timeout`
-and the row becomes `failed`. A guest that holds the device either gets an explicit provider
-refusal (`unplug_refused`, the row returns to `attached`) or never answers (`settle_timeout`, the
-row becomes `failed`); the device stays in the guest in both cases. Retrying
-`systems.unplug_device` on a `failed` row is safe and removes the row once the device is gone.
+settle: a `settled=False` plug or un-plug is polled with `is_attached` once a second, up to 60 s for
+plug and 30 s for un-plug, measured on the worker's monotonic clock from the start of the provider
+call. At the deadline the job fails `CONTROL_FAILURE` with `data.reason: settle_timeout` and the row
+becomes `failed`. An operator `jobs.cancel` mid-call is the same case as a dead worker: the row
+stays `plugging` or `unplugging` until the reconciler repair fails it. A guest that holds the device
+either gets an explicit provider refusal (`unplug_refused`, the row returns to `attached`) or never
+answers (`settle_timeout`, the row becomes `failed`); the device stays in the guest in both cases.
+Retrying `systems.unplug_device` on a `failed` row is safe and removes the row once the device is
+gone.
 
-**What invalidates the ledger.** Teardown and reprovision delete the rows by cascade and the
-provider frees the backing volumes on its existing destroy path. A `control.power` OFF or CYCLE, and
+**What invalidates the ledger.** The `systems` row survives teardown and reprovision, so no
+cascade fires: their workers call `release_all` best effort and delete the System's ledger rows,
+as they do for snapshots (`delete_snapshots_for_system`). A `control.power` OFF or CYCLE, and
 a snapshot restore, replace the running device set: when they succeed, their worker moves the
 System's `attached` rows to `lost`. `unplug_device` on a `lost` row takes the normal path: the
 provider finds the device absent, frees any backing volume, and the row is deleted. The reconciler
@@ -177,6 +191,6 @@ as `repair_stalled_creating_snapshots` does; it makes no provider call.
   provider (AGENTS.md); a 30 to 60 s guest wait belongs in a worker job, as with snapshot.
 - **Cancelable plug and un-plug jobs.** judgment: a cancel mid-call leaves the device state
   indeterminate; the settle deadline already bounds the wait, so they stay out of
-  `CONTRIBUTOR_CANCELABLE_JOB_KINDS`.
+  `CONTRIBUTOR_CANCELABLE_JOB_KINDS` and only an operator can cancel them.
 - **Gate un-plug with the destructive-op gate.** verified: `OPT_IN_DESTRUCTIVE_JOB_KINDS` holds
   only the `force_crash` job kind and ADR-0378 rejected the gate for restore on the same grounds.
