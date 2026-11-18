@@ -35,6 +35,7 @@ import pytest
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
+from kdive.providers.ports.fault_injection import FAULT_KNOB_PARAMETERS
 from scripts.coverage_campaign.contract import Cell
 from tests.integration.live_stack.cleanup import domain_disks
 from tests.integration.live_stack.image_smoke import Endpoint, os_matches, ssh
@@ -210,7 +211,8 @@ _LOCAL_ONLY = frozenset({"faultinject.inspect"})
 def _guest_knob(endpoint: Endpoint, key: Path, knob: str) -> dict[str, object]:
     """The guest's own debugfs view of one knob, read over SSH without the helper."""
     probe = f"test -d {_DEBUGFS}/{knob} || {{ echo absent; exit 0; }}; cd {_DEBUGFS}/{knob} && "
-    show = "for f in *; do [ -f $f ] && echo $f=$(cat $f); done"
+    names = " ".join(FAULT_KNOB_PARAMETERS[knob])
+    show = f"for f in {names}; do [ -f $f ] && echo $f=$(cat $f); done"
     result = ssh(endpoint, key, probe + show)
     assert result.returncode == 0, f"reading {knob} exited {result.returncode}"
     if result.stdout.strip() == "absent":
