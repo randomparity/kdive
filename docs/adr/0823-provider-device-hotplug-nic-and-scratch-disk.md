@@ -93,7 +93,8 @@ raises `CategorizedError` `CONTROL_FAILURE` with `data.reason: unplug_refused`; 
 
 **Tools.** Three `systems.*` tools. Plug and un-plug are worker jobs (`JobKind.PLUG_DEVICE`,
 `JobKind.UNPLUG_DEVICE`) because the provider call can wait on the guest. Each writes its ledger
-row state in the enqueue transaction, so both join `STATE_FENCED_JOB_KINDS` (ADR-0550). Exact parameters,
+row state in the enqueue transaction, so both join `STATE_FENCED_JOB_KINDS` (ADR-0550). Exact
+parameters,
 `data` fields, errors and limits are in the spec,
 `docs/workflow/specs/2026-11-18-provider-device-hotplug-design.md`.
 
@@ -132,12 +133,12 @@ row becomes `failed`); the device stays in the guest in both cases. Retrying
 `systems.unplug_device` on a `failed` row is safe and removes the row once the device is gone.
 
 **What invalidates the ledger.** Teardown and reprovision delete the rows by cascade and the
-provider frees the backing volumes on its existing destroy path. A `control.power` OFF or CYCLE,
-and a snapshot restore, replace the running device set: when they succeed, their worker moves the
+provider frees the backing volumes on its existing destroy path. A `control.power` OFF or CYCLE, and
+a snapshot restore, replace the running device set: when they succeed, their worker moves the
 System's `attached` rows to `lost`. `unplug_device` on a `lost` row takes the normal path: the
-provider finds the device absent, frees any backing volume, and the row is deleted. The reconciler moves a `plugging` or `unplugging` row with
-no active job to `failed` (`repair_stalled_device_ops`), as `repair_stalled_creating_snapshots`
-does; it makes no provider call.
+provider finds the device absent, frees any backing volume, and the row is deleted. The reconciler
+moves a `plugging` or `unplugging` row with no active job to `failed` (`repair_stalled_device_ops`),
+as `repair_stalled_creating_snapshots` does; it makes no provider call.
 
 ## Consequences
 
