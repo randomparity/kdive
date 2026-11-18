@@ -212,7 +212,7 @@ def _guest_knob(endpoint: Endpoint, key: Path, knob: str) -> dict[str, object]:
     """The guest's own debugfs view of one knob, read over SSH without the helper."""
     probe = f"test -d {_DEBUGFS}/{knob} || {{ echo absent; exit 0; }}; cd {_DEBUGFS}/{knob} && "
     names = " ".join(FAULT_KNOB_PARAMETERS[knob])
-    show = f"for f in {names}; do [ -f $f ] && echo $f=$(cat $f); done"
+    show = f"for f in {names}; do [ -f $f ] && echo $f=$(cat $f); done; true"
     result = ssh(endpoint, key, probe + show)
     assert result.returncode == 0, f"reading {knob} exited {result.returncode}"
     if result.stdout.strip() == "absent":
