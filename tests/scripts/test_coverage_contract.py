@@ -232,11 +232,11 @@ def test_lifecycle_owners_follow_the_approved_split(inventory: Inventory) -> Non
         assert owners(operations, provider, "x86_64") == {owner}
     for provider in ("local-libvirt", "remote-libvirt"):
         assert owners(_LIFECYCLE_TOOLS | deep, provider, "ppc64le") == {2818}
-    assert len([c for c in cells if c.owner == 3062]) == 120
+    assert len([c for c in cells if c.owner == 3062]) == 140
     assert len([c for c in cells if c.owner == 3119]) == 96
     assert len([c for c in cells if c.owner == 2809]) == 8
     assert len([c for c in cells if c.owner == 2810]) == 8
-    assert len([c for c in cells if c.owner == 3080]) == 120
+    assert len([c for c in cells if c.owner == 3080]) == 140
     assert len([c for c in cells if c.owner == 3120]) == 96
     functional = [c for c in cells if c.kind == "functional" and c.operation in _LIFECYCLE_TOOLS]
     systems = {(c.roles, c.inputs) for c in functional if c.operation in _SYSTEM_TOOLS}
@@ -325,7 +325,13 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     assert len(service) == 330 and {c.node_id for c in service} == {_RUN_SYSTEM_JOB_NODE}
     accounting = [c for c in contract.cells if c.operation in _SPLIT[3098]]
     assert len(accounting) == 348 and {c.node_id for c in accounting} == {_ACCOUNTING_NODE}
+    inspect = [c for c in contract.cells if c.operation == "faultinject.inspect"]
+    # Local cells (ppc64le included, as for power) share the System node; the remote ones stay
+    # unbound until #3080's lane covers the capability_unsupported refusal (ADR-0825).
+    assert {c.node_id for c in inspect if c.provider == "local-libvirt"} == {_SYSTEM_NODE}
+    assert {c.node_id for c in inspect if c.provider == "remote-libvirt"} == {None}
     bound = {
+        "faultinject.inspect",
         "image-smoke",
         "deep-lifecycle",
         "host-install",

@@ -76,6 +76,12 @@ expressions. For typed reads such as a struct field, use `introspect.script` on 
 `drgn-live` session. That path requires a running guest and its own transport/debug-info
 prerequisites: resource://kdive/docs/guide/toolsets/introspect.md.
 
+## Guest fault injection
+
+- `faultinject.inspect` — read the `failslab` and `fail_page_alloc` knobs of a ready
+  local-libvirt System: whether each exists, whether it is armed, and its current
+  probability and times. It needs no debug session and only viewer access.
+
 ## Modules
 
 - `debug.list_modules` — list the loaded kernel modules and their base addresses.

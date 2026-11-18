@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Annotated
 
 from fastmcp import FastMCP
@@ -114,6 +115,14 @@ async def _read_state(
     )
 
 
+def _with_limits[F: Callable[..., object]](func: F) -> F:
+    """Fill the docstring's numeric limits from the constants that enforce them."""
+    if func.__doc__ is None:
+        raise ValueError("faultinject.inspect needs a docstring")
+    func.__doc__ = func.__doc__.format(byte_cap=REPLY_BYTE_CAP, seconds=READ_WORST_CASE_SECONDS)
+    return func
+
+
 def register(
     app: FastMCP,
     pool: AsyncConnectionPool,
@@ -128,6 +137,7 @@ def register(
         annotations=_docmeta.read_only(),
         meta=_docmeta.maturity_meta("implemented"),
     )
+    @_with_limits
     async def faultinject_inspect(
         system_id: Annotated[
             str,
@@ -168,9 +178,3 @@ def register(
             resolver=resolver,
             secret_registry=secret_registry,
         )
-
-    doc = faultinject_inspect.__doc__
-    assert doc is not None
-    faultinject_inspect.__doc__ = doc.format(
-        byte_cap=REPLY_BYTE_CAP, seconds=READ_WORST_CASE_SECONDS
-    )

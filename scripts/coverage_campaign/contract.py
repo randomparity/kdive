@@ -62,6 +62,9 @@ FILTERED_LIST_BOUNDARIES = frozenset(
 # Reviewed admission refusals: the server answers these functional cells synchronously, so they
 # observe the server host alone, with no guest, image or accelerator.
 _ADMISSION_REFUSALS = {
+    ("remote-libvirt", "faultinject.inspect"): (
+        "ADR-0825: faultinject.inspect refuses remote-libvirt with capability_unsupported"
+    ),
     ("remote-libvirt", "images.publish"): (
         "ADR-0759: images.publish refuses remote-libvirt with not_implemented before enqueue"
     ),
