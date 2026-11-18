@@ -1599,7 +1599,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="debug.select_thread",
         read_only=False,
         destructive=False,
-        help="Select the guest CPU that later register and stack reads use. Requires contributor.",
+        help="Select (or clear) the guest CPU that register and stack reads use. Requires contributor.",
         unwrap_request=False,
         flags=(
             GeneratedFlag(
@@ -1614,8 +1614,8 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
             GeneratedFlag(
                 name="--thread-id",
                 dest="thread_id",
-                required=True,
-                help="Thread id to select: a positive integer from debug.list_threads data.threads.",
+                required=False,
+                help="Thread id to select: a positive integer from debug.list_threads data.threads. Omit it or pass null to clear the selection.",
                 arg_type="int",
                 action=None,
                 choices=(),

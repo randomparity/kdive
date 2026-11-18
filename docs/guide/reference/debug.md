@@ -33,7 +33,8 @@ Walk the stopped kernel's stack on a live DebugSession. Requires contributor.
 
 The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); there
 is no stack to unwind while the kernel runs. Walks the CPU chosen with debug.select_thread,
-else gdb's current thread (debug.list_threads shows both).
+else gdb's current thread (debug.list_threads shows both). data.thread_id is the id of the
+thread that was walked.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -216,7 +217,7 @@ data.threads holds up to 128 rows, each an id (a positive integer string), gdb's
 target_id, details (QEMU puts the CPU number here: thread 2 is "CPU#1"), state, and the
 func and addr of the thread's innermost frame; data.truncated says whether rows were cut.
 data.current_thread_id is the thread gdb itself has current, which a stop moves.
-data.selected_thread_id appears once debug.select_thread has chosen one; reads then use it.
+data.selected_thread_id appears while debug.select_thread has one chosen; reads then use it.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -292,7 +293,8 @@ The target must be stopped first (halt it with debug.interrupt or hit a breakpoi
 registers are only meaningful at a halt. Each requested register is returned in `data`
 keyed by its name, with the value as a hexadecimal string (e.g. "0xffffffff81000000").
 Reads the CPU chosen with debug.select_thread, else gdb's current thread
-(debug.list_threads shows both).
+(debug.list_threads shows both). data.thread_id, a reserved key beside the register
+names, is the id of the thread that was read, a decimal string and not a register value.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -314,13 +316,17 @@ Resolve a kernel symbol to its address on a live DebugSession. Requires contribu
 
 `implemented`
 
-Select the guest CPU that later register and stack reads use. Requires contributor.
+Select (or clear) the guest CPU that register and stack reads use. Requires contributor.
 
 The target must be stopped first (halt it with debug.interrupt or hit a breakpoint).
-Until the session ends, debug.read_registers, debug.backtrace and debug.read_frame read
-the selected thread, even after a stop makes another thread current in gdb. The selection
-belongs to the session, so every contributor on it shares it, and it cannot be cleared
-except by starting a new session. data.thread_id and data.thread report the selection.
+Until the selection is cleared or the session ends, debug.read_registers,
+debug.backtrace and debug.read_frame read the selected thread, even after a stop makes
+another thread current in gdb. The selection belongs to the session, so every contributor
+on it shares it. data.thread_id and data.thread report the selection.
+
+Omitting thread_id, or passing null, clears the selection: reads use gdb's current thread
+again, nothing is selected, the status is cleared and data.thread_id is null. Clearing
+when nothing is selected succeeds the same way.
 
 A thread_id that is not a positive integer fails with configuration_error (data.code
 bad_thread_id). An id gdb does not list fails with debug_attach_failure (data.code
@@ -330,7 +336,7 @@ debug.list_threads and select again.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `session_id` | string | yes | The live DebugSession whose CPU selection to set. |
-| `thread_id` | integer | yes | Thread id to select: a positive integer from debug.list_threads data.threads. |
+| `thread_id` | integer (nullable) | no | Thread id to select: a positive integer from debug.list_threads data.threads. Omit it or pass null to clear the selection. |
 
 ## `debug.set_breakpoint`
 

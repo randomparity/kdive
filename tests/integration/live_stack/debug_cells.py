@@ -1094,8 +1094,14 @@ async def list_threads_body(s: Session) -> dict[str, object]:
     return {"threads": len(ids), "cpu_numbers_match": True}
 
 
+async def _echoed_thread(s: Session, session_id: str) -> object:
+    """The thread id ``debug.read_registers`` says it read (ADR-0824)."""
+    env = await s.op("debug.read_registers", session_id=session_id, registers=["rip"])
+    return env.data.get("thread_id")
+
+
 async def select_thread_body(s: Session) -> dict[str, object]:
-    """A selection is reported, read registers follow it, and an unlisted id is refused."""
+    """A selection is reported and echoed, a clear undoes it, and an unlisted id is refused."""
     session_id = await s.start()
     rip = await s.stop_in_vfs_read(session_id)
     listing = await s.op("debug.list_threads", session_id=session_id)
@@ -1104,17 +1110,33 @@ async def select_thread_body(s: Session) -> dict[str, object]:
     env = await s.exposed(session_id=session_id, thread_id=int(current))
     assert env.status == "selected" and env.data.get("thread_id") == current, "not selected"
     assert await s.register(session_id) == rip, "the current thread's rip changed"
+    assert await _echoed_thread(s, session_id) == current, "the read did not echo the selection"
     other = next((n for n in ids if n != current), None)
     if other is not None:
         await s.op("debug.select_thread", session_id=session_id, thread_id=int(other))
         assert await s.register(session_id, "rsp") >= KERNEL_BASE, "rsp is not a kernel address"
         after = await s.op("debug.list_threads", session_id=session_id)
         assert after.data.get("selected_thread_id") == other, "the selection is not reported"
+        assert await _echoed_thread(s, session_id) == other, "the read did not echo the other CPU"
+    cleared = await s.op("debug.select_thread", session_id=session_id, thread_id=None)
+    assert cleared.status == "cleared" and cleared.data.get("thread_id") is None, "not cleared"
+    unselected = await s.op("debug.list_threads", session_id=session_id)
+    assert "selected_thread_id" not in unselected.data, "the clear left a selection"
+    assert await _echoed_thread(s, session_id) == unselected.data["current_thread_id"], (
+        "a read after the clear did not use gdb's current thread"
+    )
+    walked = await s.op("debug.backtrace", session_id=session_id, max_frames=1)
+    assert walked.data.get("thread_id") == unselected.data["current_thread_id"], "no thread echo"
     refused = await s.raw("debug.select_thread", session_id=session_id, thread_id=len(ids) + 1000)
     await s.end(session_id)
     assert refused.error_category == ErrorCategory.DEBUG_ATTACH_FAILURE.value, "unlisted accepted"
     assert refused.data.get("code") == "unknown_thread", f"refused with {refused.data}"
-    return {"threads": len(ids), "selected": other or current, "unknown_refused": True}
+    return {
+        "threads": len(ids),
+        "selected": other or current,
+        "cleared": True,
+        "unknown_refused": True,
+    }
 
 
 def _module_row(env: ToolResponse) -> dict[str, Any]:

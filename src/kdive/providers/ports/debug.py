@@ -409,17 +409,30 @@ class GdbMiEngine(Protocol):
         """
         ...
 
-    def select_thread(self, attachment: GdbMiAttachment, *, thread_id: int) -> GdbThread:
-        """Select the thread later register and stack reads act on (ADR-0819).
+    def select_thread(
+        self, attachment: GdbMiAttachment, *, thread_id: int | None
+    ) -> GdbThread | None:
+        """Select the thread later register and stack reads act on, or clear it (ADR-0819, 0824).
 
         Sends no ``-thread-select``: it checks the id with ``-thread-info`` and records it on
-        the attachment, so gdb's own current thread is untouched.
+        the attachment, so gdb's own current thread is untouched. ``None`` sends no MI command,
+        returns ``None`` and sets the attachment back to gdb's implicit current thread.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` / ``bad_thread_id`` for a non-positive or
                 non-integer id (raised before any MI command); ``DEBUG_ATTACH_FAILURE`` /
                 ``unknown_thread`` when gdb lists no such thread, ``malformed_thread_info`` for
                 a thread row without a numeric id, or other gdb/MI command failures;
+                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
+    def read_thread_id(self, attachment: GdbMiAttachment) -> str:
+        """The thread a read uses: the selection, else gdb's current thread (ADR-0824).
+
+        Raises:
+            CategorizedError: ``DEBUG_ATTACH_FAILURE`` / ``no_current_thread`` when no thread is
+                selected and gdb reports no current one, or for other gdb/MI command failures;
                 ``INFRASTRUCTURE_FAILURE`` for command timeouts.
         """
         ...
