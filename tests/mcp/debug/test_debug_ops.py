@@ -219,6 +219,7 @@ def test_op_audit_descriptor_covers_only_mutating_and_sensitive_ops() -> None:
         "debug.interrupt",
         "debug.advance",
         "debug.load_module_symbols",
+        "debug.select_thread",
     } == debug_runtime._AUDITED_OPS
     assert debug_runtime._op_audit("debug.read_memory", address="0x1", byte_count=4) == (
         debug_runtime._OpAudit(
@@ -269,6 +270,7 @@ async def _call_registered_debug_tool(
         ops_memory,
         ops_execution,
         ops_stack,
+        ops_threads,
         ops_watchpoints,
         ops_modules,
     ):
@@ -660,6 +662,30 @@ def test_advance_writes_one_audit_row_per_mode(
         assert len(rows) == 1
         assert rows[0][1] == "debug.advance"
         assert rows[0][5] == f"advance:{mode}"
+
+    asyncio.run(_run())
+
+
+def test_select_thread_writes_one_audit_row(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        async with open_pool(migrated_url) as pool:
+            session_id = await seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController({"-thread-info 2": _thread_info("2")})
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await _call_registered_debug_tool(
+                pool,
+                runtime,
+                tool="debug.select_thread",
+                arguments={"session_id": session_id, "thread_id": 2},
+                ctx=request_context(),
+                monkeypatch=monkeypatch,
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert resp.status == "selected"
+        assert len(rows) == 1
+        assert (rows[0][1], rows[0][5]) == ("debug.select_thread", "select_thread")
 
     asyncio.run(_run())
 
