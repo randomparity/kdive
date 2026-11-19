@@ -330,6 +330,10 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
     # unbound until #3080's lane covers the capability_unsupported refusal (ADR-0825).
     assert {c.node_id for c in inspect if c.provider == "local-libvirt"} == {_SYSTEM_NODE}
     assert {c.node_id for c in inspect if c.provider == "remote-libvirt"} == {None}
+    hotplug = [c for c in contract.cells if c.operation in _HOTPLUG_TOOLS]
+    # 3 tools x 2 kinds x 2 configurations x 2 exposures x 5 kinds x 2 providers x 2 arches; the
+    # arch-free scenario ids bind the ppc64le cells to the same node (#2818 proves them).
+    assert len(hotplug) == 480 and {c.node_id for c in hotplug} == {_HOTPLUG_NODE}
     bound = {
         "faultinject.inspect",
         "faultinject.reset",
@@ -354,6 +358,7 @@ def test_pending_cells_have_owned_assertions_but_no_invented_nodes(inventory: In
         *_LOCAL_CONTROL_TOOLS,
         *_RUN_SYSTEM_JOB_TOOLS,
         *_SPLIT[3098],
+        *_HOTPLUG_TOOLS,
     }
     limits = [c for c in contract.cells if c.owner == 3118]
     local_limits = [c for c in limits if c.provider == "local-libvirt"]
@@ -701,6 +706,8 @@ def test_remote_publish_functional_cells_are_server_only_admission_refusals(
     assert {c.kind for c in local} == {"functional", "rejection"}
 
 
+_HOTPLUG_TOOLS = ("systems.list_devices", "systems.plug_device", "systems.unplug_device")
+_HOTPLUG_NODE = "tests/integration/test_hotplug_tool_cells_live.py::test_hotplug_tool_cell"
 _SNAPSHOT_TOOLS = {
     "systems.delete_snapshot",
     "systems.list_snapshots",
