@@ -1948,9 +1948,9 @@ worker's libvirt defined no `kdive-` domain and `KDIVE_INSTALL_STAGING` was empt
 
 #### GDB debug tool cells (#2813)
 
-`tests/integration/test_debug_tool_cells_live.py::test_debug_tool_cell` carries the 440 x86_64
-local-libvirt cells of the 21 `debug.*` tools: 88 `functional` (`debug.start_session` as both
-`gdbstub` and `drgn-live`) and 352 rejection cells. Local-libvirt supports both transports, so
+`tests/integration/test_debug_tool_cells_live.py::test_debug_tool_cell` carries the 480 x86_64
+local-libvirt cells of the 23 `debug.*` tools: 96 `functional` (`debug.start_session` as both
+`gdbstub` and `drgn-live`) and 384 rejection cells. Local-libvirt supports both transports, so
 no `capability` cell exists. The `debug.list_sessions` `authorization` and `project-isolation`
 cells prove denied visibility against a viewer who sees the target session
 ([ADR-0756](../../adr/0756-filtered-list-boundary-evidence.md), amended 2026-10-14). The
@@ -1975,6 +1975,12 @@ KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery
 uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_live.py
 ```
 
+- A `demo-down.sh --wipe --yes` between the configurations removes the registered image, and
+  `build-image.sh fedora-kdive-ready-44` rebuilds it with a different digest. `bindings` binds that
+  digest, so run it again after the rebuild and qualify each configuration's records against the
+  bindings of its own stack; against the first bindings `qualify` reports the second
+  configuration's cells `input-digest-mismatch` and `input-context-mismatch`. Add `-k local-libvirt`
+  to the pytest commands to leave the remote cells of the same file out.
 - Each functional cell provisions `fedora-kdive-ready-44` with `debug.gdbstub` (no
   `crashkernel`, so the boot carries `nokaslr`) and boots the fixture kernel through the
   deep-lifecycle checks, which upload its `vmlinux` and load `loop`. Before any attach halts the
@@ -1996,6 +2002,15 @@ uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_li
   (ADR-0783), requires `halted_by=interrupt` with `signal-received`, records which path the
   `vfs_read` breakpoint stop took (`resume_reply` or `waiting_continue`), and ends the session
   while the guest runs, requiring it to answer again.
+- The `debug.list_threads` and `debug.select_thread` cells need a guest with more than one vCPU
+  for the other-CPU branch of `select_thread`; the fixture guest has two. `list_threads` stops in
+  `vfs_read`, requires one `CPU#n` row per vCPU with `current_thread_id` listed and no
+  `selected_thread_id`. `select_thread` selects the current thread (`rip` unchanged) and another
+  CPU (kernel `rsp`, `selected_thread_id` reported), requires `debug.read_registers` to echo the
+  selected thread, clears the selection (`cleared`, `thread_id` null, the next read and
+  `debug.backtrace` echo gdb's current thread) and requires an unlisted id to be refused
+  `debug_attach_failure` / `unknown_thread` ([ADR-0819](../../adr/0819-gdbstub-thread-selection.md),
+  [ADR-0824](../../adr/0824-clear-the-cpu-selection-and-echo-the-read-thread.md)).
 - Rejection cells aim at one target per stack: a torn-down fixture System, its Run and an ended
   gdbstub session. They compare the project rows (including its debug sessions), the jobs naming
   the System or Run, and whether its domain is defined.
@@ -2037,6 +2052,22 @@ came up after a plain `demo-down.sh` with `KDIVE_WORKER_DEATH_VERIFIER=docker`. 
 with, as `breakpoint` rows whose addresses fall inside those functions in `/proc/kallsyms`, and
 only the `vfs_write` row after the first was cleared. After `demo-down.sh --wipe --yes` no
 `kdive-` domain remained and the temp directory held no staging directory.
+
+A rerun at the #3690 candidate `c80461bb0` (server, worker and reconciler at that SHA in both
+configurations; later commits change only this record) ran all 480 cells, 240 per configuration
+(48 `functional`, 192 rejection), on a disposable Fedora 44 x86_64 KVM lab guest with SELinux
+enforcing and the `longterm` fixture `v6.18.54` built on that host. A first selection of the 20
+local `debug.list_threads` and `debug.select_thread` default-configuration cells passed 20 of 20
+in ten minutes (the same expression also selected remote cells, which stopped `blocked` without a
+remote lane). Each configuration then ran on a freshly wiped stack with `-k local-libvirt`: 240
+passed, none `blocked` or `failure`, in about 85 minutes each. The `select_thread` functional
+records show two threads listed, the other CPU selected, the clear and the refusal of an unlisted
+id, on both exposures, so #3691's echo and clear contract held on a real guest. `qualify`, run
+against the bindings of each stack, qualified all 480 cells: 96 `success` and 384 rejection,
+among them the 40 `debug.list_threads` and `debug.select_thread` cells (8 `success`, 32
+rejection). The earlier 20 `failure` cells (#3230 and the known gaps) did not recur. After
+`demo-down.sh --wipe --yes` no `kdive-` domain remained, and the install staging directory and
+the temp directory were empty.
 
 #### Break-glass provider tool cells (#3112)
 

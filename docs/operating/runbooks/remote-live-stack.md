@@ -804,8 +804,8 @@ these cells' success; the recovery configuration was not run.
 
 ## 13. Remote GDB debug tool cells (#3113)
 
-`tests/integration/test_debug_tool_cells_live.py::test_debug_tool_cell` also carries the 440
-x86_64 remote-libvirt cells of the 21 `debug.*` tools. Each tool has functional, authentication,
+`tests/integration/test_debug_tool_cells_live.py::test_debug_tool_cell` also carries the 480
+x86_64 remote-libvirt cells of the 23 `debug.*` tools. Each tool has functional, authentication,
 authorization, project-isolation and validation cells in both configurations and both exposures,
 and `debug.start_session` has a `gdbstub` and a `drgn-live` variant. Their parameter ids contain
 `remote-libvirt`, so `-k remote-libvirt` selects them. The bodies, ground truth and rejection
@@ -849,9 +849,9 @@ uv run python -m tests.integration.live_stack.evidence assemble \
 uv run python -m scripts.coverage_campaign qualify --inputs inputs.json --results results.json
 ```
 
-Each configuration records 220 cells, 44 functional and 176 rejection, and skips the other
-configuration's 220. While #3124 is open, expect 42 `success` and 2 `blocked` functional cells
-per configuration. `qualify` then qualifies 436 of the 440 and lists the 4 `drgn-live` cells,
+Each configuration records 240 cells, 48 functional and 192 rejection, and skips the other
+configuration's 240. While #3124 is open, expect 46 `success` and 2 `blocked` functional cells
+per configuration. `qualify` then qualifies 476 of the 480 and lists the 4 `drgn-live` cells,
 so it exits non-zero by design. After the run, `demo-down.sh --wipe --yes` clears the stack.
 Then check the provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no
 `kdive-` overlay.
@@ -875,6 +875,28 @@ calibration attach, and no open session row. Both rejection targets carried the 
 fixture boot, so `qualify` lists them as `missing-prerequisite`. No record or artifact carried
 a host name or address. After the run, `demo-down.sh --wipe --yes` cleared the stack, the
 provider defined no `kdive-` domain, and its pool held only the base volumes.
+
+A rerun at the #3690 candidate `c80461bb0` (server, worker and reconciler at that SHA in both
+configurations; later commits change only this record) ran all 480 cells, 240 per configuration
+(48 functional and 192 rejection). The control plane was a disposable Fedora 44 x86_64 lab guest
+with SELinux enforcing and the `longterm` fixture (6.18.54) built on it. The provider was a
+separate disposable Rocky Linux 10.2 x86_64 KVM guest whose domains ran with the `kvm` accelerator
+(nested), prepared with a fresh PKI, `site.yml` and `image.yml -e force_image_rebuild=true`. One
+attempt per configuration ran, with `demo-down.sh --wipe --yes` between them: each recorded 46
+`success` and 2 `blocked` cells (the `drgn-live` starts, #3124), no `failure`, in about 105
+minutes, and skipped the other 240. A first run of the 20 `debug.list_threads` and
+`debug.select_thread` cells of the default configuration passed 20 of 20 in eleven minutes.
+`qualify` qualified 476 of the 480: 92 `success` and 384 rejection, among them all 40 of the
+`debug.list_threads` and `debug.select_thread` cells (8 `success`, 32 rejection). The 4 `drgn-live`
+start cells are `blocked` on `debuginfo_unloadable`, which `qualify` lists as
+`missing-prerequisite`. The `select_thread` functional records show two vCPUs listed, the other CPU
+selected, the clear and the refusal of an unlisted id on both exposures, so #3691's echo and clear
+contract held through the remote gdbstub. Every record carries the provider host as `rocky:10.2` and
+the guest as `fedora:43`. After the run the provider defined no `kdive-` domain and its pool held
+only the base volumes. Two provider-host steps were environmental and are not product coverage:
+`site.yml` stops at its Docker forwarding preflight until the §7 `DOCKER-USER` rules exist, and
+`image.yml` needs a `virt-builder` repository index, so a provider host that cannot reach
+`archive.libguestfs.org` must drop that repository from `/etc/virt-builder/repos.d/` first.
 
 ## 14. Remote capture and introspection tool cells (#3114)
 
