@@ -65,6 +65,12 @@ _ADMISSION_REFUSALS = {
     ("remote-libvirt", "faultinject.inspect"): (
         "ADR-0825: faultinject.inspect refuses remote-libvirt with capability_unsupported"
     ),
+    ("remote-libvirt", "faultinject.reset"): (
+        "ADR-0826: faultinject.reset refuses remote-libvirt with capability_unsupported"
+    ),
+    ("remote-libvirt", "faultinject.set"): (
+        "ADR-0826: faultinject.set refuses remote-libvirt with capability_unsupported"
+    ),
     ("remote-libvirt", "images.publish"): (
         "ADR-0759: images.publish refuses remote-libvirt with not_implemented before enqueue"
     ),

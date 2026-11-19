@@ -46,6 +46,7 @@ _ADMITTING_STATES: dict[ExternalBootOperation, frozenset[ExternalBootActivationS
     _OP.CAPTURE_VMCORE: _ACTIVE_ONLY,
     _OP.CAPTURE_TRAFFIC: _ACTIVE_ONLY,
     _OP.DEBUG_ATTACH: _ACTIVE_ONLY,
+    _OP.FAULT_INJECTION: _ACTIVE_ONLY,
     _OP.OBSERVE_STRANDED_ACTIVATION: frozenset({_STATE.PREPARING}),
     # Every restricting state, like teardown, and for any Run: a detach reverses an attach the
     # matrix admitted, so denying it would strand a live session and leak its transport — and the

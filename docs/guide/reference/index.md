@@ -49,6 +49,8 @@
 | [`debug.set_watchpoint`](debug.md#debugset_watchpoint) | `implemented` |
 | [`debug.start_session`](debug.md#debugstart_session) | `implemented` |
 | [`faultinject.inspect`](faultinject.md#faultinjectinspect) | `implemented` |
+| [`faultinject.reset`](faultinject.md#faultinjectreset) | `implemented` |
+| [`faultinject.set`](faultinject.md#faultinjectset) | `implemented` |
 | [`fixtures.validate`](fixtures.md#fixturesvalidate) | `implemented` |
 | [`images.delete`](images.md#imagesdelete) | `implemented` |
 | [`images.describe`](images.md#imagesdescribe) | `implemented` |

@@ -184,8 +184,12 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # introspect.script runs a caller drgn script in the live guest (mutating; same live-debug
     # contributor gate as introspect.run / debug.*; ADR-0240).
     "introspect.script": _CONTRIBUTOR,
-    # faultinject: a viewer-level read of one System's guest debugfs state (ADR-0825)
+    # faultinject: a viewer-level read of one System's guest debugfs state (ADR-0825); the writes
+    # below are contributor (ADR-0826)
     "faultinject.inspect": _VIEWER,
+    # faultinject.set/reset write guest debugfs (bounded, finite); the live-debug contributor gate
+    "faultinject.set": _CONTRIBUTOR,
+    "faultinject.reset": _CONTRIBUTOR,
     # inventory (platform auditor)
     "inventory.list": _PLAT_AUDITOR,
     "inventory.clear_override": _PLAT_ADMIN,

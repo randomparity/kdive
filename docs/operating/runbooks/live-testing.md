@@ -1678,6 +1678,12 @@ remote-libvirt cells (#3080), which block without a provider host, so select the
   `CONFIG_FAILSLAB` and `CONFIG_FAIL_PAGE_ALLOC` makes it compare both knobs instead. It needs a
   staged `fedora-kdive-ready-44` built after #3694, because an older image has no
   `kdive-faultinject` and the tool then answers `helper_not_installed`.
+- `faultinject.set` and `faultinject.reset` (#3684, ADR-0826) are local-libvirt cells of the same
+  file; the remote cells are the capability_unsupported refusal and stay unbound. Their functional
+  cells arm `failslab` (probability 1, times 1) and compare the readback with the guest's own
+  debugfs files, then reset and compare again, and `reset` always runs in a `finally`. On a lane
+  kernel built without `CONFIG_FAULT_INJECTION` they prove the refusal instead (`knob_absent` for
+  `set`, `fault_injection_unsupported` for `reset`). Both need contributor.
 - A rejection cell aims at one target per stack: a System provisioned, observed, torn down and
   released by the first rejection cell, whose project then must not change. Every role check of
   these tools runs before any state check, so a torn-down System and a released Allocation are

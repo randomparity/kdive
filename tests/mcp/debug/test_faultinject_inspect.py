@@ -123,7 +123,7 @@ def test_viewer_reads_both_knobs_and_the_key_file_is_removed(migrated_url: str) 
         },
         "fail_page_alloc": {"present": False, "armed": False},
     }
-    assert resp.suggested_next_actions == ["systems.get"]
+    assert resp.suggested_next_actions == ["faultinject.reset", "systems.get"]
     handle, key_path = inspector.calls[0]
     assert "127.0.0.1" in handle
     assert inspector.key_text and "PRIVATE KEY" in inspector.key_text
