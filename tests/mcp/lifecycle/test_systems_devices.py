@@ -20,6 +20,7 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import JOBS, SNAPSHOTS, SYSTEM_DEVICES, SYSTEMS, devices_for_system
 from kdive.domain.capacity.state import SnapshotState, SystemDeviceState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -49,6 +50,7 @@ from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.authz.rbac import Role, RoleDenied
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.conftest import _RoleDsns
+from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.lifecycle import runs_support
 from tests.mcp.systems_support import SYSTEM_ADMIN_HANDLERS, provider_resolver, provisioning_profile
 from tests.mcp.systems_support import ctx as _ctx
@@ -230,6 +232,7 @@ def test_plug_inserts_a_plugging_row_enqueues_one_job_and_audits(
     [
         ("usb", None, None, "invalid_kind"),
         ("nic", "bad name", None, "invalid_network"),
+        ("nic", "br0\n", None, "invalid_network"),
         ("nic", "n" * 65, None, "invalid_network"),
         ("nic", "", None, "invalid_network"),
         ("nic", None, 4, "parameter_mismatch"),
@@ -793,5 +796,30 @@ def test_device_job_probe_sees_only_active_device_jobs_of_this_system(
             assert not await device_job_active(conn, UUID(env.system_id))
         refusal = device_op_in_flight(env.system_id)
         assert refusal.error_category == "conflict" and _reason(refusal) == "device_op_in_flight"
+
+    _scenario(migrated_url, authority_role_dsns, body)
+
+
+def test_concurrent_plugs_serialize_on_the_system_lock(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def body(env: _Env) -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url) as holder:
+            async with (
+                holder.transaction(),
+                advisory_xact_lock(holder, LockScope.SYSTEM, UUID(env.system_id)),
+            ):
+                racers = [asyncio.create_task(env.plug()) for _ in range(2)]
+                await wait_until_any_backend_waiting(holder)
+            results = await asyncio.gather(*racers)
+
+        assert sorted(r.status for r in results) == ["error", "running"], [
+            r.model_dump() for r in results
+        ]
+        (loser,) = (r for r in results if r.status == "error")
+        assert _reason(loser) == "device_op_in_flight"
+        assert len(await env.jobs(JobKind.PLUG_DEVICE)) == 1
+        async with env.owner.connection() as conn:
+            assert len(await devices_for_system(conn, UUID(env.system_id))) == 1
 
     _scenario(migrated_url, authority_role_dsns, body)

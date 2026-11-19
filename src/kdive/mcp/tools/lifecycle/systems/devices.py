@@ -53,7 +53,7 @@ DEVICE_LIMIT = 8
 DISK_MIN_GB = 1
 DISK_MAX_GB = 32
 NETWORK_MAX_LEN = 64
-_NETWORK_RE = re.compile(rf"^[A-Za-z0-9._-]{{1,{NETWORK_MAX_LEN}}}$")
+_NETWORK_RE = re.compile(rf"[A-Za-z0-9._-]{{1,{NETWORK_MAX_LEN}}}")
 # Rows that may be un-plugged; `plugging`/`unplugging` are a job in flight.
 _UNPLUGGABLE = frozenset(
     {SystemDeviceState.ATTACHED, SystemDeviceState.FAILED, SystemDeviceState.LOST}
@@ -108,7 +108,7 @@ def _validate_params(
     if kind is HotplugDeviceKind.NIC:
         if size_gb is not None:
             return _invalid(system_id, "parameter_mismatch", "size_gb applies to kind=disk only")
-        if network is not None and not _NETWORK_RE.match(network):
+        if network is not None and not _NETWORK_RE.fullmatch(network):
             return _invalid(
                 system_id,
                 "invalid_network",
