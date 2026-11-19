@@ -701,7 +701,6 @@ def test_remote_publish_functional_cells_are_server_only_admission_refusals(
     assert {c.kind for c in local} == {"functional", "rejection"}
 
 
-_HOTPLUG_TOOLS = ("systems.list_devices", "systems.plug_device", "systems.unplug_device")
 _SNAPSHOT_TOOLS = {
     "systems.delete_snapshot",
     "systems.list_snapshots",
@@ -731,16 +730,6 @@ def test_capability_cells_follow_the_support_verdict(inventory: Inventory) -> No
         f"tool/vmcore.fetch/fadump/{configuration}/{exposure}/local-libvirt/x86_64/capability"
         for configuration in ("default", "recovery")
         for exposure in ("direct", "gateway")
-    ]
-    # Device hot-plug is advertised by fault-inject only until #3687 and #3688 land, so the
-    # libvirt providers' cells are the refusal proofs (ADR-0823).
-    expected += [
-        f"tool/{tool}/hotplug_devices/{configuration}/{exposure}/{provider}/{arch}/capability"
-        for tool in _HOTPLUG_TOOLS
-        for configuration in ("default", "recovery")
-        for exposure in ("direct", "gateway")
-        for provider in ("local-libvirt", "remote-libvirt")
-        for arch in inventory.arches
     ]
     assert sorted(capability) == sorted(expected)
     gated = {name for g in load_mapping().groups for name in g.capabilities}
