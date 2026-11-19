@@ -34,6 +34,7 @@ class CancelPolicy(StrEnum):
 # - install/boot tear down side effects best-effort; residue is swept by reconciliation.
 # - connect/control are idempotent/atomic — a mid-op cancel rolls back cleanly.
 # - retrieve drops a partial capture artifact best-effort.
+# - hotplug leaves a device in an indeterminate state; the reconciler repair fails its ledger row.
 CANCEL_POLICY: Final[dict[FaultPlane, CancelPolicy]] = {
     FaultPlane.PROVISION: CancelPolicy.ORPHAN_FLAGGED,
     FaultPlane.INSTALL: CancelPolicy.BEST_EFFORT,
@@ -41,6 +42,7 @@ CANCEL_POLICY: Final[dict[FaultPlane, CancelPolicy]] = {
     FaultPlane.CONNECT: CancelPolicy.CLEAN_ROLLBACK,
     FaultPlane.CONTROL: CancelPolicy.CLEAN_ROLLBACK,
     FaultPlane.RETRIEVE: CancelPolicy.BEST_EFFORT,
+    FaultPlane.HOTPLUG: CancelPolicy.BEST_EFFORT,
 }
 
 

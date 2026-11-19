@@ -30,7 +30,16 @@ from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultIn
 from kdive.providers.fault_inject.lifecycle.connect import FaultInjectConnect
 from kdive.providers.fault_inject.lifecycle.control import FaultInjectControl
 from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
-from kdive.providers.fault_inject.lifecycle.faulted import FaultedInstall, FaultedProvisioning
+from kdive.providers.fault_inject.lifecycle.faulted import (
+    FaultedHotplug,
+    FaultedInstall,
+    FaultedProvisioning,
+)
+from kdive.providers.fault_inject.lifecycle.hotplug import (
+    ADVERTISED_KINDS,
+    FaultInjectHotplug,
+    HotplugBehaviour,
+)
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
 from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
@@ -88,6 +97,7 @@ def build_runtime(
     store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
     inventory: FaultInjectInventory | None = None,
     engine: FaultEngine | None = None,
+    hotplug_behaviour: HotplugBehaviour | None = None,
 ) -> ProviderRuntime:
     """Build fault-inject mock provider ports (ADR-0072 happy path; ADR-0074 faults)."""
     inventory = inventory if inventory is not None else FaultInjectInventory()
@@ -97,13 +107,14 @@ def build_runtime(
     introspect = FaultInjectIntrospect()
     faulted_install = FaultedInstall(install, engine) if engine is not None else install
     external_boot = FaultInjectExternalBoot()
+    hotplug = FaultInjectHotplug(inventory, hotplug_behaviour)
     return ProviderRuntime(
         profile_policy=FaultInjectProfilePolicy(),
         provisioner=FaultedProvisioning(provisioner, engine) if engine is not None else provisioner,
         installer=faulted_install,
         booter=faulted_install,
         connector=FaultInjectConnect(),
-        controller=FaultInjectControl(),
+        controller=FaultInjectControl(hotplug),
         retriever=retrieve,
         crash_postmortem=retrieve,
         vmcore_introspector=introspect,
@@ -119,6 +130,7 @@ def build_runtime(
             # and both introspection modes FaultInjectIntrospect realizes.
             debug_transports=frozenset({"gdbstub", "drgn-live"}),
             introspection=frozenset({"offline-vmcore", "live"}),
+            hotplug_devices=ADVERTISED_KINDS,
         ),
         debug=DebugCapabilities(
             attach_seam=fault_inject_attach_seam,
@@ -127,4 +139,7 @@ def build_runtime(
         external_boot=external_boot,
         external_boot_preparation=external_boot,
         external_boot_recovery_objects=external_boot,
+        device_hotplug=(
+            FaultedHotplug(hotplug, engine, inventory) if engine is not None else hotplug
+        ),
     )

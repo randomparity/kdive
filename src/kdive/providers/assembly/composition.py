@@ -33,6 +33,7 @@ from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.fault_inject import composition as fault_inject_composition
 from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
+from kdive.providers.fault_inject.lifecycle.hotplug import HotplugBehaviour
 from kdive.providers.infra.console_hosting import DbRunningRemoteSystems
 from kdive.providers.infra.reaping import (
     CaptureReaper,
@@ -195,10 +196,11 @@ def build_fault_inject_runtime(
     *,
     inventory: FaultInjectInventory | None = None,
     engine: FaultEngine | None = None,
+    hotplug_behaviour: HotplugBehaviour | None = None,
     store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
 ) -> ProviderRuntime:
     runtime = fault_inject_composition.build_runtime(
-        inventory=inventory, engine=engine, store=store
+        inventory=inventory, engine=engine, hotplug_behaviour=hotplug_behaviour, store=store
     )
     return _with_discovery_registration(runtime, fault_inject_composition.discovery_registration())
 
