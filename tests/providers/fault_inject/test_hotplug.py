@@ -15,7 +15,6 @@ from kdive.providers.fault_inject.inventory import FaultInjectInventory
 from kdive.providers.fault_inject.lifecycle.faulted import FaultedHotplug
 from kdive.providers.fault_inject.lifecycle.hotplug import FaultInjectHotplug, HotplugBehaviour
 from kdive.providers.ports.lifecycle import DeviceHotplugger, DeviceSpec, HotplugDeviceKind
-from tests.providers.test_composition import _provisioning_profile
 
 _SYSTEM = UUID("44444444-4444-4444-4444-444444444444")
 _DOMAIN = f"fault-inject-{_SYSTEM}"
@@ -322,21 +321,21 @@ def test_the_fault_is_deterministic_for_one_system() -> None:
 
 def test_runtime_wires_the_behaviour_and_follows_control_power() -> None:
     inventory = FaultInjectInventory()
+    inventory.record(_SYSTEM, _DOMAIN)
     runtime = build_fault_inject_runtime(
         inventory=inventory, hotplug_behaviour=HotplugBehaviour.BUSY
     )
     port = runtime.device_hotplug
     assert port is not None
-    domain = runtime.provisioner.provision(_SYSTEM, _provisioning_profile())
-    handle = port.plug(domain, _NIC).provider_handle
+    handle = port.plug(_DOMAIN, _NIC).provider_handle
 
     with _raises(ErrorCategory.CONTROL_FAILURE, "unplug_refused"):
-        port.unplug(domain, _NIC.device_id, handle)
-    runtime.controller.power(domain, PowerAction.OFF)
+        port.unplug(_DOMAIN, _NIC.device_id, handle)
+    runtime.controller.power(_DOMAIN, PowerAction.OFF)
 
-    assert port.is_attached(domain, _NIC.device_id, handle) is False
+    assert port.is_attached(_DOMAIN, _NIC.device_id, handle) is False
     with _raises(ErrorCategory.INFRASTRUCTURE_FAILURE, "domain_not_running"):
-        port.plug(domain, _NIC)
+        port.plug(_DOMAIN, _NIC)
 
 
 def test_runtime_with_an_engine_wraps_the_port_in_the_faulting_decorator() -> None:
