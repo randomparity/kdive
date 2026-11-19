@@ -46,6 +46,7 @@ from kdive.providers.ports.lifecycle import (
     DEBUG_TRANSPORT_KINDS,
     INTROSPECTION_MODES,
     DebugTransportKind,
+    HotplugDeviceKind,
     IntrospectionMode,
 )
 from kdive.providers.ports.traffic import TrafficCaptureOperationPorts
@@ -178,6 +179,7 @@ def provider_resolver(
     external_boot_preparation: object | None = None,
     external_boot_recovery_objects: object | None = None,
     authority_sender: object | None = None,
+    hotplugger: object | None = None,
 ) -> ProviderResolver:
     """Return a local-libvirt resolver with optional fake runtime ports.
 
@@ -240,6 +242,7 @@ def provider_resolver(
                 else INTROSPECTION_MODES
             ),
             supports_snapshots=supports_snapshots,
+            hotplug_devices=frozenset(HotplugDeviceKind) if hotplugger is not None else frozenset(),
             supports_traffic_capture=supports_traffic_capture,
             supports_diagnostic_sysrq=supports_diagnostic_sysrq,
             supports_crash_watch=supports_crash_watch,
@@ -254,6 +257,7 @@ def provider_resolver(
         snapshot=cast(Any, snapshotter if snapshotter is not None else _NoopSnapshotter())
         if supports_snapshots
         else None,
+        device_hotplug=cast(Any, hotplugger),
         traffic_capturer=cast(
             Any, traffic_capturer if traffic_capturer is not None else unused_port
         )

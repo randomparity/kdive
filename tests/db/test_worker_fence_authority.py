@@ -183,7 +183,6 @@ _PROTECTED_TABLES = {
     "investigation_build_use_recoveries",
     "investigation_build_uses",
     "schema_migrations",
-    "system_devices",
     "worker_incarnations",
 }
 _ORDINARY_TABLES = {
@@ -222,6 +221,7 @@ _ORDINARY_TABLES = {
     "runs",
     "snapshots",
     "system_bootstrap_keys",
+    "system_devices",
     "system_object_sweep_cursors",
     "system_root_provenance",
     "system_shapes",
@@ -307,6 +307,7 @@ _WORKER_SELECT = {
     "runs",
     "snapshots",
     "system_bootstrap_keys",
+    "system_devices",
     "system_shapes",
     "systems",
     "upload_manifests",
@@ -342,6 +343,7 @@ _WORKER_MUTATIONS = {
         "run_steps",
         "runs",
         "snapshots",
+        "system_devices",
         "systems",
         "upload_manifests",
         "vmcore_capture_executions",
@@ -354,6 +356,7 @@ _WORKER_MUTATIONS = {
         "run_steps",
         "snapshots",
         "system_bootstrap_keys",
+        "system_devices",
         "upload_manifests",
     },
 }
@@ -390,6 +393,7 @@ _RECONCILER_MUTATIONS = {
         "resources",
         "runs",
         "snapshots",
+        "system_devices",
         "system_object_sweep_cursors",
         "systems",
         "upload_manifests",
@@ -409,6 +413,7 @@ _RECONCILER_MUTATIONS = {
         "run_steps",
         "snapshots",
         "system_bootstrap_keys",
+        "system_devices",
         "upload_manifests",
     },
 }

@@ -225,6 +225,7 @@ async def execute_authority_system_job(
             ports.artifact_store,
             marker.system_id,
             reclaim_snapshot_ledger=True,
+            reclaim_device_ledger=True,
             discharge_mutation_obligations=True,
         )
     await _finalize(conn, job, allocated, response, ports.incarnation_credential)

@@ -1156,6 +1156,7 @@ def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
                 artifact_store,
                 context.marker.system_id,
                 reclaim_snapshot_ledger=True,
+                reclaim_device_ledger=True,
                 discharge_mutation_obligations=False,
             )
         async with context.prerequisites["connection"].cursor() as cursor:

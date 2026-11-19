@@ -114,6 +114,7 @@ async def repair_terminal_authority_system_attempts(
                 artifact_store,
                 system_id,
                 reclaim_snapshot_ledger=True,
+                reclaim_device_ledger=True,
                 discharge_mutation_obligations=True,
             )
             status = await _finalize_authority_system_teardown(conn, candidate)

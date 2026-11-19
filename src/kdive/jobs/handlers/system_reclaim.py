@@ -14,7 +14,7 @@ from psycopg.rows import dict_row
 from kdive.artifacts.console.sidecar import sidecar_object_name
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
-from kdive.db.repositories import delete_snapshots_for_system
+from kdive.db.repositories import delete_devices_for_system, delete_snapshots_for_system
 from kdive.providers.shared.runtime_paths import pcap_dir
 from kdive.security.secrets.system_bootstrap_key import delete_system_bootstrap_key
 from kdive.store.objectstore import artifact_key
@@ -101,12 +101,16 @@ async def reclaim_system_core_after_provider_teardown(
     system_id: UUID,
     *,
     reclaim_snapshot_ledger: bool,
+    reclaim_device_ledger: bool,
     discharge_mutation_obligations: bool,
 ) -> None:
     """Reclaim core state only after a provider proves physical System absence."""
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         if reclaim_snapshot_ledger:
             await delete_snapshots_for_system(conn, system_id)
+        if reclaim_device_ledger:
+            # The provider proved physical absence, so there is no device left to release.
+            await delete_devices_for_system(conn, system_id)
         if discharge_mutation_obligations:
             # The worker-fenced form: every caller of this helper that discharges runs under
             # kdive_worker or kdive_reconciler, and neither holds UPDATE on the obligations

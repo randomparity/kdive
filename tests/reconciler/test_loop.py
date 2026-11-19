@@ -421,6 +421,7 @@ def test_terminal_authority_system_receipt_repair_uses_the_fixed_batch_limit() -
             assert args[1:3] == (store, system_id)
             assert kwargs == {
                 "reclaim_snapshot_ledger": True,
+                "reclaim_device_ledger": True,
                 "discharge_mutation_obligations": True,
             }
             events.append("cleanup")

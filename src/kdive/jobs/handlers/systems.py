@@ -19,7 +19,9 @@ from kdive.db.repositories import (
     SNAPSHOTS,
     SYSTEMS,
     ObjectNotFound,
+    delete_devices_for_system,
     delete_snapshots_for_system,
+    mark_attached_devices_lost,
     record_system_failure_category,
     snapshot_by_name,
 )
@@ -59,7 +61,7 @@ from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
-from kdive.providers.ports.lifecycle import Snapshotter
+from kdive.providers.ports.lifecycle import DeviceHotplugger, Snapshotter
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.providers.system_authority.protocol import AuthoritySystemResponseV1
 from kdive.security import audit
@@ -253,6 +255,7 @@ async def _commit_reprovision_result(
             # The recreated qcow2 destroys the old libvirt snapshots; drop their ledger rows in
             # the same commit so a restore of a stale name is refused, not silently mismatched.
             await delete_snapshots_for_system(conn, system.id)
+            await delete_devices_for_system(conn, system.id)
             await audit_transition(
                 conn,
                 job,
@@ -446,6 +449,13 @@ async def reprovision_handler(
     if system.state is not SystemState.REPROVISIONING:
         return str(system_id)
     secret_registry = secret_registry or SecretRegistry()
+    # The recreated domain has none of the hot-plugged devices; free their backing storage first.
+    await _best_effort_release_all(
+        None if runtime.device_hotplug is None else runtime.device_hotplug.release_all,
+        system_id,
+        system.domain_name or domain_name_for(system_id),
+        "device",
+    )
     return await _execute_system_lifecycle_call(
         conn,
         job,
@@ -553,6 +563,8 @@ async def _commit_restore_result(
         current = await _locked_system_state(conn, system_id)
         if current is SystemState.RESTORING:
             await SYSTEMS.update_state(conn, system_id, target)
+            # The revert replaced the running device set (ADR-0823).
+            await mark_attached_devices_lost(conn, system_id)
             await audit_transition(
                 conn,
                 job,
@@ -650,6 +662,23 @@ async def snapshot_delete_handler(
     return str(system_id)
 
 
+async def _best_effort_release_all(
+    release_all: Callable[[str], None] | None, system_id: UUID, domain_name: str, what: str
+) -> None:
+    """Run a provider ``release_all`` off the loop; a provider fault never blocks the caller."""
+    if release_all is None:
+        return
+    try:
+        await asyncio.to_thread(release_all, domain_name)
+    except CategorizedError:
+        _log.warning(
+            "best-effort %s release_all for system %s failed; continuing",
+            what,
+            system_id,
+            exc_info=True,
+        )
+
+
 async def _reclaim_snapshots(
     conn: AsyncConnection, snapshotter: Snapshotter | None, system_id: UUID, domain_name: str
 ) -> None:
@@ -661,17 +690,27 @@ async def _reclaim_snapshots(
     snapshots (``snapshot is None``) skips it. The ledger rows are then deleted so a torn-down
     System reports no snapshots.
     """
-    if snapshotter is not None:
-        try:
-            await asyncio.to_thread(snapshotter.delete_all, domain_name)
-        except CategorizedError:
-            _log.warning(
-                "best-effort snapshot delete_all for system %s failed; continuing teardown",
-                system_id,
-                exc_info=True,
-            )
+    await _best_effort_release_all(
+        None if snapshotter is None else snapshotter.delete_all, system_id, domain_name, "snapshot"
+    )
     async with conn.transaction():
         await delete_snapshots_for_system(conn, system_id)
+
+
+async def _reclaim_devices(
+    conn: AsyncConnection, hotplugger: DeviceHotplugger | None, system_id: UUID, domain_name: str
+) -> None:
+    """Free a System's hot-plugged devices at teardown: provider devices, then ledger rows.
+
+    ``release_all`` is best-effort: a provider fault must not strand a teardown, and teardown is
+    exempt from the plug/un-plug exclusion so a stuck job cannot block reclaim (ADR-0823). The
+    ledger rows go either way, so a torn-down System reports no devices.
+    """
+    await _best_effort_release_all(
+        None if hotplugger is None else hotplugger.release_all, system_id, domain_name, "device"
+    )
+    async with conn.transaction():
+        await delete_devices_for_system(conn, system_id)
 
 
 async def _finalize_teardown(
@@ -753,6 +792,7 @@ async def teardown_handler(
     set_provider_kind(binding.kind.value)
     provisioner = binding.runtime.provisioner
     await _reclaim_snapshots(conn, binding.runtime.snapshot, system_id, domain_name)
+    await _reclaim_devices(conn, binding.runtime.device_hotplug, system_id, domain_name)
     await asyncio.to_thread(provisioner.teardown, domain_name)
     await _finalize_teardown(conn, job, system_id)
     # Provider teardown and the terminal/discharge transaction completed, so a cancellation or
@@ -772,6 +812,7 @@ async def teardown_handler(
         artifact_store,
         system_id,
         reclaim_snapshot_ledger=False,
+        reclaim_device_ledger=False,
         discharge_mutation_obligations=False,
     )
     return str(system_id)

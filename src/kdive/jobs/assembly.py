@@ -6,15 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from opentelemetry import metrics
-from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
 import kdive.config as config
 from kdive.assembly import ProcessAssembly, build_process_assembly
 from kdive.config.core_settings import BUILD_WORKSPACE
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
 from kdive.jobs.external_boot_authority_client import (
@@ -24,6 +22,7 @@ from kdive.jobs.external_boot_authority_client import (
     external_boot_client_factory,
 )
 from kdive.jobs.handlers import (
+    devices,
     diagnostics,
     external_boot,
     image_build,
@@ -152,20 +151,6 @@ def build_production_handler_registry(
     )
 
 
-async def _device_hotplug_not_implemented(conn: AsyncConnection, job: Job) -> str | None:
-    """Fail a hot-plug job closed until its handlers land (#3699).
-
-    The kinds are active so the ledger and queue contracts can ship first; no tool enqueues them
-    yet, so reaching this means a row was written by hand. A terminal error dead-letters it
-    instead of retrying.
-    """
-    raise CategorizedError(
-        f"{job.kind.value} has no handler yet (tracked by #3699)",
-        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-        terminal=True,
-    )
-
-
 def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAssembly) -> None:
     """Register every active worker handler using the process assembly ports."""
     # One operations registry, passed to both registrars. Building two would let a marked boot and
@@ -257,8 +242,11 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
         registry,
         worker_check_builders=assembly.worker_check_builders,
     )
-    registry.register(JobKind.PLUG_DEVICE, _device_hotplug_not_implemented)
-    registry.register(JobKind.UNPLUG_DEVICE, _device_hotplug_not_implemented)
+    devices.register_handlers(
+        registry,
+        resolver=assembly.resolver,
+        secret_registry=assembly.secret_registry,
+    )
     registry.register(
         JobKind.REMOTE_MODULE_VOLUME_REAP,
         lambda conn, job: module_volume_reaping.remote_module_volume_reap_handler(
