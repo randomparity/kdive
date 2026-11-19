@@ -16,7 +16,7 @@ from kdive.db.repositories import (
 )
 from kdive.domain.capacity.state import IllegalTransition, SystemDeviceState
 from kdive.domain.lifecycle.records import SystemDevice
-from tests.db.test_snapshots_repo import _connect, _seed_system
+from tests.db.system_ledger_support import connect, seed_system
 
 _DT = datetime(2026, 11, 19, tzinfo=UTC)
 
@@ -55,9 +55,9 @@ def _device(system_id: UUID, **kw: object) -> SystemDevice:
 
 def test_insert_round_trips_columns_and_lists_oldest_first(migrated_url: str) -> None:
     async def scenario() -> None:
-        async with await _connect(migrated_url) as conn:
-            sid = await _seed_system(conn)
-            other = await _seed_system(conn)
+        async with await connect(migrated_url) as conn:
+            sid = await seed_system(conn)
+            other = await seed_system(conn)
             first = await SYSTEM_DEVICES.insert(
                 conn,
                 _device(
@@ -83,8 +83,8 @@ def test_insert_round_trips_columns_and_lists_oldest_first(migrated_url: str) ->
 
 def test_more_than_eight_devices_are_not_a_schema_constraint(migrated_url: str) -> None:
     async def scenario() -> None:
-        async with await _connect(migrated_url) as conn:
-            sid = await _seed_system(conn)
+        async with await connect(migrated_url) as conn:
+            sid = await seed_system(conn)
             for _ in range(9):
                 await SYSTEM_DEVICES.insert(conn, _device(sid))
             assert len(await devices_for_system(conn, sid)) == 9
@@ -95,8 +95,8 @@ def test_more_than_eight_devices_are_not_a_schema_constraint(migrated_url: str) 
 @pytest.mark.parametrize(("frm", "to"), _VALID_EDGES)
 def test_valid_edges_pass(migrated_url: str, frm: SystemDeviceState, to: SystemDeviceState) -> None:
     async def scenario() -> None:
-        async with await _connect(migrated_url) as conn:
-            row = await SYSTEM_DEVICES.insert(conn, _device(await _seed_system(conn), state=frm))
+        async with await connect(migrated_url) as conn:
+            row = await SYSTEM_DEVICES.insert(conn, _device(await seed_system(conn), state=frm))
             assert (await SYSTEM_DEVICES.update_state(conn, row.id, to)).state is to
 
     asyncio.run(scenario())
@@ -107,8 +107,8 @@ def test_invalid_edges_are_refused(
     migrated_url: str, frm: SystemDeviceState, to: SystemDeviceState
 ) -> None:
     async def scenario() -> None:
-        async with await _connect(migrated_url) as conn:
-            row = await SYSTEM_DEVICES.insert(conn, _device(await _seed_system(conn), state=frm))
+        async with await connect(migrated_url) as conn:
+            row = await SYSTEM_DEVICES.insert(conn, _device(await seed_system(conn), state=frm))
             with pytest.raises(IllegalTransition):
                 await SYSTEM_DEVICES.update_state(conn, row.id, to)
             fetched = await SYSTEM_DEVICES.get(conn, row.id)
@@ -119,8 +119,8 @@ def test_invalid_edges_are_refused(
 
 def test_delete_removes_one_row(migrated_url: str) -> None:
     async def scenario() -> None:
-        async with await _connect(migrated_url) as conn:
-            row = await SYSTEM_DEVICES.insert(conn, _device(await _seed_system(conn)))
+        async with await connect(migrated_url) as conn:
+            row = await SYSTEM_DEVICES.insert(conn, _device(await seed_system(conn)))
             assert await SYSTEM_DEVICES.delete(conn, row.id) is True
             assert await SYSTEM_DEVICES.get(conn, row.id) is None
 
@@ -129,9 +129,9 @@ def test_delete_removes_one_row(migrated_url: str) -> None:
 
 def test_delete_devices_for_system_is_scoped_and_counts(migrated_url: str) -> None:
     async def scenario() -> None:
-        async with await _connect(migrated_url) as conn:
-            sid = await _seed_system(conn)
-            other = await _seed_system(conn)
+        async with await connect(migrated_url) as conn:
+            sid = await seed_system(conn)
+            other = await seed_system(conn)
             await SYSTEM_DEVICES.insert(conn, _device(sid))
             await SYSTEM_DEVICES.insert(conn, _device(sid, state=SystemDeviceState.FAILED))
             await SYSTEM_DEVICES.insert(conn, _device(other))
@@ -145,8 +145,8 @@ def test_delete_devices_for_system_is_scoped_and_counts(migrated_url: str) -> No
 
 def test_devices_cascade_when_system_deleted(migrated_url: str) -> None:
     async def scenario() -> None:
-        async with await _connect(migrated_url) as conn:
-            sid = await _seed_system(conn)
+        async with await connect(migrated_url) as conn:
+            sid = await seed_system(conn)
             await SYSTEM_DEVICES.insert(conn, _device(sid))
             async with conn.cursor() as cur:
                 await cur.execute("DELETE FROM systems WHERE id = %s", (sid,))
@@ -158,8 +158,8 @@ def test_devices_cascade_when_system_deleted(migrated_url: str) -> None:
 @pytest.mark.parametrize(("kind", "state"), [("pcie", "plugging"), ("nic", "gone")])
 def test_check_constraints_reject_unknown_values(migrated_url: str, kind: str, state: str) -> None:
     async def scenario() -> None:
-        async with await _connect(migrated_url) as conn:
-            sid = await _seed_system(conn)
+        async with await connect(migrated_url) as conn:
+            sid = await seed_system(conn)
             with pytest.raises(psycopg.errors.CheckViolation):
                 await conn.execute(
                     "INSERT INTO system_devices (system_id, kind, state) VALUES (%s, %s, %s)",
