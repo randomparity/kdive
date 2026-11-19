@@ -43,6 +43,8 @@ _SERIAL_CHARS: Final = 20
 _DISK_LETTERS: Final = "bcdefghijklmnopqrstuvwxyz"
 _LIBVIRT_MESSAGE_CHARS: Final = 300
 _ATTACH_FLAGS: Final = libvirt.VIR_DOMAIN_AFFECT_LIVE
+# libvirt's text for a detach re-issued while the guest has not yet released the device.
+_PENDING_UNPLUG: Final = "already in the process of unplug"
 _NETWORK_NAME_RE: Final = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 type NicSource = tuple[Literal["user", "network"], str | None]
@@ -318,7 +320,9 @@ class LibvirtDeviceHotplug:
             try:
                 domain.detachDeviceFlags(live.xml, _ATTACH_FLAGS)
             except libvirt.libvirtError as exc:
-                raise _unplug_failure(exc, domain_name) from exc
+                # A retry while the first request is pending is the same accepted request.
+                if _PENDING_UNPLUG not in _libvirt_text(exc):
+                    raise _unplug_failure(exc, domain_name) from exc
             # libvirt waits a few seconds for the guest; a prompt guest is already done.
             if _find(_domain_xml(domain, domain_name), device_id, domain_name) is None:
                 self._volumes.remove(conn, domain_name, device_id)

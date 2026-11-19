@@ -313,6 +313,19 @@ def test_unplug_refused_by_guest_is_control_failure() -> None:
     assert len(domain.devices) == 1
 
 
+def test_repeated_unplug_while_the_guest_has_not_released_is_still_pending() -> None:
+    domain, device_id = _Domain(), str(uuid4())
+    port = _port(domain, _Volumes())
+    handle = port.plug(DOMAIN, _nic(device_id)).provider_handle
+    domain.guest_releases = False
+    assert port.unplug(DOMAIN, device_id, handle) is False
+    domain.detach_error = _FakeError(
+        libvirt.VIR_ERR_OPERATION_INVALID, "device is already in the process of unplug"
+    )
+
+    assert port.unplug(DOMAIN, device_id, handle) is False
+
+
 def test_unplug_libvirt_fault_is_infrastructure_failure() -> None:
     domain, device_id = _Domain(), str(uuid4())
     port = _port(domain, _Volumes())
