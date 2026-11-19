@@ -81,6 +81,13 @@ prerequisites: resource://kdive/docs/guide/toolsets/introspect.md.
 - `faultinject.inspect` — read the `failslab` and `fail_page_alloc` knobs of a ready
   local-libvirt System: whether each exists, whether it is armed, and its current
   probability and times. It needs no debug session and only viewer access.
+- `faultinject.set` — arm one knob (contributor). `probability` is 1 to 100 percent and `times` is
+  a finite count of injected failures (1 to 1000000; -1 and 0 are refused), so a fault ends by
+  itself even if the guest can no longer be reached. `interval`, `space`, `verbose` and, for
+  `fail_page_alloc`, `min_order` are optional and keep the guest value when omitted. The result is
+  the state read back from the guest.
+- `faultinject.reset` — write the kernel defaults to one knob, or to every knob the kernel has
+  (contributor). `faultinject.inspect` suggests it while a knob is armed.
 
 ## Modules
 

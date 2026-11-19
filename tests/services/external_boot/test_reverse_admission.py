@@ -1559,6 +1559,8 @@ _NO_JOB_PATH: dict[str, str] = {
     "allocations.release": "transitions Allocation state and enqueues no job",
     "debug.end_session": "transitions a DebugSession row; enqueues no job",
     "debug.start_session": "inserts a DebugSession row; enqueues no job",
+    "faultinject.reset": "runs one bounded ssh call to the guest in-request; enqueues no job",
+    "faultinject.set": "runs one bounded ssh call to the guest in-request; enqueues no job",
     "runs.bind": "writes runs.system_id; enqueues no job",
     "runs.cancel": "transitions the Run and cancels an existing job; enqueues none",
     "runs.create": "inserts a Run; the build job is runs.install's",

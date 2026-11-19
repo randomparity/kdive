@@ -26,6 +26,8 @@ GUARDED_TOOLS: dict[str, ExternalBootOperation] = {
     "control.watch_for_crash": _OP.SYSTEM_WATCH_CRASH,
     "allocations.release": _OP.ALLOCATION_RELEASE,
     "debug.end_session": _OP.DEBUG_DETACH,
+    "faultinject.reset": _OP.FAULT_INJECTION,
+    "faultinject.set": _OP.FAULT_INJECTION,
     "debug.start_session": _OP.DEBUG_ATTACH,
     "runs.bind": _OP.RUN_BIND,
     "runs.boot": _OP.RUN_BOOT,
