@@ -1823,6 +1823,27 @@ reported all 100 qualified: 20 `success` and 80 `rejection`. After `demo-down.sh
 the worker's libvirt defined no domain, no overlay disk remained and `KDIVE_INSTALL_STAGING` was
 empty.
 
+#### Device hot-plug tool cells (#3687)
+
+`tests/integration/test_hotplug_tool_cells_live.py::test_hotplug_tool_cell` carries the x86_64
+cells of `systems.plug_device`, `systems.unplug_device` and `systems.list_devices` for the `nic`
+and `disk` kinds on local-libvirt (60 per configuration) and remote-libvirt
+([ADR-0823](../../adr/0823-provider-device-hotplug-nic-and-scratch-disk.md)). The prerequisites
+are the power and snapshot cells' above without the `longterm` fixture: a stack at the candidate
+and the staged `fedora-kdive-ready-44` image (remote: the section 7 lane of the
+[remote runbook](remote-live-stack.md)). Select the provider with `-k local-libvirt` or
+`-k remote-libvirt`.
+
+- Each functional cell provisions the lane image and plugs one device of the cell's kind into
+  the running guest. It then checks three things independently: the ledger row
+  (`systems.list_devices`, state `attached`, with the reported MAC or serial), the provider's own
+  libvirt for the domain (the `ua-kdive-<device_id>` alias and, for a disk, its backing source),
+  and the guest over SSH (the MAC under `/sys/class/net`, the virtio serial under
+  `/sys/block/vd*/serial`).
+- The un-plug then requires all three to report the device gone, the backing volume to be absent
+  on the provider, and the ledger row to be deleted. Teardown frees anything a failed cell left.
+- Rejection cells aim at the stack's torn-down lane target, as the power and snapshot cells do.
+
 #### Capture and introspection tool cells (#2814)
 
 `tests/integration/test_capture_tool_cells_live.py::test_capture_tool_cell` carries the 164
