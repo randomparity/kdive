@@ -92,6 +92,10 @@ from kdive.providers.remote_libvirt.lifecycle.capture_operation import (
 )
 from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnect
 from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtControl
+from kdive.providers.remote_libvirt.lifecycle.hotplug import (
+    ADVERTISED_KINDS,
+    RemoteLibvirtDeviceHotplug,
+)
 from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstall
 from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtProvisioning
 from kdive.providers.remote_libvirt.lifecycle.snapshot import RemoteLibvirtSnapshotter
@@ -540,6 +544,9 @@ def build_runtime(
             # Out-of-band crash-signature watch over the reconciler-pumped S3 console parts
             # (ADR-0367/0433, #1435). The deferred ADR-0427 opt-in; matches the reader factory.
             supports_crash_watch=True,
+            # NIC and scratch-disk hot-plug over qemu+tls on the allocated host (ADR-0823, #3687);
+            # matches the wired ``device_hotplug`` port below.
+            hotplug_devices=ADVERTISED_KINDS,
         ),
         debug=_debug_capabilities(secret_registry, store),
         rootfs=RootfsCapabilities(build_plane=RemoteLibvirtRootfsBuildPlane.from_env()),
@@ -564,6 +571,9 @@ def build_runtime(
         # Internal RAM+disk/disk-only domain snapshots over qemu+tls (ADR-0428, #1430). Matches
         # ``support.supports_snapshots``; the teardown path reclaims them via ``delete_all``.
         snapshot=RemoteLibvirtSnapshotter.from_env(
+            secret_registry=secret_registry, config_factory=config_factory
+        ),
+        device_hotplug=RemoteLibvirtDeviceHotplug.from_env(
             secret_registry=secret_registry, config_factory=config_factory
         ),
         # Host-side filter-dump traffic capture with pcap fetch-back over qemu+tls (ADR-0432,
