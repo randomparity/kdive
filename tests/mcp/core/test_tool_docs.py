@@ -176,6 +176,9 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "systems.restore": ("tests/mcp/lifecycle/test_systems_snapshot.py",),
     "systems.list_snapshots": ("tests/mcp/lifecycle/test_systems_snapshot.py",),
     "systems.delete_snapshot": ("tests/mcp/lifecycle/test_systems_snapshot.py",),
+    "systems.plug_device": ("tests/mcp/lifecycle/test_systems_devices.py",),
+    "systems.unplug_device": ("tests/mcp/lifecycle/test_systems_devices.py",),
+    "systems.list_devices": ("tests/mcp/lifecycle/test_systems_devices.py",),
     "tools.invoke": ("tests/mcp/tools/test_gateway_invoke.py",),
     "tools.search": ("tests/mcp/tools/test_gateway_search.py",),
     "vmcore.fetch": ("tests/mcp/lifecycle/test_vmcore_tools.py",),
@@ -1035,6 +1038,8 @@ _JOB_HANDLE_TOOLS = frozenset(
         "systems.snapshot",
         "systems.restore",
         "systems.delete_snapshot",
+        "systems.plug_device",
+        "systems.unplug_device",
         "vmcore.fetch",
     }
 )

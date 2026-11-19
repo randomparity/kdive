@@ -295,6 +295,13 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     ),
     "systems.reprovision": frozenset({"system", "reprovision", "rebuild", "refresh"}),
     "systems.teardown": frozenset({"system", "teardown", "destroy", "delete", "remove"}),
+    "systems.plug_device": frozenset(
+        {"hotplug", "plug", "attach", "add", "nic", "disk", "network", "device", "dlpar"}
+    ),
+    "systems.unplug_device": frozenset(
+        {"hotplug", "unplug", "detach", "remove", "nic", "disk", "device", "dlpar"}
+    ),
+    "systems.list_devices": frozenset({"hotplug", "devices", "list", "nic", "disk", "attached"}),
     # resources — `resources.register` absorbed the three per-provider register_* tools
     # (ADR-0464), so the provider words that used to be *in the retired tool names* must rank it.
     "resources.register": frozenset(

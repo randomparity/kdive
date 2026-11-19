@@ -297,6 +297,19 @@ kernel = true
 "systems.restore" = "supports_snapshots"
 "systems.snapshot" = "supports_snapshots"
 
+[[groups]]
+owner = 3687
+execution = "provider"
+kernel = true
+[groups.tools]
+"systems.list_devices" = "Compare listed device identities and states with the guest's own lsblk and ip link output."
+"systems.plug_device" = "Wait for the job, then verify the new NIC or disk appears in the guest with the reported MAC or serial."
+"systems.unplug_device" = "Wait for the job, then verify the device is gone from the guest and its backing volume is freed."
+[groups.capabilities]
+"systems.list_devices" = "hotplug_devices"
+"systems.plug_device" = "hotplug_devices"
+"systems.unplug_device" = "hotplug_devices"
+
 [implementations]
 "failure-resource/local-libvirt/x86_64/backing-service" = "tests/integration/test_orchestration_faults_live.py::test_local_orchestration_fault"
 "failure-resource/local-libvirt/x86_64/insufficient-disk" = "tests/integration/test_resource_limits_live.py::test_local_resource_boundary"

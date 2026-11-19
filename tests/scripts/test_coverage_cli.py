@@ -15,7 +15,7 @@ def test_real_fast_check_distinguishes_ownership_from_proof(
 ) -> None:
     assert cli.main(["check"]) == 0
     output = capsys.readouterr().out
-    assert "132 tools" in output
+    assert "135 tools" in output
     assert "21 catalog images" in output
     assert "qualification unproven" in output
 

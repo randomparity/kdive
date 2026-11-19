@@ -36,6 +36,7 @@ class ExternalBootOperation(StrEnum):
     SYSTEM_REPROVISION = "system_reprovision"
     SYSTEM_POWER = "system_power"
     SYSTEM_SNAPSHOT = "system_snapshot"
+    SYSTEM_DEVICE_HOTPLUG = "system_device_hotplug"
     SYSTEM_SYSRQ = "system_sysrq"
     SYSTEM_TEARDOWN = "system_teardown"
     SYSTEM_AUTHORIZE_SSH_KEY = "system_authorize_ssh_key"

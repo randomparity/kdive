@@ -22,7 +22,8 @@ It also names the owning `investigation_id` and a bounded, newest-first `run_inv
 list of the Investigations with Runs on the System (`run_investigation_ids_truncated` marks a
 longer history). Read the System's full run history with `runs.list(system_id=…)`.
 `systems.list` provides filters and cursor pagination. Missing capability/CPU data is unknown,
-not proof of support. Check `data.supports_snapshots` before using checkpoints.
+not proof of support. Check `data.supports_snapshots` before using checkpoints and `data.hotplug_devices` (sorted
+device kinds, empty when none) before hot-plugging a device.
 
 ## Checkpoint and restore
 
@@ -40,6 +41,26 @@ restore with `start_paused=true` leaves the System PAUSED. If the Run's other de
 hold, attach GDB and set breakpoints before `control.power(action="resume")` returns it to READY.
 SSH and drgn-live need the guest executing. All snapshot mutations require contributor; listing
 requires viewer. These operations return jobs; poll them rather than assuming immediate completion.
+
+## Hot-plug a NIC or scratch disk
+
+- `systems.plug_device` adds a `nic` or a new empty scratch `disk` (`size_gb` 1 to 32) to a READY
+  System. It returns `status: running` with a `job_id` and a `device_id`; poll `jobs.wait`, then
+  read the result with `systems.list_devices`. A plug settles within 60 s of the job starting.
+- `systems.list_devices` reads the System's device rows (`plugging`, `attached`, `unplugging`,
+  `failed`, `lost`) from the database. Compare `settle_deadline` with the response's
+  `server_time`, not your own clock. The boot disk and SSH NIC are never listed.
+- `systems.unplug_device` gracefully removes an `attached`, `failed` or `lost` device within 30 s
+  of the job starting. A guest or HMC refusal returns the row to its prior state; a timeout marks
+  it `failed` and the device may still be in the guest. Repeat the call to clear a `failed` or
+  `lost` row.
+
+At most 8 device rows per System. Only one plug or un-plug runs at a time, and while one is queued
+or running `control.power`, `systems.snapshot`, `systems.restore` and `systems.reprovision` are
+refused `conflict` (`reason: device_op_in_flight`); `systems.teardown` is not. Devices are
+live-only: a power OFF or cycle and a snapshot restore turn `attached` rows into `lost`. A
+provider that cannot hot-plug the kind is refused `capability_unsupported`. Plug and un-plug
+require contributor; listing requires viewer.
 
 ## Reach and customize the guest
 

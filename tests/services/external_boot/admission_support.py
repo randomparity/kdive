@@ -37,11 +37,13 @@ GUARDED_TOOLS: dict[str, ExternalBootOperation] = {
     "runs.release_external_boot": _OP.EXTERNAL_BOOT_RELEASE,
     "systems.authorize_ssh_key": _OP.SYSTEM_AUTHORIZE_SSH_KEY,
     "systems.delete_snapshot": _OP.SYSTEM_SNAPSHOT,
+    "systems.plug_device": _OP.SYSTEM_DEVICE_HOTPLUG,
     "systems.reprovision": _OP.SYSTEM_REPROVISION,
     "systems.resolve_external_boot_conflict": _OP.EXTERNAL_BOOT_RESOLVE_CONFLICT,
     "systems.restore": _OP.SYSTEM_SNAPSHOT,
     "systems.snapshot": _OP.SYSTEM_SNAPSHOT,
     "systems.teardown": _OP.SYSTEM_TEARDOWN,
+    "systems.unplug_device": _OP.SYSTEM_DEVICE_HOTPLUG,
     "vmcore.fetch": _OP.CAPTURE_VMCORE,
 }
 

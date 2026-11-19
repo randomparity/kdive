@@ -69,6 +69,7 @@ from kdive.mcp.tools._common import (
     invalid_uuid_error as _invalid_uuid_error,
 )
 from kdive.mcp.tools._common import job_envelope
+from kdive.mcp.tools.lifecycle.support._device_ops import device_job_active, device_op_in_flight
 from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay, keyed_mutation
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -164,6 +165,8 @@ async def power_system(
                     )
                 except ExternalBootDenied as exc:
                     return _external_boot_denial(system_id, exc, ctx)
+                if await device_job_active(conn, uid):
+                    return device_op_in_flight(system_id)
                 job = await queue.enqueue(
                     conn,
                     JobKind.POWER,
