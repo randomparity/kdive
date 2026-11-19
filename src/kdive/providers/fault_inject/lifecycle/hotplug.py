@@ -128,7 +128,8 @@ class FaultInjectHotplug:
             if device is None:
                 device = self._new_device(spec)
                 domain.devices[spec.device_id] = device
-            return PlugOutcome(device.handle, dict(device.identity), device.attached)
+            settled = device.attached and not device.removing
+            return PlugOutcome(device.handle, dict(device.identity), settled)
 
     def unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
         with self._lock:

@@ -130,6 +130,16 @@ def test_slow_unplug_is_gone_on_the_third_poll() -> None:
     assert port.unplug(_DOMAIN, _NIC.device_id, handle) is True
 
 
+def test_plug_of_a_device_being_removed_is_not_settled() -> None:
+    port = _port(HotplugBehaviour.SLOW)
+    handle = port.plug(_DOMAIN, _NIC).provider_handle
+    while not port.is_attached(_DOMAIN, _NIC.device_id, handle):
+        pass
+    port.unplug(_DOMAIN, _NIC.device_id, handle)
+
+    assert port.plug(_DOMAIN, _NIC).settled is False
+
+
 def test_hang_plug_never_settles() -> None:
     port = _port(HotplugBehaviour.HANG)
 

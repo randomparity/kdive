@@ -438,7 +438,9 @@ class DeviceHotplugger(Protocol):
             CategorizedError: ``CONTROL_FAILURE`` with ``data.reason: unplug_refused`` when the
                 guest or provider refuses, or ``handle_unknown`` when the device cannot be
                 found without a handle; ``INFRASTRUCTURE_FAILURE`` for a provider fault, an
-                absent domain, or a stopped one (``data.reason: domain_not_running``).
+                absent domain, or a stopped domain that still holds the device
+                (``data.reason: domain_not_running``). An absent device on a stopped domain
+                is not an error: it returns ``True`` after freeing any backing volume.
         """
         ...
 
