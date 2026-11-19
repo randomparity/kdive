@@ -56,6 +56,11 @@ class JobKind(StrEnum):
     # Platform-admin evidence for a stranded activation (ADR-0816). Unmarked: it runs on the fixed
     # worker and asks the authority for its own observation.
     OBSERVE_STRANDED_ACTIVATION = "observe_stranded_activation"
+    # Provider device hot-plug (ADR-0823): a plug/un-plug is asynchronous because the guest or HMC
+    # settles after the provider call returns. Not contributor-cancelable: the ledger row's
+    # `plugging`/`unplugging` state is the only record of an in-flight provider operation.
+    PLUG_DEVICE = "plug_device"
+    UNPLUG_DEVICE = "unplug_device"
 
 
 RETIRED_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})
@@ -68,16 +73,24 @@ STATE_FENCED_JOB_DISPATCH_LANE = "state-fenced"
 """Dispatch lane for the kinds that fence a durable object at enqueue (ADR-0550)."""
 
 STATE_FENCED_JOB_KINDS: frozenset[JobKind] = frozenset(
-    {JobKind.RESTORE, JobKind.REPROVISION, JobKind.SNAPSHOT}
+    {
+        JobKind.RESTORE,
+        JobKind.REPROVISION,
+        JobKind.SNAPSHOT,
+        JobKind.PLUG_DEVICE,
+        JobKind.UNPLUG_DEVICE,
+    }
 )
 """The kinds whose **enqueue transaction** writes a transient state another tool rejects on.
 
 That is the whole rule, and it is checkable at the enqueue site: ``systems.restore`` sets
 ``SystemState.RESTORING``, ``systems.reprovision`` sets ``SystemState.REPROVISIONING``, and
-``systems.snapshot`` inserts its ledger row as ``SnapshotState.CREATING`` — each in the same
-transaction as the ``enqueue``, so the job's *queue wait* is time the object is unusable rather
-than time the agent waits. These route to :data:`STATE_FENCED_JOB_DISPATCH_LANE` so that wait
-cannot sit behind unrelated long work (ADR-0550, #1538).
+``systems.snapshot`` inserts its ledger row as ``SnapshotState.CREATING``, and the device
+plug/un-plug tools write their ``system_devices`` row as ``PLUGGING`` / ``UNPLUGGING``
+(ADR-0823) — each in the same transaction as the ``enqueue``, so the job's *queue wait* is time
+the object is unusable rather than time the agent waits. These route to
+:data:`STATE_FENCED_JOB_DISPATCH_LANE` so that wait cannot sit behind unrelated long work
+(ADR-0550, #1538).
 
 Three near misses stay on the default lane. ``delete_snapshot`` writes no state — only its queued
 presence is read, by ``_active_snapshot_op`` — so the rule admitting it would be "queued presence

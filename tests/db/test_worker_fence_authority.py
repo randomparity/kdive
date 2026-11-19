@@ -183,6 +183,7 @@ _PROTECTED_TABLES = {
     "investigation_build_use_recoveries",
     "investigation_build_uses",
     "schema_migrations",
+    "system_devices",
     "worker_incarnations",
 }
 _ORDINARY_TABLES = {

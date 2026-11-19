@@ -23,6 +23,7 @@ from pydantic import (
     model_validator,
 )
 
+from kdive.domain.capacity.state import SystemDeviceState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.cmdline import cmdline_extra_error
@@ -194,6 +195,43 @@ class RestorePayload(SystemPayload):
 
     name: str
     start_paused: bool
+
+
+class PlugDevicePayload(SystemPayload):
+    """A request to hot-plug the ``system_devices`` row ``device_id`` (ADR-0823).
+
+    The row is pre-minted ``plugging`` at admission; its ``kind`` and ``network``/``size_gb`` are
+    read from the ledger, so the payload carries only the anchor.
+    """
+
+    device_id: str
+
+    @field_validator("device_id")
+    @classmethod
+    def _valid_device_id(cls, value: str) -> str:
+        UUID(value)
+        return value
+
+
+class UnplugDevicePayload(PlugDevicePayload):
+    """A request to remove the ``system_devices`` row ``device_id`` (ADR-0823).
+
+    ``from_state`` is the state the row held at admission (``attached``, ``failed`` or ``lost``);
+    a refused un-plug returns the row to it.
+    """
+
+    from_state: SystemDeviceState
+
+    @field_validator("from_state")
+    @classmethod
+    def _valid_from_state(cls, value: SystemDeviceState) -> SystemDeviceState:
+        if value not in {
+            SystemDeviceState.ATTACHED,
+            SystemDeviceState.FAILED,
+            SystemDeviceState.LOST,
+        }:
+            raise ValueError("from_state must be attached, failed or lost")
+        return value
 
 
 class SnapshotDeletePayload(SystemPayload):
@@ -638,6 +676,8 @@ type _ActivePayloadModel = (
     | type[RemoteModuleVolumeReapPayload]
     | type[ResolveRecoveryOrphanPayload]
     | type[ObserveStrandedActivationPayload]
+    | type[PlugDevicePayload]
+    | type[UnplugDevicePayload]
 )
 type ActivePayloadModel = (
     SystemPayload
@@ -662,6 +702,8 @@ type ActivePayloadModel = (
     | RemoteModuleVolumeReapPayload
     | ResolveRecoveryOrphanPayload
     | ObserveStrandedActivationPayload
+    | PlugDevicePayload
+    | UnplugDevicePayload
 )
 _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.PROVISION: SystemPayload,
@@ -687,6 +729,8 @@ _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.REMOTE_MODULE_VOLUME_REAP: RemoteModuleVolumeReapPayload,
     JobKind.RESOLVE_RECOVERY_ORPHAN: ResolveRecoveryOrphanPayload,
     JobKind.OBSERVE_STRANDED_ACTIVATION: ObserveStrandedActivationPayload,
+    JobKind.PLUG_DEVICE: PlugDevicePayload,
+    JobKind.UNPLUG_DEVICE: UnplugDevicePayload,
 }
 _HISTORICAL_RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,

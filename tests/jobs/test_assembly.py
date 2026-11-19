@@ -6,13 +6,13 @@ import asyncio
 import json
 import ssl
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
 from pydantic import SecretStr
 
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, RETIRED_JOB_KINDS, JobKind
 from kdive.jobs.assembly import WorkerHandlerAssembly, register_all_handlers
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
@@ -179,6 +179,35 @@ def test_register_all_handlers_registers_active_and_no_retired_job_kinds() -> No
     registered = frozenset(kind for kind in JobKind if registry.get(kind) is not None)
     assert registered == ACTIVE_JOB_KINDS
     assert registered.isdisjoint(RETIRED_JOB_KINDS)
+
+
+@pytest.mark.parametrize("kind", [JobKind.PLUG_DEVICE, JobKind.UNPLUG_DEVICE])
+def test_device_hotplug_kinds_fail_closed_until_their_handlers_land(kind: JobKind) -> None:
+    registry = HandlerRegistry()
+    credential = SecretStr("worker-test-incarnation-credential")
+    register_all_handlers(
+        registry,
+        WorkerHandlerAssembly(
+            resolver=ProviderResolver({}),
+            incarnation_credential=credential,
+            secret_registry=SecretRegistry(),
+            object_stores=ObjectStoreAssembly(store=INERT_OBJECT_STORE),
+            capture_supervisor=cast(
+                CaptureOperationSupervisor, SimpleNamespace(credential=credential)
+            ),
+            worker_check_builders={},
+            module_volume_reaper=NullModuleVolumeReaper(),
+        ),
+    )
+    handler = registry.get(kind)
+    assert handler is not None
+
+    with pytest.raises(CategorizedError, match="no handler yet") as excinfo:
+        asyncio.run(handler(cast(Any, None), cast(Any, SimpleNamespace(kind=kind))))
+
+    assert "#3699" in str(excinfo.value)
+    assert excinfo.value.terminal is True
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_authority_system_handler_receives_the_worker_artifact_store(monkeypatch) -> None:
