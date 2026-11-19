@@ -791,7 +791,7 @@ def _thread_answers(count: int) -> dict[str, _Answer]:
 
 
 def test_select_thread_blocks_on_a_one_vcpu_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
-    with pytest.raises(ScenarioStop) as stop:
+    with pytest.raises(ScenarioStop, match="needs two") as stop:
         _run("debug.select_thread", _Debugger(_thread_answers(1)), monkeypatch)
     assert stop.value.outcome is Outcome.BLOCKED
 
