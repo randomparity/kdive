@@ -565,3 +565,67 @@ def test_unplug_on_a_system_that_left_ready_returns_the_row_without_a_provider_c
         assert (await SYSTEMS.get(env.owner, env.system_id)) is not None
 
     _run(migrated_url, authority_role_dsns, scenario)
+
+
+def test_a_configuration_error_after_the_handle_was_recorded_fails_the_row_not_deletes_it(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    class _Drifts(_Spy):
+        def is_attached(
+            self, domain_name: str, device_id: str, provider_handle: str | None
+        ) -> bool:
+            raise CategorizedError("drift", category=ErrorCategory.CONFIGURATION_ERROR)
+
+    async def scenario(env: _Env) -> None:
+        device_id = await env.add_row(SystemDeviceState.PLUGGING)
+
+        await _raises(env.plug(_Drifts(env.port(HotplugBehaviour.SLOW), migrated_url), device_id))
+
+        row = await env.row(device_id)
+        assert row is not None and row.state is _FAILED and row.provider_handle is not None
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
+@pytest.mark.parametrize("op", ["plug", "unplug"])
+def test_an_unexpected_provider_exception_fails_the_row_and_propagates(
+    migrated_url: str, authority_role_dsns: _RoleDsns, op: str
+) -> None:
+    class _Boom(_Untouched):
+        def plug(self, domain_name: str, spec: DeviceSpec) -> Any:
+            raise ValueError("boom")
+
+        def unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+            raise ValueError("boom")
+
+    async def scenario(env: _Env) -> None:
+        if op == "plug":
+            device_id = await env.add_row(SystemDeviceState.PLUGGING)
+            call = env.plug(_Boom(), device_id)
+        else:
+            device_id = await env.add_row(SystemDeviceState.UNPLUGGING)
+            call = env.unplug(_Boom(), device_id)
+        with pytest.raises(ValueError, match="boom"):
+            await call
+        row = await env.row(device_id)
+        assert row is not None and row.state is _FAILED and row.detail
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
+def test_a_provider_timeout_with_window_left_is_not_a_settle_timeout(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    class _TimesOut(_Untouched):
+        def plug(self, domain_name: str, spec: DeviceSpec) -> Any:
+            raise TimeoutError("socket timed out")
+
+    async def scenario(env: _Env) -> None:
+        device_id = await env.add_row(SystemDeviceState.PLUGGING)
+
+        with pytest.raises(TimeoutError, match="socket"):
+            await env.plug(_TimesOut(), device_id)
+
+        assert (await env.state(device_id)) is _FAILED
+
+    _run(migrated_url, authority_role_dsns, scenario)

@@ -51,6 +51,7 @@ POLL_INTERVAL_S: Final = 1.0
 _DETAIL_MAX_CHARS: Final = 500
 _REFUSAL_REASONS: Final = frozenset({"unplug_refused", "handle_unknown"})
 _SETTLE_TIMEOUT: Final = "settle_timeout"
+_UNEXPECTED_DETAIL: Final = "unexpected worker error; the device may or may not be in the guest"
 
 
 class _Window:
@@ -85,6 +86,8 @@ async def _call_within[T](window: _Window, call: Callable[[], T]) -> T:
     try:
         return await asyncio.wait_for(asyncio.to_thread(call), timeout=remaining)
     except TimeoutError:
+        if window.remaining() > 0:  # the provider's own timeout, not our window
+            raise
         raise _settle_timeout(window) from None
 
 
@@ -198,13 +201,24 @@ async def plug_device_handler(
         spec = DeviceSpec(HotplugDeviceKind(row.kind), str(device_id), row.network, row.size_gb)
         await _drive_plug(conn, hotplugger, domain, spec, window_s, poll_interval_s)
     except CategorizedError as exc:
-        if exc.category is ErrorCategory.CONFIGURATION_ERROR:
+        if exc.category is ErrorCategory.CONFIGURATION_ERROR and await _nothing_attached(
+            conn, system_id, device_id
+        ):
             await _delete_row(conn, device_id)
         else:
             await _settle(conn, device_id, SystemDeviceState.FAILED, detail=_detail(redactor, exc))
         exc.terminal = True
         raise
+    except Exception:
+        await _settle(conn, device_id, SystemDeviceState.FAILED, detail=_UNEXPECTED_DETAIL)
+        raise
     return str(device_id)
+
+
+async def _nothing_attached(conn: AsyncConnection, system_id: UUID, device_id: UUID) -> bool:
+    """True while the provider has returned no handle, so a rejected plug attached nothing."""
+    row = await _device_row(conn, system_id, device_id)
+    return row is not None and row.provider_handle is None
 
 
 async def _drive_plug(
@@ -265,6 +279,9 @@ async def unplug_device_handler(
     except CategorizedError as exc:
         await _settle_failed_unplug(conn, device_id, payload.from_state, exc, redactor)
         exc.terminal = True
+        raise
+    except Exception:
+        await _settle(conn, device_id, SystemDeviceState.FAILED, detail=_UNEXPECTED_DETAIL)
         raise
     return str(device_id)
 
