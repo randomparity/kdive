@@ -69,6 +69,9 @@ is allowed, and how a lost reply is reported.
 - `reset` writes the kernel defaults, not the values found before `set` (ADR-0822).
 - The Protocol name `FaultInjectionInspector` now covers writes; a rename was rejected as churn
   with no behavior change.
+- Both tools sit in the external-boot admission matrix's exempt table, like `introspect.script`:
+  they write guest debugfs over an already-admitted SSH transport and decide nothing about boot.
+  Guarding them would add an `ExternalBootOperation` outside this change's scope.
 - The helper's `-1` and `0` for `times` stay legal in the guest and in `inspect` output; only the
   tool refuses to write them.
 
