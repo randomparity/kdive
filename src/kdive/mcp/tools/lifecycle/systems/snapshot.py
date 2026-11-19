@@ -33,6 +33,7 @@ from kdive.mcp.tools._common import external_boot_denial as _external_boot_denia
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools.lifecycle._recovery import iso
+from kdive.mcp.tools.lifecycle.support._device_ops import device_job_active, device_op_in_flight
 from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security import audit
@@ -216,6 +217,8 @@ async def snapshot_system(
                 )
             except ExternalBootDenied as exc:
                 return _external_boot_denial(system_id, exc, ctx)
+            if await device_job_active(conn, uid):
+                return device_op_in_flight(system_id)
             collision = await _resolve_snapshot_collision(conn, uid, validated)
             if isinstance(collision, ToolResponse):
                 return collision
@@ -323,6 +326,8 @@ async def restore_system(
                     detail="a snapshot capture/restore/delete is in progress; wait for it first",
                     data={"reason": "snapshot_op_in_progress"},
                 )
+            if await device_job_active(conn, uid):
+                return device_op_in_flight(system_id)
             if await active_session_ids_for_system(conn, uid):
                 return _config_error(
                     system_id,

@@ -263,6 +263,9 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "systems.restore": _CONTRIBUTOR,
     "systems.list_snapshots": _VIEWER,
     "systems.delete_snapshot": _CONTRIBUTOR,
+    "systems.plug_device": _CONTRIBUTOR,  # hot-plug on the leaseholder's own VM (ADR-0823)
+    "systems.unplug_device": _CONTRIBUTOR,
+    "systems.list_devices": _VIEWER,
     # vmcore
     "vmcore.fetch": _CONTRIBUTOR,
 }

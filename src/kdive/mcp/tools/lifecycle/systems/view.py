@@ -189,6 +189,7 @@ def system_envelope(
     active_debug_session_ids: list[str] | None = None,
     active_run: dict[str, JsonValue] | None = None,
     supports_snapshots: bool | None = None,
+    hotplug_devices: list[str] | None = None,
     supports_traffic_capture: bool | None = None,
     supported_capture_methods: list[str] | None = None,
     failure_job: FailureJobLookup = FAILURE_JOB_NOT_LOOKED_UP,
@@ -233,6 +234,8 @@ def system_envelope(
         data["active_run"] = active_run
     if supports_snapshots is not None:
         data["supports_snapshots"] = supports_snapshots
+    if hotplug_devices is not None:
+        data["hotplug_devices"] = list(hotplug_devices)
     if supports_traffic_capture is not None:
         data["supports_traffic_capture"] = supports_traffic_capture
     if supported_capture_methods is not None:
@@ -486,14 +489,17 @@ async def get_system(
             # resolve a runtime; keep systems.get resilient (its metadata still lets an agent tear
             # the System down) by omitting the field rather than failing the whole read.
             supports_snapshots: bool | None = None
+            hotplug_devices: list[str] | None = None
             supports_traffic_capture: bool | None = None
             supported_capture_methods: list[str] | None = None
             try:
                 runtime = await resolver.runtime_for_system(conn, system.id)
                 supports_snapshots = runtime.support.supports_snapshots
+                hotplug_devices = sorted(kind.value for kind in runtime.support.hotplug_devices)
                 supports_traffic_capture = runtime.support.supports_traffic_capture
             except CategorizedError:
                 supports_snapshots = None
+                hotplug_devices = None
                 supports_traffic_capture = None
             else:
                 # The provider set narrowed by the guest profile architecture (ADR-0757), with the
@@ -519,6 +525,7 @@ async def get_system(
             run_history=run_history,
             external_boot_conflict=external_boot_conflict,
             supports_snapshots=supports_snapshots,
+            hotplug_devices=hotplug_devices,
             supports_traffic_capture=supports_traffic_capture,
             supported_capture_methods=supported_capture_methods,
             failure_job=(

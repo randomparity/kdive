@@ -36,6 +36,9 @@ class ExternalBootOperation(StrEnum):
     SYSTEM_REPROVISION = "system_reprovision"
     SYSTEM_POWER = "system_power"
     SYSTEM_SNAPSHOT = "system_snapshot"
+    # Plug and un-plug both: admitted in no restricting state (ADR-0583 rejects "mutation of
+    # attachments"); teardown's `release_all` is the exit for a device left behind (ADR-0823).
+    SYSTEM_DEVICE_HOTPLUG = "system_device_hotplug"
     SYSTEM_SYSRQ = "system_sysrq"
     SYSTEM_TEARDOWN = "system_teardown"
     SYSTEM_AUTHORIZE_SSH_KEY = "system_authorize_ssh_key"

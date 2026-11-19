@@ -21,15 +21,16 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config_registry
 from kdive.db.locks import LockScope, _lock_key
-from kdive.db.repositories import RUNS, SNAPSHOTS, SYSTEMS
+from kdive.db.repositories import RUNS, SNAPSHOTS, SYSTEM_DEVICES, SYSTEMS, devices_for_system
 from kdive.domain.capacity.state import (
     ExternalBootActivationState,
     RunState,
     SnapshotState,
+    SystemDeviceState,
     SystemState,
 )
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.lifecycle.records import Run, Snapshot
+from kdive.domain.lifecycle.records import Run, Snapshot, SystemDevice
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.control import registrar as control_registrar
 from kdive.mcp.tools.lifecycle.control.registrar import (
@@ -44,6 +45,7 @@ from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
 from kdive.mcp.tools.lifecycle.runs.steps import _enqueue_external_boot, boot_run, install_run
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_system
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
+from kdive.mcp.tools.lifecycle.systems.devices import plug_device, unplug_device
 from kdive.mcp.tools.lifecycle.systems.snapshot import (
     delete_snapshot,
     restore_system,
@@ -78,6 +80,7 @@ _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _ACTIVE_ACTIONS = ["runs.get", "runs.release_external_boot", "systems.teardown"]
 _CONFLICT_ACTIONS = ["runs.get", "systems.teardown"]
 _GOOD_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 agent@kdive"
+_ABSENT_DEVICE = str(uuid4())
 
 
 class _FakeConnector:
@@ -108,6 +111,11 @@ def _ctx(role: Role = Role.ADMIN) -> RequestContext:
 
 def _resolver() -> Any:
     return provider_resolver(connector=_FakeConnector())
+
+
+def _hotplug_resolver() -> Any:
+    """A hot-plug-capable provider; admission never calls the port, so any object serves."""
+    return provider_resolver(connector=_FakeConnector(), hotplugger=object())
 
 
 def _assert_denied(response: ToolResponse, actions: list[str]) -> None:
@@ -307,6 +315,50 @@ async def _delete_snapshot(restricted: _Restricted) -> ToolResponse:
             runtime,
             system_id=restricted.system_id,
             name="snap-1",
+        ),
+        required_role=Role.CONTRIBUTOR,
+    )
+
+
+async def _plug(restricted: _Restricted) -> ToolResponse:
+    return await with_runtime_for_system(
+        restricted.pool,
+        _hotplug_resolver(),
+        _ctx(),
+        restricted.system_id,
+        lambda runtime: plug_device(
+            restricted.pool,
+            _ctx(),
+            runtime,
+            system_id=restricted.system_id,
+            kind="nic",
+            network=None,
+            size_gb=None,
+            idempotency_key=None,
+        ),
+        required_role=Role.CONTRIBUTOR,
+    )
+
+
+async def _unplug(restricted: _Restricted) -> ToolResponse:
+    return await _unplug_keyed(restricted.pool, restricted.system_id, _ABSENT_DEVICE, None)
+
+
+async def _unplug_keyed(
+    pool: AsyncConnectionPool, system_id: str, device_id: str, key: str | None
+) -> ToolResponse:
+    return await with_runtime_for_system(
+        pool,
+        _hotplug_resolver(),
+        _ctx(),
+        system_id,
+        lambda runtime: unplug_device(
+            pool,
+            _ctx(),
+            runtime,
+            system_id=system_id,
+            device_id=device_id,
+            idempotency_key=key,
         ),
         required_role=Role.CONTRIBUTOR,
     )
@@ -779,6 +831,8 @@ _READY_DENIED: dict[str, Callable[[_Restricted], Awaitable[ToolResponse]]] = {
     "control.diagnostic_sysrq": _sysrq,
     "systems.snapshot": _snapshot,
     "systems.delete_snapshot": _delete_snapshot,
+    "systems.plug_device": _plug,
+    "systems.unplug_device": _unplug,
     "systems.reprovision": _reprovision,
     "systems.authorize_ssh_key": _authorize_ssh_key,
     "control.capture_traffic": _capture_traffic_other_run,
@@ -851,6 +905,59 @@ async def _vmcore_keyed(
     )
 
 
+async def _seed_attached_device(pool: AsyncConnectionPool, system_id: str) -> None:
+    async with pool.connection() as conn:
+        await SYSTEM_DEVICES.insert(
+            conn,
+            SystemDevice(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                system_id=UUID(system_id),
+                kind="nic",
+                state=SystemDeviceState.ATTACHED,
+            ),
+        )
+
+
+async def _prepare_attached_device(restricted: _Restricted) -> None:
+    await _seed_attached_device(restricted.pool, restricted.system_id)
+
+
+async def _unplug_seeded_keyed(
+    pool: AsyncConnectionPool, system_id: str, _run: str, key: str | None
+) -> ToolResponse:
+    async with pool.connection() as conn:
+        rows = await devices_for_system(conn, UUID(system_id))
+    return await _unplug_keyed(pool, system_id, str(rows[0].id), key)
+
+
+async def _unplug_seeded(restricted: _Restricted) -> ToolResponse:
+    return await _unplug_seeded_keyed(restricted.pool, restricted.system_id, "", None)
+
+
+async def _plug_keyed(
+    pool: AsyncConnectionPool, system_id: str, _run: str, key: str
+) -> ToolResponse:
+    return await with_runtime_for_system(
+        pool,
+        _hotplug_resolver(),
+        _ctx(),
+        system_id,
+        lambda runtime: plug_device(
+            pool,
+            _ctx(),
+            runtime,
+            system_id=system_id,
+            kind="nic",
+            network=None,
+            size_gb=None,
+            idempotency_key=key,
+        ),
+        required_role=Role.CONTRIBUTOR,
+    )
+
+
 async def _crash_the_system(pool: AsyncConnectionPool, system_id: str) -> None:
     await _set_system_state(pool, system_id, SystemState.CRASHED)
 
@@ -862,6 +969,8 @@ class _ReplayCase:
     state: ExternalBootActivationState
     invoke: Callable[[AsyncConnectionPool, str, str, str], Awaitable[ToolResponse]]
     prepare: Callable[[AsyncConnectionPool, str], Awaitable[None]] | None = None
+    # The device tools answer `running`, the ledger row's in-flight word, not a job state.
+    status: str = "queued"
 
 
 # `force_crash`, `watch_for_crash`, `capture_traffic` and `vmcore.fetch` are admitted in
@@ -871,6 +980,10 @@ _REPLAY_CASES: dict[str, _ReplayCase] = {
     "control.diagnostic_sysrq": _ReplayCase(_STATE.ACTIVE, _sysrq_keyed),
     "control.force_crash": _ReplayCase(_STATE.RECOVERY_CONFLICT, _force_crash_keyed),
     "control.power": _ReplayCase(_STATE.ACTIVE, _power_keyed),
+    "systems.plug_device": _ReplayCase(_STATE.ACTIVE, _plug_keyed, status="running"),
+    "systems.unplug_device": _ReplayCase(
+        _STATE.ACTIVE, _unplug_seeded_keyed, _seed_attached_device, status="running"
+    ),
     "control.watch_for_crash": _ReplayCase(_STATE.RECOVERY_CONFLICT, _watch_keyed),
     "vmcore.fetch": _ReplayCase(_STATE.RECOVERY_CONFLICT, _vmcore_keyed, _crash_the_system),
 }
@@ -920,7 +1033,7 @@ def test_a_keyed_mutation_admitted_before_the_activation_still_replays(
             return first, replay, fresh, key_varies
 
     first, replay, fresh, key_varies = asyncio.run(_run())
-    assert first.status == "queued", first.model_dump()
+    assert first.status == case.status, first.model_dump()
     assert replay.error_category is None, replay.model_dump()
     assert replay.model_dump() == first.model_dump()
     if key_varies:
@@ -1530,6 +1643,7 @@ class _JobTool:
     state: ExternalBootActivationState
     invoke: Callable[[_Restricted], Awaitable[ToolResponse]]
     prepare: Callable[[_Restricted], Awaitable[None]] | None = None
+    status: str = "queued"
 
 
 # Guarded tools that enqueue a job. `force_crash`, `watch_for_crash`, `capture_traffic` and
@@ -1545,6 +1659,10 @@ _JOB_TOOLS: dict[str, _JobTool] = {
     "systems.authorize_ssh_key": _JobTool(_STATE.ACTIVE, _authorize_ssh_key),
     "systems.delete_snapshot": _JobTool(
         _STATE.ACTIVE, _delete_snapshot_replay_name, _prepare_available_snapshot
+    ),
+    "systems.plug_device": _JobTool(_STATE.ACTIVE, _plug, status="running"),
+    "systems.unplug_device": _JobTool(
+        _STATE.ACTIVE, _unplug_seeded, _prepare_attached_device, status="running"
     ),
     "systems.reprovision": _JobTool(_STATE.ACTIVE, _reprovision),
     "systems.restore": _JobTool(_STATE.ACTIVE, _restore, _prepare_available_snapshot),
@@ -1683,7 +1801,7 @@ def test_an_unkeyed_repeat_that_replays_still_replays_under_an_activation(
             return plain_first, plain_second, plain_minted, held_first, held_second
 
     plain_first, plain_second, plain_minted, held_first, held_second = asyncio.run(_run())
-    assert plain_first.status == "queued", plain_first.model_dump()
+    assert plain_first.status == case.status, plain_first.model_dump()
     if plain_minted:
         # The repeat enqueued fresh work, which the matrix is entitled to deny; the denial
         # itself is `test_a_restricting_activation_denies_every_reverse_operation`'s.
@@ -1693,7 +1811,7 @@ def test_an_unkeyed_repeat_that_replays_still_replays_under_an_activation(
         # System `RESTORING`, which its own precondition rejects). Nothing was replayed, so
         # there is no replay for the guard to preempt.
         return
-    assert held_first.status == "queued", held_first.model_dump()
+    assert held_first.status == case.status, held_first.model_dump()
     if tool == "systems.teardown":
         # A queued ordinary teardown predates the activation and therefore lacks authority.
         # Replaying its envelope would advertise executable destructive work; the current

@@ -42,6 +42,7 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import stale_handle as _stale_handle
+from kdive.mcp.tools.lifecycle.support._device_ops import device_job_active, device_op_in_flight
 from kdive.mcp.tools.lifecycle.support._idempotency import (
     dedup_replay,
     record_envelope,
@@ -286,6 +287,8 @@ async def _reprovision_in_lock(
             suggested_next_actions=["systems.get"],
             data={"reason": "teardown_in_progress"},
         )
+    if await device_job_active(conn, system_id):
+        return device_op_in_flight(str(system_id))
     if await _has_live_run(conn, system_id):
         return _stale_handle(str(system_id), current_status=system.state.value)
     if (settling := await _settling_reprovision_job(conn, dedup_key)) is not None:
