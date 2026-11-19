@@ -2613,6 +2613,8 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                     "remote_module_volume_reap",
                     "resolve_recovery_orphan",
                     "observe_stranded_activation",
+                    "plug_device",
+                    "unplug_device",
                 ),
             ),
             GeneratedFlag(
