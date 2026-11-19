@@ -29,6 +29,7 @@ from kdive.domain.capacity.state import (
     ResourceStatus,
     RunState,
     SnapshotState,
+    SystemDeviceState,
     SystemState,
     ensure_transition,
 )
@@ -44,6 +45,7 @@ from kdive.domain.lifecycle.records import (
     Run,
     Snapshot,
     System,
+    SystemDevice,
     SystemShape,
 )
 from kdive.domain.operations.jobs import Job
@@ -478,6 +480,9 @@ RUNS = RunRepository(
 )
 DEBUG_SESSIONS = StatefulRepository(DebugSession, "debug_sessions", DebugSessionState)
 SNAPSHOTS = StatefulRepository(Snapshot, "snapshots", SnapshotState)
+SYSTEM_DEVICES = StatefulRepository(
+    SystemDevice, "system_devices", SystemDeviceState, json_columns=frozenset({"identity"})
+)
 
 
 async def record_system_failure_category(
@@ -520,6 +525,28 @@ async def delete_snapshots_for_system(conn: AsyncConnection, system_id: UUID) ->
     exist; the ``ON DELETE CASCADE`` FK still covers the eventual System-row delete at release.
     """
     await conn.execute("DELETE FROM snapshots WHERE system_id = %s", (system_id,))
+
+
+async def devices_for_system(conn: AsyncConnection, system_id: UUID) -> list[SystemDevice]:
+    """Return a System's device ledger rows oldest-first (ADR-0823)."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT * FROM system_devices WHERE system_id = %s ORDER BY created_at, id",
+            (system_id,),
+        )
+        rows = await cur.fetchall()
+    return [validate_stored(SystemDevice, row) for row in rows]
+
+
+async def delete_devices_for_system(conn: AsyncConnection, system_id: UUID) -> int:
+    """Delete every device ledger row for a System and return how many were removed.
+
+    Teardown, reprovision and system-reclaim call this after releasing the provider-side
+    devices; the ``ON DELETE CASCADE`` FK only covers the eventual System-row delete (ADR-0823).
+    """
+    async with conn.cursor() as cur:
+        await cur.execute("DELETE FROM system_devices WHERE system_id = %s", (system_id,))
+        return cur.rowcount
 
 
 JOBS = StatefulRepository(

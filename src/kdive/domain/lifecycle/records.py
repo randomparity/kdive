@@ -15,6 +15,7 @@ from kdive.domain.capacity.state import (
     InvestigationState,
     RunState,
     SnapshotState,
+    SystemDeviceState,
     SystemState,
 )
 from kdive.domain.catalog.resources import ResourceKind
@@ -112,6 +113,24 @@ class Snapshot(DomainModel, Attribution):
     name: str
     include_memory: bool
     state: SnapshotState
+
+
+class SystemDevice(DomainModel):
+    """A hot-plugged device on a System — a child ledger row (ADR-0823).
+
+    ``kind`` is stored as text; the closed set is enforced by the table's CHECK and typed by the
+    provider port. The 8-row-per-System limit is enforced at admission, not by the schema.
+    """
+
+    system_id: UUID
+    kind: str
+    state: SystemDeviceState
+    network: str | None = None
+    size_gb: int | None = None
+    provider_handle: str | None = None
+    identity: dict[str, JsonValue] = Field(default_factory=dict)
+    detail: str | None = None
+    settle_deadline: datetime | None = None
 
 
 class Investigation(DomainModel, Attribution):

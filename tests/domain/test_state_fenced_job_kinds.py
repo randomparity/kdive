@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from kdive.domain.operations.jobs import (
     ACTIVE_JOB_KINDS,
+    CONTRIBUTOR_CANCELABLE_JOB_KINDS,
     DEFAULT_JOB_DISPATCH_LANE,
     STATE_FENCED_JOB_DISPATCH_LANE,
     STATE_FENCED_JOB_KINDS,
@@ -12,13 +13,22 @@ from kdive.domain.operations.jobs import (
 )
 
 
-def test_the_set_is_exactly_the_three_kinds_that_fence_at_enqueue() -> None:
+def test_the_set_is_exactly_the_kinds_that_fence_at_enqueue() -> None:
     # The rule is "the enqueue transaction writes a transient state another tool rejects on":
     # restore -> SystemState.RESTORING, reprovision -> SystemState.REPROVISIONING,
-    # snapshot -> SnapshotState.CREATING. Pinned as an equality, not a membership check, so
+    # snapshot -> SnapshotState.CREATING, plug_device / unplug_device -> SystemDeviceState.PLUGGING
+    # / UNPLUGGING (ADR-0823). Pinned as an equality, not a membership check, so
     # adding a kind without revisiting the rule fails here.
     assert (
-        frozenset({JobKind.RESTORE, JobKind.REPROVISION, JobKind.SNAPSHOT})
+        frozenset(
+            {
+                JobKind.RESTORE,
+                JobKind.REPROVISION,
+                JobKind.SNAPSHOT,
+                JobKind.PLUG_DEVICE,
+                JobKind.UNPLUG_DEVICE,
+            }
+        )
         == STATE_FENCED_JOB_KINDS
     )
 
@@ -37,7 +47,7 @@ def test_a_retired_kind_can_never_be_routed() -> None:
 
 
 def test_the_derivation_is_total_over_every_job_kind() -> None:
-    # Spec S2's derivation half: every kind derives a lane, and only the fenced three derive the
+    # Spec S2's derivation half: every kind derives a lane, and only the fenced kinds derive the
     # fenced lane. No payload needed, so this covers kinds the enqueue-level test cannot reach.
     for kind in JobKind:
         expected = (
@@ -51,3 +61,9 @@ def test_the_derivation_is_total_over_every_job_kind() -> None:
 def test_the_two_lane_names_are_distinct_and_non_empty() -> None:
     # jobs_dispatch_lane_nonempty (migration 0066) rejects a blank lane at the database.
     assert STATE_FENCED_JOB_DISPATCH_LANE != DEFAULT_JOB_DISPATCH_LANE
+
+
+def test_device_jobs_are_not_contributor_cancelable() -> None:
+    # ADR-0823 rejects cancelable plug/un-plug: the ledger row's transient state is the only
+    # record of the in-flight provider call.
+    assert not {JobKind.PLUG_DEVICE, JobKind.UNPLUG_DEVICE} & CONTRIBUTOR_CANCELABLE_JOB_KINDS

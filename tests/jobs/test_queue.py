@@ -15,7 +15,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
-from kdive.domain.capacity.state import JobState
+from kdive.domain.capacity.state import JobState, SystemDeviceState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import (
     DEFAULT_JOB_DISPATCH_LANE,
@@ -30,11 +30,13 @@ from kdive.jobs.payloads import (
     AuthorizeSshKeyPayload,
     Authorizing,
     InstallPayload,
+    PlugDevicePayload,
     RemoteModuleVolumeReapPayload,
     ReprovisionPayload,
     RestorePayload,
     SnapshotPayload,
     SystemPayload,
+    UnplugDevicePayload,
 )
 from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 
@@ -319,6 +321,12 @@ def _fenced_payload(kind: JobKind) -> Any:
         )
     if kind is JobKind.RESTORE:
         return RestorePayload(system_id=system_id, name="snap", start_paused=False)
+    if kind is JobKind.PLUG_DEVICE:
+        return PlugDevicePayload(system_id=system_id, device_id=str(uuid4()))
+    if kind is JobKind.UNPLUG_DEVICE:
+        return UnplugDevicePayload(
+            system_id=system_id, device_id=str(uuid4()), from_state=SystemDeviceState.ATTACHED
+        )
     return ReprovisionPayload(system_id=system_id, profile_digest="sha256:abc")
 
 
@@ -326,7 +334,7 @@ def _fenced_payload(kind: JobKind) -> Any:
 def test_enqueue_routes_state_fenced_kinds_to_the_fenced_lane(
     migrated_url: str, kind: JobKind
 ) -> None:
-    """S1: the three fencing kinds land on the fenced lane, derived from the kind alone."""
+    """S1: the fencing kinds land on the fenced lane, derived from the kind alone."""
 
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:

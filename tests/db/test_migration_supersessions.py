@@ -197,7 +197,8 @@ def test_an_existing_database_upgrades_through_0199(
         with pytest.raises(psycopg.errors.FeatureNotSupported, match="uses its row type"):
             _add_defaulted_columns(pg_conn)
 
-    monkeypatch.setattr(migrate, "discover_migrations", lambda: every)
+    through_0199 = [m for m in every if m.version <= "0199"]
+    monkeypatch.setattr(migrate, "discover_migrations", lambda: through_0199)
     assert migrate.apply_migrations(pg_conn) == ["0199"]
 
     assert _hazards(pg_conn) == []

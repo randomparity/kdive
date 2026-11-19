@@ -350,6 +350,10 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         "resolve_recovery_orphan",
         # Platform-admin evidence for a stranded activation (ADR-0816).
         "observe_stranded_activation",
+        # systems.plug_device / systems.unplug_device enqueue these to hot-plug and remove a NIC or
+        # scratch disk on a ready System (ADR-0823, #3686).
+        "plug_device",
+        "unplug_device",
     }
 
 

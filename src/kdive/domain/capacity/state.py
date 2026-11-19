@@ -172,6 +172,23 @@ class SnapshotState(StrEnum):
     FAILED = "failed"
 
 
+# Provenance: hot-plug device ledger ADR-0823.
+class SystemDeviceState(StrEnum):
+    """A ``system_devices`` ledger row's lifecycle (child of a System).
+
+    ``plugging`` and ``unplugging`` are the transient states a plug/un-plug job fences on;
+    ``failed`` and ``lost`` rows stay in the ledger until an un-plug removes them. Deletion
+    is row removal, not a state. ``unplugging`` may fall back to the state it came from when
+    the provider refuses, so every non-transient state is an exit of ``unplugging``.
+    """
+
+    PLUGGING = "plugging"
+    ATTACHED = "attached"
+    UNPLUGGING = "unplugging"
+    FAILED = "failed"
+    LOST = "lost"
+
+
 class JobState(StrEnum):
     """Durable job lifecycle; ``running → queued`` is a bounded-retry requeue."""
 
@@ -302,6 +319,19 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
         SnapshotState.CREATING: frozenset({SnapshotState.AVAILABLE, SnapshotState.FAILED}),
         SnapshotState.AVAILABLE: frozenset({SnapshotState.FAILED}),
         SnapshotState.FAILED: frozenset(),
+    },
+    SystemDeviceState: {
+        SystemDeviceState.PLUGGING: frozenset(
+            {SystemDeviceState.ATTACHED, SystemDeviceState.FAILED}
+        ),
+        SystemDeviceState.ATTACHED: frozenset(
+            {SystemDeviceState.UNPLUGGING, SystemDeviceState.LOST}
+        ),
+        SystemDeviceState.UNPLUGGING: frozenset(
+            {SystemDeviceState.ATTACHED, SystemDeviceState.FAILED, SystemDeviceState.LOST}
+        ),
+        SystemDeviceState.FAILED: frozenset({SystemDeviceState.UNPLUGGING}),
+        SystemDeviceState.LOST: frozenset({SystemDeviceState.UNPLUGGING}),
     },
     JobState: {
         JobState.QUEUED: frozenset({JobState.RUNNING, JobState.CANCELED}),

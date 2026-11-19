@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from kdive.domain.capacity.state import JobState
+from kdive.domain.capacity.state import JobState, SystemDeviceState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
@@ -23,12 +23,14 @@ from kdive.jobs.payloads import (
     DiagnosticsWorkerCheckPayload,
     InstallPayload,
     PayloadValidationError,
+    PlugDevicePayload,
     PowerPayload,
     RecoveryRequestV1,
     ReprovisionPayload,
     SysRqPayload,
     SystemPayload,
     TeardownPayload,
+    UnplugDevicePayload,
     WatchForCrashPayload,
     dump_authorizing,
     dump_payload,
@@ -718,3 +720,32 @@ def test_check_ssh_reachable_payload_serializes() -> None:
     assert dump_payload(JobKind.CHECK_SSH_REACHABLE, payload) == {
         "system_id": "11111111-2222-3333-4444-555555555555"
     }
+
+
+def test_device_payloads_round_trip_through_dump_and_load() -> None:
+    system_id, device_id = str(uuid4()), str(uuid4())
+    plug = dump_payload(JobKind.PLUG_DEVICE, {"system_id": system_id, "device_id": device_id})
+    assert plug == {"system_id": system_id, "device_id": device_id}
+    unplug = dump_payload(
+        JobKind.UNPLUG_DEVICE,
+        {"system_id": system_id, "device_id": device_id, "from_state": "failed"},
+    )
+    assert unplug["from_state"] == "failed"
+    assert PlugDevicePayload.model_validate(plug).device_id == device_id
+    assert UnplugDevicePayload.model_validate(unplug).from_state is SystemDeviceState.FAILED
+
+
+@pytest.mark.parametrize("from_state", ["plugging", "unplugging", "gone"])
+def test_unplug_payload_refuses_a_from_state_that_is_not_attached_failed_or_lost(
+    from_state: str,
+) -> None:
+    with pytest.raises(PayloadValidationError, match="from_state"):
+        dump_payload(
+            JobKind.UNPLUG_DEVICE,
+            {"system_id": str(uuid4()), "device_id": str(uuid4()), "from_state": from_state},
+        )
+
+
+def test_device_payloads_refuse_a_malformed_device_id() -> None:
+    with pytest.raises(PayloadValidationError, match="device_id"):
+        dump_payload(JobKind.PLUG_DEVICE, {"system_id": str(uuid4()), "device_id": "nope"})
