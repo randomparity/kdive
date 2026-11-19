@@ -2002,14 +2002,16 @@ uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_li
   (ADR-0783), requires `halted_by=interrupt` with `signal-received`, records which path the
   `vfs_read` breakpoint stop took (`resume_reply` or `waiting_continue`), and ends the session
   while the guest runs, requiring it to answer again.
-- The `debug.list_threads` and `debug.select_thread` cells need a guest with more than one vCPU
-  for the other-CPU branch of `select_thread`; the fixture guest has two. `list_threads` stops in
-  `vfs_read`, requires one `CPU#n` row per vCPU with `current_thread_id` listed and no
-  `selected_thread_id`. `select_thread` selects the current thread (`rip` unchanged) and another
-  CPU (kernel `rsp`, `selected_thread_id` reported), requires `debug.read_registers` to echo the
-  selected thread, clears the selection (`cleared`, `thread_id` null, the next read and
-  `debug.backtrace` echo gdb's current thread) and requires an unlisted id to be refused
-  `debug_attach_failure` / `unknown_thread` ([ADR-0819](../../adr/0819-gdbstub-thread-selection.md),
+- The other-CPU branch of the `debug.select_thread` cell runs only on a guest with more than one
+  vCPU, and nothing asserts the count, so a one-vCPU guest skips it silently; the fixture guest
+  has two. The `debug.list_threads` and `debug.select_thread` cells compare as follows:
+  `list_threads` stops in `vfs_read`, requires `CPU#n` rows numbered from 0 whose count equals
+  `thread_count`, with `current_thread_id` listed and no `selected_thread_id`. `select_thread`
+  selects the current thread (`rip` unchanged) and another CPU (kernel `rsp`, `selected_thread_id`
+  reported), requires `debug.read_registers` to echo the selected thread, clears the selection
+  (`cleared`, `thread_id` null, the next read and `debug.backtrace` echo gdb's current thread) and
+  requires an unlisted id to be refused `debug_attach_failure` / `unknown_thread`
+  ([ADR-0819](../../adr/0819-gdbstub-thread-selection.md),
   [ADR-0824](../../adr/0824-clear-the-cpu-selection-and-echo-the-read-thread.md)).
 - Rejection cells aim at one target per stack: a torn-down fixture System, its Run and an ended
   gdbstub session. They compare the project rows (including its debug sessions), the jobs naming
@@ -2017,15 +2019,15 @@ uv run python -m pytest -m live_stack tests/integration/test_debug_tool_cells_li
 
 The ppc64le local cells share the node but are owner #2818's; the remote cells are #3113's.
 
-Last run: candidate `e5215fc6d` (server, worker and reconciler at that SHA in both
-configurations), a disposable Fedora 44 x86_64 KVM lab guest with SELinux enforcing, the
-`longterm` fixture `v6.18.54` built on that host. Each configuration ran on a freshly wiped stack
-and recorded its 220 cells in about 80 minutes, skipping the other's 220. A first default run
-filled the guest's 16 GB quota-limited `/tmp` with leaked debuginfo staging (#3229) and failed 16
-cells with `Disk quota exceeded`. Both reported configurations therefore ran with the server's
-`TMPDIR` on disk (operator decision, 2026-10-15), and the leaked directories were deleted
-before each run. `qualify` reported 420 of the 440 cells qualified: all 352 `rejection` and 68
-`success`. Twenty are `failure`:
+Last run (the 21-tool set, 440 cells, before #3690): candidate `e5215fc6d` (server, worker and
+reconciler at that SHA in both configurations), a disposable Fedora 44 x86_64 KVM lab guest with
+SELinux enforcing, the `longterm` fixture `v6.18.54` built on that host. Each configuration ran on
+a freshly wiped stack and recorded its 220 cells in about 80 minutes, skipping the other's 220. A
+first default run filled the guest's 16 GB quota-limited `/tmp` with leaked debuginfo staging
+(#3229) and failed 16 cells with `Disk quota exceeded`. Both reported configurations therefore ran
+with the server's `TMPDIR` on disk (operator decision, 2026-10-15), and the leaked directories
+were deleted before each run. `qualify` reported 420 of the 440 cells qualified: all 352
+`rejection` and 68 `success`. Twenty are `failure`:
 
 - 12 known gaps, each after its observable proof: `debug.list_breakpoints` (count only),
   `debug.read_frame` (no arguments or locals) and `debug.interrupt` (the started session's
@@ -2062,12 +2064,13 @@ in ten minutes (the same expression also selected remote cells, which stopped `b
 remote lane). Each configuration then ran on a freshly wiped stack with `-k local-libvirt`: 240
 passed, none `blocked` or `failure`, in about 85 minutes each. The `select_thread` functional
 records show two threads listed, the other CPU selected, the clear and the refusal of an unlisted
-id, on both exposures, so #3691's echo and clear contract held on a real guest. `qualify`, run
-against the bindings of each stack, qualified all 480 cells: 96 `success` and 384 rejection,
-among them the 40 `debug.list_threads` and `debug.select_thread` cells (8 `success`, 32
-rejection). The earlier 20 `failure` cells (#3230 and the known gaps) did not recur. After
-`demo-down.sh --wipe --yes` no `kdive-` domain remained, and the install staging directory and
-the temp directory were empty.
+id, on both exposures, so #3691's echo and clear contract held on a real guest. Each `qualify`
+run, against the bindings of its own stack, qualified that configuration's 240 cells (48 `success`
+and 192 rejection) and reported the other's 240 as `failure`; together the two qualified all 480
+cells, 96 `success` and 384 rejection, among them the 40 `debug.list_threads` and
+`debug.select_thread` cells (8 `success`, 32 rejection). The earlier 20 `failure` cells (#3230 and
+the known gaps) did not recur. After `demo-down.sh --wipe --yes` no `kdive-` domain remained, and
+the install staging directory and the temp directory were empty.
 
 #### Break-glass provider tool cells (#3112)
 

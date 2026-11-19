@@ -856,16 +856,16 @@ so it exits non-zero by design. After the run, `demo-down.sh --wipe --yes` clear
 Then check the provider: `virsh list --all` shows no `kdive-` domain, and the pool holds no
 `kdive-` overlay.
 
-Last run: candidate `43aa59e96` (server, worker and reconciler at that SHA in both
-configurations; later commits change only this record). The control plane was a disposable
-Fedora 44 x86_64 lab guest with the verified `longterm` fixture (6.18.54). The provider was a
-separate disposable Rocky Linux 10.2 x86_64 host, itself a KVM guest whose domains ran with the
-`kvm` accelerator (nested). It was prepared with `site.yml` (a fresh PKI from
-`playbooks/pki.yml`), §7's `DOCKER-USER` rule, and `image.yml -e force_image_rebuild=true`, so
-the staged `fedora-kdive-remote-base-43` carried the ADR-0721 return route. One attempt per
+Last run (the 21-tool set, 440 cells, before #3690): candidate `43aa59e96` (server, worker and
+reconciler at that SHA in both configurations; later commits change only this record). The control
+plane was a disposable Fedora 44 x86_64 lab guest with the verified `longterm` fixture (6.18.54).
+The provider was a separate disposable Rocky Linux 10.2 x86_64 host, itself a KVM guest whose
+domains ran with the `kvm` accelerator (nested). It was prepared with `site.yml` (a fresh PKI from
+`playbooks/pki.yml`), §7's `DOCKER-USER` rule, and `image.yml -e force_image_rebuild=true`, so the
+staged `fedora-kdive-remote-base-43` carried the ADR-0721 return route. One attempt per
 configuration ran: the default configuration, `demo-down.sh --wipe --yes`, then
-`KDIVE_WORKER_DEATH_VERIFIER=docker` (`recovery`). Each recorded its 220 cells in about 95
-minutes and skipped the other 220.
+`KDIVE_WORKER_DEATH_VERIFIER=docker` (`recovery`). Each recorded its 220 cells in about 95 minutes
+and skipped the other 220.
 
 `qualify` qualified 436 of the 440 cells: 84 `success` and all 352 `rejection`, each record
 carrying the provider host as `rocky:10.2` and the guest as `fedora:43`. Every `success` record
@@ -887,16 +887,17 @@ attempt per configuration ran, with `demo-down.sh --wipe --yes` between them: ea
 minutes, and skipped the other 240. A first run of the 20 `debug.list_threads` and
 `debug.select_thread` cells of the default configuration passed 20 of 20 in eleven minutes.
 `qualify` qualified 476 of the 480: 92 `success` and 384 rejection, among them all 40 of the
-`debug.list_threads` and `debug.select_thread` cells (8 `success`, 32 rejection). The 4 `drgn-live`
-start cells are `blocked` on `debuginfo_unloadable`, which `qualify` lists as
-`missing-prerequisite`. The `select_thread` functional records show two vCPUs listed, the other CPU
-selected, the clear and the refusal of an unlisted id on both exposures, so #3691's echo and clear
-contract held through the remote gdbstub. Every record carries the provider host as `rocky:10.2` and
-the guest as `fedora:43`. After the run the provider defined no `kdive-` domain and its pool held
-only the base volumes. Two provider-host steps were environmental and are not product coverage:
-`site.yml` stops at its Docker forwarding preflight until the §7 `DOCKER-USER` rules exist, and
-`image.yml` needs a `virt-builder` repository index, so a provider host that cannot reach
-`archive.libguestfs.org` must drop that repository from `/etc/virt-builder/repos.d/` first.
+`debug.list_threads` and `debug.select_thread` cells (8 `success`, 32 rejection). The 4
+`drgn-live` start cells are `blocked` on `debuginfo_unloadable`, which `qualify` lists as
+`missing-prerequisite`. The `select_thread` functional records show two vCPUs listed, the other
+CPU selected, the clear and the refusal of an unlisted id on both exposures, so #3691's echo and
+clear contract held through the remote gdbstub. Every record carries the provider host as
+`rocky:10.2` and the guest as `fedora:43`. After the run the provider defined no `kdive-` domain
+and its pool held only the base volumes. Two provider-host steps were environmental and are not
+product coverage: `site.yml` stops at its Docker forwarding preflight until the §7 `DOCKER-USER`
+rules exist, and `image.yml` needs a `virt-builder` repository index, so a provider host that
+cannot reach `archive.libguestfs.org` must drop that repository from `/etc/virt-builder/repos.d/`
+first.
 
 ## 14. Remote capture and introspection tool cells (#3114)
 
