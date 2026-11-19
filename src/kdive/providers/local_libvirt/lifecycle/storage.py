@@ -275,6 +275,32 @@ def _real_resize_overlay(overlay: str, disk_gb: int) -> None:
     )
 
 
+def create_scratch_qcow2(path: str, size_gb: int) -> None:
+    """Create an empty qcow2 of ``size_gb`` GB at ``path``, writable by the shared libvirt group.
+
+    Replaces a stale file of the same name: the caller only creates a path no domain holds.
+    """
+    Path(path).unlink(missing_ok=True)
+    _run_qemu_img(
+        ["create", "-q", "-f", "qcow2", path, f"{size_gb}G"],
+        op="create_scratch_disk",
+        action="create the scratch disk",
+        overlay=path,
+        extra_details={"size_gb": size_gb},
+    )
+    try:
+        os.chmod(path, _SHARED_LIBVIRT_FILE_MODE)
+    except OSError as exc:
+        raise CategorizedError(
+            "failed to grant shared-libvirt write access to the scratch disk",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={
+                **_overlay_error_details("chmod_scratch_disk", path),
+                "error": type(exc).__name__,
+            },
+        ) from exc
+
+
 def _real_remove_overlay(overlay: str) -> None:
     """Remove a System's overlay file; an absent file is the achieved post-state."""
     try:

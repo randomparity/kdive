@@ -90,6 +90,7 @@ from kdive.providers.local_libvirt.lifecycle.connect import (
     LocalLibvirtConnect,
 )
 from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl
+from kdive.providers.local_libvirt.lifecycle.hotplug import ADVERTISED_KINDS, build_local_hotplug
 from kdive.providers.local_libvirt.lifecycle.install import LocalLibvirtInstall
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
@@ -519,6 +520,9 @@ def build_runtime(
             supports_diagnostic_sysrq=True,
             # Out-of-band crash-signature watch on the local guest's serial console (ADR-0367).
             supports_crash_watch=True,
+            # NIC and scratch-disk hot-plug on a live domain (ADR-0823, #3687); matches the wired
+            # ``device_hotplug`` port below.
+            hotplug_devices=ADVERTISED_KINDS,
         ),
         debug=DebugCapabilities(
             attach_seam=default_attach_seam,
@@ -542,6 +546,7 @@ def build_runtime(
         # Internal RAM+disk/disk-only domain snapshots (ADR-0378, #1254). Matches
         # ``support.supports_snapshots``; a snapshot-incapable provider leaves both unset.
         snapshot=LocalLibvirtSnapshotter.from_env(),
+        device_hotplug=build_local_hotplug(),
         # Host-side filter-dump traffic capture (ADR-0385, #1258). Matches
         # ``support.supports_traffic_capture``.
         traffic_capturer=traffic_capturer,

@@ -66,13 +66,13 @@ def test_runtime_accepts_advertised_hotplug_with_port() -> None:
     assert runtime.device_hotplug is port
 
 
-def test_libvirt_runtimes_advertise_no_hotplug() -> None:
+def test_libvirt_runtimes_advertise_nic_and_disk_and_wire_the_port() -> None:
     for runtime in (
         build_local_runtime(secret_registry=SecretRegistry()),
         build_remote_runtime(secret_registry=SecretRegistry()),
     ):
-        assert runtime.support.hotplug_devices == frozenset()
-        assert runtime.device_hotplug is None
+        assert runtime.support.hotplug_devices == frozenset(HotplugDeviceKind)
+        assert runtime.device_hotplug is not None
 
 
 def test_fault_inject_runtime_advertises_both_kinds_and_wires_the_port() -> None:
