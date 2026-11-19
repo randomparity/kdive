@@ -12,7 +12,7 @@ from uuid import uuid4
 import pytest
 from pydantic import SecretStr
 
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, RETIRED_JOB_KINDS, JobKind
 from kdive.jobs.assembly import WorkerHandlerAssembly, register_all_handlers
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
@@ -205,7 +205,9 @@ def test_device_hotplug_kinds_fail_closed_until_their_handlers_land(kind: JobKin
     with pytest.raises(CategorizedError, match="no handler yet") as excinfo:
         asyncio.run(handler(cast(Any, None), cast(Any, SimpleNamespace(kind=kind))))
 
+    assert "#3699" in str(excinfo.value)
     assert excinfo.value.terminal is True
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_authority_system_handler_receives_the_worker_artifact_store(monkeypatch) -> None:

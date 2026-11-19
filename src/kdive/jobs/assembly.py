@@ -160,7 +160,7 @@ async def _device_hotplug_not_implemented(conn: AsyncConnection, job: Job) -> st
     instead of retrying.
     """
     raise CategorizedError(
-        f"{job.kind.value} has no handler yet",
+        f"{job.kind.value} has no handler yet (tracked by #3699)",
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         terminal=True,
     )
