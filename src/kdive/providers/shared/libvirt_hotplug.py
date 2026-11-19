@@ -45,6 +45,9 @@ _LIBVIRT_MESSAGE_CHARS: Final = 300
 _ATTACH_FLAGS: Final = libvirt.VIR_DOMAIN_AFFECT_LIVE
 # libvirt's text for a detach re-issued while the guest has not yet released the device.
 _PENDING_UNPLUG: Final = "already in the process of unplug"
+_REFUSAL_CODES: Final = frozenset(
+    {libvirt.VIR_ERR_OPERATION_FAILED, libvirt.VIR_ERR_OPERATION_UNSUPPORTED}
+)
 _NETWORK_NAME_RE: Final = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 type NicSource = tuple[Literal["user", "network"], str | None]
@@ -246,8 +249,7 @@ def libvirt_failure(exc: libvirt.libvirtError, verb: str, domain_name: str) -> C
 
 
 def _unplug_failure(exc: libvirt.libvirtError, domain_name: str) -> CategorizedError:
-    refusal = {libvirt.VIR_ERR_OPERATION_FAILED, libvirt.VIR_ERR_OPERATION_UNSUPPORTED}
-    if exc.get_error_code() in refusal:
+    if exc.get_error_code() in _REFUSAL_CODES:
         return hotplug_error(
             "the guest or hypervisor refused to release the device",
             ErrorCategory.CONTROL_FAILURE,
@@ -381,6 +383,14 @@ class LibvirtDeviceHotplug:
         try:
             domain.attachDeviceFlags(device_xml, _ATTACH_FLAGS)
         except libvirt.libvirtError as exc:
+            if exc.get_error_code() in _REFUSAL_CODES:
+                raise hotplug_error(
+                    "the hypervisor refused to attach the device",
+                    ErrorCategory.CONTROL_FAILURE,
+                    "plug_refused",
+                    domain=domain_name,
+                    libvirt_error=_libvirt_text(exc),
+                ) from exc
             raise libvirt_failure(exc, "attaching a device to", domain_name) from exc
 
     def _plug_disk(

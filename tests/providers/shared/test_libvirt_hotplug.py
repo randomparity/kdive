@@ -217,6 +217,20 @@ def test_failed_disk_attach_frees_the_new_volume() -> None:
     assert volumes.live == {}
 
 
+def test_hypervisor_refusal_of_an_attach_is_a_control_failure() -> None:
+    domain, volumes = _Domain(), _Volumes()
+    domain.attach_error = _FakeError(
+        libvirt.VIR_ERR_OPERATION_FAILED, "No more available PCI slots"
+    )
+
+    with pytest.raises(CategorizedError) as err:
+        _port(domain, volumes).plug(DOMAIN, _disk(str(uuid4())))
+
+    assert err.value.category is ErrorCategory.CONTROL_FAILURE
+    assert err.value.details["reason"] == "plug_refused"
+    assert volumes.live == {}
+
+
 def test_plug_into_stopped_domain_is_domain_not_running() -> None:
     with pytest.raises(CategorizedError) as err:
         _port(_Domain(active=False), _Volumes()).plug(DOMAIN, _nic(str(uuid4())))
