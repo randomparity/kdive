@@ -259,7 +259,7 @@ async def _admit_plug(
     job = await queue.enqueue(
         conn,
         JobKind.PLUG_DEVICE,
-        PlugDevicePayload(system_id=system_id, device_id=str(device_id)),
+        PlugDevicePayload(system_id=str(uid), device_id=str(device_id)),
         job_authorizing(ctx, system.project),
         f"plug:{device_id}",
         max_attempts=1,
@@ -313,7 +313,8 @@ async def plug_device(
         return _config_error(system_id)
     parsed = _parse_kind(system_id, kind)
     if isinstance(parsed, ToolResponse):
-        return parsed
+        # A provider with no hot-plug kinds refuses before an unparseable kind is judged.
+        return _capability_refusal(runtime, system_id, None) or parsed
     refusal = _capability_refusal(runtime, system_id, parsed) or _validate_params(
         system_id, parsed, network, size_gb
     )
@@ -373,7 +374,7 @@ async def _admit_unplug(
     job = await queue.enqueue(
         conn,
         JobKind.UNPLUG_DEVICE,
-        UnplugDevicePayload(system_id=system_id, device_id=str(device_id), from_state=row.state),
+        UnplugDevicePayload(system_id=str(uid), device_id=str(device_id), from_state=row.state),
         job_authorizing(ctx, system.project),
         f"unplug:{device_id}:{attempt}",
         max_attempts=1,

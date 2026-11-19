@@ -485,6 +485,31 @@ def test_unplug_refuses_while_another_device_job_is_active(
 # --- capability and RBAC ----------------------------------------------------------------------
 
 
+def test_a_provider_without_hotplug_refuses_before_judging_the_kind(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def body(env: _Env) -> None:
+        response = await env.plug("usb", capable=False)
+
+        assert _reason(response) == "capability_unsupported", response.model_dump()
+
+    _scenario(migrated_url, authority_role_dsns, body)
+
+
+def test_a_non_canonical_system_id_cannot_hide_a_device_job_from_the_probe(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def body(env: _Env) -> None:
+        plugged = await env.plug(system_id=env.system_id.upper())
+        assert plugged.status == "running", plugged.model_dump()
+
+        response = await _power(env)
+
+        assert _reason(response) == "device_op_in_flight", response.model_dump()
+
+    _scenario(migrated_url, authority_role_dsns, body)
+
+
 @pytest.mark.parametrize("tool", ["plug", "unplug", "list"])
 def test_a_provider_without_hotplug_refuses_every_tool(
     migrated_url: str, authority_role_dsns: _RoleDsns, tool: str
