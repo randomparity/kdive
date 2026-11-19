@@ -37,7 +37,7 @@ Both tools: contributor, mutating annotation, ready local-libvirt System, `syste
 | min_order | 0..10 | `fail_page_alloc` only: smallest page order that can fail; unset keeps it |
 
 A violation is `configuration_error`, `data.reason` `unknown_knob` / `parameter_out_of_range` /
-`parameter_not_applicable`, before any DB read of the System's guest state or any ssh call.
+`parameter_not_applicable`, before any database read or ssh call.
 Recovery: send a value inside the stated range.
 
 `faultinject.reset(system_id, knob?)` writes the helper's kernel defaults (probability 0, times 1,
