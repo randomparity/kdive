@@ -178,7 +178,9 @@ class FaultInjectHotplug:
 
     def release_all(self, domain_name: str) -> None:
         with self._lock:
-            self._domains.pop(domain_name, None)
+            domain = self._domains.get(domain_name)
+            if domain is not None:
+                domain.devices.clear()
 
     def note_power(self, domain_name: str, action: PowerAction) -> None:
         """Mirror a power action: OFF and CYCLE drop the live devices; ON and CYCLE run."""

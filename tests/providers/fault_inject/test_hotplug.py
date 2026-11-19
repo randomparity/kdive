@@ -213,6 +213,16 @@ def test_release_all_clears_the_domain_and_is_idempotent() -> None:
     assert port.is_attached(_DOMAIN, _DISK.device_id, None) is False
 
 
+def test_release_all_keeps_a_stopped_domain_stopped() -> None:
+    port = _port()
+    port.note_power(_DOMAIN, PowerAction.OFF)
+
+    port.release_all(_DOMAIN)
+
+    with _raises(ErrorCategory.INFRASTRUCTURE_FAILURE, "domain_not_running"):
+        port.plug(_DOMAIN, _NIC)
+
+
 def test_an_undefined_domain_is_an_infrastructure_failure() -> None:
     with _raises(ErrorCategory.INFRASTRUCTURE_FAILURE, "domain_absent"):
         _port().plug("fault-inject-unknown", _NIC)
