@@ -14,6 +14,7 @@ false when the kernel lacks it), armed (bool), and, when present, the current in
 probability (percent, 0 to 100), interval, times (-1 is unlimited, 0 is exhausted), space,
 verbose, and for fail_page_alloc min-order. A knob is armed when probability is above 0 and
 times is not 0: it can then fail allocations in every task in the guest, including sshd.
+suggested_next_actions adds faultinject.reset while any knob is armed.
 
 The helper reply is capped at 4096 bytes per call and is never truncated: an
 oversized or malformed reply is infrastructure_failure and retrying changes nothing. A
@@ -31,3 +32,89 @@ guest failed); infrastructure_failure (the helper failed or replied unexpectedly
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `system_id` | string | yes | A ready local-libvirt System whose guest image carries the kdive-faultinject helper and whose kernel enables fault injection. |
+
+## `faultinject.reset`
+
+`implemented`
+
+Disarm one fault-injection knob, or all of them, on a ready local-libvirt System.
+
+Requires contributor.
+
+Writes the kernel defaults through the guest's kdive-faultinject helper over the
+System's loopback SSH: probability 0 (disarmed), times 1, interval 1, space 0, verbose 2
+and, for fail_page_alloc, min-order 1. These are the kernel's compiled-in defaults, not
+the values the knob held before faultinject.set. Probability is written first, so a
+partial failure never leaves injection armed. With knob omitted, a knob the kernel lacks
+is skipped; naming a knob the kernel lacks fails.
+
+Returns data.knobs for each knob touched, with present, armed (false after a successful
+reset) and the integers read back from the guest. The helper reply is capped at
+4096 bytes and a call takes at most about 25 seconds. If a knob is armed the
+guest may fail this call too (transport_failure): a fault set with faultinject.set stops
+by itself after its times count of failures, or on reboot, so retry after that. If the
+call fails with transport_failure after the command started, call faultinject.inspect
+to see what is in effect. Concurrent calls on one System are not serialized.
+
+Errors: configuration_error with data.reason unknown_knob, knob_absent (the named knob
+is missing from this kernel), fault_injection_unsupported (knob omitted and neither
+knob exists: boot a kernel with CONFIG_FAULT_INJECTION, CONFIG_FAILSLAB and
+CONFIG_FAIL_PAGE_ALLOC), capability_unsupported (provider is not local-libvirt),
+ssh_not_provisioned (no SSH forward), debugfs_not_mounted (mount debugfs in the guest)
+or helper_not_installed (rebuild the guest image with kdive-faultinject staged);
+not_found (unknown System or project); readiness_failure (System is not ready);
+transport_failure (ssh to the guest failed); infrastructure_failure (the helper failed
+or replied unexpectedly). The next action is faultinject.inspect.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `knob` | string (nullable) | no | Optional: failslab or fail_page_alloc to reset only that knob. Omitted resets every knob this kernel has. Any other name is rejected (configuration_error, reason unknown_knob) before the guest is contacted. |
+| `system_id` | string | yes | A ready local-libvirt System whose guest image carries the kdive-faultinject helper and whose kernel enables fault injection. |
+
+## `faultinject.set`
+
+`implemented`
+
+Arm one fault-injection knob with bounded parameters on a ready local-libvirt System.
+
+Requires contributor.
+
+Arms failslab or fail_page_alloc through the guest's kdive-faultinject helper over the
+System's loopback SSH. Every value is checked before the guest is contacted; the helper
+validates again and writes probability last. An armed knob can fail allocations in every
+task in the guest, including sshd, so arming is bounded: probability is 1 to 100 percent
+and times is a finite count of failures, 1 to 1000000 (-1 and 0 are refused). The
+kernel stops injecting after that many failures, with no clock involved, so a guest that
+can no longer be reached by ssh recovers by itself once the count is used up, or on
+reboot (debugfs state does not survive one). Unset optional parameters keep their
+current guest values, so read them in the returned data before relying on them.
+
+Returns data.knobs.<knob> with present, armed and the integers probability, interval,
+times, space, verbose (and min-order for fail_page_alloc) read back from the guest after
+the write: the state actually in effect. The helper reply is capped at 4096 bytes
+and a call takes at most about 25 seconds. If the call fails with transport_failure
+after the command started (a timeout), the write may or may not have happened: call
+faultinject.inspect, and faultinject.reset if a knob is armed. Concurrent calls on one
+System are not serialized; the last write wins.
+
+Errors: configuration_error with data.reason unknown_knob (data.accepted_values lists the
+knobs), parameter_out_of_range (data.parameter, data.minimum, data.maximum),
+parameter_not_applicable, knob_absent (this kernel lacks that knob: boot one built with
+CONFIG_FAULT_INJECTION and CONFIG_FAILSLAB or CONFIG_FAIL_PAGE_ALLOC),
+capability_unsupported (provider is not local-libvirt), ssh_not_provisioned (no SSH
+forward), debugfs_not_mounted (mount debugfs in the guest) or helper_not_installed
+(rebuild the guest image with kdive-faultinject staged); not_found (unknown System or
+project); readiness_failure (System is not ready); transport_failure (ssh to the guest
+failed); infrastructure_failure (the helper failed or replied unexpectedly). The next
+actions are faultinject.inspect and faultinject.reset.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `interval` | integer (nullable) | no | Optional, 1 to 1000000: inject at most once per this many eligible allocations (1 is every one). Omitted keeps the guest's current value, shown in the returned readback. Out of range: parameter_out_of_range. |
+| `knob` | string | yes | The knob to arm: failslab (fail kernel slab allocations) or fail_page_alloc (fail page allocations). Any other name is rejected (configuration_error, reason unknown_knob) before the guest is contacted. |
+| `min_order` | integer (nullable) | no | Optional, 0 to 10, fail_page_alloc only: smallest page order (2 to the power of the order pages) that can fail. Omitted keeps the guest's current value. Sent for failslab it is rejected with reason parameter_not_applicable. Out of range: parameter_out_of_range. |
+| `probability` | integer | yes | Percent chance, 1 to 100, that each eligible allocation fails, per allocation in every guest task. 0 is refused: arming needs a nonzero chance (use faultinject.reset to disarm). Outside the range the call is rejected with reason parameter_out_of_range; send a value in range. |
+| `space` | integer (nullable) | no | Optional, 0 to 1073741824 bytes: allocation volume that must pass before injection can begin, counted per guest. Omitted keeps the guest's current value. Out of range: parameter_out_of_range. |
+| `system_id` | string | yes | A ready local-libvirt System whose guest image carries the kdive-faultinject helper and whose kernel enables fault injection. |
+| `times` | integer | yes | How many failures the guest kernel injects, 1 to 1000000, counted across all tasks in this guest; then it stops injecting by itself, with no clock and no later call needed. -1 (unlimited) and 0 are refused with reason parameter_out_of_range before the guest is contacted, so a guest that can no longer run faultinject.reset still recovers once the count is used up. Pick the smallest count that reproduces the failure. |
+| `verbose` | integer (nullable) | no | Optional, 0 to 2: how much each injected failure logs to the guest kernel log (0 none, 2 most). Omitted keeps the guest's current value. Out of range: parameter_out_of_range. |

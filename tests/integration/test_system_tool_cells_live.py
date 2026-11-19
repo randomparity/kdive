@@ -72,6 +72,8 @@ pytestmark = pytest.mark.live_stack
 
 TOOLS = (
     "faultinject.inspect",
+    "faultinject.reset",
+    "faultinject.set",
     "systems.authorize_ssh_key",
     "systems.check_ssh_reachable",
     "systems.provision",
@@ -82,6 +84,8 @@ TOOLS = (
 # Each tool's project gate, and the role one rank below it (none below viewer).
 _GATES = {
     "faultinject.inspect": "viewer",
+    "faultinject.reset": "contributor",
+    "faultinject.set": "contributor",
     "systems.authorize_ssh_key": "contributor",
     "systems.check_ssh_reachable": "viewer",
     "systems.provision": "contributor",
@@ -205,7 +209,8 @@ _DEBUGFS = "/sys/kernel/debug"
 _KNOBS = ("failslab", "fail_page_alloc")
 # Local-libvirt only (ADR-0825): the remote cells stay unbound and the contract classes them as a
 # capability_unsupported refusal.
-_LOCAL_ONLY = frozenset({"faultinject.inspect"})
+_LOCAL_ONLY = frozenset({"faultinject.inspect", "faultinject.reset", "faultinject.set"})
+_ARM = {"knob": "failslab", "probability": 1, "times": 1}
 
 
 def _guest_knob(endpoint: Endpoint, key: Path, knob: str) -> dict[str, object]:
@@ -248,6 +253,51 @@ async def _inspect(caller: HttpCaller, token: str, guest: Guest) -> dict[str, ob
         )
         assert reported["armed"] is armed, f"{knob} armed flag {reported}"
     return {"knobs": len(knobs), "matches_guest_debugfs": True}
+
+
+def _guest_views(guest: Guest) -> dict[str, dict[str, object]]:
+    return {knob: _guest_knob(guest.endpoint, guest.key, knob) for knob in _KNOBS}
+
+
+async def _set(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
+    args = {"system_id": guest.system_id, **_ARM}
+    views = await asyncio.to_thread(_guest_views, guest)
+    env = await caller.call("faultinject.set", args, token)
+    assert isinstance(env, ToolResponse), "expected one envelope"
+    if not views["failslab"]["present"]:
+        assert env.error_category == ErrorCategory.CONFIGURATION_ERROR.value, env.error_category
+        assert env.data.get("reason") == "knob_absent", env.data
+        return {"guest_knobs": "absent", "refused": "knob_absent"}
+    try:
+        assert env.error_category is None, f"{env.error_category}: {env.detail}"
+        reported = cast(dict[str, object], data_mapping(env, "knobs")["failslab"])
+        after = await asyncio.to_thread(_guest_knob, guest.endpoint, guest.key, "failslab")
+        assert {k: reported[k] for k in after if k in reported} == after, f"{reported} vs {after}"
+        assert (after["probability"], after["times"]) == (1, 1), after
+        assert reported["armed"] is True, reported
+    finally:
+        await caller.call("faultinject.reset", {"system_id": guest.system_id}, token)
+    return {"armed_readback_matches_guest": True}
+
+
+async def _reset(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
+    views = await asyncio.to_thread(_guest_views, guest)
+    if not any(view["present"] for view in views.values()):
+        env = await caller.call("faultinject.reset", {"system_id": guest.system_id}, token)
+        assert isinstance(env, ToolResponse), "expected one envelope"
+        assert env.error_category == ErrorCategory.CONFIGURATION_ERROR.value, env.error_category
+        assert env.data.get("reason") == "fault_injection_unsupported", env.data
+        return {"guest_knobs": "absent", "refused": "fault_injection_unsupported"}
+    armed = await caller.call("faultinject.set", {"system_id": guest.system_id, **_ARM}, token)
+    assert isinstance(armed, ToolResponse) and armed.error_category is None, armed
+    env = await caller.call("faultinject.reset", {"system_id": guest.system_id}, token)
+    assert isinstance(env, ToolResponse), "expected one envelope"
+    assert env.error_category is None, f"{env.error_category}: {env.detail}"
+    after = await asyncio.to_thread(_guest_views, guest)
+    assert after["failslab"]["probability"] == 0, after
+    knobs = data_mapping(env, "knobs")
+    assert all(cast(dict[str, object], knobs[k])["armed"] is False for k in knobs), knobs
+    return {"disarmed_matches_guest_debugfs": True}
 
 
 async def _authorize(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
@@ -309,6 +359,8 @@ async def _teardown(caller: HttpCaller, token: str, guest: Guest) -> dict[str, o
 
 _FUNCTIONAL: dict[str, Body] = {
     "faultinject.inspect": _inspect,
+    "faultinject.reset": _reset,
+    "faultinject.set": _set,
     "systems.authorize_ssh_key": _authorize,
     "systems.check_ssh_reachable": _check,
     "systems.provision": _provision,
@@ -343,6 +395,8 @@ def _target_args(
     if tool == "systems.provision":
         return {"allocation_id": allocation_id, "profile": profile}
     args: dict[str, object] = {"system_id": system_id}
+    if tool == "faultinject.set":
+        args.update(_ARM)
     if tool == "systems.authorize_ssh_key":
         args["public_key"] = _public_key()
     if tool == "systems.reprovision":

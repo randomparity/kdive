@@ -16,7 +16,9 @@ from kdive.providers.local_libvirt.debug.fault_inject import (
 )
 from kdive.providers.local_libvirt.debug.live_introspect import _live_ssh_argv
 from kdive.providers.ports.fault_injection import (
+    ARMING_BOUNDS,
     FAULT_KNOB_PARAMETERS,
+    FAULT_PARAMETER_BOUNDS,
     READ_WORST_CASE_SECONDS,
     FaultKnobState,
 )
@@ -39,12 +41,20 @@ def _reply(**knobs: object) -> str:
     return json.dumps({"knobs": {**base, **knobs}})
 
 
-def _inspector(exit_status: int, stdout: str | bytes, registry: SecretRegistry | None = None):
+def _inspector(
+    exit_status: int,
+    stdout: str | bytes,
+    registry: SecretRegistry | None = None,
+    argv: list[list[str]] | None = None,
+):
     raw = stdout.encode() if isinstance(stdout, str) else stdout
-    return LocalLibvirtFaultInjection(
-        secret_registry=registry or SecretRegistry(),
-        run_helper=lambda handle, key: (exit_status, raw),
-    )
+
+    def run(handle: str, key: str, args: list[str]) -> tuple[int, bytes]:
+        if argv is not None:
+            argv.append(args)
+        return exit_status, raw
+
+    return LocalLibvirtFaultInjection(secret_registry=registry or SecretRegistry(), run_helper=run)
 
 
 def _error(inspector: LocalLibvirtFaultInjection) -> CategorizedError:
@@ -166,3 +176,122 @@ def test_argv_refuses_a_non_loopback_handle() -> None:
 
 def test_worst_case_call_time_matches_the_documented_figure() -> None:
     assert mod._SSH_TIMEOUT_S + mod._SSH_RETRY.deadline_s == READ_WORST_CASE_SECONDS
+
+
+def _single(knob: str, **override: object) -> str:
+    return json.dumps({"knobs": {knob: _knob(FAULT_KNOB_PARAMETERS[knob], **override)}})
+
+
+def test_bounds_table_matches_the_helper_text() -> None:
+    text = _HELPER.read_text(encoding="utf-8")
+    for name, (low, high) in FAULT_PARAMETER_BOUNDS.items():
+        match = re.search(rf"\b{name}\) echo \"(-?\d+) (\d+) -?\d+\"", text)
+        assert match is not None, name
+        assert (int(match.group(1)), int(match.group(2))) == (low, high)
+
+
+def test_set_knob_sends_a_fixed_argv_in_table_order() -> None:
+    argv: list[list[str]] = []
+    reply = _single("fail_page_alloc", probability=5, times=3, **{"min-order": 2})
+    state = _inspector(0, reply, argv=argv).set_knob(
+        transport_handle=_HANDLE,
+        key_path="/k",
+        knob="fail_page_alloc",
+        parameters={"min-order": 2, "times": 3, "probability": 5},
+    )
+    assert argv == [["set", "fail_page_alloc", "probability=5", "times=3", "min-order=2"]]
+    assert set(state) == {"fail_page_alloc"}
+    assert state["fail_page_alloc"].parameters["times"] == 3
+
+
+@pytest.mark.parametrize(
+    ("knob", "parameters", "reason"),
+    [
+        ("slab", {"probability": 1, "times": 1}, "unknown_knob"),
+        ("failslab", {"probability": 1, "times": -1}, "parameter_out_of_range"),
+        ("failslab", {"probability": 1, "times": 0}, "parameter_out_of_range"),
+        ("failslab", {"probability": 1, "times": 1_000_001}, "parameter_out_of_range"),
+        ("failslab", {"probability": 0, "times": 1}, "parameter_out_of_range"),
+        ("failslab", {"probability": 101, "times": 1}, "parameter_out_of_range"),
+        ("failslab", {"probability": 1, "times": 1, "interval": 0}, "parameter_out_of_range"),
+        ("failslab", {"probability": 1, "times": 1, "space": 2**30 + 1}, "parameter_out_of_range"),
+        ("failslab", {"probability": 1, "times": 1, "verbose": 3}, "parameter_out_of_range"),
+        ("failslab", {"probability": 1, "times": 1, "min-order": 1}, "parameter_not_applicable"),
+        (
+            "fail_page_alloc",
+            {"probability": 1, "times": 1, "min-order": 11},
+            "parameter_out_of_range",
+        ),
+        ("failslab", {"probability": 1}, "parameter_out_of_range"),
+        ("failslab", {"times": 1}, "parameter_out_of_range"),
+        ("failslab", {"probability": True, "times": 1}, "parameter_out_of_range"),
+    ],
+)
+def test_set_knob_rejects_before_the_helper_runs(
+    knob: str, parameters: dict[str, int], reason: str
+) -> None:
+    argv: list[list[str]] = []
+    with pytest.raises(CategorizedError) as caught:
+        _inspector(0, "", argv=argv).set_knob(
+            transport_handle=_HANDLE, key_path="/k", knob=knob, parameters=parameters
+        )
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details["reason"] == reason
+    assert argv == []
+
+
+def test_arming_bounds_accept_each_edge() -> None:
+    for name, (low, high) in ARMING_BOUNDS.items():
+        knob = "fail_page_alloc"
+        for value in (low, high):
+            base = {"probability": 1, "times": 1} | {name: value}
+            _inspector(0, _single(knob), argv=[]).set_knob(
+                transport_handle=_HANDLE, key_path="/k", knob=knob, parameters=base
+            )
+
+
+def test_set_of_a_knob_the_kernel_lacks_is_knob_absent() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        _inspector(4, "").set_knob(
+            transport_handle=_HANDLE,
+            key_path="/k",
+            knob="failslab",
+            parameters={"probability": 1, "times": 1},
+        )
+    assert caught.value.details["reason"] == "knob_absent"
+    assert "CONFIG_FAILSLAB" in str(caught.value)
+
+
+def test_reset_one_knob_and_all_knobs_send_the_expected_argv() -> None:
+    argv: list[list[str]] = []
+    one = _inspector(0, _single("failslab"), argv=argv).reset(
+        transport_handle=_HANDLE, key_path="/k", knob="failslab"
+    )
+    every = _inspector(0, _reply(), argv=argv).reset(
+        transport_handle=_HANDLE, key_path="/k", knob=None
+    )
+    assert argv == [["reset", "failslab"], ["reset"]]
+    assert set(one) == {"failslab"} and set(every) == {"failslab", "fail_page_alloc"}
+
+
+def test_reset_rejects_an_unknown_knob_before_the_helper_runs() -> None:
+    argv: list[list[str]] = []
+    with pytest.raises(CategorizedError) as caught:
+        _inspector(0, "", argv=argv).reset(transport_handle=_HANDLE, key_path="/k", knob="../x")
+    assert caught.value.details["reason"] == "unknown_knob"
+    assert argv == []
+
+
+def test_reset_of_every_absent_knob_is_fault_injection_unsupported() -> None:
+    reply = _reply(failslab={"present": False}, fail_page_alloc={"present": False})
+    with pytest.raises(CategorizedError) as caught:
+        _inspector(0, reply).reset(transport_handle=_HANDLE, key_path="/k", knob=None)
+    assert caught.value.details["reason"] == "fault_injection_unsupported"
+
+
+def test_a_reply_for_the_wrong_knob_is_invalid() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        _inspector(0, _single("fail_page_alloc")).reset(
+            transport_handle=_HANDLE, key_path="/k", knob="failslab"
+        )
+    assert caught.value.details["reason"] == "helper_output_invalid"
