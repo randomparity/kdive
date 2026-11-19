@@ -15,7 +15,7 @@ from kdive.db.locks import (
     require_top_level_transaction,
     scoped_session_advisory_lock,
 )
-from kdive.db.repositories import SYSTEMS
+from kdive.db.repositories import SYSTEMS, mark_attached_devices_lost
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
@@ -29,6 +29,9 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.services.debug.detach import detach_audit_event, detach_system_debug_sessions
+
+# A power OFF or CYCLE replaces the running device set, so hot-plugged devices are gone (ADR-0823).
+_DEVICE_REPLACING_ACTIONS = frozenset({PowerAction.OFF, PowerAction.CYCLE})
 
 
 class _ControlTarget(NamedTuple):
@@ -152,6 +155,8 @@ async def power_handler(
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id)},
             )
+        if action in _DEVICE_REPLACING_ACTIONS:
+            await mark_attached_devices_lost(conn, system_id)
         await audit.record(
             conn,
             job_context_from_job(job, target.project),

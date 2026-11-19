@@ -70,6 +70,7 @@ async def _reclaim_as(dsn: str, system_id: UUID, *, reclaim_snapshot_ledger: boo
             _NoStore(),
             system_id,
             reclaim_snapshot_ledger=reclaim_snapshot_ledger,
+            reclaim_device_ledger=reclaim_snapshot_ledger,
             discharge_mutation_obligations=True,
         )
         await conn.commit()
@@ -83,8 +84,9 @@ async def _read_discharge(migrated_url: str, system_id: UUID) -> tuple[object, s
 
 
 # The three shapes production actually passes. `reclaim_snapshot_ledger=True` additionally
-# runs `delete_snapshots_for_system`, so covering it under both roles keeps a later revocation
-# on that branch from reddening one role's arm while leaving the other's unproven.
+# runs `delete_snapshots_for_system` (`reclaim_device_ledger` rides the same shapes), so covering
+# it under both roles keeps a later revocation on that branch from reddening one role's arm while
+# leaving the other's unproven.
 _RECLAIM_SHAPES = [
     pytest.param("kdive_worker", False, id="worker-systems-teardown"),
     pytest.param("kdive_worker", True, id="worker-authority-teardown"),

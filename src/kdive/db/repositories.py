@@ -9,6 +9,7 @@ timestamps (they are omitted from inserts and read back through the repository p
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -546,6 +547,76 @@ async def delete_devices_for_system(conn: AsyncConnection, system_id: UUID) -> i
     """
     async with conn.cursor() as cur:
         await cur.execute("DELETE FROM system_devices WHERE system_id = %s", (system_id,))
+        return cur.rowcount
+
+
+async def start_device_settle_window(
+    conn: AsyncConnection, device_id: UUID, window_s: float
+) -> None:
+    """Stamp ``settle_deadline`` on a row whose plug or un-plug job just started (ADR-0823).
+
+    The deadline is the database clock plus the window, so it is comparable with the
+    ``server_time`` ``systems.list_devices`` returns; the worker bounds the wait itself on its
+    monotonic clock.
+    """
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE system_devices SET settle_deadline = now() + make_interval(secs => %s) "
+            "WHERE id = %s",
+            (window_s, device_id),
+        )
+
+
+async def record_device_plug(
+    conn: AsyncConnection,
+    device_id: UUID,
+    provider_handle: str,
+    identity: Mapping[str, str],
+) -> None:
+    """Commit what the provider returned from ``plug``, before the settle poll (ADR-0823).
+
+    A worker that dies while polling then leaves a row that carries the handle an un-plug needs.
+    """
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE system_devices SET provider_handle = %s, identity = %s WHERE id = %s",
+            (provider_handle, Jsonb(dict(identity)), device_id),
+        )
+
+
+async def settle_device(
+    conn: AsyncConnection,
+    device_id: UUID,
+    new_state: SystemDeviceState,
+    *,
+    detail: str | None = None,
+) -> SystemDevice:
+    """End a plug or un-plug: guarded transition, ``detail`` and a cleared ``settle_deadline``.
+
+    Raises:
+        ObjectNotFound: No row has ``device_id``.
+        IllegalTransition: The current → ``new_state`` edge is not permitted.
+    """
+    async with conn.transaction():
+        row = await SYSTEM_DEVICES.update_state(conn, device_id, new_state)
+        await conn.execute(
+            "UPDATE system_devices SET detail = %s, settle_deadline = NULL WHERE id = %s",
+            (detail, device_id),
+        )
+    return row.model_copy(update={"detail": detail, "settle_deadline": None})
+
+
+async def mark_attached_devices_lost(conn: AsyncConnection, system_id: UUID) -> int:
+    """Move a System's ``attached`` rows to ``lost`` and return how many moved (ADR-0823).
+
+    A power OFF/CYCLE or a snapshot restore replaces the running device set; the caller runs this
+    in the transaction that commits that result. Other states are untouched.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "UPDATE system_devices SET state = %s WHERE system_id = %s AND state = %s",
+            (SystemDeviceState.LOST.value, system_id, SystemDeviceState.ATTACHED.value),
+        )
         return cur.rowcount
 
 

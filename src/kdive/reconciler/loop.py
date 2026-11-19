@@ -166,6 +166,7 @@ _repair_stalled_crashing_systems = system_repairs.repair_stalled_crashing_system
 _repair_stalled_restoring_systems = system_repairs.repair_stalled_restoring_systems
 _repair_stalled_reprovisioning_systems = system_repairs.repair_stalled_reprovisioning_systems
 _repair_stalled_creating_snapshots = system_repairs.repair_stalled_creating_snapshots
+_repair_stalled_device_ops = system_repairs.repair_stalled_device_ops
 _sweep_expired_allocations = allocation_repairs.sweep_expired_allocations
 _sweep_console_rotation = console_rotation_repairs.sweep_console_rotation
 
@@ -670,6 +671,9 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     _RepairCatalogEntry(
         "stalled_creating_snapshots", lambda _r, _c, _g: _repair_stalled_creating_snapshots
     ),
+    # Also after `abandoned_jobs`: a plugging/unplugging device row with no active plug/un-plug
+    # job -> failed, with no provider call (ADR-0823).
+    _RepairCatalogEntry("stalled_device_ops", lambda _r, _c, _g: _repair_stalled_device_ops),
     _RepairCatalogEntry("console_rotations_enqueued", lambda _r, _c, _g: _sweep_console_rotation),
     _RepairCatalogEntry(
         "reaped_runtime_resources",

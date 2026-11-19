@@ -12,8 +12,20 @@ from psycopg.rows import dict_row
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
-from kdive.db.repositories import SNAPSHOTS, SYSTEMS, record_system_failure_category
-from kdive.domain.capacity.state import AllocationState, JobState, SnapshotState, SystemState
+from kdive.db.repositories import (
+    SNAPSHOTS,
+    SYSTEM_DEVICES,
+    SYSTEMS,
+    record_system_failure_category,
+    settle_device,
+)
+from kdive.domain.capacity.state import (
+    AllocationState,
+    JobState,
+    SnapshotState,
+    SystemDeviceState,
+    SystemState,
+)
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
@@ -719,6 +731,54 @@ async def repair_stalled_creating_snapshots(conn: AsyncConnection) -> int:
             await SNAPSHOTS.update_state(conn, snapshot_id, SnapshotState.FAILED)
         recovered += 1
         _log.info("reconciler: stalled creating snapshot %s -> failed", snapshot_id)
+    return recovered
+
+
+# The transient device state each job kind owns; a row in one with no active job of that kind
+# can never settle (ADR-0823).
+_DEVICE_OP_KINDS = (
+    (SystemDeviceState.PLUGGING, JobKind.PLUG_DEVICE),
+    (SystemDeviceState.UNPLUGGING, JobKind.UNPLUG_DEVICE),
+)
+_STALLED_DEVICE_DETAIL = (
+    "the worker ended before the device operation settled; the device may or may not be in the "
+    "guest. Retry systems.unplug_device, or plug again."
+)
+
+
+async def repair_stalled_device_ops(conn: AsyncConnection) -> int:
+    """Fail a `plugging`/`unplugging` device row whose job can never finish (ADR-0823).
+
+    A worker that died mid-call, or an operator `jobs.cancel`, strands the row with no active job of
+    the matching kind. Move it to `failed` so `systems.unplug_device` can clear it. No provider call
+    is made: the state of the device is unknown, and the retry path asks the provider. A row whose
+    job is still queued or running is left alone.
+    """
+    recovered = 0
+    for state, kind in _DEVICE_OP_KINDS:
+        async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT d.id FROM system_devices d "
+                "WHERE d.state = %s "
+                "  AND NOT EXISTS ( "
+                "    SELECT 1 FROM jobs j "
+                "    WHERE j.kind = %s "
+                "      AND j.payload->>'device_id' = d.id::text "
+                "      AND j.state = ANY(%s) "
+                "  )",
+                (state.value, kind.value, list(_ACTIVE_JOB_STATE_VALUES)),
+            )
+            candidates = [row["id"] for row in await cur.fetchall()]
+        for device_id in candidates:
+            async with conn.transaction():
+                device = await SYSTEM_DEVICES.get(conn, device_id)
+                if device is None or device.state is not state:
+                    continue
+                await settle_device(
+                    conn, device_id, SystemDeviceState.FAILED, detail=_STALLED_DEVICE_DETAIL
+                )
+            recovered += 1
+            _log.info("reconciler: stalled %s device %s -> failed", state.value, device_id)
     return recovered
 
 

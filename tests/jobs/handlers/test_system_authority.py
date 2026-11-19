@@ -263,6 +263,7 @@ async def test_preactivation_absence_reclaims_core_before_terminal_sql_and_retri
         assert args[1:3] == (store, marker.system_id)
         assert kwargs == {
             "reclaim_snapshot_ledger": True,
+            "reclaim_device_ledger": True,
             "discharge_mutation_obligations": True,
         }
         reclaim_attempts += 1
