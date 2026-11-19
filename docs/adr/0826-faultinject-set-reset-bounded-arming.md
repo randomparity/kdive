@@ -80,6 +80,9 @@ is allowed, and how a lost reply is reported.
   so the owning-Run fence of `force_crash` does not apply. `reset` takes the same guard as `set`:
   a finite `times` already ends an armed fault, and `systems.teardown` stays admitted in every
   restricted state. `faultinject.inspect` is a read and is not guarded.
+  The check is made on a pooled connection before the ssh call and holds no System lock, so an
+  activation that enters `recovering` between the check and the write is not fenced; the write is
+  bounded by `times` and teardown stays admitted, so this window is accepted.
 - The helper's `-1` and `0` for `times` stay legal in the guest and in `inspect` output; only the
   tool refuses to write them.
 
