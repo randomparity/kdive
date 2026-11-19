@@ -1112,12 +1112,15 @@ async def select_thread_body(s: Session) -> dict[str, object]:
     assert await s.register(session_id) == rip, "the current thread's rip changed"
     assert await _echoed_thread(s, session_id) == current, "the read did not echo the selection"
     other = next((n for n in ids if n != current), None)
-    if other is not None:
-        await s.op("debug.select_thread", session_id=session_id, thread_id=int(other))
-        assert await s.register(session_id, "rsp") >= KERNEL_BASE, "rsp is not a kernel address"
-        after = await s.op("debug.list_threads", session_id=session_id)
-        assert after.data.get("selected_thread_id") == other, "the selection is not reported"
-        assert await _echoed_thread(s, session_id) == other, "the read did not echo the other CPU"
+    if other is None:
+        raise ScenarioStop(
+            Outcome.BLOCKED, f"the fixture lists {len(ids)} thread; selecting another needs two"
+        )
+    await s.op("debug.select_thread", session_id=session_id, thread_id=int(other))
+    assert await s.register(session_id, "rsp") >= KERNEL_BASE, "rsp is not a kernel address"
+    after = await s.op("debug.list_threads", session_id=session_id)
+    assert after.data.get("selected_thread_id") == other, "the selection is not reported"
+    assert await _echoed_thread(s, session_id) == other, "the read did not echo the other CPU"
     cleared = await s.op("debug.select_thread", session_id=session_id, thread_id=None)
     assert cleared.status == "cleared" and cleared.data.get("thread_id") is None, "not cleared"
     unselected = await s.op("debug.list_threads", session_id=session_id)
@@ -1133,7 +1136,7 @@ async def select_thread_body(s: Session) -> dict[str, object]:
     assert refused.data.get("code") == "unknown_thread", f"refused with {refused.data}"
     return {
         "threads": len(ids),
-        "selected": other or current,
+        "selected": other,
         "cleared": True,
         "unknown_refused": True,
     }
