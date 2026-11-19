@@ -744,6 +744,63 @@ def test_set_watchpoint_must_watch_the_kallsyms_address(monkeypatch: pytest.Monk
         _run("debug.set_watchpoint", _Debugger(answers("*(char(*)[8])0x1000")), monkeypatch)
 
 
+def _threads(count: int) -> ToolResponse:
+    rows = [{"id": str(n), "details": f"CPU#{n - 1} [halted]"} for n in range(1, count + 1)]
+    data = {"threads": rows, "thread_count": count, "current_thread_id": "1"}
+    return ToolResponse.success("ses-1", "listed", data=cast(Any, data))
+
+
+def _thread_answers(count: int) -> dict[str, _Answer]:
+    """A scripted debugger whose gdbstub lists ``count`` vCPUs and honours a selection."""
+    chosen: list[object] = [None]
+
+    def select(args: Mapping[str, object]) -> ToolResponse:
+        if isinstance(args["thread_id"], int) and args["thread_id"] > count:
+            return ToolResponse.failure(
+                "ses-1",
+                ErrorCategory.DEBUG_ATTACH_FAILURE,
+                detail="no such thread",
+                data={"code": "unknown_thread"},
+            )
+        chosen[0] = args["thread_id"]
+        status = "cleared" if chosen[0] is None else "selected"
+        data = {"thread_id": None if chosen[0] is None else str(chosen[0])}
+        return ToolResponse.success("ses-1", status, data=cast(Any, data))
+
+    def listing(_args: Mapping[str, object]) -> ToolResponse:
+        listed = _threads(count)
+        if chosen[0] is not None:
+            listed.data["selected_thread_id"] = str(chosen[0])
+        return listed
+
+    def registers(_args: Mapping[str, object]) -> ToolResponse:
+        data = {"rip": _RIP, "rsp": "0xffffc90000a3fe00", "thread_id": str(chosen[0] or 1)}
+        return ToolResponse.success("ses-1", "read", data=cast(Any, data))
+
+    def walk(_args: Mapping[str, object]) -> ToolResponse:
+        return ToolResponse.success("ses-1", "walked", data={"thread_id": "1"})
+
+    return _stop_answers(
+        **{
+            "debug.backtrace": walk,
+            "debug.list_threads": listing,
+            "debug.select_thread": select,
+            "debug.read_registers": registers,
+        }
+    )
+
+
+def test_select_thread_blocks_on_a_one_vcpu_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ScenarioStop) as stop:
+        _run("debug.select_thread", _Debugger(_thread_answers(1)), monkeypatch)
+    assert stop.value.outcome is Outcome.BLOCKED
+
+
+def test_select_thread_selects_the_other_vcpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _run("debug.select_thread", _Debugger(_thread_answers(2)), monkeypatch)
+    assert result["selected"] == "2" and result["threads"] == 2
+
+
 # --- the remote lane (#3113) ----------------------------------------------------------------
 
 _REMOTE_START = "tool/remote-libvirt/debug.start_session/drgn-live/functional"
