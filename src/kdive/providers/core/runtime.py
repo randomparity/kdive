@@ -35,6 +35,8 @@ from kdive.providers.ports.lifecycle import (
     Connector,
     Controller,
     DebugTransportKind,
+    DeviceHotplugger,
+    HotplugDeviceKind,
     Installer,
     IntrospectionMode,
     Provisioner,
@@ -98,6 +100,9 @@ class ProviderSupport:
     # Required ports can be refusing stubs; their presence is not advertised support (ADR-0813).
     supports_build: bool = False
     supports_boot: bool = False
+    # Device hot-plug kinds this provider can prove (ADR-0823). Fail closed: empty means
+    # unsupported, and a provider advertises only the kinds it can attach and observe.
+    hotplug_devices: frozenset[HotplugDeviceKind] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +196,8 @@ class ProviderRuntime:
     # ``support.supports_traffic_capture is False``).
     traffic_capturer: TrafficCapturer | None = None
     traffic_capture_operation: TrafficCaptureOperationPorts | None = None
+    # Device hot-plug port (ADR-0823); ``None`` when ``support.hotplug_devices`` is empty.
+    device_hotplug: DeviceHotplugger | None = None
     # Provider-neutral external Run-boot operations (ADR-0583). Existing providers leave this
     # absent until their adapter issues land; legacy install and boot remain unchanged.
     external_boot: ExternalBootPorts | None = None
@@ -219,6 +226,12 @@ class ProviderRuntime:
             port=self.traffic_capturer,
             capability_name="support.supports_traffic_capture",
             port_name="traffic_capturer",
+        )
+        _require_capability_port_parity(
+            advertised=bool(self.support.hotplug_devices),
+            port=self.device_hotplug,
+            capability_name="support.hotplug_devices",
+            port_name="device_hotplug",
         )
 
     async def register_discovery(self, pool: AsyncConnectionPool) -> None:

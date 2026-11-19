@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Literal, NamedTuple, Protocol
 from uuid import UUID
 
@@ -366,5 +367,97 @@ class Snapshotter(Protocol):
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a provider delete fault.
+        """
+        ...
+
+
+class HotplugDeviceKind(StrEnum):
+    """The device kinds a provider can hot-plug (ADR-0823)."""
+
+    NIC = "nic"
+    DISK = "disk"
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceSpec:
+    """One device to plug, as the ledger row describes it (ADR-0823)."""
+
+    kind: HotplugDeviceKind
+    # kdive's ledger id; the provider embeds it in the device's name.
+    device_id: str
+    # nic only: provider network or virtual switch; ``None`` selects the provider default.
+    network: str | None
+    # disk only: size of the new empty scratch disk in gigabytes.
+    size_gb: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class PlugOutcome:
+    """What ``plug`` reports back for the ledger row (ADR-0823)."""
+
+    # Opaque; the only thing ``unplug`` and ``is_attached`` take to find the device.
+    provider_handle: str
+    # Guest-visible identity: ``{"mac": ...}`` for a nic, ``{"serial": ...}`` for a disk.
+    identity: Mapping[str, str]
+    # ``False``: the provider accepted the request and is still working.
+    settled: bool
+
+
+class DeviceHotplugger(Protocol):
+    """Device hot-plug port keyed on provider domain name (ADR-0823).
+
+    A provider that advertises ``ProviderSupport.hotplug_devices`` wires a ``DeviceHotplugger``
+    into ``ProviderRuntime.device_hotplug``. Every method refuses a kind outside the advertised
+    set with ``CONFIGURATION_ERROR``. Each call carries its own timeout bounded by the job's
+    remaining window. ``unplug`` never forces the guest: it issues the graceful request only.
+    """
+
+    def plug(self, domain_name: str, spec: DeviceSpec) -> PlugOutcome:
+        """Attach a new device; idempotent on ``spec.device_id``.
+
+        Plugging an already-attached ``device_id`` returns its outcome.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` for a kind outside the advertised set or
+                an unknown network (``data.reason: unknown_network``), ``CONTROL_FAILURE`` when
+                the provider refuses, ``INFRASTRUCTURE_FAILURE`` for a provider fault, an absent
+                domain, or a stopped one (``data.reason: domain_not_running``).
+        """
+        ...
+
+    def unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+        """Request graceful removal of a device; idempotent.
+
+        Returns ``True`` when the device is gone (an absent device counts, after freeing any
+        backing volume it still holds) and ``False`` when the provider accepted the request and
+        has not finished; the caller then polls ``is_attached``. ``provider_handle`` is ``None``
+        only when a worker died between the provider call and the ledger commit; the provider
+        then finds the device by ``device_id``.
+
+        Raises:
+            CategorizedError: ``CONTROL_FAILURE`` with ``data.reason: unplug_refused`` when the
+                guest or provider refuses, or ``handle_unknown`` when the device cannot be
+                found without a handle; ``INFRASTRUCTURE_FAILURE`` for a provider fault, an
+                absent domain, or a stopped domain that still holds the device
+                (``data.reason: domain_not_running``). An absent device on a stopped domain
+                is not an error: it returns ``True`` after freeing any backing volume.
+        """
+        ...
+
+    def is_attached(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+        """Whether the device is present and settled; polled while a plug or un-plug settles.
+
+        Raises:
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a provider fault.
+        """
+        ...
+
+    def release_all(self, domain_name: str) -> None:
+        """Remove every kdive-plugged device and backing volume of a domain, best effort.
+
+        Idempotent. Called at teardown and reprovision, like ``Snapshotter.delete_all``.
+
+        Raises:
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a provider fault.
         """
         ...

@@ -58,6 +58,9 @@ class FaultInjectInventory:
     def is_orphaned(self, domain_name: str) -> bool:
         return domain_name in self._orphaned
 
+    def system_id_of(self, domain_name: str) -> UUID | None:
+        return self._domains.get(domain_name)
+
     def owned_domains(self) -> list[OwnedDomain]:
         return [OwnedDomain(name=name, system_id=sid) for name, sid in self._domains.items()]
 

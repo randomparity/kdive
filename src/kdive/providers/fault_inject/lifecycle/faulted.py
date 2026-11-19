@@ -9,9 +9,11 @@ from uuid import UUID
 from kdive.domain.errors import CategorizedError
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.fault_inject.faulting.engine import FaultDecision, FaultEngine, FaultPlane
+from kdive.providers.fault_inject.inventory import FaultInjectInventory
+from kdive.providers.fault_inject.lifecycle.hotplug import FaultInjectHotplug
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
 from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
-from kdive.providers.ports.lifecycle import InstallRequest
+from kdive.providers.ports.lifecycle import DeviceSpec, InstallRequest, PlugOutcome
 from kdive.serialization import JsonValue
 
 _FIRST_ATTEMPT: Callable[[UUID], int] = lambda _system_id: 1  # noqa: E731 - a tiny default port
@@ -126,5 +128,52 @@ class FaultedInstall:
     def _draw(self, system_id: UUID, plane: FaultPlane) -> None:
         decision = self._engine.decide(
             system_id=system_id, plane=plane, attempt=self._attempt_for(system_id)
+        )
+        _apply(decision, self._sleep_s)
+
+
+class FaultedHotplug:
+    """A :class:`FaultInjectHotplug` that draws hotplug-plane faults before plug and un-plug.
+
+    ``is_attached`` and ``release_all`` are never perturbed: polling is how a settle is observed,
+    and release is compensation that must always run. A domain the inventory does not know is
+    delegated undrawn, so the inner port raises its own absent-domain error.
+    """
+
+    def __init__(
+        self,
+        inner: FaultInjectHotplug,
+        engine: FaultEngine,
+        inventory: FaultInjectInventory,
+        *,
+        attempt_for: _AttemptFor = _FIRST_ATTEMPT,
+        sleep_s: _SyncSleep = time.sleep,
+    ) -> None:
+        self._inner = inner
+        self._engine = engine
+        self._inventory = inventory
+        self._attempt_for = attempt_for
+        self._sleep_s = sleep_s
+
+    def plug(self, domain_name: str, spec: DeviceSpec) -> PlugOutcome:
+        self._draw(domain_name)
+        return self._inner.plug(domain_name, spec)
+
+    def unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+        self._draw(domain_name)
+        return self._inner.unplug(domain_name, device_id, provider_handle)
+
+    def is_attached(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+        return self._inner.is_attached(domain_name, device_id, provider_handle)
+
+    def release_all(self, domain_name: str) -> None:
+        self._inner.release_all(domain_name)
+
+    def _draw(self, domain_name: str) -> None:
+        system_id = self._inventory.system_id_of(domain_name)
+        if system_id is None:
+            return
+        decision = self._engine.decide(
+            system_id=system_id, plane=FaultPlane.HOTPLUG, attempt=self._attempt_for(system_id)
         )
         _apply(decision, self._sleep_s)

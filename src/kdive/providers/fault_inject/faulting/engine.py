@@ -52,7 +52,7 @@ _UNIT_SCALE: Final = float(1 << _MANTISSA_BITS)
 
 
 class FaultPlane(StrEnum):
-    """The six perturbable provider planes the engine keys faults on.
+    """The seven perturbable provider planes the engine keys faults on.
 
     The values are stable wire strings used both as hash-key material and as the keys of
     the per-plane ``fault_rate`` / ``max_latency_s`` capability maps.
@@ -64,6 +64,7 @@ class FaultPlane(StrEnum):
     CONNECT = "connect"
     CONTROL = "control"
     RETRIEVE = "retrieve"
+    HOTPLUG = "hotplug"
 
 
 class FaultFacet(StrEnum):
@@ -83,6 +84,7 @@ _FAULT_CATALOG: Final[Mapping[FaultPlane, tuple[ErrorCategory, ...]]] = {
     FaultPlane.CONNECT: (ErrorCategory.TRANSPORT_FAILURE,),
     FaultPlane.CONTROL: (ErrorCategory.CONTROL_FAILURE,),
     FaultPlane.RETRIEVE: (ErrorCategory.INFRASTRUCTURE_FAILURE,),
+    FaultPlane.HOTPLUG: (ErrorCategory.INFRASTRUCTURE_FAILURE,),
 }
 
 

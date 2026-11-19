@@ -19,3 +19,8 @@ SEED_KEY: Final = "seed"
 FAULT_RATE_KEY: Final = "fault_rate"
 MAX_LATENCY_S_KEY: Final = "max_latency_s"
 SECRET_REF_KEY: Final = "secret_ref"
+# Hot-plug behaviour (ADR-0823): ``busy``, ``slow`` or ``hang``; absent means un-plug and plug
+# settle at once. ``HotplugBehaviour.from_capabilities`` parses it; like the fault engine's keys,
+# no production wiring reads it from the resource row yet, so tests pass the parsed value to
+# ``build_runtime``.
+HOTPLUG_BEHAVIOUR_KEY: Final = "hotplug_behaviour"
