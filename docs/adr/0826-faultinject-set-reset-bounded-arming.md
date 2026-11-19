@@ -69,9 +69,17 @@ is allowed, and how a lost reply is reported.
 - `reset` writes the kernel defaults, not the values found before `set` (ADR-0822).
 - The Protocol name `FaultInjectionInspector` now covers writes; a rename was rejected as churn
   with no behavior change.
-- Both tools sit in the external-boot admission matrix's exempt table, like `introspect.script`:
-  they write guest debugfs over an already-admitted SSH transport and decide nothing about boot.
-  Guarding them would add an `ExternalBootOperation` outside this change's scope.
+- Both tools are guarded by the external-boot matrix (ADR-0583) through a new
+  `ExternalBootOperation.FAULT_INJECTION`, which is admitted only in `active` and is not
+  owning-Run scoped. They change guest kernel behaviour, like `control.force_crash` and
+  `control.diagnostic_sysrq`, which are guarded, and unlike `introspect.script`, which only reads
+  through an already-admitted attach. Arming a fault on a System that an activation is preparing,
+  recovering or stopping would hit the clean shutdown recovery relies on, and an authority-owned
+  System has no guest to write before its first activation. `active` is admitted because the
+  kernel under test is the one that state means is running. The tools take a System, not a Run,
+  so the owning-Run fence of `force_crash` does not apply. `reset` takes the same guard as `set`:
+  a finite `times` already ends an armed fault, and `systems.teardown` stays admitted in every
+  restricted state. `faultinject.inspect` is a read and is not guarded.
 - The helper's `-1` and `0` for `times` stay legal in the guest and in `inspect` output; only the
   tool refuses to write them.
 

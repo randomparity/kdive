@@ -62,9 +62,12 @@ knob exists: boot a kernel with CONFIG_FAULT_INJECTION, CONFIG_FAILSLAB and
 CONFIG_FAIL_PAGE_ALLOC), capability_unsupported (provider is not local-libvirt),
 ssh_not_provisioned (no SSH forward), debugfs_not_mounted (mount debugfs in the guest)
 or helper_not_installed (rebuild the guest image with kdive-faultinject staged);
-not_found (unknown System or project); readiness_failure (System is not ready);
-transport_failure (ssh to the guest failed); infrastructure_failure (the helper failed
-or replied unexpectedly). The next action is faultinject.inspect.
+not_found (unknown System or project); readiness_failure (System is not ready); conflict
+with data.reason external_boot_restricted or
+authority_system_preactivation_mutation_fenced (an external-boot activation holds the
+System in a state that does not admit guest writes: wait for it to be active, or follow
+the next actions); transport_failure (ssh to the guest failed); infrastructure_failure
+(the helper failed or replied unexpectedly). The next action is faultinject.inspect.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -106,9 +109,12 @@ CONFIG_FAULT_INJECTION and CONFIG_FAILSLAB or CONFIG_FAIL_PAGE_ALLOC),
 capability_unsupported (provider is not local-libvirt), ssh_not_provisioned (no SSH
 forward), debugfs_not_mounted (mount debugfs in the guest) or helper_not_installed
 (rebuild the guest image with kdive-faultinject staged); not_found (unknown System or
-project); readiness_failure (System is not ready); transport_failure (ssh to the guest
-failed); infrastructure_failure (the helper failed or replied unexpectedly). The next
-actions are faultinject.inspect and faultinject.reset.
+project); readiness_failure (System is not ready); conflict with data.reason
+external_boot_restricted or authority_system_preactivation_mutation_fenced (an
+external-boot activation holds the System in a state that does not admit guest writes:
+wait for it to be active, or follow the next actions); transport_failure (ssh to the
+guest failed); infrastructure_failure (the helper failed or replied unexpectedly). The
+next actions are faultinject.inspect and faultinject.reset.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

@@ -43,6 +43,7 @@ class ExternalBootOperation(StrEnum):
     FORCE_CRASH = "force_crash"
     CAPTURE_VMCORE = "capture_vmcore"
     CAPTURE_TRAFFIC = "capture_traffic"
+    FAULT_INJECTION = "fault_injection"
     DEBUG_ATTACH = "debug_attach"
     DEBUG_DETACH = "debug_detach"
     EXTERNAL_BOOT_RELEASE = "external_boot_release"
@@ -107,6 +108,9 @@ _ADMITTED: Mapping[ExternalBootActivationState, frozenset[ExternalBootOperation]
         ExternalBootOperation.CAPTURE_VMCORE,
         ExternalBootOperation.CAPTURE_TRAFFIC,
         ExternalBootOperation.DEBUG_ATTACH,
+        # Not run-scoped: the tools take a System, not a Run, and the kernel under test is the
+        # one this state means is running (ADR-0826).
+        ExternalBootOperation.FAULT_INJECTION,
     },
     ExternalBootActivationState.RECOVERED: _ALWAYS_ADMITTED,
     ExternalBootActivationState.ABANDONED: _ALWAYS_ADMITTED,

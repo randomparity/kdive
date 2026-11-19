@@ -17,6 +17,7 @@ from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
+from kdive.mcp.tools.debug import faultinject as faultinject_module
 from kdive.mcp.tools.debug.faultinject import inspect_faults, reset_faults, set_fault
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.fault_injection import FAULT_KNOB_PARAMETERS, FaultKnobState
@@ -24,6 +25,7 @@ from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import ensure_system_bootstrap_key
+from kdive.services.external_boot.admission import ExternalBootDenied, ExternalBootOperation
 from tests.mcp.systems_support import TEST_DT as _DT
 from tests.mcp.systems_support import ctx as _ctx
 from tests.mcp.systems_support import granted_allocation as _granted_allocation
@@ -320,3 +322,50 @@ def test_inspect_suggests_reset_only_while_a_knob_is_armed(migrated_url: str) ->
 
     assert asyncio.run(go(Idle())).suggested_next_actions == ["systems.get"]
     assert asyncio.run(go(_Port())).suggested_next_actions == ["faultinject.reset", "systems.get"]
+
+
+@pytest.mark.parametrize("call", ["set", "reset"])
+def test_an_external_boot_denial_blocks_the_write_before_the_guest(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, call: str
+) -> None:
+    seen: list[ExternalBootOperation] = []
+
+    async def deny(conn, system_id, operation, *, project, run_id=None):
+        seen.append(operation)
+        raise ExternalBootDenied(
+            "denied",
+            details={"reason": "external_boot_restricted"},
+            next_actions=[],
+            project=project,
+        )
+
+    monkeypatch.setattr(faultinject_module, "check_external_boot_admission", deny)
+    port = _Port()
+    run = _set if call == "set" else _reset
+    resp, audited = run(migrated_url, _resolver(port))
+    assert resp.error_category == ErrorCategory.CONFLICT.value
+    assert resp.data["reason"] == "external_boot_restricted"
+    assert seen == [ExternalBootOperation.FAULT_INJECTION]
+    assert port.calls == [] and audited == []
+
+
+def test_inspect_is_not_subject_to_the_external_boot_matrix(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fail(*_args, **_kwargs):
+        raise AssertionError("inspect must not consult the matrix")
+
+    monkeypatch.setattr(faultinject_module, "check_external_boot_admission", fail)
+
+    async def go():
+        async with _pool(migrated_url) as pool:
+            sid = await _seed(pool)
+            return await inspect_faults(
+                pool,
+                _ctx(role=Role.VIEWER),
+                sid,
+                resolver=_resolver(_Port()),
+                secret_registry=SecretRegistry(),
+            )
+
+    assert asyncio.run(go()).status == "ok"

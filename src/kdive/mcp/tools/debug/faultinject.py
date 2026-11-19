@@ -21,6 +21,7 @@ from kdive.mcp.responses import ResponseData, ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import capability_unsupported as _capability_unsupported
+from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools.lifecycle.systems.ssh_access import recorded_endpoint
@@ -42,6 +43,11 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import (
     load_system_bootstrap_private_key,
     materialized_private_key,
+)
+from kdive.services.external_boot.admission import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
 )
 
 _NOT_READY_DETAIL = "System is not ready; fault-injection state is readable only on a ready System."
@@ -69,8 +75,13 @@ async def _resolve_guest(
     *,
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
+    admission: ExternalBootOperation | None = None,
 ) -> ToolResponse | _Guest:
-    """Authorize ``role`` on a ready System and gather what one helper round trip needs."""
+    """Authorize ``role`` on a ready System and gather what one helper round trip needs.
+
+    ``admission`` names the external-boot matrix operation a state-changing call must pass
+    (ADR-0583); a read passes none.
+    """
     uid = _as_uuid(system_id)
     if uid is None:
         return _invalid_uuid_error("system_id", system_id)
@@ -84,6 +95,13 @@ async def _resolve_guest(
                 return ToolResponse.failure(
                     system_id, ErrorCategory.READINESS_FAILURE, detail=_NOT_READY_DETAIL
                 )
+            if admission is not None:
+                try:
+                    await check_external_boot_admission(
+                        conn, uid, admission, project=system.project
+                    )
+                except ExternalBootDenied as exc:
+                    return _external_boot_denial(system_id, exc, ctx)
             try:
                 runtime = (await resolver.binding_for_system(conn, uid)).runtime
                 inspector = runtime.fault_injection
@@ -176,7 +194,13 @@ async def set_fault(
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(system_id, exc)
     guest = await _resolve_guest(
-        pool, ctx, system_id, Role.CONTRIBUTOR, resolver=resolver, secret_registry=secret_registry
+        pool,
+        ctx,
+        system_id,
+        Role.CONTRIBUTOR,
+        resolver=resolver,
+        secret_registry=secret_registry,
+        admission=ExternalBootOperation.FAULT_INJECTION,
     )
     if isinstance(guest, ToolResponse):
         return guest
@@ -215,7 +239,13 @@ async def reset_faults(
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(system_id, exc)
     guest = await _resolve_guest(
-        pool, ctx, system_id, Role.CONTRIBUTOR, resolver=resolver, secret_registry=secret_registry
+        pool,
+        ctx,
+        system_id,
+        Role.CONTRIBUTOR,
+        resolver=resolver,
+        secret_registry=secret_registry,
+        admission=ExternalBootOperation.FAULT_INJECTION,
     )
     if isinstance(guest, ToolResponse):
         return guest
@@ -474,9 +504,12 @@ def register(
         capability_unsupported (provider is not local-libvirt), ssh_not_provisioned (no SSH
         forward), debugfs_not_mounted (mount debugfs in the guest) or helper_not_installed
         (rebuild the guest image with kdive-faultinject staged); not_found (unknown System or
-        project); readiness_failure (System is not ready); transport_failure (ssh to the guest
-        failed); infrastructure_failure (the helper failed or replied unexpectedly). The next
-        actions are faultinject.inspect and faultinject.reset.
+        project); readiness_failure (System is not ready); conflict with data.reason
+        external_boot_restricted or authority_system_preactivation_mutation_fenced (an
+        external-boot activation holds the System in a state that does not admit guest writes:
+        wait for it to be active, or follow the next actions); transport_failure (ssh to the
+        guest failed); infrastructure_failure (the helper failed or replied unexpectedly). The
+        next actions are faultinject.inspect and faultinject.reset.
         """
         parameters = {
             name: value
@@ -552,9 +585,12 @@ def register(
         CONFIG_FAIL_PAGE_ALLOC), capability_unsupported (provider is not local-libvirt),
         ssh_not_provisioned (no SSH forward), debugfs_not_mounted (mount debugfs in the guest)
         or helper_not_installed (rebuild the guest image with kdive-faultinject staged);
-        not_found (unknown System or project); readiness_failure (System is not ready);
-        transport_failure (ssh to the guest failed); infrastructure_failure (the helper failed
-        or replied unexpectedly). The next action is faultinject.inspect.
+        not_found (unknown System or project); readiness_failure (System is not ready); conflict
+        with data.reason external_boot_restricted or
+        authority_system_preactivation_mutation_fenced (an external-boot activation holds the
+        System in a state that does not admit guest writes: wait for it to be active, or follow
+        the next actions); transport_failure (ssh to the guest failed); infrastructure_failure
+        (the helper failed or replied unexpectedly). The next action is faultinject.inspect.
         """
         return await reset_faults(
             pool,
