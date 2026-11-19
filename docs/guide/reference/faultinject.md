@@ -85,8 +85,10 @@ validates again and writes probability last. An armed knob can fail allocations 
 task in the guest, including sshd, so arming is bounded: probability is 1 to 100 percent
 and times is a finite count of failures, 1 to 1000000 (-1 and 0 are refused). The
 kernel stops injecting after that many failures, with no clock involved, so a guest that
-can no longer be reached by ssh recovers by itself once the count is used up, or on
-reboot (debugfs state does not survive one). Unset optional parameters keep their
+can no longer be reached by ssh stops failing allocations once that many failures have
+been injected (a low probability or a high interval makes that slow), or on reboot
+(debugfs state does not survive one). armed false with probability above 0 in the
+readback means the count is already used up. Unset optional parameters keep their
 current guest values, so read them in the returned data before relying on them.
 
 Returns data.knobs.<knob> with present, armed and the integers probability, interval,
@@ -116,5 +118,5 @@ actions are faultinject.inspect and faultinject.reset.
 | `probability` | integer | yes | Percent chance, 1 to 100, that each eligible allocation fails, per allocation in every guest task. 0 is refused: arming needs a nonzero chance (use faultinject.reset to disarm). Outside the range the call is rejected with reason parameter_out_of_range; send a value in range. |
 | `space` | integer (nullable) | no | Optional, 0 to 1073741824 bytes: allocation volume that must pass before injection can begin, counted per guest. Omitted keeps the guest's current value. Out of range: parameter_out_of_range. |
 | `system_id` | string | yes | A ready local-libvirt System whose guest image carries the kdive-faultinject helper and whose kernel enables fault injection. |
-| `times` | integer | yes | How many failures the guest kernel injects, 1 to 1000000, counted across all tasks in this guest; then it stops injecting by itself, with no clock and no later call needed. -1 (unlimited) and 0 are refused with reason parameter_out_of_range before the guest is contacted, so a guest that can no longer run faultinject.reset still recovers once the count is used up. Pick the smallest count that reproduces the failure. |
+| `times` | integer | yes | How many failures the guest kernel injects, 1 to 1000000, counted across all tasks in this guest; then it stops injecting by itself, with no clock and no later call needed. -1 (unlimited) and 0 are refused with reason parameter_out_of_range before the guest is contacted, so a guest that can no longer run faultinject.reset stops failing allocations once that many failures have been injected (a low probability or high interval makes that slow) or after a reboot. Pick the smallest count that reproduces the failure. |
 | `verbose` | integer (nullable) | no | Optional, 0 to 2: how much each injected failure logs to the guest kernel log (0 none, 2 most). Omitted keeps the guest's current value. Out of range: parameter_out_of_range. |

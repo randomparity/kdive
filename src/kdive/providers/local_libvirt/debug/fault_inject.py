@@ -120,7 +120,8 @@ def _real_run_helper(  # pragma: no cover - live_vm
 ) -> tuple[int, bytes]:
     """SSH-exec ``kdive-faultinject`` with fixed ``helper_args``; return ``(exit status, stdout)``.
 
-    A connect-phase ssh failure (exit 255) never ran the helper, so retrying it is safe for a write.
+    Both ``set`` and ``reset`` are idempotent, so retrying a retryable ssh failure (exit 255) is
+    safe even when the connection closed after the helper had started.
     """
     argv = _live_ssh_argv(transport_handle, secret_registry, helper_args, key_path, program=_HELPER)
 
@@ -148,7 +149,7 @@ def _real_run_helper(  # pragma: no cover - live_vm
     proc = run_ssh_with_retry(run_once, policy=_SSH_RETRY)
     if proc.returncode == 255:
         raise CategorizedError(
-            "ssh to the guest failed before the fault-injection helper ran",
+            "ssh to the guest failed; the fault-injection helper may not have run",
             category=ErrorCategory.TRANSPORT_FAILURE,
             details={"reason": classify_ssh_failure(255, proc.stderr), "exit_status": 255},
         )

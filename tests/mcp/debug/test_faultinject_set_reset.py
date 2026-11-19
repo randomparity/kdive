@@ -20,6 +20,7 @@ from kdive.domain.lifecycle.records import System
 from kdive.mcp.tools.debug.faultinject import inspect_faults, reset_faults, set_fault
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.fault_injection import FAULT_KNOB_PARAMETERS, FaultKnobState
+from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import ensure_system_bootstrap_key
@@ -148,10 +149,13 @@ def _reset(url, resolver, *, knob=None, state=SystemState.READY, role=Role.CONTR
     return asyncio.run(go())
 
 
-async def _audit_rows(pool) -> list[str]:
+async def _audit_rows(pool) -> list[tuple[str, str]]:
     async with pool.connection() as conn:
-        cur = await conn.execute("SELECT tool FROM audit_log WHERE tool LIKE 'faultinject.%'")
-        return [row[0] for row in await cur.fetchall()]
+        cur = await conn.execute(
+            "SELECT a.tool, a.args_digest FROM audit_log a JOIN systems s ON s.id = a.object_id "
+            "WHERE a.tool LIKE 'faultinject.%' AND a.object_kind = 'systems'"
+        )
+        return [(row[0], row[1]) for row in await cur.fetchall()]
 
 
 def test_set_arms_a_knob_reads_it_back_audits_and_removes_the_key(migrated_url: str) -> None:
@@ -174,7 +178,7 @@ def test_set_arms_a_knob_reads_it_back_audits_and_removes_the_key(migrated_url: 
     assert port.key_text and "PRIVATE KEY" in port.key_text
     assert not os.path.exists(port.key_path)
     assert port.thread != threading.get_ident()
-    assert audited == ["faultinject.set"]
+    assert audited == [("faultinject.set", args_digest({"knob": "failslab", **_ARM}))]
 
 
 def test_set_passes_fail_page_alloc_optional_parameters(migrated_url: str) -> None:
@@ -231,7 +235,7 @@ def test_reset_one_knob_and_all_knobs(migrated_url: str) -> None:
     assert every.data["knobs"]["failslab"]["armed"] is False
     assert one.suggested_next_actions == ["faultinject.inspect"]
     assert port.calls == [("reset", "fail_page_alloc"), ("reset", None)]
-    assert audited == ["faultinject.reset"]
+    assert audited == [("faultinject.reset", args_digest({"knob": "fail_page_alloc"}))]
 
 
 def test_reset_rejects_an_unknown_knob(migrated_url: str) -> None:
@@ -286,7 +290,7 @@ def test_missing_ssh_forward_is_ssh_not_provisioned(migrated_url: str, call: str
         (ErrorCategory.INFRASTRUCTURE_FAILURE, "helper_failed"),
     ],
 )
-def test_port_errors_keep_their_category_reason_and_write_no_audit_row(
+def test_port_errors_keep_their_category_and_audit_only_unknown_outcomes(
     migrated_url: str, call: str, category: ErrorCategory, reason: str
 ) -> None:
     error = CategorizedError("remediation", category=category, details={"reason": reason})
@@ -294,7 +298,8 @@ def test_port_errors_keep_their_category_reason_and_write_no_audit_row(
     resp, audited = run(migrated_url, _resolver(_Port(raises=error)))
     assert resp.error_category == category.value
     assert resp.data["reason"] == reason
-    assert audited == []
+    unknown = category is not ErrorCategory.CONFIGURATION_ERROR
+    assert [tool for tool, _ in audited] == ([f"faultinject.{call}"] if unknown else [])
 
 
 def test_inspect_suggests_reset_only_while_a_knob_is_armed(migrated_url: str) -> None:

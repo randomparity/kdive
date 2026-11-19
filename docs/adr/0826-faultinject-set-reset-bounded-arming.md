@@ -36,8 +36,8 @@ is allowed, and how a lost reply is reported.
   (unlimited) and `0` (exhausted) are refused, and so is `probability` 0, which would only disarm
   (`reset` does that). `times` counts injected failures across the whole guest, not seconds or
   calls: the kernel stops injecting after that many, with no clock and no further call, so a guest
-  that can no longer run `reset` still recovers by exhausting the fault, or by rebooting (debugfs
-  state does not survive a reboot). The optional `interval`, `space`, `verbose` and `min_order`
+  that can no longer run `reset` stops failing allocations once that many failures were injected
+  (slow at a low probability or a high interval), or on reboot (debugfs state does not survive one). The optional `interval`, `space`, `verbose` and `min_order`
   are written only when given; unset ones keep their current guest value, which the readback shows.
 - **Readback is the helper's own printed state**, parsed with the strict rules of ADR-0825 and
   shaped as `data.knobs.<knob>{present, armed, <parameters>}` for the knob(s) the call touched.
@@ -53,6 +53,12 @@ is allowed, and how a lost reply is reported.
   leaves the guest state unknown; the docstring says to call `faultinject.inspect` (and
   `faultinject.reset` when it shows an armed knob) before assuming either outcome. Connect-phase ssh
   failures are retried as for `read` because the helper had not run.
+- **Validation runs before the System lookup.** The knob list and bounds are static and the same
+  for every caller, so an early rejection discloses nothing about a System.
+- **Writes are audited, including ones with an unknown outcome.** A successful call writes one
+  audit row (`tool`, `systems`, knob and parameters). A transport or infrastructure failure after
+  the command may have started writes a row marked `outcome: unknown`; a configuration error
+  writes none.
 - **No server-side lock.** Writes are last-writer-wins per guest; two concurrent calls both
   succeed and each reports the state its own helper printed.
 

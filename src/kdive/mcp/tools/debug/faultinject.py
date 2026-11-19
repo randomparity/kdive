@@ -187,9 +187,10 @@ async def set_fault(
             transport_handle=handle, key_path=key, knob=knob, parameters=parameters
         ),
     )
+    args = {"knob": knob, **parameters}
     if isinstance(state, ToolResponse):
-        return state
-    await _audit(pool, ctx, guest.system, "set", {"knob": knob, **parameters})
+        return await _audit_unknown_outcome(pool, ctx, guest.system, "set", args, state)
+    await _audit(pool, ctx, guest.system, "set", args)
     return ToolResponse.success(
         system_id,
         "ok",
@@ -224,11 +225,34 @@ async def reset_faults(
         lambda handle, key: guest.inspector.reset(transport_handle=handle, key_path=key, knob=knob),
     )
     if isinstance(state, ToolResponse):
-        return state
+        return await _audit_unknown_outcome(pool, ctx, guest.system, "reset", {"knob": knob}, state)
     await _audit(pool, ctx, guest.system, "reset", {"knob": knob})
     return ToolResponse.success(
         system_id, "ok", suggested_next_actions=["faultinject.inspect"], data=_knobs_data(state)
     )
+
+
+_UNKNOWN_OUTCOME = frozenset(
+    {ErrorCategory.TRANSPORT_FAILURE.value, ErrorCategory.INFRASTRUCTURE_FAILURE.value}
+)
+
+
+async def _audit_unknown_outcome(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    system: System,
+    transition: str,
+    args: Mapping[str, object],
+    failure: ToolResponse,
+) -> ToolResponse:
+    """Attribute a write that failed after it may have reached the guest, then return it.
+
+    A transport or infrastructure failure leaves the guest state unknown, so the attempt is
+    recorded; a configuration error means the helper wrote nothing and leaves no row.
+    """
+    if failure.error_category in _UNKNOWN_OUTCOME:
+        await _audit(pool, ctx, system, transition, {**args, "outcome": "unknown"})
+    return failure
 
 
 async def _audit(
@@ -370,8 +394,10 @@ def register(
                     "across all tasks in this guest; then it stops injecting by itself, with "
                     "no clock and no later call needed. -1 (unlimited) and 0 are refused with "
                     "reason parameter_out_of_range before the guest is contacted, so a guest "
-                    "that can no longer run faultinject.reset still recovers once the count is "
-                    "used up. Pick the smallest count that reproduces the failure."
+                    "that can no longer run faultinject.reset stops failing allocations once "
+                    "that many failures have been injected (a low probability or high interval "
+                    "makes that slow) or after a reboot. Pick the smallest count that "
+                    "reproduces the failure."
                 ).format(times_max=ARMING_BOUNDS["times"][1])
             ),
         ],
@@ -427,8 +453,10 @@ def register(
         task in the guest, including sshd, so arming is bounded: probability is 1 to 100 percent
         and times is a finite count of failures, 1 to {times_max} (-1 and 0 are refused). The
         kernel stops injecting after that many failures, with no clock involved, so a guest that
-        can no longer be reached by ssh recovers by itself once the count is used up, or on
-        reboot (debugfs state does not survive one). Unset optional parameters keep their
+        can no longer be reached by ssh stops failing allocations once that many failures have
+        been injected (a low probability or a high interval makes that slow), or on reboot
+        (debugfs state does not survive one). armed false with probability above 0 in the
+        readback means the count is already used up. Unset optional parameters keep their
         current guest values, so read them in the returned data before relying on them.
 
         Returns data.knobs.<knob> with present, armed and the integers probability, interval,
