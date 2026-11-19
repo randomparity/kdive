@@ -61,6 +61,8 @@ UNGUARDED_TOOLS: dict[str, str] = {
     "debug.select_thread": "in-session debugger control on an already-admitted attach",
     "debug.set_breakpoint": "in-session debugger control on an already-admitted attach",
     "debug.set_watchpoint": "in-session debugger control on an already-admitted attach",
+    "faultinject.reset": "bounded guest debugfs write over an already-admitted SSH transport",
+    "faultinject.set": "bounded guest debugfs write over an already-admitted SSH transport",
     "images.delete": "image catalog administration; touches no System",
     "images.extend": "image catalog administration; touches no System",
     "images.prune_expired": "image catalog administration; touches no System",
