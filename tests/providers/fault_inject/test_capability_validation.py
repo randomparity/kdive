@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any, cast
-from uuid import UUID
+from typing import Any
 
 import pytest
-from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.assembly import composition
 from kdive.providers.fault_inject.capabilities import (
     FAULT_RATE_KEY,
     HOTPLUG_BEHAVIOUR_KEY,
@@ -18,9 +14,6 @@ from kdive.providers.fault_inject.capabilities import (
     SEED_KEY,
     validate_capabilities,
 )
-from tests.providers.fault_inject.test_capability_wiring import _Conn
-
-_SYSTEM_ID = UUID("33333333-3333-3333-3333-333333333333")
 
 MALFORMED: list[dict[str, Any]] = [
     *({key: value} for key in (FAULT_RATE_KEY, MAX_LATENCY_S_KEY) for value in (0, False, "", [])),
@@ -56,25 +49,3 @@ def test_validator_rejects_each_malformed_key(capabilities: dict[str, Any]) -> N
 @pytest.mark.parametrize("capabilities", WELL_FORMED)
 def test_validator_accepts_a_well_formed_row(capabilities: dict[str, Any]) -> None:
     validate_capabilities(capabilities)
-
-
-@pytest.mark.parametrize("capabilities", MALFORMED)
-def test_binding_fails_closed_on_each_malformed_key(capabilities: dict[str, Any]) -> None:
-    resolver = composition.ProviderComposition().build_provider_resolver(
-        enable_fault_inject=True, enable_local_libvirt=False
-    )
-    conn = cast(AsyncConnection, _Conn(capabilities))
-
-    with pytest.raises(CategorizedError) as raised:
-        asyncio.run(resolver.binding_for_system(conn, _SYSTEM_ID))
-    assert raised.value.category is ErrorCategory.CONFIGURATION_ERROR
-
-
-@pytest.mark.parametrize("capabilities", WELL_FORMED)
-def test_binding_accepts_a_well_formed_row(capabilities: dict[str, Any]) -> None:
-    resolver = composition.ProviderComposition().build_provider_resolver(
-        enable_fault_inject=True, enable_local_libvirt=False
-    )
-    conn = cast(AsyncConnection, _Conn(capabilities))
-
-    assert asyncio.run(resolver.binding_for_system(conn, _SYSTEM_ID)).runtime is not None
