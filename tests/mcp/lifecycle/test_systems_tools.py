@@ -4148,9 +4148,13 @@ async def _job_count(pool: AsyncConnectionPool) -> int:
 
 
 @pytest.mark.parametrize(
-    "tool", [_keyed_reprovision, _keyed_teardown], ids=["reprovision", "teardown"]
+    ("tool", "bare_kind"),
+    [(_keyed_reprovision, "systems.reprovision"), (_keyed_teardown, "systems.teardown")],
+    ids=["reprovision", "teardown"],
 )
-def test_keyed_system_admin_tool_is_scoped_to_its_system(migrated_url: str, tool: Any) -> None:
+def test_keyed_system_admin_tool_is_scoped_to_its_system(
+    migrated_url: str, tool: Any, bare_kind: str
+) -> None:
     """The same key replays on its own System and fails closed on another, enqueuing nothing."""
 
     async def _run() -> None:
@@ -4158,6 +4162,7 @@ def test_keyed_system_admin_tool_is_scoped_to_its_system(migrated_url: str, tool
             first_system, second_system = await _two_ready_systems(pool)
             first = await tool(pool, first_system, "shared-key")
             assert first.error_category is None, first.model_dump()
+            assert await stored_key_kind(pool, "shared-key") == f"{bare_kind}:{first_system}"
             replay = await tool(pool, first_system, "shared-key")
             assert replay.model_dump() == first.model_dump()
             jobs_before = await _job_count(pool)
