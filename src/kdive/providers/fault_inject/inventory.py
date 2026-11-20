@@ -12,6 +12,7 @@ is a *leaked* domain the reaper reports.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -37,13 +38,34 @@ class FaultInjectInventory:
     def __init__(self) -> None:
         self._domains: dict[str, UUID] = {}
         self._orphaned: set[str] = set()
+        self._draws: dict[str, int] = {}
+        self._lock = threading.Lock()
 
     def record(self, system_id: UUID, domain_name: str) -> None:
-        self._domains[domain_name] = system_id
+        with self._lock:
+            self._domains[domain_name] = system_id
+            self._draws.pop(domain_name, None)
 
     def forget(self, domain_name: str) -> None:
-        self._domains.pop(domain_name, None)
-        self._orphaned.discard(domain_name)
+        with self._lock:
+            self._domains.pop(domain_name, None)
+            self._draws.pop(domain_name, None)
+            self._orphaned.discard(domain_name)
+
+    def next_draw(self, domain_name: str) -> tuple[UUID, int] | None:
+        """Claim the domain's next 1-based draw ordinal, or ``None`` for an unknown domain.
+
+        The ordinal is the ``attempt`` of a per-call fault draw (ADR-0072, ADR-0074). It lives with
+        the domain, so every binding of one System shares it and a (re)provision or teardown
+        restarts it.
+        """
+        with self._lock:
+            system_id = self._domains.get(domain_name)
+            if system_id is None:
+                return None
+            ordinal = self._draws.get(domain_name, 0) + 1
+            self._draws[domain_name] = ordinal
+            return system_id, ordinal
 
     def flag_orphan(self, domain_name: str) -> None:
         """Mark a domain as intentionally orphaned by a mid-op cancel (idempotent).

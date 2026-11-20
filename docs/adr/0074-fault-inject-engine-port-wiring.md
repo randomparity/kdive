@@ -133,6 +133,23 @@ port, against ADR-0063's pure ports); sourcing the keys from `systems.toml` (lea
 documented source, ignored); populating a cache from discovery registration (that runs only in
 the reconciler and admin processes, not the worker or server where the ports execute).
 
+### Amendment (2026-11-20): the hot-plug draw takes a per-System call ordinal (#3715)
+
+This resolves the sentence above that left the per-call hot-plug draw out of scope. A hot-plug
+call fixed `attempt` at 1, so a `hotplug` `fault_rate` between 0 and 1 was decided once per
+System. `FaultInjectInventory.next_draw(domain_name)` now returns the System and the domain's
+next 1-based call ordinal under a lock, and `FaultedHotplug` draws with it as `attempt`.
+`record` and `forget` clear the ordinal, so provision, reprovision and teardown restart it, and
+every per-binding port shares it through the inventory. The ordinal is in-process, like the
+inventory and the hot-plug ledger, and resets with the worker. The sequence stays a pure function
+of seed, System and prior-call count, which is the determinism ADR-0072 protects; it is not a
+durable input, and the rejected port-held counter below differs in being held per port rather
+than per System. `FaultedHotplug` no longer takes `attempt_for` (no caller passed it). The
+provision, install and boot planes keep `attempt` 1.
+
+Rejected: recording the ordinal on the device row (a migration and a shared-contract change for
+a synthetic plane).
+
 ## Consequences
 
 - Each of issue 5's five drift cases is driven by a **real seeded engine decision**: the

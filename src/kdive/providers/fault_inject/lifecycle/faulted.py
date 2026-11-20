@@ -137,7 +137,9 @@ class FaultedHotplug:
 
     ``is_attached`` and ``release_all`` are never perturbed: polling is how a settle is observed,
     and release is compensation that must always run. A domain the inventory does not know is
-    delegated undrawn, so the inner port raises its own absent-domain error.
+    delegated undrawn, so the inner port raises its own absent-domain error. Each draw takes the
+    next per-System call ordinal from the inventory as ``attempt``, so successive calls on one
+    System draw independently while staying a pure function of seed, System and call count.
     """
 
     def __init__(
@@ -146,13 +148,11 @@ class FaultedHotplug:
         engine: FaultEngine,
         inventory: FaultInjectInventory,
         *,
-        attempt_for: _AttemptFor = _FIRST_ATTEMPT,
         sleep_s: _SyncSleep = time.sleep,
     ) -> None:
         self._inner = inner
         self._engine = engine
         self._inventory = inventory
-        self._attempt_for = attempt_for
         self._sleep_s = sleep_s
 
     def plug(self, domain_name: str, spec: DeviceSpec) -> PlugOutcome:
@@ -170,10 +170,11 @@ class FaultedHotplug:
         self._inner.release_all(domain_name)
 
     def _draw(self, domain_name: str) -> None:
-        system_id = self._inventory.system_id_of(domain_name)
-        if system_id is None:
+        draw = self._inventory.next_draw(domain_name)
+        if draw is None:
             return
+        system_id, attempt = draw
         decision = self._engine.decide(
-            system_id=system_id, plane=FaultPlane.HOTPLUG, attempt=self._attempt_for(system_id)
+            system_id=system_id, plane=FaultPlane.HOTPLUG, attempt=attempt
         )
         _apply(decision, self._sleep_s)
