@@ -173,6 +173,19 @@ attempt until the row leaves at the retention bound of §5, and the work rolls b
 nothing runs twice. No migration is needed: `kind` is an opaque discriminator that nothing
 parses.
 
+### Amendment (2026-11-20): `systems.reprovision` and `systems.teardown` join the object scope (#3734)
+
+The 2026-11-19 amendment left these two tools on the bare tool name. They now fold the System
+named by `system_id` into `kind` (`systems.reprovision:<system-uuid>`,
+`systems.teardown:<system-uuid>`), by the same rule and with the same outcome: a key reused on a
+second System is `conflict` / `idempotency_key_in_use` and enqueues nothing, and a retry on the
+same System replays. Every conflict re-resolve, replay lookup and record of the two tools,
+including the authority-owned and break-glass teardown paths, uses the scoped kind, so one
+System's key never resolves through another kind. The bare-tool-name behavior of the previous
+amendment applies unchanged: a pre-existing row fails the retry closed until the retention
+bound, with no migration. Runs, investigations, allocation and provisioning keep their current
+scope, and the same key with different arguments on the same System is not detected here.
+
 ## Consequences
 
 - One mechanism, one table, no migration. The existing GC, retention config, and
