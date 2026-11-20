@@ -884,3 +884,70 @@ def test_an_unplug_key_reused_on_a_second_device_conflicts_and_changes_nothing(
         assert row is not None and row.state is _ATTACHED
 
     _scenario(migrated_url, authority_role_dsns, body)
+
+
+# --- idempotency key binds its arguments (#3735, ADR-0193 amendment) ------------------------
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"kind": "disk", "size_gb": 5, "network": None},
+        {"network": "other-net"},
+    ],
+    ids=["kind", "network"],
+)
+def test_a_plug_key_reused_with_changed_arguments_conflicts_and_runs_no_work(
+    migrated_url: str, authority_role_dsns: _RoleDsns, changed: dict[str, Any]
+) -> None:
+    async def body(env: _Env) -> None:
+        first = await env.plug(idempotency_key="k", network="net-a")
+        assert first.status == "running", first.model_dump()
+        assert (await env.plug(idempotency_key="k", network="net-a")).model_dump() == (
+            first.model_dump()
+        )
+        await env.settle_job(str(first.data["job_id"]))
+        async with env.owner.connection() as conn:  # the first plug settled to attached
+            await SYSTEM_DEVICES.update_state(conn, UUID(str(first.data["device_id"])), _ATTACHED)
+
+        other = await env.plug(**{"idempotency_key": "k", "network": "net-a", **changed})
+
+        assert other.error_category == "conflict", other.model_dump()
+        assert _reason(other) == "idempotency_key_in_use"
+        assert len(await env.jobs(JobKind.PLUG_DEVICE)) == 1
+
+    _scenario(migrated_url, authority_role_dsns, body)
+
+
+def test_a_plug_key_reused_with_a_changed_size_conflicts_and_runs_no_work(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def body(env: _Env) -> None:
+        first = await env.plug("disk", size_gb=4, idempotency_key="k")
+        assert first.status == "running", first.model_dump()
+        await env.settle_job(str(first.data["job_id"]))
+        async with env.owner.connection() as conn:
+            await SYSTEM_DEVICES.update_state(conn, UUID(str(first.data["device_id"])), _ATTACHED)
+
+        other = await env.plug("disk", size_gb=5, idempotency_key="k")
+
+        assert other.error_category == "conflict", other.model_dump()
+        assert _reason(other) == "idempotency_key_in_use"
+        assert len(await env.jobs(JobKind.PLUG_DEVICE)) == 1
+
+    _scenario(migrated_url, authority_role_dsns, body)
+
+
+def test_a_plug_key_reused_with_changed_arguments_mid_flight_is_refused_without_work(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def body(env: _Env) -> None:
+        first = await env.plug(idempotency_key="k", network="net-a")
+        assert first.status == "running", first.model_dump()
+
+        other = await env.plug(idempotency_key="k", network="net-b")
+
+        assert _reason(other) == "device_op_in_flight", other.model_dump()
+        assert len(await env.jobs(JobKind.PLUG_DEVICE)) == 1
+
+    _scenario(migrated_url, authority_role_dsns, body)

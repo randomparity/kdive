@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import json
+from collections.abc import Awaitable, Callable, Mapping
+from hashlib import sha256
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -120,15 +122,29 @@ async def resolve_conflict(
     return _envelope(await _resolve_conflict(conn, principal=principal, key=key, kind=kind))
 
 
-def object_scoped_kind(kind: str, object_id: UUID) -> str:
-    """The ``kind`` for a mutation whose key must not replay against another object.
+def object_scoped_kind(
+    kind: str, object_id: UUID, arguments: Mapping[str, object] | None = None
+) -> str:
+    """The ``kind`` for a mutation whose key must not replay against another object or request.
 
     ``idempotency_keys`` is unique on ``(principal, key)``, so a key reused on a second object
     of the same tool misses the replay lookup and collides on insert, which
     ``keyed_mutation`` surfaces as ``conflict`` (ADR-0193, 2026-11-19 amendment). The canonical
     UUID form keeps one object's spellings in one scope.
+
+    ``arguments`` are the call's effective arguments other than the target and the key: the
+    values after parsing, defaulting and clamping, with every optional one present (``None``
+    when unset), so an omitted argument and its explicit default produce one kind. They are
+    folded in as a short digest of their sorted-key JSON, so a retry that changed one collides
+    on insert and resolves to ``conflict`` exactly as a second object does (ADR-0193,
+    2026-11-20 argument-digest amendment). ``None`` marks a tool whose only arguments are its
+    targets. Values must be JSON scalars, never an object whose ``str`` is not stable.
     """
-    return f"{kind}:{object_id}"
+    scoped = f"{kind}:{object_id}"
+    if arguments is None:
+        return scoped
+    canonical = json.dumps(arguments, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return f"{scoped}:{sha256(canonical.encode()).hexdigest()[:16]}"
 
 
 async def keyed_mutation(

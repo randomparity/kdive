@@ -189,7 +189,7 @@ async def power_system(
                     idempotency_key=idempotency_key,
                     principal=ctx.principal,
                     project=system.project,
-                    kind=object_scoped_kind(_POWER_KIND, uid),
+                    kind=object_scoped_kind(_POWER_KIND, uid, {"action": power_action.value}),
                     do_work=_enqueue,
                 )
 
@@ -341,7 +341,9 @@ async def force_crash_system(
                     idempotency_key=idempotency_key,
                     principal=ctx.principal,
                     project=system.project,
-                    kind=object_scoped_kind(_FORCE_CRASH_KIND, uid),
+                    kind=object_scoped_kind(
+                        _FORCE_CRASH_KIND, uid, {"run_id": None if run is None else str(run)}
+                    ),
                     do_work=_enqueue,
                 )
 
@@ -415,7 +417,9 @@ async def diagnostic_sysrq_system(
                     idempotency_key=idempotency_key,
                     principal=ctx.principal,
                     project=system.project,
-                    kind=object_scoped_kind(_DIAGNOSTIC_SYSRQ_KIND, uid),
+                    kind=object_scoped_kind(
+                        _DIAGNOSTIC_SYSRQ_KIND, uid, {"command": sysrq_command.value}
+                    ),
                     do_work=_enqueue,
                 )
 
@@ -519,7 +523,11 @@ async def watch_for_crash_system(
                     idempotency_key=idempotency_key,
                     principal=ctx.principal,
                     project=system.project,
-                    kind=object_scoped_kind(_WATCH_FOR_CRASH_KIND, uid),
+                    kind=object_scoped_kind(
+                        _WATCH_FOR_CRASH_KIND,
+                        uid,
+                        {"deadline_s": float(clamped), "run_id": None if run is None else str(run)},
+                    ),
                     do_work=_enqueue,
                 )
 
@@ -660,7 +668,16 @@ async def _capture_traffic(
                     idempotency_key=idempotency_key,
                     principal=ctx.principal,
                     project=run.project,
-                    kind=object_scoped_kind(_CAPTURE_TRAFFIC_KIND, uid),
+                    kind=object_scoped_kind(
+                        _CAPTURE_TRAFFIC_KIND,
+                        uid,
+                        {
+                            "duration_s": duration_s,
+                            "max_bytes": max_bytes,
+                            "snaplen": snaplen,
+                            "capture_filter": capture_filter,
+                        },
+                    ),
                     do_work=_enqueue,
                 )
 
