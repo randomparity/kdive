@@ -26,7 +26,8 @@ A search for an existing storage-reference concept finds two, and no third.
   `visibility` `public` or `private` (owner project), a `registered` state, and an optional
   `volume` column naming a staged provider-pool volume (`0030_systems_inventory.sql:18-26`, ADR-0156). Provisioning already
   resolves it by name and attaches a per-System overlay over the shared base, never the base
-  (ADR-0060, `_real_make_overlay`, `remote_libvirt/lifecycle/xml.py:58-74`).
+  (ADR-0060; local `_real_make_overlay` in `local_libvirt/lifecycle/storage.py:117-137`, remote
+  `render_volume_xml` in `remote_libvirt/lifecycle/xml.py:58-74`).
 - **`provider_components`** (`0009_provider_components.sql`, ADR-0065): kind-tagged references
   (`rootfs`, `kernel`, ...) with `local`, `artifact`, `component-upload` and `catalog` sources. Its
   `artifact` source is not materialized for a rootfs
