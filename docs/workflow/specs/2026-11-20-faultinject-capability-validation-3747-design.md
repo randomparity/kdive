@@ -39,6 +39,10 @@ No port, resolver or schema change.
 - Malformed row at reconcile: warned each pass until an operator edits it; no write, no raise, so
   one bad row does not abort the pass.
 - Malformed row at binding: unchanged, fails closed for every binding including teardown.
+- The skip covers adoption as well as the field overwrite, and a detached row is warned too: a
+  row that needs a repair write waits until its keys are fixed, and nothing is written meanwhile.
+- A `seed` of `null` or a non-integer on a row with no rates used to bind and now fails closed;
+  discovery and `systems.toml` only ever write an integer.
 - Direct SQL edit after reconcile: caught at binding, as before.
 
 ## Tests
