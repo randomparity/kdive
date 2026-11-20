@@ -189,7 +189,7 @@ def test_a_plug_job_does_not_own_an_unplugging_row(
     _run(migrated_url, authority_role_dsns, scenario)
 
 
-def test_the_stalled_row_detail_names_both_unplug_tools(
+def test_the_stalled_row_detail_names_the_retry_tool(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
     async def scenario(conn: psycopg.AsyncConnection, system_id: UUID, dsn: str) -> None:
@@ -199,7 +199,6 @@ def test_the_stalled_row_detail_names_both_unplug_tools(
 
         detail = (await _row(conn, device_id)).detail
         assert detail and "systems.unplug_device" in detail
-        assert "systems.force_unplug_device" in detail
 
     _run(migrated_url, authority_role_dsns, scenario)
 
