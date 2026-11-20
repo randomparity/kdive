@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -9,6 +11,8 @@ import pytest
 
 from kdive.providers.local_libvirt.lifecycle import hotplug
 from kdive.providers.local_libvirt.lifecycle.hotplug import LocalDeviceVolumes, scratch_disk_prefix
+from kdive.providers.ports.lifecycle import HotplugDeviceKind
+from kdive.providers.shared.libvirt_hotplug import LibvirtDeviceHotplug
 
 DOMAIN = "kdive-11111111-1111-1111-1111-111111111111"
 
@@ -55,3 +59,42 @@ def test_remove_is_idempotent_and_remove_all_spares_other_domains(
 def test_nic_source_is_user_mode_unless_a_network_is_named() -> None:
     assert hotplug._nic_source(None) == ("user", None)  # noqa: SLF001
     assert hotplug._nic_source("lab") == ("network", "lab")  # noqa: SLF001
+
+
+class _AbsentDomain:
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
+        return "<domain><devices/></domain>"
+
+
+class _Conn:
+    def lookupByName(self, name: str) -> _AbsentDomain:  # noqa: N802
+        return _AbsentDomain()
+
+
+@pytest.mark.parametrize(
+    ("kind", "survives"), [(HotplugDeviceKind.NIC, True), (HotplugDeviceKind.DISK, False)]
+)
+def test_absent_device_unlinks_a_file_only_for_a_disk(
+    tmp_path: Path, kind: HotplugDeviceKind, survives: bool
+) -> None:
+    device_id = str(uuid4())
+    volumes = LocalDeviceVolumes(str(tmp_path))
+    leftover = tmp_path / f"{scratch_disk_prefix(DOMAIN)}{device_id}.qcow2"
+    leftover.write_bytes(b"qcow2")
+
+    @contextmanager
+    def connection() -> Generator[_Conn]:
+        yield _Conn()
+
+    port = LibvirtDeviceHotplug(
+        connection=connection,
+        volumes=volumes,
+        nic_source=hotplug._nic_source,  # noqa: SLF001
+        kinds=hotplug.ADVERTISED_KINDS,
+    )
+
+    assert port.unplug(DOMAIN, device_id, None, kind=kind) is True
+    assert leftover.exists() is survives
+    leftover.write_bytes(b"qcow2")
+    assert port.is_attached(DOMAIN, device_id, None, kind=kind) is False
+    assert leftover.exists() is survives

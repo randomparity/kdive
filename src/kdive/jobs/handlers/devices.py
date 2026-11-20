@@ -238,7 +238,11 @@ async def _drive_plug(
         await _poll_until(
             window,
             functools.partial(
-                hotplugger.is_attached, domain, spec.device_id, outcome.provider_handle
+                hotplugger.is_attached,
+                domain,
+                spec.device_id,
+                outcome.provider_handle,
+                kind=spec.kind,
             ),
             attached=True,
             interval_s=poll_interval_s,
@@ -315,13 +319,17 @@ async def _drive_unplug(
     window = _Window(window_s)
     await start_device_settle_window(conn, row.id, window_s)
     device_id = str(row.id)
+    kind = HotplugDeviceKind(row.kind)
     removed = await _call_within(
-        window, functools.partial(hotplugger.unplug, domain, device_id, row.provider_handle)
+        window,
+        functools.partial(hotplugger.unplug, domain, device_id, row.provider_handle, kind=kind),
     )
     if not removed:
         await _poll_until(
             window,
-            functools.partial(hotplugger.is_attached, domain, device_id, row.provider_handle),
+            functools.partial(
+                hotplugger.is_attached, domain, device_id, row.provider_handle, kind=kind
+            ),
             attached=False,
             interval_s=poll_interval_s,
         )
