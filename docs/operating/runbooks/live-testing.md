@@ -1867,7 +1867,31 @@ KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery
 uv run python -m pytest -m live_stack -k local-libvirt tests/integration/test_hotplug_tool_cells_live.py
 ```
 
-The remote run uses the same two stack starts with `-k remote-libvirt`.
+The remote run uses the same two stack starts with `-k remote-libvirt`. The remote arm also needs
+what the [remote runbook's section 7](remote-live-stack.md#7-remote-deep-lifecycle-2810) sets up
+for the provider host, because the cells read the provider's domain XML and backing volumes
+through the test's own libvirt connection, not the worker's:
+
+- `REMOTE_PROVIDER_SSH=<user>@<provider-host>`: an `ssh` destination that works
+  non-interactively from the control plane (key and known-host entry), whose user is in the
+  provider's `libvirt` group. The test opens `qemu+ssh://<destination>/system` over it. Unset or
+  malformed, the cell records `blocked` and no device is plugged. The variable's full definition
+  is the section 7 bullet of the same name.
+- `KDIVE_SYSTEMS_TOML=<the stack's systems.toml>`, exported (live tests ignore the XDG default),
+  declaring exactly one `[[remote_libvirt]]` instance with the staged base image.
+- `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`, as for every cell above.
+
+The cells boot no kernel, so `KDIVE_FIXTURE_ROOT` and `KDIVE_S3_ENDPOINT_URL` are not needed.
+
+```bash
+export REMOTE_PROVIDER_SSH=<user>@<provider-host> KDIVE_SYSTEMS_TOML=<the stack's systems.toml>
+export KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"
+examples/local-libvirt/demo-up.sh                                     # default
+uv run python -m pytest -m live_stack -k remote-libvirt tests/integration/test_hotplug_tool_cells_live.py
+examples/local-libvirt/demo-down.sh --wipe --yes
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery
+uv run python -m pytest -m live_stack -k remote-libvirt tests/integration/test_hotplug_tool_cells_live.py
+```
 
 - Each functional cell provisions the lane image and plugs one device of the cell's kind into
   the running guest. It then checks three things independently: the ledger row
