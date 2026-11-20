@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from collections.abc import Generator
+from contextlib import contextmanager
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -10,6 +12,7 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.ports.lifecycle import HotplugDeviceKind
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.lifecycle.hotplug import (
     RemoteDeviceVolumes,
@@ -17,6 +20,7 @@ from kdive.providers.remote_libvirt.lifecycle.hotplug import (
     scratch_volume_name,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
+from kdive.providers.shared.libvirt_hotplug import LibvirtDeviceHotplug
 
 
 def _el(root: ET.Element, path: str) -> ET.Element:
@@ -161,3 +165,51 @@ def test_non_system_domain_is_refused() -> None:
 def test_volume_xml_omits_permissions_without_an_identity() -> None:
     xml: Any = ET.fromstring(render_scratch_volume_xml("v", size_gb=1, identity=None))
     assert xml.find("target/permissions") is None
+
+
+class _AbsentDomain:
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
+        return "<domain><devices/></domain>"
+
+
+class _CountingConn(_Conn):
+    """A host connection whose domain has no kdive device; counts storage-pool lookups."""
+
+    def __init__(self) -> None:
+        super().__init__(_Pool())
+        self.pool_lookups = 0
+
+    def lookupByName(self, name: str) -> _AbsentDomain:  # noqa: N802
+        return _AbsentDomain()
+
+    def storagePoolLookupByName(self, name: str) -> _Pool:  # noqa: N802
+        self.pool_lookups += 1
+        return super().storagePoolLookupByName(name)
+
+
+def _absent_port(conn: _CountingConn) -> LibvirtDeviceHotplug:
+    @contextmanager
+    def connection() -> Generator[_CountingConn]:
+        yield conn
+
+    return LibvirtDeviceHotplug(
+        connection=connection,
+        volumes=_volumes(),
+        nic_source=lambda _network: ("user", None),
+        kinds=frozenset(HotplugDeviceKind),
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "lookups"), [(HotplugDeviceKind.NIC, 0), (HotplugDeviceKind.DISK, 2)]
+)
+def test_absent_device_touches_the_storage_pool_only_for_a_disk(
+    kind: HotplugDeviceKind, lookups: int
+) -> None:
+    conn, device_id = _CountingConn(), str(uuid4())
+    port = _absent_port(conn)
+
+    assert port.unplug(DOMAIN, device_id, None, kind=kind) is True
+    assert port.is_attached(DOMAIN, device_id, None, kind=kind) is False
+
+    assert conn.pool_lookups == lookups

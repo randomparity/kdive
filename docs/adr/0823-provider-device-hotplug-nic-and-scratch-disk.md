@@ -211,3 +211,12 @@ system-reclaim path deletes the rows alone, because the provider proved physical
 device is left to release. A reprovision deletes the rows when it succeeds; when it fails after
 `release_all`, the System's `attached` rows move to `lost` in the transaction that records the
 failure, as for a power OFF or CYCLE. The spec's Ledger section states the current behaviour.
+
+### Amendment (2026-11-20): `unplug` and `is_attached` take the device kind (#3737)
+
+This amends the port signatures in "Port", not the decision. `unplug` and `is_attached` gain a
+required keyword-only `kind: HotplugDeviceKind`, the ledger row's kind. A device that is absent
+from the live domain leaves no XML to read its kind from, and only a `disk` has a backing volume,
+so the provider frees the volume only for a `disk`: a NIC un-plug, and a NIC `is_attached` that
+finds the device absent, make no volume call. When a disk's volume is freed is unchanged. The
+fault-inject port accepts and ignores `kind`.
