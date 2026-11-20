@@ -45,6 +45,7 @@ from kdive.mcp.tools._common import stale_handle as _stale_handle
 from kdive.mcp.tools.lifecycle.support._device_ops import device_job_active, device_op_in_flight
 from kdive.mcp.tools.lifecycle.support._idempotency import (
     dedup_replay,
+    object_scoped_kind,
     record_envelope,
     resolve_conflict,
     resolve_envelope_replay,
@@ -151,7 +152,10 @@ class SystemAdminHandlers:
             if idempotency_key is not None:
                 async with pool.connection() as conn:
                     replay = await resolve_envelope_replay(
-                        conn, principal=ctx.principal, key=idempotency_key, kind=_REPROVISION_KIND
+                        conn,
+                        principal=ctx.principal,
+                        key=idempotency_key,
+                        kind=object_scoped_kind(_REPROVISION_KIND, uid),
                     )
                 if replay is not None:
                     return replay
@@ -197,7 +201,10 @@ async def _reprovision_locked(
         async with pool.connection() as conn:
             try:
                 return await resolve_conflict(
-                    conn, principal=ctx.principal, key=idempotency_key, kind=_REPROVISION_KIND
+                    conn,
+                    principal=ctx.principal,
+                    key=idempotency_key,
+                    kind=object_scoped_kind(_REPROVISION_KIND, system_id),
                 )
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error("idempotency_key", exc)
@@ -326,7 +333,7 @@ async def _reprovision_in_lock(
             principal=ctx.principal,
             key=idempotency_key,
             project=system.project,
-            kind=_REPROVISION_KIND,
+            kind=object_scoped_kind(_REPROVISION_KIND, system_id),
             envelope=envelope,
         )
     return envelope
@@ -470,7 +477,10 @@ async def teardown_system(
                     raise  # only the keyed path records, so an unkeyed collision is not ours
                 try:
                     return await resolve_conflict(
-                        conn, principal=ctx.principal, key=idempotency_key, kind=_TEARDOWN_KIND
+                        conn,
+                        principal=ctx.principal,
+                        key=idempotency_key,
+                        kind=object_scoped_kind(_TEARDOWN_KIND, uid),
                     )
                 except CategorizedError as exc:
                     return ToolResponse.failure_from_error("idempotency_key", exc)
@@ -503,7 +513,10 @@ async def _teardown_locked(
             return routed
         if idempotency_key is not None:
             replay = await resolve_envelope_replay(
-                conn, principal=ctx.principal, key=idempotency_key, kind=_TEARDOWN_KIND
+                conn,
+                principal=ctx.principal,
+                key=idempotency_key,
+                kind=object_scoped_kind(_TEARDOWN_KIND, uid),
             )
             if replay is not None:
                 return replay
@@ -573,7 +586,7 @@ async def _teardown_locked(
                 principal=ctx.principal,
                 key=idempotency_key,
                 project=system.project,
-                kind=_TEARDOWN_KIND,
+                kind=object_scoped_kind(_TEARDOWN_KIND, uid),
                 envelope=envelope,
             )
         return envelope
@@ -662,14 +675,14 @@ async def _route_settled_teardown(
         await _audit_teardown_recycle(conn, ctx, system, job)
     envelope = job_envelope(job, "system_id", system.id)
     if idempotency_key is not None and not await _key_names_job(
-        conn, ctx, idempotency_key, envelope.object_id
+        conn, ctx, system.id, idempotency_key, envelope.object_id
     ):
         await record_envelope(
             conn,
             principal=ctx.principal,
             key=idempotency_key,
             project=system.project,
-            kind=_TEARDOWN_KIND,
+            kind=object_scoped_kind(_TEARDOWN_KIND, system.id),
             envelope=envelope,
         )
     return envelope
@@ -736,7 +749,7 @@ async def _enqueue_preactivation_authority_teardown(
             principal=ctx.principal,
             key=idempotency_key,
             project=system.project,
-            kind=_TEARDOWN_KIND,
+            kind=object_scoped_kind(_TEARDOWN_KIND, system.id),
             envelope=envelope,
         )
     return envelope
@@ -766,10 +779,10 @@ async def _audit_teardown_recycle(
 
 
 async def _key_names_job(
-    conn: AsyncConnection, ctx: RequestContext, key: str, job_id: str | None
+    conn: AsyncConnection, ctx: RequestContext, system_id: UUID, key: str, job_id: str | None
 ) -> bool:
     stored = await resolve_envelope_replay(
-        conn, principal=ctx.principal, key=key, kind=_TEARDOWN_KIND
+        conn, principal=ctx.principal, key=key, kind=object_scoped_kind(_TEARDOWN_KIND, system_id)
     )
     return stored is not None and stored.object_id == job_id
 
@@ -906,14 +919,15 @@ async def _enqueue_authority_teardown(
     # A key already recorded for the replaced ordinary job names this same job row; recording it
     # again would raise and roll the replacement back behind a stale replay.
     if idempotency_key is not None and not (
-        replaces_ordinary and await _key_names_job(conn, ctx, idempotency_key, envelope.object_id)
+        replaces_ordinary
+        and await _key_names_job(conn, ctx, system.id, idempotency_key, envelope.object_id)
     ):
         await record_envelope(
             conn,
             principal=ctx.principal,
             key=idempotency_key,
             project=system.project,
-            kind=_TEARDOWN_KIND,
+            kind=object_scoped_kind(_TEARDOWN_KIND, system.id),
             envelope=envelope,
         )
     return envelope
