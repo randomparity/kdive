@@ -211,3 +211,11 @@ system-reclaim path deletes the rows alone, because the provider proved physical
 device is left to release. A reprovision deletes the rows when it succeeds; when it fails after
 `release_all`, the System's `attached` rows move to `lost` in the transaction that records the
 failure, as for a power OFF or CYCLE. The spec's Ledger section states the current behaviour.
+
+### Amendment (2026-11-19): pre-existing volumes as disks are decided in ADR-0829 (#3722)
+
+This amends the "Deferred" list in "Decision", not the decision: the deferral "pre-existing
+volumes as disks (needs a storage-reference model)" now has a proposed decision,
+[ADR-0829](0829-hotplug-existing-volumes-attach-an-overlay-of-a-catalog-image.md), which names a
+catalog image as the reference and attaches a kdive-owned overlay. The `disk` kind defined above
+is unchanged.
