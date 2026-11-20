@@ -2944,7 +2944,8 @@ def test_reprovision_keyed_retry_replays_stored_envelope(migrated_url: str) -> N
                 await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
                 job_n = await cur.fetchone()
                 await cur.execute(
-                    "SELECT count(*) AS n FROM idempotency_keys WHERE kind = 'systems.reprovision'"
+                    "SELECT count(*) AS n FROM idempotency_keys WHERE kind = %s",
+                    (f"systems.reprovision:{sys_id}",),
                 )
                 key_n = await cur.fetchone()
         assert job_n is not None and job_n["n"] == 1  # replayed, not re-enqueued
@@ -4108,3 +4109,85 @@ def test_system_envelope_without_history_omits_run_list() -> None:
     assert resp.data["investigation_id"] is None
     assert "run_investigation_ids" not in resp.data
     assert resp.suggested_next_actions == ["systems.get", "systems.teardown"]
+
+
+# --- idempotency keys are scoped to their System (#3734, ADR-0193) -------------------------
+
+
+async def _two_ready_systems(pool: AsyncConnectionPool) -> tuple[str, str]:
+    first = await _seed_ready_system(pool, await _scoped_active_allocation(pool))
+    second_alloc = await _second_granted_allocation(pool)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE allocations SET state = 'active' WHERE id = %s", (second_alloc,))
+    return first, await _seed_ready_system(pool, second_alloc)
+
+
+async def _keyed_reprovision(pool: AsyncConnectionPool, system_id: str, key: str):
+    return await _reprovision(
+        pool, ctx(), system_id, _active_allocation_profile(), idempotency_key=key
+    )
+
+
+async def _keyed_teardown(pool: AsyncConnectionPool, system_id: str, key: str):
+    return await teardown_system(pool, ctx(Role.ADMIN), system_id, idempotency_key=key)
+
+
+async def _job_count(pool: AsyncConnectionPool) -> int:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT count(*) AS n FROM jobs")
+        row = await cur.fetchone()
+    assert row is not None
+    return int(row["n"])
+
+
+@pytest.mark.parametrize(
+    "tool", [_keyed_reprovision, _keyed_teardown], ids=["reprovision", "teardown"]
+)
+def test_keyed_system_admin_tool_is_scoped_to_its_system(migrated_url: str, tool: Any) -> None:
+    """The same key replays on its own System and fails closed on another, enqueuing nothing."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            first_system, second_system = await _two_ready_systems(pool)
+            first = await tool(pool, first_system, "shared-key")
+            assert first.error_category is None, first.model_dump()
+            replay = await tool(pool, first_system, "shared-key")
+            assert replay.model_dump() == first.model_dump()
+            jobs_before = await _job_count(pool)
+
+            other = await tool(pool, second_system, "shared-key")
+
+            assert other.error_category == "conflict", other.model_dump()
+            assert other.data["reason"] == "idempotency_key_in_use"
+            assert await _job_count(pool) == jobs_before
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("tool", "bare_kind"),
+    [(_keyed_reprovision, "systems.reprovision"), (_keyed_teardown, "systems.teardown")],
+    ids=["reprovision", "teardown"],
+)
+def test_a_system_admin_key_stored_under_the_bare_tool_name_conflicts(
+    migrated_url: str, tool: Any, bare_kind: str
+) -> None:
+    """A row written before the scoped kind existed is not replayed: the retry fails closed."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            sys_id = await _seed_ready_system(pool, await _scoped_active_allocation(pool))
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO idempotency_keys (key, principal, project, kind, result) "
+                    "VALUES ('legacy-key', 'user-1', 'proj', %s, '{\"envelope\": {}}')",
+                    (bare_kind,),
+                )
+
+            resp = await tool(pool, sys_id, "legacy-key")
+
+            assert resp.error_category == "conflict", resp.model_dump()
+            assert resp.data["reason"] == "idempotency_key_in_use"
+            assert await _job_count(pool) == 0
+
+    asyncio.run(_run())
