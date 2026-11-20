@@ -170,10 +170,16 @@ authority = true
 [[groups]]
 owner = 3062
 execution = "provider"
+kernel = true
 [groups.tools]
 "faultinject.inspect" = "Compare reported knob presence and parameters with the guest's own debugfs fault-injection files."
 "faultinject.reset" = "Reset armed knobs and compare the disarmed readback with the guest's own debugfs fault-injection files."
 "faultinject.set" = "Arm a knob with a finite times and compare the readback with the guest's own debugfs fault-injection files."
+
+[[groups]]
+owner = 3062
+execution = "provider"
+[groups.tools]
 "systems.authorize_ssh_key" = "Authenticate using the supplied key and confirm no unrelated key was removed."
 "systems.check_ssh_reachable" = "Compare reachability with a real guest sshd in the expected ready state."
 "systems.provision" = "Wait for first boot, authenticate, inspect guest identity and verify allocated capacity."
