@@ -79,6 +79,7 @@ from tests.mcp.systems_support import (
     provider_resolver,
     provisioning_profile,
     seed_system,
+    stored_key_kind,
     upload_profile,
 )
 from tests.services.external_boot.conftest import seed_activation
@@ -4215,6 +4216,7 @@ def test_authority_teardown_key_is_scoped_to_its_system(migrated_url: str) -> No
 
             first = await keyed(first_system)
             assert first.status == "queued", first.model_dump()
+            assert await stored_key_kind(pool, "shared") == f"systems.teardown:{first_system}"
             assert (await keyed(first_system)).model_dump() == first.model_dump()
             jobs_before = await _job_count(pool)
 

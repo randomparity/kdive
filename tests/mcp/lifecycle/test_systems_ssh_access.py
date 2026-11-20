@@ -40,6 +40,7 @@ from tests.mcp.systems_support import granted_allocation as _granted_allocation
 from tests.mcp.systems_support import pool as _pool
 from tests.mcp.systems_support import provider_resolver as _provider_resolver
 from tests.mcp.systems_support import provisioning_profile as _profile
+from tests.mcp.systems_support import stored_key_kind
 from tests.services.external_boot.conftest import seed_activation
 
 _GOOD_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 agent@host"
@@ -908,6 +909,7 @@ def test_preactivation_authority_teardown_key_is_scoped_to_its_system(migrated_u
             admin = _ctx(role=Role.ADMIN)
             first = await teardown_system(pool, admin, first_system, idempotency_key="shared")
             assert first.error_category is None, first.model_dump()
+            assert await stored_key_kind(pool, "shared") == f"systems.teardown:{first_system}"
             replay = await teardown_system(pool, admin, first_system, idempotency_key="shared")
             assert replay.model_dump() == first.model_dump()
             jobs_before = await _job_count(pool)

@@ -41,6 +41,7 @@ from tests.mcp.systems_support import (
     granted_allocation,
     provider_resolver,
     seed_system,
+    stored_key_kind,
 )
 from tests.services.external_boot.conftest import seed_activation
 from tests.support.object_store import INERT_OBJECT_STORE
@@ -403,6 +404,7 @@ def test_a_settled_replacement_key_is_scoped_to_its_system(migrated_url: str) ->
             admin = ctx(Role.ADMIN)
             first = await teardown_system(pool, admin, first_system, idempotency_key="shared")
             assert first.error_category is None, first.model_dump()
+            assert await stored_key_kind(pool, "shared") == f"systems.teardown:{first_system}"
             replay = await teardown_system(pool, admin, first_system, idempotency_key="shared")
             assert replay.model_dump() == first.model_dump()
             before = await _job(pool, second_system)
