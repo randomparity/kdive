@@ -1938,7 +1938,8 @@ and Compose project name: an older `kdive:dev` image or an existing `kdive_*` vo
 otherwise be reused, and its migrations would not match the checkout.
 
 ```bash
-cat > /tmp/force-unplug-override.yml <<'YAML'
+override=$(mktemp --suffix=.yml)
+cat > "$override" <<'YAML'
 services:
   server:
     environment:
@@ -1953,13 +1954,14 @@ services:
 YAML
 docker build -t kdive:force-unplug .
 export COMPOSE_PROJECT_NAME=kdive-force-unplug KDIVE_IMAGE=kdive:force-unplug
-export COMPOSE_FILE=docker-compose.yml:/tmp/force-unplug-override.yml
+export COMPOSE_FILE="docker-compose.yml:$override"
 just compose-up
 export KDIVE_OIDC_ISSUER=http://localhost:8090/default KDIVE_STACK_BASE_URL=http://127.0.0.1:8000/mcp
 export KDIVE_DATABASE_URL=postgresql://kdive:kdive@localhost:5432/kdive  # pragma: allowlist secret
 KDIVE_STACK_SKEW_POLICY=off uv run python -m pytest -m live_stack \
   tests/integration/test_force_unplug_tool_cell_live.py
 just compose-down
+rm -f "$override"
 ```
 
 `KDIVE_STACK_SKEW_POLICY=off` is needed because the compose tier does not publish the aux

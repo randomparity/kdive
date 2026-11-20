@@ -991,9 +991,9 @@ def _register_systems_force_unplug_device(
         to release it, so a driver can be tested against a device vanishing under it. DESTRUCTIVE:
         it can wedge or crash the guest. Requires the project's admin role AND the System's
         provisioning profile opting in (`destructive_ops: ["force_unplug_device"]`); a denial
-        names every missing factor (`authorization_denied`, `data.missing`) and is audited. Only
-        the fault-inject provider forces an un-plug today: local-libvirt and remote-libvirt
-        advertise no forced kind and answer `configuration_error` (`reason:
+        names every missing factor (`authorization_denied`, `data.missing_checks`) and is
+        audited. Only the fault-inject provider forces an un-plug today: local-libvirt and
+        remote-libvirt advertise no forced kind and answer `configuration_error` (`reason:
         capability_unsupported`), even with the opt-in; `systems.get` reports
         `data.forced_unplug_devices`. Enqueues a job and returns `status: running` with
         `data.job_id`, `data.device_id`, `data.kind`, `data.state: unplugging`,
