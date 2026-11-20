@@ -111,12 +111,14 @@ class _Volumes:
     def __init__(self) -> None:
         self.live: dict[str, str] = {}
         self.removed_all: list[str] = []
+        self.removes: list[str] = []
 
     def create(self, conn: Any, domain_name: str, device_id: str, size_gb: int, /) -> str:
         self.live[device_id] = f"/pool/{device_id}.qcow2"
         return self.live[device_id]
 
     def remove(self, conn: Any, domain_name: str, device_id: str, /) -> None:
+        self.removes.append(device_id)
         self.live.pop(device_id, None)
 
     def remove_all(self, conn: Any, domain_name: str, /) -> None:
@@ -281,9 +283,9 @@ def test_unplug_removes_device_and_frees_volume_when_guest_releases() -> None:
     port = _port(domain, volumes)
     handle = port.plug(DOMAIN, _disk(device_id)).provider_handle
 
-    assert port.unplug(DOMAIN, device_id, handle) is True
+    assert port.unplug(DOMAIN, device_id, handle, kind=HotplugDeviceKind.DISK) is True
     assert volumes.live == {}
-    assert port.is_attached(DOMAIN, device_id, handle) is False
+    assert port.is_attached(DOMAIN, device_id, handle, kind=HotplugDeviceKind.DISK) is False
 
 
 def test_unplug_unsettled_then_is_attached_frees_volume_on_first_absent_look() -> None:
@@ -292,12 +294,12 @@ def test_unplug_unsettled_then_is_attached_frees_volume_on_first_absent_look() -
     handle = port.plug(DOMAIN, _disk(device_id)).provider_handle
     domain.guest_releases = False
 
-    assert port.unplug(DOMAIN, device_id, handle) is False
-    assert port.is_attached(DOMAIN, device_id, handle) is True
+    assert port.unplug(DOMAIN, device_id, handle, kind=HotplugDeviceKind.DISK) is False
+    assert port.is_attached(DOMAIN, device_id, handle, kind=HotplugDeviceKind.DISK) is True
     assert volumes.live != {}
 
     domain.finish_release()
-    assert port.is_attached(DOMAIN, device_id, handle) is False
+    assert port.is_attached(DOMAIN, device_id, handle, kind=HotplugDeviceKind.DISK) is False
     assert volumes.live == {}
 
 
@@ -305,12 +307,70 @@ def test_unplug_of_absent_device_is_true_and_frees_a_leftover_volume() -> None:
     volumes, device_id = _Volumes(), str(uuid4())
     volumes.live[device_id] = "/pool/x"
 
-    assert _port(_Domain(), volumes).unplug(DOMAIN, device_id, None) is True
+    assert (
+        _port(_Domain(), volumes).unplug(DOMAIN, device_id, None, kind=HotplugDeviceKind.DISK)
+        is True
+    )
     assert volumes.live == {}
 
 
+def test_nic_unplug_makes_no_volume_call_when_the_guest_releases() -> None:
+    domain, volumes, device_id = _Domain(), _Volumes(), str(uuid4())
+    port = _port(domain, volumes)
+    handle = port.plug(DOMAIN, _nic(device_id)).provider_handle
+
+    assert port.unplug(DOMAIN, device_id, handle, kind=HotplugDeviceKind.NIC) is True
+    assert volumes.removes == []
+
+
+def test_nic_unplug_then_is_attached_makes_no_volume_call() -> None:
+    domain, volumes, device_id = _Domain(), _Volumes(), str(uuid4())
+    port = _port(domain, volumes)
+    handle = port.plug(DOMAIN, _nic(device_id)).provider_handle
+    domain.guest_releases = False
+    nic = HotplugDeviceKind.NIC
+
+    assert port.unplug(DOMAIN, device_id, handle, kind=nic) is False
+    domain.finish_release()
+    assert port.is_attached(DOMAIN, device_id, handle, kind=nic) is False
+    assert volumes.removes == []
+
+
+def test_nic_absent_unplug_and_is_attached_make_no_volume_call() -> None:
+    volumes, device_id = _Volumes(), str(uuid4())
+    port = _port(_Domain(), volumes)
+
+    assert port.unplug(DOMAIN, device_id, None, kind=HotplugDeviceKind.NIC) is True
+    assert port.is_attached(DOMAIN, device_id, None, kind=HotplugDeviceKind.NIC) is False
+    assert volumes.removes == []
+
+
+def test_disk_absent_unplug_and_is_attached_each_free_the_volume_once() -> None:
+    volumes, device_id = _Volumes(), str(uuid4())
+    port = _port(_Domain(), volumes)
+
+    assert port.unplug(DOMAIN, device_id, None, kind=HotplugDeviceKind.DISK) is True
+    assert volumes.removes == [device_id]
+    assert port.is_attached(DOMAIN, device_id, None, kind=HotplugDeviceKind.DISK) is False
+    assert volumes.removes == [device_id, device_id]
+
+
+def test_disk_unplug_that_the_guest_releases_frees_the_volume_once() -> None:
+    domain, volumes, device_id = _Domain(), _Volumes(), str(uuid4())
+    port = _port(domain, volumes)
+    handle = port.plug(DOMAIN, _disk(device_id)).provider_handle
+
+    assert port.unplug(DOMAIN, device_id, handle, kind=HotplugDeviceKind.DISK) is True
+    assert volumes.removes == [device_id]
+
+
 def test_unplug_of_absent_device_on_stopped_domain_is_true() -> None:
-    assert _port(_Domain(active=False), _Volumes()).unplug(DOMAIN, str(uuid4()), None) is True
+    assert (
+        _port(_Domain(active=False), _Volumes()).unplug(
+            DOMAIN, str(uuid4()), None, kind=HotplugDeviceKind.DISK
+        )
+        is True
+    )
 
 
 def test_unplug_refused_by_guest_is_control_failure() -> None:
@@ -320,7 +380,7 @@ def test_unplug_refused_by_guest_is_control_failure() -> None:
     domain.detach_error = _FakeError(libvirt.VIR_ERR_OPERATION_FAILED, "device busy")
 
     with pytest.raises(CategorizedError) as err:
-        port.unplug(DOMAIN, device_id, handle)
+        port.unplug(DOMAIN, device_id, handle, kind=HotplugDeviceKind.DISK)
 
     assert err.value.category is ErrorCategory.CONTROL_FAILURE
     assert err.value.details["reason"] == "unplug_refused"
@@ -332,12 +392,12 @@ def test_repeated_unplug_while_the_guest_has_not_released_is_still_pending() -> 
     port = _port(domain, _Volumes())
     handle = port.plug(DOMAIN, _nic(device_id)).provider_handle
     domain.guest_releases = False
-    assert port.unplug(DOMAIN, device_id, handle) is False
+    assert port.unplug(DOMAIN, device_id, handle, kind=HotplugDeviceKind.DISK) is False
     domain.detach_error = _FakeError(
         libvirt.VIR_ERR_OPERATION_INVALID, "device is already in the process of unplug"
     )
 
-    assert port.unplug(DOMAIN, device_id, handle) is False
+    assert port.unplug(DOMAIN, device_id, handle, kind=HotplugDeviceKind.DISK) is False
 
 
 def test_unplug_libvirt_fault_is_infrastructure_failure() -> None:
@@ -347,14 +407,16 @@ def test_unplug_libvirt_fault_is_infrastructure_failure() -> None:
     domain.detach_error = _FakeError(libvirt.VIR_ERR_INTERNAL_ERROR)
 
     with pytest.raises(CategorizedError) as err:
-        port.unplug(DOMAIN, device_id, None)
+        port.unplug(DOMAIN, device_id, None, kind=HotplugDeviceKind.DISK)
 
     assert err.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_foreign_handle_is_handle_unknown() -> None:
     with pytest.raises(CategorizedError) as err:
-        _port(_Domain(), _Volumes()).unplug(DOMAIN, str(uuid4()), "ua-kdive-someone-else")
+        _port(_Domain(), _Volumes()).unplug(
+            DOMAIN, str(uuid4()), "ua-kdive-someone-else", kind=HotplugDeviceKind.DISK
+        )
 
     assert err.value.category is ErrorCategory.CONTROL_FAILURE
     assert err.value.details["reason"] == "handle_unknown"
@@ -364,8 +426,8 @@ def test_boot_disk_and_ssh_nic_are_never_matched() -> None:
     domain = _Domain()
     port = _port(domain, _Volumes())
 
-    assert port.is_attached(DOMAIN, str(uuid4()), None) is False
-    assert port.unplug(DOMAIN, str(uuid4()), None) is True
+    assert port.is_attached(DOMAIN, str(uuid4()), None, kind=HotplugDeviceKind.DISK) is False
+    assert port.unplug(DOMAIN, str(uuid4()), None, kind=HotplugDeviceKind.DISK) is True
     assert len(domain.XMLDesc()) > 0
 
 

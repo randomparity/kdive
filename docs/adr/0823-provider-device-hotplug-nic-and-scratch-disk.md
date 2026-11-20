@@ -5,7 +5,8 @@
 Accepted (2026-11-18)
 
 Implementation is tracked by #3686 (port, tools, fault-inject), #3687 (libvirt) and #3688
-(PowerVM through the HMC). Nothing in this record is implemented yet.
+(PowerVM through the HMC). #3686 and #3687 are implemented; #3688 is not, so the PowerVM provider
+does not yet advertise hot-plug.
 
 ## Context
 
@@ -211,6 +212,23 @@ system-reclaim path deletes the rows alone, because the provider proved physical
 device is left to release. A reprovision deletes the rows when it succeeds; when it fails after
 `release_all`, the System's `attached` rows move to `lost` in the transaction that records the
 failure, as for a power OFF or CYCLE. The spec's Ledger section states the current behaviour.
+
+### Amendment (2026-11-20): `unplug` and `is_attached` take the device kind (#3737)
+
+This amends the port signatures in "Port", not the decision. `unplug` and `is_attached` gain a
+required keyword-only `kind: HotplugDeviceKind`, the ledger row's kind. A device that is absent
+from the live domain leaves no XML to read its kind from, and only a `disk` has a backing volume,
+so the provider frees the volume only for a `disk`: a NIC un-plug, and a NIC `is_attached` that
+finds the device absent, make no volume call. When a disk's volume is freed is unchanged. The
+fault-inject port accepts and ignores `kind`.
+
+### Amendment (2026-11-19): the storage-quota deferral is owned by ADR-0827 (#3720)
+
+This qualifies the Consequences bullet that says the backing storage "is not charged to a project
+quota" and that "no follow-up exists yet". #3720 is that follow-up, and
+[ADR-0827](0827-charge-hot-plugged-scratch-disks-to-a-project-storage-cap.md) proposes the
+decision: a server-configured per-project cap, charged from the device ledger. Until it is
+implemented, the storage stays uncharged as this record states.
 
 ### Amendment (2026-11-19): pre-existing volumes as disks are decided in ADR-0829 (#3722)
 

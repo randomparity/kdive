@@ -141,7 +141,15 @@ class FaultInjectHotplug:
             settled = device.attached and not device.removing
             return PlugOutcome(device.handle, dict(device.identity), settled)
 
-    def unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+    def unplug(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
+        del kind  # the ledger already records the kind of every device it holds
         with self._lock:
             domain = self._domain(domain_name)
             device = domain.devices.get(device_id)
@@ -167,7 +175,15 @@ class FaultInjectHotplug:
             device.polls_left = SLOW_POLLS
             return False
 
-    def is_attached(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+    def is_attached(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
+        del kind
         with self._lock:
             device = self._domain(domain_name).devices.get(device_id)
             if device is None:

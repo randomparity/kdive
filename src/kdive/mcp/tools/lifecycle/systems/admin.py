@@ -45,6 +45,7 @@ from kdive.mcp.tools._common import stale_handle as _stale_handle
 from kdive.mcp.tools.lifecycle.support._device_ops import device_job_active, device_op_in_flight
 from kdive.mcp.tools.lifecycle.support._idempotency import (
     dedup_replay,
+    object_scoped_kind,
     record_envelope,
     resolve_conflict,
     resolve_envelope_replay,
@@ -110,6 +111,15 @@ _SYSTEM_TEARDOWN_AUTHORITY_SQL: LiteralString = (
 _WRITTEN_SINCE_SQL: LiteralString = "SELECT updated_at >= %s FROM jobs WHERE id = %s"
 
 
+def _reprovision_key_kind(system_id: UUID, profile: ProvisioningProfile) -> str:
+    """The reprovision key's kind: the System and the parsed profile's digest (ADR-0193).
+
+    The digest is over the parsed profile, so an omitted profile field and its explicit default
+    are one request, and a changed one is another.
+    """
+    return object_scoped_kind(_REPROVISION_KIND, system_id, {"profile": profile_digest(profile)})
+
+
 def _teardown_dedup_key(system_id: UUID) -> str:
     """One expression for the replay probe and the enqueue; the key does not vary with
     ``idempotency_key``, so the probe runs unconditionally."""
@@ -147,11 +157,12 @@ class SystemAdminHandlers:
                 validate_idempotency_key(idempotency_key)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error("idempotency_key", exc)
+        kind = _reprovision_key_kind(uid, parsed)
         with bind_context(principal=ctx.principal):
             if idempotency_key is not None:
                 async with pool.connection() as conn:
                     replay = await resolve_envelope_replay(
-                        conn, principal=ctx.principal, key=idempotency_key, kind=_REPROVISION_KIND
+                        conn, principal=ctx.principal, key=idempotency_key, kind=kind
                     )
                 if replay is not None:
                     return replay
@@ -164,6 +175,7 @@ class SystemAdminHandlers:
                     self.profile_policy,
                     self.rootfs_validator,
                     idempotency_key=idempotency_key,
+                    idempotency_kind=kind,
                 )
             except IllegalTransition:
                 async with pool.connection() as conn:
@@ -181,6 +193,7 @@ async def _reprovision_locked(
     rootfs_validator: RootfsValidator,
     *,
     idempotency_key: str | None = None,
+    idempotency_kind: str,
 ) -> ToolResponse:
     try:
         async with (
@@ -189,7 +202,14 @@ async def _reprovision_locked(
             advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
         ):
             return await _reprovision_in_lock(
-                conn, ctx, system_id, profile, profile_policy, rootfs_validator, idempotency_key
+                conn,
+                ctx,
+                system_id,
+                profile,
+                profile_policy,
+                rootfs_validator,
+                idempotency_key,
+                idempotency_kind,
             )
     except UniqueViolation:
         if idempotency_key is None:
@@ -197,7 +217,10 @@ async def _reprovision_locked(
         async with pool.connection() as conn:
             try:
                 return await resolve_conflict(
-                    conn, principal=ctx.principal, key=idempotency_key, kind=_REPROVISION_KIND
+                    conn,
+                    principal=ctx.principal,
+                    key=idempotency_key,
+                    kind=idempotency_kind,
                 )
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error("idempotency_key", exc)
@@ -211,6 +234,7 @@ async def _reprovision_in_lock(
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
     idempotency_key: str | None,
+    idempotency_kind: str,
 ) -> ToolResponse:
     system = await SYSTEMS.get(conn, system_id)
     if system is None or system.project not in ctx.projects:
@@ -326,7 +350,7 @@ async def _reprovision_in_lock(
             principal=ctx.principal,
             key=idempotency_key,
             project=system.project,
-            kind=_REPROVISION_KIND,
+            kind=idempotency_kind,
             envelope=envelope,
         )
     return envelope
@@ -470,7 +494,10 @@ async def teardown_system(
                     raise  # only the keyed path records, so an unkeyed collision is not ours
                 try:
                     return await resolve_conflict(
-                        conn, principal=ctx.principal, key=idempotency_key, kind=_TEARDOWN_KIND
+                        conn,
+                        principal=ctx.principal,
+                        key=idempotency_key,
+                        kind=object_scoped_kind(_TEARDOWN_KIND, uid),
                     )
                 except CategorizedError as exc:
                     return ToolResponse.failure_from_error("idempotency_key", exc)
@@ -503,7 +530,10 @@ async def _teardown_locked(
             return routed
         if idempotency_key is not None:
             replay = await resolve_envelope_replay(
-                conn, principal=ctx.principal, key=idempotency_key, kind=_TEARDOWN_KIND
+                conn,
+                principal=ctx.principal,
+                key=idempotency_key,
+                kind=object_scoped_kind(_TEARDOWN_KIND, uid),
             )
             if replay is not None:
                 return replay
@@ -573,7 +603,7 @@ async def _teardown_locked(
                 principal=ctx.principal,
                 key=idempotency_key,
                 project=system.project,
-                kind=_TEARDOWN_KIND,
+                kind=object_scoped_kind(_TEARDOWN_KIND, uid),
                 envelope=envelope,
             )
         return envelope
@@ -662,14 +692,14 @@ async def _route_settled_teardown(
         await _audit_teardown_recycle(conn, ctx, system, job)
     envelope = job_envelope(job, "system_id", system.id)
     if idempotency_key is not None and not await _key_names_job(
-        conn, ctx, idempotency_key, envelope.object_id
+        conn, ctx, system.id, idempotency_key, envelope.object_id
     ):
         await record_envelope(
             conn,
             principal=ctx.principal,
             key=idempotency_key,
             project=system.project,
-            kind=_TEARDOWN_KIND,
+            kind=object_scoped_kind(_TEARDOWN_KIND, system.id),
             envelope=envelope,
         )
     return envelope
@@ -736,7 +766,7 @@ async def _enqueue_preactivation_authority_teardown(
             principal=ctx.principal,
             key=idempotency_key,
             project=system.project,
-            kind=_TEARDOWN_KIND,
+            kind=object_scoped_kind(_TEARDOWN_KIND, system.id),
             envelope=envelope,
         )
     return envelope
@@ -766,10 +796,10 @@ async def _audit_teardown_recycle(
 
 
 async def _key_names_job(
-    conn: AsyncConnection, ctx: RequestContext, key: str, job_id: str | None
+    conn: AsyncConnection, ctx: RequestContext, system_id: UUID, key: str, job_id: str | None
 ) -> bool:
     stored = await resolve_envelope_replay(
-        conn, principal=ctx.principal, key=key, kind=_TEARDOWN_KIND
+        conn, principal=ctx.principal, key=key, kind=object_scoped_kind(_TEARDOWN_KIND, system_id)
     )
     return stored is not None and stored.object_id == job_id
 
@@ -906,14 +936,15 @@ async def _enqueue_authority_teardown(
     # A key already recorded for the replaced ordinary job names this same job row; recording it
     # again would raise and roll the replacement back behind a stale replay.
     if idempotency_key is not None and not (
-        replaces_ordinary and await _key_names_job(conn, ctx, idempotency_key, envelope.object_id)
+        replaces_ordinary
+        and await _key_names_job(conn, ctx, system.id, idempotency_key, envelope.object_id)
     ):
         await record_envelope(
             conn,
             principal=ctx.principal,
             key=idempotency_key,
             project=system.project,
-            kind=_TEARDOWN_KIND,
+            kind=object_scoped_kind(_TEARDOWN_KIND, system.id),
             envelope=envelope,
         )
     return envelope

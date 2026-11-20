@@ -308,7 +308,14 @@ class LibvirtDeviceHotplug:
                 self._plug_disk(conn, domain, domain_name, device_id, size_gb, domain_xml)
             return _outcome(self._require_live(domain, domain_name, device_id))
 
-    def unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+    def unplug(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
         """Send the graceful detach; ``True`` when the device is already gone."""
         device_id = parse_device_id(device_id)
         self._check_handle(device_id, provider_handle)
@@ -316,7 +323,7 @@ class LibvirtDeviceHotplug:
             domain = _lookup(conn, domain_name)
             live = _find(_domain_xml(domain, domain_name), device_id, domain_name)
             if live is None:
-                self._volumes.remove(conn, domain_name, device_id)
+                self._free_volume(conn, domain_name, device_id, kind)
                 return True
             self._require_running(domain, domain_name)
             try:
@@ -327,20 +334,34 @@ class LibvirtDeviceHotplug:
                     raise _unplug_failure(exc, domain_name) from exc
             # libvirt waits a few seconds for the guest; a prompt guest is already done.
             if _find(_domain_xml(domain, domain_name), device_id, domain_name) is None:
-                self._volumes.remove(conn, domain_name, device_id)
+                self._free_volume(conn, domain_name, device_id, kind)
                 return True
             return False
 
-    def is_attached(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
-        """Whether the device is in the live domain; the first absent look frees its volume."""
+    def is_attached(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
+        """Whether the device is in the live domain; the first absent look frees a disk's volume."""
         device_id = parse_device_id(device_id)
         self._check_handle(device_id, provider_handle)
         with self._connection() as conn:
             domain = _lookup(conn, domain_name)
             if _find(_domain_xml(domain, domain_name), device_id, domain_name) is not None:
                 return True
-            self._volumes.remove(conn, domain_name, device_id)
+            self._free_volume(conn, domain_name, device_id, kind)
             return False
+
+    def _free_volume(
+        self, conn: HotplugConnection, domain_name: str, device_id: str, kind: HotplugDeviceKind
+    ) -> None:
+        """Free a ``disk``'s scratch volume; a NIC has none, so it costs no provider call."""
+        if kind is HotplugDeviceKind.DISK:
+            self._volumes.remove(conn, domain_name, device_id)
 
     def release_all(self, domain_name: str) -> None:
         """Delete every device volume of the domain; teardown destroys the domain's devices."""

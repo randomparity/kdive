@@ -425,10 +425,20 @@ class DeviceHotplugger(Protocol):
         """
         ...
 
-    def unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
-        """Request graceful removal of a device; idempotent.
+    def unplug(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
+        """Request graceful removal of a device of ``kind``; idempotent.
 
-        Returns ``True`` when the device is gone (an absent device counts, after freeing any
+        ``kind`` is the ledger row's kind: an absent device leaves no XML to read it from, and only
+        a ``disk`` has a backing volume to free.
+
+        Returns ``True`` when the device is gone (an absent ``disk`` counts, after freeing any
         backing volume it still holds) and ``False`` when the provider accepted the request and
         has not finished; the caller then polls ``is_attached``. ``provider_handle`` is ``None``
         only when a worker died between the provider call and the ledger commit; the provider
@@ -444,8 +454,17 @@ class DeviceHotplugger(Protocol):
         """
         ...
 
-    def is_attached(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+    def is_attached(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
         """Whether the device is present and settled; polled while a plug or un-plug settles.
+
+        The first absent look at a ``disk`` frees its backing volume; a ``nic`` has none.
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a provider fault.

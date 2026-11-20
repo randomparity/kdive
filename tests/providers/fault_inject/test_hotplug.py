@@ -42,9 +42,13 @@ def test_plug_then_unplug_round_trips(spec: DeviceSpec) -> None:
     outcome = port.plug(_DOMAIN, spec)
 
     assert outcome.settled is True
-    assert port.is_attached(_DOMAIN, spec.device_id, outcome.provider_handle) is True
-    assert port.unplug(_DOMAIN, spec.device_id, outcome.provider_handle) is True
-    assert port.is_attached(_DOMAIN, spec.device_id, outcome.provider_handle) is False
+    assert (
+        port.is_attached(_DOMAIN, spec.device_id, outcome.provider_handle, kind=spec.kind) is True
+    )
+    assert port.unplug(_DOMAIN, spec.device_id, outcome.provider_handle, kind=spec.kind) is True
+    assert (
+        port.is_attached(_DOMAIN, spec.device_id, outcome.provider_handle, kind=spec.kind) is False
+    )
 
 
 def test_identity_is_a_mac_for_a_nic_and_a_bounded_serial_for_a_disk() -> None:
@@ -71,21 +75,21 @@ def test_plug_is_idempotent_on_device_id() -> None:
 def test_unplug_of_an_absent_device_with_a_handle_succeeds() -> None:
     port = _port()
     handle = port.plug(_DOMAIN, _NIC).provider_handle
-    assert port.unplug(_DOMAIN, _NIC.device_id, handle) is True
+    assert port.unplug(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is True
 
-    assert port.unplug(_DOMAIN, _NIC.device_id, handle) is True
+    assert port.unplug(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is True
 
 
 def test_unplug_of_an_absent_device_without_a_handle_is_handle_unknown() -> None:
     with _raises(ErrorCategory.CONTROL_FAILURE, "handle_unknown"):
-        _port().unplug(_DOMAIN, "never-plugged", None)
+        _port().unplug(_DOMAIN, "never-plugged", None, kind=HotplugDeviceKind.NIC)
 
 
 def test_unplug_finds_a_present_device_without_a_handle() -> None:
     port = _port()
     port.plug(_DOMAIN, _DISK)
 
-    assert port.unplug(_DOMAIN, _DISK.device_id, None) is True
+    assert port.unplug(_DOMAIN, _DISK.device_id, None, kind=HotplugDeviceKind.DISK) is True
 
 
 def test_unplug_with_a_foreign_handle_is_handle_unknown() -> None:
@@ -93,7 +97,7 @@ def test_unplug_with_a_foreign_handle_is_handle_unknown() -> None:
     port.plug(_DOMAIN, _NIC)
 
     with _raises(ErrorCategory.CONTROL_FAILURE, "handle_unknown"):
-        port.unplug(_DOMAIN, _NIC.device_id, "another-handle")
+        port.unplug(_DOMAIN, _NIC.device_id, "another-handle", kind=HotplugDeviceKind.NIC)
 
 
 def test_busy_refuses_unplug_and_keeps_the_device() -> None:
@@ -101,16 +105,21 @@ def test_busy_refuses_unplug_and_keeps_the_device() -> None:
     handle = port.plug(_DOMAIN, _NIC).provider_handle
 
     with _raises(ErrorCategory.CONTROL_FAILURE, "unplug_refused"):
-        port.unplug(_DOMAIN, _NIC.device_id, handle)
+        port.unplug(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC)
 
-    assert port.is_attached(_DOMAIN, _NIC.device_id, handle) is True
+    assert port.is_attached(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is True
 
 
 def test_slow_plug_settles_on_the_third_poll() -> None:
     port = _port(HotplugBehaviour.SLOW)
 
     outcome = port.plug(_DOMAIN, _NIC)
-    polls = [port.is_attached(_DOMAIN, _NIC.device_id, outcome.provider_handle) for _ in range(5)]
+    polls = [
+        port.is_attached(
+            _DOMAIN, _NIC.device_id, outcome.provider_handle, kind=HotplugDeviceKind.NIC
+        )
+        for _ in range(5)
+    ]
 
     assert outcome.settled is False
     assert polls == [False, False, True, True, True]
@@ -119,23 +128,26 @@ def test_slow_plug_settles_on_the_third_poll() -> None:
 def test_slow_unplug_is_gone_on_the_third_poll() -> None:
     port = _port(HotplugBehaviour.SLOW)
     handle = port.plug(_DOMAIN, _NIC).provider_handle
-    while not port.is_attached(_DOMAIN, _NIC.device_id, handle):
+    while not port.is_attached(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC):
         pass
 
-    assert port.unplug(_DOMAIN, _NIC.device_id, handle) is False
-    assert port.unplug(_DOMAIN, _NIC.device_id, handle) is False
-    polls = [port.is_attached(_DOMAIN, _NIC.device_id, handle) for _ in range(4)]
+    assert port.unplug(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is False
+    assert port.unplug(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is False
+    polls = [
+        port.is_attached(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC)
+        for _ in range(4)
+    ]
 
     assert polls == [True, True, False, False]
-    assert port.unplug(_DOMAIN, _NIC.device_id, handle) is True
+    assert port.unplug(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is True
 
 
 def test_plug_of_a_device_being_removed_is_not_settled() -> None:
     port = _port(HotplugBehaviour.SLOW)
     handle = port.plug(_DOMAIN, _NIC).provider_handle
-    while not port.is_attached(_DOMAIN, _NIC.device_id, handle):
+    while not port.is_attached(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC):
         pass
-    port.unplug(_DOMAIN, _NIC.device_id, handle)
+    port.unplug(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC)
 
     assert port.plug(_DOMAIN, _NIC).settled is False
 
@@ -147,7 +159,10 @@ def test_hang_plug_never_settles() -> None:
 
     assert outcome.settled is False
     assert not any(
-        port.is_attached(_DOMAIN, _DISK.device_id, outcome.provider_handle) for _ in range(50)
+        port.is_attached(
+            _DOMAIN, _DISK.device_id, outcome.provider_handle, kind=HotplugDeviceKind.DISK
+        )
+        for _ in range(50)
     )
 
 
@@ -155,10 +170,13 @@ def test_hang_unplug_never_settles() -> None:
     port = _port(HotplugBehaviour.HANG)
     handle = port.plug(_DOMAIN, _DISK).provider_handle
     # A hung plug is not attached yet; the removal still reports the device present, forever.
-    port.unplug(_DOMAIN, _DISK.device_id, handle)
+    port.unplug(_DOMAIN, _DISK.device_id, handle, kind=HotplugDeviceKind.DISK)
 
-    assert all(port.is_attached(_DOMAIN, _DISK.device_id, handle) for _ in range(50))
-    assert port.unplug(_DOMAIN, _DISK.device_id, handle) is False
+    assert all(
+        port.is_attached(_DOMAIN, _DISK.device_id, handle, kind=HotplugDeviceKind.DISK)
+        for _ in range(50)
+    )
+    assert port.unplug(_DOMAIN, _DISK.device_id, handle, kind=HotplugDeviceKind.DISK) is False
 
 
 def test_plug_into_a_stopped_domain_is_domain_not_running() -> None:
@@ -175,8 +193,8 @@ def test_power_off_drops_devices_and_unplug_still_succeeds_with_a_handle() -> No
 
     port.note_power(_DOMAIN, PowerAction.OFF)
 
-    assert port.is_attached(_DOMAIN, _DISK.device_id, handle) is False
-    assert port.unplug(_DOMAIN, _DISK.device_id, handle) is True
+    assert port.is_attached(_DOMAIN, _DISK.device_id, handle, kind=HotplugDeviceKind.DISK) is False
+    assert port.unplug(_DOMAIN, _DISK.device_id, handle, kind=HotplugDeviceKind.DISK) is True
 
 
 def test_power_on_after_off_accepts_a_plug_and_cycle_drops_devices() -> None:
@@ -187,7 +205,7 @@ def test_power_on_after_off_accepts_a_plug_and_cycle_drops_devices() -> None:
 
     port.note_power(_DOMAIN, PowerAction.CYCLE)
 
-    assert port.is_attached(_DOMAIN, _NIC.device_id, handle) is False
+    assert port.is_attached(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is False
     assert port.plug(_DOMAIN, _NIC).settled is True
 
 
@@ -198,7 +216,7 @@ def test_reset_and_resume_keep_devices(action: PowerAction) -> None:
 
     port.note_power(_DOMAIN, action)
 
-    assert port.is_attached(_DOMAIN, _NIC.device_id, handle) is True
+    assert port.is_attached(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is True
 
 
 def test_release_all_clears_the_domain_and_is_idempotent() -> None:
@@ -209,8 +227,8 @@ def test_release_all_clears_the_domain_and_is_idempotent() -> None:
     port.release_all(_DOMAIN)
     port.release_all(_DOMAIN)
 
-    assert port.is_attached(_DOMAIN, _NIC.device_id, handle) is False
-    assert port.is_attached(_DOMAIN, _DISK.device_id, None) is False
+    assert port.is_attached(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is False
+    assert port.is_attached(_DOMAIN, _DISK.device_id, None, kind=HotplugDeviceKind.DISK) is False
 
 
 def test_release_all_keeps_a_stopped_domain_stopped() -> None:
@@ -249,7 +267,7 @@ def test_devices_are_per_domain() -> None:
 
     port.plug(_DOMAIN, _NIC)
 
-    assert port.is_attached(other, _NIC.device_id, None) is False
+    assert port.is_attached(other, _NIC.device_id, None, kind=HotplugDeviceKind.NIC) is False
 
 
 # --- behaviour parsing ------------------------------------------------------------------
@@ -290,12 +308,12 @@ def test_a_certain_fault_fails_plug_and_unplug_as_infrastructure_failure() -> No
 
     for call in (
         lambda: faulted.plug(_DOMAIN, _NIC),
-        lambda: faulted.unplug(_DOMAIN, _NIC.device_id, "handle"),
+        lambda: faulted.unplug(_DOMAIN, _NIC.device_id, "handle", kind=HotplugDeviceKind.NIC),
     ):
         with pytest.raises(CategorizedError) as err:
             call()
         assert err.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert inner.is_attached(_DOMAIN, _NIC.device_id, None) is False
+    assert inner.is_attached(_DOMAIN, _NIC.device_id, None, kind=HotplugDeviceKind.NIC) is False
 
 
 def test_a_zero_rate_delegates_and_polling_is_never_perturbed() -> None:
@@ -303,8 +321,16 @@ def test_a_zero_rate_delegates_and_polling_is_never_perturbed() -> None:
 
     outcome = faulted.plug(_DOMAIN, _NIC)
 
-    assert faulted.is_attached(_DOMAIN, _NIC.device_id, outcome.provider_handle) is True
-    assert faulted.unplug(_DOMAIN, _NIC.device_id, outcome.provider_handle) is True
+    assert (
+        faulted.is_attached(
+            _DOMAIN, _NIC.device_id, outcome.provider_handle, kind=HotplugDeviceKind.NIC
+        )
+        is True
+    )
+    assert (
+        faulted.unplug(_DOMAIN, _NIC.device_id, outcome.provider_handle, kind=HotplugDeviceKind.NIC)
+        is True
+    )
 
 
 def test_release_all_is_never_perturbed_by_a_fault() -> None:
@@ -313,7 +339,7 @@ def test_release_all_is_never_perturbed_by_a_fault() -> None:
 
     faulted.release_all(_DOMAIN)
 
-    assert inner.is_attached(_DOMAIN, _NIC.device_id, None) is False
+    assert inner.is_attached(_DOMAIN, _NIC.device_id, None, kind=HotplugDeviceKind.NIC) is False
 
 
 def test_an_undefined_domain_is_delegated_without_a_draw() -> None:
@@ -396,10 +422,10 @@ def test_runtime_wires_the_behaviour_and_follows_control_power() -> None:
     handle = port.plug(_DOMAIN, _NIC).provider_handle
 
     with _raises(ErrorCategory.CONTROL_FAILURE, "unplug_refused"):
-        port.unplug(_DOMAIN, _NIC.device_id, handle)
+        port.unplug(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC)
     runtime.controller.power(_DOMAIN, PowerAction.OFF)
 
-    assert port.is_attached(_DOMAIN, _NIC.device_id, handle) is False
+    assert port.is_attached(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is False
     with _raises(ErrorCategory.INFRASTRUCTURE_FAILURE, "domain_not_running"):
         port.plug(_DOMAIN, _NIC)
 
