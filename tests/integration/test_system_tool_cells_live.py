@@ -254,7 +254,12 @@ async def _set(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object
         assert inspected["armed"] is False, inspected
     finally:
         await faultinject_proof.reset(caller, token, guest)
-    return {"failure_injected": True, "times_spent": spent["times"], "inspect_armed": False}
+    return {
+        "failure_injected": True,
+        "times_before": before["times"],
+        "times_spent": spent["times"],
+        "inspect_armed": False,
+    }
 
 
 async def _reset(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
@@ -268,7 +273,8 @@ async def _reset(caller: HttpCaller, token: str, guest: Guest) -> dict[str, obje
     after = await asyncio.to_thread(faultinject_proof.guest_views, endpoint, key)
     for knob, view in after.items():
         faultinject_proof.assert_matches_guest(knobs[knob], view, knob)
-    assert after["failslab"]["probability"] == 0, after
+    assert (after["failslab"]["probability"], after["failslab"]["interval"]) == (0, 1), after
+    assert after["failslab"]["times"] == 1, after
     seen = await caller.call("faultinject.inspect", {"system_id": guest.system_id}, token)
     assert isinstance(seen, ToolResponse) and seen.error_category is None, seen
     inspected = faultinject_proof.failslab_of(seen)
@@ -384,7 +390,7 @@ def _target_args(
         return {"allocation_id": allocation_id, "profile": profile}
     args: dict[str, object] = {"system_id": system_id}
     if tool == "faultinject.set":
-        args.update(_ARM)
+        args.update(faultinject_proof.INERT)
     if tool == "systems.authorize_ssh_key":
         args["public_key"] = _public_key()
     if tool == "systems.reprovision":

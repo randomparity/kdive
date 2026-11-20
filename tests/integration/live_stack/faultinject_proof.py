@@ -37,7 +37,8 @@ DEBUGFS = "/sys/kernel/debug"
 KNOBS = ("failslab", "fail_page_alloc")
 # Fires on the next atomic slab allocation, then disarms itself after that one failure.
 ARM = {"knob": "failslab", "probability": 100, "times": 1, "verbose": 1}
-# Interval 1_000_000 lets one allocation in a million fail: armed, and in practice inert.
+# Interval 1_000_000 fails the 1_000_000th eligible allocation, so the knob stays armed and
+# unspent for the length of one cell.
 INERT = {"knob": "failslab", "probability": 100, "times": 1, "interval": 1_000_000}
 _FIRE_DEADLINE_S = 60.0
 _POLL_S = 2.0
@@ -123,13 +124,8 @@ async def arm(
     return env
 
 
-async def reset(
-    caller: HttpCaller, token: str, guest: Guest, knob: str | None = None
-) -> ToolResponse:
-    args: dict[str, object] = {"system_id": guest.system_id}
-    if knob:
-        args["knob"] = knob
-    env = await caller.call("faultinject.reset", args, token)
+async def reset(caller: HttpCaller, token: str, guest: Guest) -> ToolResponse:
+    env = await caller.call("faultinject.reset", {"system_id": guest.system_id}, token)
     assert not isinstance(env, list), "expected one envelope"
     assert env.error_category is None, f"{env.error_category}: {env.detail}"
     return env

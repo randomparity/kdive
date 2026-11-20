@@ -1669,33 +1669,32 @@ remote-libvirt cells (#3080), which block without a provider host, so select the
   allocation and proves the domain undefined, the disks gone and capacity returned. The
   `systems.provision` cell provisions through the cell's exposure itself.
 - `faultinject.inspect` (#3683, ADR-0825) is a local-libvirt cell of this file with no remote
-  counterpart: the remote cells are the contract's capability_unsupported refusal and stay
-  unbound. The lane's stock Fedora kernel is built without `CONFIG_FAULT_INJECTION`, so the three
+  counterpart: the remote cells are the contract's capability_unsupported refusal and stay unbound.
+  The lane's stock Fedora kernel is built without `CONFIG_FAULT_INJECTION`, so the three
   `faultinject.*` functional cells (#3726) first upload, install and boot the verified `longterm`
   kernel fixture, whose `fixtures/kernel/debug.config` enables `CONFIG_FAULT_INJECTION`,
   `CONFIG_FAULT_INJECTION_DEBUG_FS`, `CONFIG_FAILSLAB` and `CONFIG_FAIL_PAGE_ALLOC`. They bind the
   kernel inputs like the power cells, so write the bindings with `--kernel-baseline longterm` and
   build the fixture first (`scripts/kernel_fixtures.py build --baseline longterm`, as in the
   deep-lifecycle section). A fixture tree built before #3726 lacks the options and `verify` rejects
-  it; rebuild it. The inspect cell has the operator client arm `failslab` inert (`probability` 100,
-  `interval` 1000000,
-  `times` 1), calls the tool at viewer and compares both knobs with the guest's own
-  `/sys/kernel/debug/<knob>` files read over SSH, then resets. It needs a staged
-  `fedora-kdive-ready-44` built after #3694, because an older image has no `kdive-faultinject` and
-  the tool then answers `helper_not_installed`.
+  it; rebuild it. The inspect cell has the operator client arm `failslab` with a failure that stays
+  unspent (`probability` 100, `interval` 1000000, `times` 1), calls the tool at viewer and compares
+  both knobs with the guest's own `/sys/kernel/debug/<knob>` files read over SSH, then resets. It
+  needs a staged `fedora-kdive-ready-44` built after #3694, because an older image has no
+  `kdive-faultinject` and the tool then answers `helper_not_installed`.
 - `faultinject.set` and `faultinject.reset` (#3684, ADR-0826, #3726) are local-libvirt cells of the
   same file; the remote cells are the capability_unsupported refusal and stay unbound. The `set`
-  cell arms `failslab` with `probability` 100, `times` 1 and `verbose` 1, compares the readback
-  with the guest's debugfs, and then observes the injected failure in the guest: its own debugfs
-  `times` falls from 1 to 0, which the kernel does only when it injects a failure, and
-  `faultinject.inspect` then reports the knob disarmed. The kernel log is not the evidence: the
-  kernel suppresses its `FAULT_INJECTION` line for an allocation carrying `__GFP_NOWARN`, and the
-  first live run logged none. The bounds cannot wedge the guest: `times` counts injected failures
-  across the whole guest, so one allocation fails and the kernel disarms itself, and the default
-  `ignore-gfp-wait` limits that failure to an allocation that cannot sleep, which its caller drops
-  or retries. `reset` runs in a `finally`. The `reset` cell arms the inert setting, resets, and
-  compares the cleared knob with the guest's debugfs and with `faultinject.inspect`. Both need
-  contributor.
+  cell arms `failslab` with `probability` 100, `times` 1 and `verbose` 1, compares the readback with
+  the guest's debugfs, and then observes the injected failure in the guest: its own debugfs `times`
+  falls from 1 to 0, which the kernel does only when it injects a failure, and `faultinject.inspect`
+  then reports the knob disarmed. The kernel log is not the evidence: the kernel suppresses its
+  `FAULT_INJECTION` line for an allocation carrying `__GFP_NOWARN`, and the first live run logged
+  none. The bounds limit the damage to one failed non-sleeping allocation: `times` counts injected
+  failures across the whole guest, so one allocation fails and the kernel disarms itself, and the
+  default `ignore-gfp-wait` limits that failure to an allocation that cannot sleep, which its caller
+  drops or retries. `reset` runs in a `finally`. The `reset` cell arms the unspent failure, resets,
+  and compares the defaults the guest shows with the tool's answer and with `faultinject.inspect`.
+  Both need contributor.
 - A rejection cell aims at one target per stack: a System provisioned, observed, torn down and
   released by the first rejection cell, whose project then must not change. Every role check of
   these tools runs before any state check, so a torn-down System and a released Allocation are
@@ -2564,7 +2563,8 @@ see
 [live and host-side debug information](../external-build-upload.md#choosing-your-kernel-config).
 
 The pinned debug fragment, `fixtures/kernel/debug.config`, sets the virtio, ext4, btrfs,
-fault-injection (`FAILSLAB`, `FAIL_PAGE_ALLOC`) and debug-info symbols with `VIRTIO_NET=y`, and `ppc64le_defconfig` supplies the kdump ones, so a
+fault-injection (`FAILSLAB`, `FAIL_PAGE_ALLOC`) and debug-info symbols with `VIRTIO_NET=y`, and
+`ppc64le_defconfig` supplies the kdump ones, so a
 ppc64le tree from `scripts/kernel_fixtures.py build --arch ppc64le` passes the kernel preflight of
 every spine proof listed above. BTF generation needs host `pahole`; the `local_worker_host` role installs the
 package that provides it. The guest side is separate: without matching DWARF debug information
