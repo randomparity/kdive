@@ -609,8 +609,9 @@ async def settle_device(
 async def mark_attached_devices_lost(conn: AsyncConnection, system_id: UUID) -> int:
     """Move a System's ``attached`` rows to ``lost`` and return how many moved (ADR-0823).
 
-    A power OFF/CYCLE or a snapshot restore replaces the running device set; the caller runs this
-    in the transaction that commits that result. Other states are untouched.
+    Call it when the running device set was replaced or its backing storage was freed (power
+    OFF/CYCLE, snapshot restore, failed reprovision); the caller runs this in the transaction that
+    commits that result. Other states are untouched.
     """
     async with conn.cursor() as cur:
         await cur.execute(

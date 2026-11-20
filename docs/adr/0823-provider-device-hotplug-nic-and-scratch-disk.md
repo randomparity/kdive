@@ -5,7 +5,8 @@
 Accepted (2026-11-18)
 
 Implementation is tracked by #3686 (port, tools, fault-inject), #3687 (libvirt) and #3688
-(PowerVM through the HMC). Nothing in this record is implemented yet.
+(PowerVM through the HMC). #3686 and #3687 are implemented; #3688 is not, so the PowerVM provider
+does not yet advertise hot-plug.
 
 ## Context
 
