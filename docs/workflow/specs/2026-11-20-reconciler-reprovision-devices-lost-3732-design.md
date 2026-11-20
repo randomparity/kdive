@@ -6,9 +6,10 @@ amendment. Follows #3714, which closed the same gap on the job-handler failure p
 ## Problem
 
 `reprovision_handler` frees every hot-plugged device's backing storage before it calls the
-provider. A System stranded after that point (job dead-lettered, canceled or absent) is moved to
+provider. A System stranded by a dead-lettered, canceled or absent job is moved to
 `failed` by `repair_stalled_reprovisioning_systems`, but its `attached` `system_devices` rows are
-left reading `attached` for devices whose storage is gone.
+left reading `attached`. The repair cannot tell whether the job died before or after that release,
+so the device set is indeterminate and `lost` is the honest state.
 
 ## Scope
 
@@ -37,5 +38,6 @@ SELECT, UPDATE and DELETE on `system_devices`.
 
 `tests/reconciler/test_stalled_reprovision_recovery.py`: a stranded System with an `attached` and
 a `failed` row ends with the first `lost` and the second unchanged, under the superuser and the
-`kdive_reconciler` role; a deferred System keeps its `attached` row. Removing the call turns the
+`kdive_reconciler` role; a deferred System keeps its `attached` row; a forced failure after the device write (category
+record) leaves the System `reprovisioning` and the row `attached`. Removing the call turns the
 first test red.

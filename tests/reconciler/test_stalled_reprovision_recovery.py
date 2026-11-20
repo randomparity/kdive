@@ -287,6 +287,25 @@ def test_deferred_system_keeps_its_attached_devices(migrated_url: str) -> None:
     asyncio.run(run())
 
 
+def test_failure_after_the_device_write_rolls_both_back(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("category write failed")
+
+    async def run() -> None:
+        conn = await connect(migrated_url)
+        sid = await seed_system(conn, system_state=SystemState.REPROVISIONING)
+        attached = await _seed_device(conn, sid, "attached")
+        monkeypatch.setattr(repairs_systems, "record_system_failure_category", boom)
+        assert await _repair(migrated_url) == 0
+        assert await _device_state(conn, attached) == "attached"
+        assert (await _state_and_category(conn, sid))[0] == _REPROVISIONING
+        await conn.close()
+
+    asyncio.run(run())
+
+
 def test_repair_runs_under_the_reconciler_role(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
