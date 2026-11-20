@@ -1685,11 +1685,14 @@ remote-libvirt cells (#3080), which block without a provider host, so select the
 - `faultinject.set` and `faultinject.reset` (#3684, ADR-0826, #3726) are local-libvirt cells of the
   same file; the remote cells are the capability_unsupported refusal and stay unbound. The `set`
   cell arms `failslab` with `probability` 100, `times` 1 and `verbose` 1, compares the readback
-  with the guest's debugfs, and then observes the injected failure in the guest: `times` reaches 0
-  and `dmesg` gains exactly one `FAULT_INJECTION: forcing a failure` record naming `failslab`.
-  The bounds cannot wedge the guest: `times` counts injected failures across the whole guest, so
-  one allocation fails and the kernel disarms itself, and the default `ignore-gfp-wait` limits that
-  failure to an allocation that cannot sleep, which its caller drops or retries. `reset` runs in a
+  with the guest's debugfs, and then observes the injected failure in the guest: its own debugfs
+  `times` falls from 1 to 0, which the kernel does only when it injects a failure, and
+  `faultinject.inspect` then reports the knob disarmed. The kernel log is not the evidence: the
+  kernel suppresses its `FAULT_INJECTION` line for an allocation carrying `__GFP_NOWARN`, and the
+  first live run logged none. The bounds cannot wedge the guest: `times` counts injected failures
+  across the whole guest, so one allocation fails and the kernel disarms itself, and the default
+  `ignore-gfp-wait` limits that failure to an allocation that cannot sleep, which its caller drops
+  or retries. `reset` runs in a
   `finally`. The `reset` cell arms the inert setting, resets, and compares the cleared knob with
   the guest's debugfs and with `faultinject.inspect`. Both need contributor.
 - A rejection cell aims at one target per stack: a System provisioned, observed, torn down and

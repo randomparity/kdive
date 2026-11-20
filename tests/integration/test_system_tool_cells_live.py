@@ -235,7 +235,8 @@ async def _inspect(caller: HttpCaller, token: str, guest: Guest) -> dict[str, ob
 
 async def _set(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
     key, endpoint = guest.key, guest.endpoint
-    before = await asyncio.to_thread(faultinject_proof.injections, endpoint, key)
+    before = await asyncio.to_thread(faultinject_proof.guest_knob, endpoint, key, "failslab")
+    assert (before["probability"], before["times"]) == (0, 1), f"failslab is not at rest: {before}"
     try:
         env = await faultinject_proof.arm(caller, token, guest, _ARM)
         reported = faultinject_proof.failslab_of(env)
@@ -244,15 +245,14 @@ async def _set(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object
         assert reported["times"] in (0, 1), reported
         assert reported["armed"] is (reported["times"] == 1), reported
         spent = await faultinject_proof.await_fired(endpoint, key)
-        after = await asyncio.to_thread(faultinject_proof.injections, endpoint, key)
+        seen = await caller.call("faultinject.inspect", {"system_id": guest.system_id}, token)
+        assert isinstance(seen, ToolResponse) and seen.error_category is None, seen
+        inspected = faultinject_proof.failslab_of(seen)
+        faultinject_proof.assert_matches_guest(inspected, spent, "failslab")
+        assert inspected["armed"] is False, inspected
     finally:
         await faultinject_proof.reset(caller, token, guest)
-    assert len(after) - len(before) == 2, f"expected one injection line pair: {before} -> {after}"
-    assert "name failslab" in after[-1], after[-1]
-    seen = await caller.call("faultinject.inspect", {"system_id": guest.system_id}, token)
-    assert isinstance(seen, ToolResponse) and seen.error_category is None, seen
-    assert faultinject_proof.failslab_of(seen)["armed"] is False, seen.data
-    return {"failure_injected": True, "times_spent": spent["times"], "log_lines": len(after)}
+    return {"failure_injected": True, "times_spent": spent["times"], "inspect_armed": False}
 
 
 async def _reset(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:

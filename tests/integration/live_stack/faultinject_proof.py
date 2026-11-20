@@ -8,9 +8,10 @@ tool's answer with the guest's own debugfs files read over SSH without the helpe
 ``set`` arms ``failslab`` with ``probability=100``, ``times=1`` and ``verbose=1``. ``times`` counts
 injected failures across the guest, so exactly one allocation fails and the kernel then disarms
 itself; the default ``ignore-gfp-wait`` keeps that allocation to one that cannot sleep (a
-``GFP_ATOMIC`` skb or similar), which the caller retries or drops. ``verbose=1`` prints the one
-``FAULT_INJECTION: forcing a failure`` line without the stack dump. The failure is observed twice
-in the guest: ``times`` reaches 0 and ``dmesg`` gains one line naming ``failslab``.
+``GFP_ATOMIC`` skb or similar), which the caller retries or drops. The kernel decrements ``times``
+only on the path that injects a failure, so the guest's own debugfs ``times`` falling from 1 to 0
+is the observation of that failure. ``dmesg`` is not: the kernel suppresses the log line for an
+allocation that carries ``__GFP_NOWARN``, and the allocation that spends the failure usually does.
 """
 
 from __future__ import annotations
@@ -38,7 +39,6 @@ KNOBS = ("failslab", "fail_page_alloc")
 ARM = {"knob": "failslab", "probability": 100, "times": 1, "verbose": 1}
 # Interval 1_000_000 lets one allocation in a million fail: armed, and in practice inert.
 INERT = {"knob": "failslab", "probability": 100, "times": 1, "interval": 1_000_000}
-_INJECTION_LINE = "FAULT_INJECTION: forcing a failure"
 _FIRE_DEADLINE_S = 60.0
 _POLL_S = 2.0
 
@@ -94,13 +94,6 @@ def guest_knob(endpoint: Endpoint, key: Path, knob: str) -> dict[str, object]:
 
 def guest_views(endpoint: Endpoint, key: Path) -> dict[str, dict[str, object]]:
     return {knob: guest_knob(endpoint, key, knob) for knob in KNOBS}
-
-
-def injections(endpoint: Endpoint, key: Path) -> list[str]:
-    """The kernel log's injection lines, each with the ``name <knob>`` line that follows it."""
-    result = ssh(endpoint, key, f"dmesg | grep -A1 '{_INJECTION_LINE}'; true")
-    assert result.returncode == 0, f"dmesg exited {result.returncode}"
-    return [line for line in result.stdout.splitlines() if line.strip() and line != "--"]
 
 
 def assert_matches_guest(reported: object, guest_view: dict[str, object], knob: str) -> None:
