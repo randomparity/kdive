@@ -19,26 +19,29 @@ both passthrough kinds. This spec holds the contract the implementation issues b
 | The claim lives on the allocation; occupancy is derived from non-terminal allocations | `services/allocation/admission/pcie_claim.py:48-70`; `db/schema/0014_allocations_pcie_claim.sql` |
 | Resolve-and-claim runs in the per-Resource lock at admission | `services/allocation/admission/core.py:243`, `:329-345` |
 | A System is one per Allocation | `domain/lifecycle/records.py:71-72` |
-| `System.accel` is `kvm`, `tcg` or `NULL` | `domain/lifecycle/records.py:86` |
+| `System.accel` is `kvm`, `tcg` or `NULL`, resolved from advertised `guest_arches`; fault-inject advertises none, so it is `NULL` there | `domain/lifecycle/records.py:86`; `services/systems/validation.py:56`; `services/systems/admission.py:795` |
 | An allocation can end with its System not torn down (only external-boot history is fenced) | `services/allocation/release.py:223-237`; `reconciler/repairs/allocations.py:216-246` |
+| The fleet availability read has its own claim query | `mcp/tools/catalog/availability.py:180-203` |
 | Teardown deletes device rows, then destroys the domain | `jobs/handlers/systems.py:709-722`, `:804-805` |
+| `delete_devices_for_system` deletes every kind; reclaim callers use it | `db/repositories.py:542`; `jobs/handlers/system_reclaim.py:111`; `reconciler/repairs/jobs.py:117` |
 | A successful reprovision deletes rows in its commit; a failed one marks `attached` rows `lost` | `jobs/handlers/systems.py:264`; ADR-0823 Amendment (2026-11-19) |
 | Local discovery writes the five-field descriptor from node devices; remote does not enumerate | `providers/local_libvirt/discovery.py:186-228`, `:323-341`; `providers/remote_libvirt/discovery.py:11` |
 | The capability view keeps only the five descriptor fields | `domain/catalog/resource_capabilities.py:289-308` |
 | `live_devices` finds only `<interface>` and `<disk>` and types every `<interface>` as `nic` | `providers/shared/libvirt_hotplug.py:174-193` |
 | Admission limits: 8 rows, unpluggable states, advisory lock | `mcp/tools/lifecycle/systems/devices.py:52`, `:58`, `:196-268` |
 | Handlers: settle windows and state edges | `jobs/handlers/devices.py:41-42`, `:136-285` |
-| Every libvirt provider advertises through one `ADVERTISED_KINDS` | `providers/local_libvirt/composition.py:525`; `providers/remote_libvirt/composition.py:549`; `providers/fault_inject/composition.py:180` |
+| Every provider advertises through one `ADVERTISED_KINDS` | `providers/local_libvirt/composition.py:525`; `providers/remote_libvirt/composition.py:549`; `providers/fault_inject/composition.py:180` |
 | q35 System XML renders no `<controller>`; remote defaults to i440fx | `providers/local_libvirt/lifecycle/xml.py` (none; comment at `:436`); `providers/remote_libvirt/config.py:38-47` |
 
 ## Design
 
 ### Capability and port
 
-`HotplugDeviceKind` gains `PCI = "pci"` and `SRIOV_VF = "sriov_vf"`. `ProviderSupport.hotplug_devices`
-and `systems.get data.hotplug_devices` carry them like the existing kinds; the capability refusal
-is `capability_unsupported` with `capability: hotplug:pci` or `hotplug:sriov_vf`. `DeviceSpec` gets
-two trailing fields with defaults, so existing constructors keep working:
+`HotplugDeviceKind` gains `PCI = "pci"` (item A) and `SRIOV_VF = "sriov_vf"` (item C, so no provider
+advertises a kind whose resolution does not exist yet). `ProviderSupport.hotplug_devices` and
+`systems.get data.hotplug_devices` carry them like the existing kinds; the capability refusal is
+`capability_unsupported` with `capability: hotplug:pci` or `hotplug:sriov_vf`. `DeviceSpec` gets two
+trailing fields with defaults, so existing constructors keep working:
 
 ```python
 host_device: str | None = None  # pci, sriov_vf: the resolved host device (libvirt: BDF)
@@ -74,67 +77,71 @@ and `parameter_mismatch` still comes first (`device` or `port` given to the wron
 |---|---|
 | `device` missing or not a valid match spec for `pci` | `invalid_device` |
 | `port` missing or not a valid match spec for `sriov_vf` | `invalid_port` |
-| System `accel` is not `kvm` | `accel_unsupported` |
+| System `accel` is `tcg` (the provider also refuses a non-`kvm` domain) | `accel_unsupported` |
 | no device in the allocation's claim matches `device` | `device_not_claimed` |
-| a matching claimed device is a physical port with VFs | `pf_has_virtual_functions` |
 | no claimed physical port matches `port`, or the match has no VFs | `port_not_claimed` |
 | two or more claimed ports match `port` | `ambiguous_port` |
 
 Conflicts, `conflict` with `data.reason`, checked after the ADR-0823 ones (`system_not_ready`,
-`device_op_in_flight`, `device_limit`):
+`device_op_in_flight`, `device_limit`; the limit of 8 is unchanged):
 
 | Condition | `data.reason` |
 |---|---|
-| 4 passthrough rows already exist (any state) | `passthrough_limit`, `data.limit: 4` |
+| the System's allocation is `released`, `expired` or `failed` | `allocation_not_active` |
 | every matching claimed device already has a row, or the port's pool is exhausted | `no_free_device`; for a VF, `data.pool: {total, in_use}` |
 
-Admission, in the existing transaction under the System advisory lock: resolve the target from the
-allocation's `pcie_claim` and the resource's descriptors, insert the row `plugging` with
-`host_device`, `physical_port`, `resource_id` and `identity.pci_id`, enqueue `PLUG_DEVICE`.
+Admission, in the existing transaction under the System advisory lock: read the allocation row
+`FOR SHARE` and require a non-terminal state, resolve the target from its `pcie_claim` and the
+resource's descriptors, insert the row `plugging` with `host_device`, `physical_port`,
+`resource_id` and `identity.pci_id`, enqueue `PLUG_DEVICE`.
 
-- `pci`: candidates are the claimed devices that match `device`, are not a port with VFs and hold no
-  row; take the lowest BDF.
+- `pci`: candidates are the claimed devices that match `device` and hold no row; take the lowest
+  BDF. A claimed port is a valid `pci` target (the operator decided what is bound to `vfio-pci`).
 - `sriov_vf`: the claimed ports matching `port` must be exactly one; candidates are the VF
   descriptors whose `pf_bdf` is that port, minus every BDF `active_claims` returns (other
   allocations' claims, this allocation's own direct claims, ledger rows); take the lowest BDF.
   `data.pool.total` is the VF descriptor count, `in_use` the number removed.
 
-A unique-index violation on the insert is `no_free_device` and the caller retries.
-`systems.unplug_device` is unchanged except for its window (below). `systems.list_devices` items
-gain `pci_id` inside `identity` and nothing else: the host BDF and the physical port stay in the
-ledger and are not returned. `systems.snapshot` joins the reverse refusal
-list: `conflict`, `reason: passthrough_attached`, while any passthrough row exists in any state
-(a device assigned through vfio blocks the QEMU state save; confirmed only by the live proof).
-`systems.restore` is unchanged: it moves `attached` rows to `lost`.
+A unique-index violation on the insert is `no_free_device` and the caller retries. The plug job
+re-reads the allocation before the provider call; a terminal allocation fails the job `conflict`,
+`reason: allocation_not_active`, and moves the row to `failed`, as `system_not_ready` does.
+
+`systems.unplug_device` is unchanged. `systems.list_devices` items gain `pci_id` inside `identity`
+and nothing else: the host BDF and the physical port stay in the ledger and are not returned.
+`systems.snapshot` and `systems.restore` are unchanged: restore moves `attached` rows to `lost`, and
+a snapshot of a guest holding a vfio device surfaces the provider's own error if QEMU cannot save
+its state (unverified).
 
 ### Limit contract
 
 | Limit | Unit | Clock | Scope | On violation | Recovery |
 |---|---|---|---|---|---|
-| Passthrough settle window: 60 s plug, 60 s un-plug | seconds | worker monotonic clock from job start, as ADR-0823 | one job | `control_failure`, `reason: settle_timeout`; row `failed`; the guest may still hold the device | `systems.unplug_device` again, or teardown/reprovision |
-| 4 passthrough rows | rows, any state, `pci` and `sriov_vf` together | none | per System, inside the limit of 8 | `conflict`, `passthrough_limit` | un-plug a `failed`, `lost` or `attached` row |
+| Settle window: 60 s plug, 30 s un-plug, all kinds | seconds | worker monotonic clock from job start, as ADR-0823 | one job | `control_failure`, `reason: settle_timeout`; row `failed`; the guest may still hold the device | `systems.unplug_device` again, or teardown/reprovision |
+| 4 spare hot-plug root ports (libvirt q35) | ports | none | per System | `configuration_error`, `no_hotplug_slot` | un-plug a device, or reprovision |
 
-`nic` and `disk` keep 60 s and 30 s. The handler picks the window from the row's kind.
+The windows and the limit of 8 are ADR-0823's and no handler change is needed; the real adapters'
+release time is unmeasured, and the live proof records it.
 
 ### Ledger and schema
 
-One migration (number assigned by the implementing PR, under the migration-number scan):
+Item A's migration (number assigned by the implementing PR, under the migration-number scan):
 
 ```sql
 ALTER TABLE system_devices
-    ADD COLUMN resource_id    uuid REFERENCES resources (id),
-    ADD COLUMN host_device    text,
-    ADD COLUMN physical_port  text;
--- drop and recreate system_devices_kind_check to admit ('nic','disk','pci','sriov_vf')
+    ADD COLUMN resource_id  uuid REFERENCES resources (id),
+    ADD COLUMN host_device  text;
+-- drop and recreate system_devices_kind_check to admit ('nic','disk','pci')
 ALTER TABLE system_devices
     ADD CONSTRAINT system_devices_passthrough_check CHECK (
-        (kind IN ('pci', 'sriov_vf')) = (host_device IS NOT NULL AND resource_id IS NOT NULL)),
-    ADD CONSTRAINT system_devices_port_check CHECK (physical_port IS NULL OR kind = 'sriov_vf');
+        (resource_id IS NULL) = (host_device IS NULL)
+        AND ((kind = 'pci') = (host_device IS NOT NULL)));
 CREATE UNIQUE INDEX system_devices_host_device_idx
     ON system_devices (resource_id, host_device) WHERE host_device IS NOT NULL;
 ```
 
-The state set and the transition table are ADR-0823's, unchanged. The migration touches no job
+Item C's migration adds `physical_port text`, widens the kind check with `sriov_vf` and the
+passthrough check to `kind IN ('pci', 'sriov_vf')`, and constrains `physical_port` to `sriov_vf`
+rows. The state set and the transition table are ADR-0823's, unchanged. The migration touches no job
 kind. The window tests that list the newest migrations take the new row, as the repository's
 migration notes require.
 
@@ -143,44 +150,54 @@ migration notes require.
 `active_claims(conn, resource_id)` returns the union of the non-terminal allocations' claims and
 one claim per `system_devices` row of that resource with a `host_device`, whatever its state, so
 a `failed` or `lost` row keeps the device occupied. The ids on a row-derived claim come from the
-host's descriptor list. `resolve_union` also treats a VF as claimed when its PF is claimed: it adds
-every descriptor whose `pf_bdf` is in the claimed set to the claimed set before it subtracts, so the
-rule is in the pure matcher and covered by unit tests there. A PF claimed by one allocation does not
-stop another allocation claiming a VF that was already claimed before the PF (the pool draw skips
-it).
+host's descriptor list. The fleet availability read (`availability._claims_by_resource`) is
+rewritten onto one shared fleet-wide union function with `active_claims`, and a test asserts the two
+agree.
+
+The pool-draw expansion lives only in `resolve_union` at admission, where every claim in the list
+belongs to another allocation: it adds every descriptor whose `pf_bdf` is in the claimed set to the
+claimed set before it subtracts, so the pure matcher and its unit tests own the rule. The plug draw
+uses the raw `active_claims` list, not the expansion, so the PF owner's own pool stays open. A VF
+claimed before its PF is skipped by the draw; an allocation resolves its claim once, so the owner
+never requests a VF of its own port.
 
 ### Reclaim
 
 | Event | Rule |
 |---|---|
 | un-plug settles | row deleted; the device is unbound again; the reservation stays |
-| teardown | `release_all` best effort; `nic` and `disk` rows are deleted before the destroy as now; passthrough rows are deleted after `provisioner.teardown` returns, in the commit that publishes the terminal state, through a `delete_passthrough_devices_for_system` beside the existing call; a failed destroy leaves them, so the device stays occupied |
-| reprovision | success: all rows deleted in the commit that returns the System to `READY` (the provider call has recreated the domain); failure: `attached` rows become `lost` and stay occupying |
-| system-reclaim (`reclaim_device_ledger`) | all rows deleted; the provider proved the domain absent |
+| teardown | `release_all` best effort; `delete_devices_for_system` is narrowed to the `nic` and `disk` kinds and still runs before the destroy; passthrough rows are deleted by a new `delete_passthrough_devices_for_system` after `provisioner.teardown` returns, in the commit that publishes the terminal state; a failed destroy leaves them, so the device stays occupied |
+| reprovision | success: all kinds deleted in the commit that returns the System to `READY` (the provider call has recreated the domain); failure: `attached` rows become `lost` and stay occupying |
+| system-reclaim (`reclaim_device_ledger`: `system_reclaim.py:111`, and its callers in `system_authority.py`, `external_boot/lifecycle.py`, `repairs/jobs.py:117`) | all kinds deleted through a new delete-all function; each caller runs after the provider proved the domain absent (verify per caller) |
 | power OFF/CYCLE, snapshot restore | `attached` rows become `lost`; occupancy unchanged; `unplug_device` on a `lost` row deletes it after the provider finds the device absent |
-| allocation released or expired with a live System | claim stops counting; the rows keep the device occupied until the reaper's teardown deletes them |
+| allocation released or expired with a live System | claim stops counting; the rows keep the device occupied until the reaper's teardown deletes them; plug admission refuses (`allocation_not_active`) |
 
 ### Providers
 
-fault-inject: advertise both kinds; the in-memory table stores the two new fields; `hotplug_behaviour`
-and the per-plane fault rate apply unchanged; a resource registered with `pcie_devices` descriptors
-(including `pf_bdf`) serves allocation claims. libvirt (local; remote only after node-device
-enumeration, see the split):
+fault-inject: advertise `pci` (item A) and `sriov_vf` (item C); the in-memory table stores the two
+new fields; `hotplug_behaviour` and the per-plane fault rate apply unchanged; a resource registered
+with `pcie_devices` descriptors (including `pf_bdf`) serves allocation claims. libvirt (local;
+remote only after node-device enumeration, see the split):
 
 - `pci`: attach `<hostdev mode='subsystem' type='pci' managed='no'><source><address .../></source>
   <alias name='ua-kdive-<device_id>'/></hostdev>` with the live flag only. Before attaching, read the
   node device and refuse unless its driver is `vfio-pci` (`device_not_assignable`). A free
-  hot-plug root port must exist: on q35 count `pcie-root-port` controllers with nothing attached,
-  else `no_hotplug_slot`. libvirt's own refusal (no IOMMU, group peers not bound) is `plug_refused`.
+  hot-plug slot must exist: on q35 a `pcie-root-port` controller whose `index` is no other device's
+  `<address bus=...>` in the live XML, else `no_hotplug_slot`; i440fx uses a free slot on `pci.0`.
+  The provider also reads the live domain `type` and refuses a non-`kvm` domain
+  (`accel_unsupported`); other guest architectures refuse the kind. libvirt's own refusal (no IOMMU,
+  group peers not bound) is `plug_refused`.
 - `sriov_vf`: attach `<interface type='hostdev' managed='no'><mac address=.../><source><address
   type='pci' .../></source><alias .../></interface>`. libvirt sets the VF's MAC through the physical
-  port and restores it on detach (confirm in the live proof).
+  port and restores it on detach (confirm in the live proof). If `managed='no'` or the MAC step is
+  not valid for an interface-hostdev with a pre-bound VF, item D falls back to a plain `<hostdev>`
+  with no MAC control and `identity` loses `mac`.
 - `live_devices` learns the two shapes: a `<hostdev type='pci'>` with a kdive alias is `pci`, an
   `<interface type='hostdev'>` with one is `sriov_vf`; today the second would be typed `nic`, so the
   change is needed before either kind is advertised. The alias is the handle, as for `nic`.
 - Provisioning: when the allocation's `pcie_claim` is non-empty and the machine is q35, the
-  provisioner renders 4 spare `pcie-root-port` controllers; i440fx and pseries need none. Systems
-  without a claim render as today.
+  provisioner renders 4 spare `pcie-root-port` controllers; i440fx needs none. Systems without a
+  claim render as today.
 - Discovery adds `pf_bdf` to a descriptor whose node device has a `phys_function` capability. The
   nodedev address attributes are hex strings (`0x3b`), unlike the decimal elements `_compose_bdf`
   reads, so the BDF composer for it is separate. `resource_capabilities.pcie_descriptors` keeps the
@@ -191,9 +208,10 @@ enumeration, see the split):
 
 ### Errors from the port
 
-ADR-0823's table plus `CONFIGURATION_ERROR` + `device_not_assignable` and `no_hotplug_slot` (a plug
-the port rejects with a configuration error deletes its row only when it returned no handle, as
-today), `accel_unsupported` and `pf_has_virtual_functions` are server-side refusals before enqueue.
+ADR-0823's table plus `CONFIGURATION_ERROR` + `device_not_assignable`, `no_hotplug_slot` and
+`accel_unsupported` (a plug the port rejects with a configuration error deletes its row only when it
+returned no handle, as today). `allocation_not_active` at job start fails the job `conflict` and
+moves the row to `failed`, like `system_not_ready`.
 
 ## Decisions answered
 
@@ -213,11 +231,11 @@ today), `accel_unsupported` and `pf_has_virtual_functions` are server-side refus
    claimed devices; local-libvirt x86_64 on a host whose operator bound devices to `vfio-pci`;
    fault-inject; one worker per job; the reconciler and the reaper that tears down expired
    allocations.
-2. Invariants: a host device is held by at most one of {an allocation claim, a ledger row} per
-   allocation and never offered to a second allocation while a row names it; a passthrough row exists
-   until the domain that may hold the device is destroyed or proven absent; kdive never unbinds a
-   host driver; only claimed devices and the VFs of claimed ports can be plugged; no plug or un-plug
-   overlaps power, snapshot, restore or reprovision (ADR-0823).
+2. Invariants: at most one ledger row names a host device, and a device is never offered to a second
+   allocation while a live claim or any row names it; a passthrough row exists until the domain that
+   may hold the device is destroyed or proven absent; kdive never unbinds a host driver; only claimed
+   devices and the VFs of claimed ports can be plugged, and only while the allocation is live; no
+   plug or un-plug overlaps power, snapshot, restore or reprovision (ADR-0823).
 3. Accepted: a worker that dies after the provider call and before the commit leaves a `failed` row
    with no handle, found by `device_id` on retry; a device in a domain whose destroy fails stays
    occupied until an operator tears the System down; devices do not survive a power cycle; an
@@ -225,10 +243,10 @@ today), `accel_unsupported` and `pf_has_virtual_functions` are server-side refus
    unbound devices cannot use the feature; a VF created or removed on the host after discovery shows
    only after re-discovery; guest-side loss of a device without a hypervisor event shows as a stale
    `attached` row until the next `is_attached` poll.
-4. Covered elsewhere: forced un-plug (#3721); PowerVM slots and logical ports (#3688);
-   disk quota for scratch disks (#3720); creating VFs, binding devices to `vfio-pci` and IOMMU
-   enablement (host setup, unowned until an issue names it); VF VLAN and rate settings (unowned);
-   live migration and snapshot of a guest holding a device (unowned).
+4. Covered elsewhere: forced un-plug (#3721); PowerVM slots and logical ports (#3688); disk quota
+   for scratch disks (#3720); creating VFs, binding devices to `vfio-pci` and IOMMU enablement (host
+   setup, unowned until an issue names it); VF VLAN and rate settings (unowned); live migration and
+   snapshot of a guest holding a device (unowned).
 
 ## Non-goals
 
@@ -239,24 +257,26 @@ today), `accel_unsupported` and `pf_has_virtual_functions` are server-side refus
 | Creating VFs (`sriov_numvfs`), `vfio-pci` binding, IOMMU setup | host setup; unowned until an issue names it |
 | VF VLAN, MAC choice and rate limits | unowned |
 | Plug-time claim of an unreserved device | operator decision on the PR; unowned if declined |
-| Passthrough of a device while a snapshot exists or a snapshot while it is attached | refused here (`passthrough_attached`); lifting it is unowned |
+| A refusal of snapshot while a passthrough device is attached | unowned; added if the live proof shows QEMU cannot save such a guest |
+| aarch64 and ppc64le passthrough on libvirt | unowned |
 | Real-hardware proof on hosts this repository does not name | each implementing issue |
 
 ## Proposed implementation split
 
-Not filed; each is one PR. #A belongs to #3723, #C and #D to #3724.
+Not filed; each is one PR. A belongs to #3723, C and D to #3724, B to #3723, E to both.
 
 | # | Title | Scope | Issue | Order | Effort | Live proof |
 |---|---|---|---|---|---|---|
-| A | Passthrough ledger, occupancy and tools | `pci` and `sriov_vf` kinds, `DeviceSpec` fields, migration, `active_claims` ledger source, tool parameters and refusals, handler windows, teardown and reprovision ordering, snapshot refusal, fault-inject provider, guide and RBAC docs | #3723 (shared by #3724) | 1 | L | none; fault-inject |
-| B | libvirt `pci` hostdev attach | `live_devices` shapes, hostdev XML, vfio-pci driver check, spare root ports on q35, advertise `pci` on local-libvirt | #3723 | 2 (after A) | L | local-libvirt on an x86_64 host with an IOMMU and a device bound to `vfio-pci` |
-| C | SR-IOV descriptor field and pool draw | `pf_bdf` in discovery and the capability view, matcher VF-of-claimed-PF rule, `sriov_vf` resolution and pool counts, fault-inject VFs | #3724 | 2 (after A, parallel with B) | M | none; fault-inject |
+| A | Passthrough ledger, occupancy and tools | `pci` kind, `DeviceSpec` fields, migration, `active_claims` and availability ledger source, `allocation_not_active` check, tool parameters and refusals, reclaim split (`delete_devices_for_system` narrowed, passthrough and delete-all functions, callers), fault-inject provider, guide and RBAC docs; at the upper size bound, so the implementer may cut it into schema-and-occupancy, then tools-and-fault-inject | #3723 (shared by #3724) | 1 | L | none; fault-inject |
+| B | libvirt `pci` hostdev attach | `live_devices` shapes, hostdev XML, vfio-pci driver check, free-slot check, spare root ports on q35, advertise `pci` on local-libvirt | #3723 | 2 (after A) | L | local-libvirt on an x86_64 host with an IOMMU and a device bound to `vfio-pci` |
+| C | SR-IOV descriptor field and pool draw | `sriov_vf` kind and its migration, `pf_bdf` in discovery and the capability view, matcher VF-of-claimed-PF rule, `sriov_vf` resolution and pool counts, fault-inject VFs | #3724 | 2 (after A, parallel with B) | M | none; fault-inject |
 | D | libvirt `interface type=hostdev` VF attach | interface-hostdev XML, MAC set and restore, advertise `sriov_vf` on local-libvirt | #3724 | 3 (after B and C) | M | local-libvirt on a host with an SR-IOV NIC whose VFs are bound to `vfio-pci` |
-| E | remote-libvirt node-device enumeration and advertise | node-device inventory over the TLS transport, advertise both kinds | #3723 and #3724 | 4 (after B and D) | M | remote-libvirt host with an assignable device |
+| E | remote-libvirt node-device enumeration and advertise (optional: neither Expected section needs it, and the issues carry the remote label) | node-device inventory over the TLS transport, advertise both kinds | #3723 and #3724 | 4 (after B and D) | M | remote-libvirt host with an assignable device |
 
-Unverified until the live proof: that libvirt refuses an unbound device as stated; that spare
-`pcie-root-port` controllers make a q35 hostdev hot-plug succeed on the QEMU version kdive boots;
-that vfio assignment blocks internal snapshots; the effect of the root-port change on the NIC-slot
-pin at `xml.py:436`; that a fault-inject resource accepts `pcie_devices` descriptors without a
-fixture change. No lab host with an IOMMU and an SR-IOV adapter is named; the orchestrator
-schedules it.
+Unverified until the live proof: that libvirt refuses an unbound device as stated under
+`managed='no'`; that `managed` and a MAC are accepted on an interface-hostdev with a pre-bound VF;
+that a hostdev detach completes through the guest's hot-unplug request; that spare `pcie-root-port`
+controllers make a q35 hostdev hot-plug succeed on the QEMU version kdive boots; that vfio assignment
+blocks internal snapshots; the effect of the root-port change on the NIC-slot pin at `xml.py:436`;
+that a fault-inject resource accepts `pcie_devices` descriptors without a fixture change. No lab host
+with an IOMMU and an SR-IOV adapter is named; the orchestrator schedules it.
