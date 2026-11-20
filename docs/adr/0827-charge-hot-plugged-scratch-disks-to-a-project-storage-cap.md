@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (2026-11-20)
 
 Implementation is tracked by #3720. Nothing in this record is implemented yet.
 
