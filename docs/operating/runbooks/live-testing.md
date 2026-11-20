@@ -1854,6 +1854,21 @@ and the staged `fedora-kdive-ready-44` image (remote: the section 7 lane of the
 [remote runbook](remote-live-stack.md)). Select the provider with `-k local-libvirt` or
 `-k remote-libvirt`.
 
+Each configuration records its 60 cells per provider and skips the other configuration's 60.
+Start the stack once per configuration; a recovery stack needs a durable worker-death verifier,
+so `KDIVE_WORKER_DEATH_VERIFIER=docker` (the `local` verifier leaves the stack in the default
+configuration, and the cells would skip):
+
+```bash
+examples/local-libvirt/demo-up.sh                                     # default
+uv run python -m pytest -m live_stack -k local-libvirt tests/integration/test_hotplug_tool_cells_live.py
+examples/local-libvirt/demo-down.sh --wipe --yes
+KDIVE_WORKER_DEATH_VERIFIER=docker examples/local-libvirt/demo-up.sh  # recovery
+uv run python -m pytest -m live_stack -k local-libvirt tests/integration/test_hotplug_tool_cells_live.py
+```
+
+The remote run uses the same two stack starts with `-k remote-libvirt`.
+
 - Each functional cell provisions the lane image and plugs one device of the cell's kind into
   the running guest. It then checks three things independently: the ledger row
   (`systems.list_devices`, state `attached`, with the reported MAC or serial), the provider's own
@@ -1863,6 +1878,14 @@ and the staged `fedora-kdive-ready-44` image (remote: the section 7 lane of the
 - The un-plug then requires all three to report the device gone, the backing volume to be absent
   on the provider, and the ledger row to be deleted. Teardown frees anything a failed cell left.
 - Rejection cells aim at the stack's torn-down lane target, as the power and snapshot cells do.
+
+Last run, recovery configuration: candidate `6a63d89e1` (server, worker and reconciler at that SHA,
+the worker venv carrying the hot-plug helper), x86_64, one stack started with
+`KDIVE_WORKER_DEATH_VERIFIER=docker`. The control plane was an Ubuntu 26.04 KVM lab guest. The
+remote provider was a Rocky Linux 10.2 host with nested KVM and a Fedora 43 guest base.
+`-k local-libvirt` ran 60 cells (12 functional, 48 rejection) and `-k remote-libvirt` ran 60; all
+120 passed and each run skipped the default configuration's 60. After `demo-down.sh --wipe --yes`
+neither libvirt defined a domain.
 
 #### Capture and introspection tool cells (#2814)
 

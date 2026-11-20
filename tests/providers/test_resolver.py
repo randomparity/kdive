@@ -29,12 +29,14 @@ class _Runtime:
         self.label = label
         self.registered: list[object] = []
         self.bound_to: str | None = None
+        self.bound_capabilities: object = None
 
     async def register_discovery(self, pool: object) -> None:
         self.registered.append(pool)
 
-    def for_resource(self, resource_name: str) -> _Runtime:
+    def for_resource(self, resource_name: str, capabilities: object | None = None) -> _Runtime:
         self.bound_to = resource_name
+        self.bound_capabilities = capabilities
         return self
 
 
@@ -132,7 +134,7 @@ def test_register_all_discovery_isolates_one_runtimes_failure() -> None:
 
 
 class _CursorContext:
-    def __init__(self, row: dict[str, str] | None) -> None:
+    def __init__(self, row: dict[str, Any] | None) -> None:
         self.row = row
         self.executed: tuple[object, tuple[UUID, ...]] | None = None
 
@@ -150,12 +152,12 @@ class _CursorContext:
     async def execute(self, sql: object, params: tuple[UUID, ...]) -> None:
         self.executed = (sql, params)
 
-    async def fetchone(self) -> dict[str, str] | None:
+    async def fetchone(self) -> dict[str, Any] | None:
         return self.row
 
 
 class _Conn:
-    def __init__(self, row: dict[str, str] | None) -> None:
+    def __init__(self, row: dict[str, Any] | None) -> None:
         self.cursor_context = _CursorContext(row)
 
     def cursor(self, *, row_factory: object) -> _CursorContext:
@@ -214,7 +216,9 @@ def test_runtime_for_system_binds_to_resource_name() -> None:
     # ADR-0187: runtime_for_system resolves (kind, name) and returns the runtime bound to the
     # System's Resource name, so a per-op call reaches the allocated host.
     resolver, runtimes = _resolver(ResourceKind.REMOTE_LIBVIRT)
-    conn = cast(AsyncConnection, _Conn({"kind": "remote-libvirt", "name": "host-b"}))
+    conn = cast(
+        AsyncConnection, _Conn({"kind": "remote-libvirt", "name": "host-b", "capabilities": {}})
+    )
     bound = asyncio.run(resolver.runtime_for_system(conn, _ABSENT_OBJECT_ID))
     assert bound is runtimes[ResourceKind.REMOTE_LIBVIRT]
     assert runtimes[ResourceKind.REMOTE_LIBVIRT].bound_to == "host-b"
@@ -222,7 +226,9 @@ def test_runtime_for_system_binds_to_resource_name() -> None:
 
 def test_binding_for_system_returns_binding_with_kind_and_bound_runtime() -> None:
     resolver, runtimes = _resolver(ResourceKind.REMOTE_LIBVIRT)
-    conn = cast(AsyncConnection, _Conn({"kind": "remote-libvirt", "name": "host-c"}))
+    conn = cast(
+        AsyncConnection, _Conn({"kind": "remote-libvirt", "name": "host-c", "capabilities": {}})
+    )
     binding = asyncio.run(resolver.binding_for_system(conn, _ABSENT_OBJECT_ID))
     assert binding.kind is ResourceKind.REMOTE_LIBVIRT
     assert binding.resource_name == "host-c"
@@ -233,7 +239,9 @@ def test_binding_for_system_returns_binding_with_kind_and_bound_runtime() -> Non
 
 def test_binding_for_run_returns_binding_with_kind_and_bound_runtime() -> None:
     resolver, runtimes = _resolver(ResourceKind.LOCAL_LIBVIRT)
-    conn = cast(AsyncConnection, _Conn({"kind": "local-libvirt", "name": "host-d"}))
+    conn = cast(
+        AsyncConnection, _Conn({"kind": "local-libvirt", "name": "host-d", "capabilities": {}})
+    )
     binding = asyncio.run(resolver.binding_for_run(conn, _ABSENT_OBJECT_ID))
     assert binding.kind is ResourceKind.LOCAL_LIBVIRT
     assert binding.resource_name == "host-d"
@@ -268,3 +276,27 @@ def test_binding_lookup_absent_object_fails_with_not_found(
         _SQL_FOR_KIND[object_kind],
         (_ABSENT_OBJECT_ID,),
     )
+
+
+@pytest.mark.parametrize("object_kind", sorted(_SQL_FOR_KIND))
+def test_every_lookup_selects_the_resource_capabilities(object_kind: str) -> None:
+    assert "capabilities AS capabilities" in _SQL_FOR_KIND[object_kind]
+
+
+@pytest.mark.parametrize(
+    "resolve",
+    (
+        ProviderResolver.runtime_for_allocation,
+        ProviderResolver.runtime_for_system,
+        ProviderResolver.runtime_for_run,
+        ProviderResolver.runtime_for_session,
+    ),
+)
+def test_every_lookup_binds_with_the_row_capabilities(resolve: _RuntimeLookup) -> None:
+    resolver, runtimes = _resolver(ResourceKind.FAULT_INJECT)
+    row = {"kind": "fault-inject", "name": "fi", "capabilities": {"seed": 3}}
+    conn = cast(AsyncConnection, _Conn(row))
+
+    asyncio.run(resolve(resolver, cast(_Conn, conn), _ABSENT_OBJECT_ID))
+
+    assert runtimes[ResourceKind.FAULT_INJECT].bound_capabilities == {"seed": 3}

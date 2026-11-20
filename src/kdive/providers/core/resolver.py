@@ -26,25 +26,26 @@ from kdive.providers.core.runtime import ProviderRuntime
 _log = logging.getLogger(__name__)
 
 _KIND_FOR_SYSTEM: LiteralString = (
-    "SELECT r.kind AS kind, r.name AS name FROM systems s "
+    "SELECT r.kind AS kind, r.name AS name, r.capabilities AS capabilities FROM systems s "
     "JOIN allocations a ON a.id = s.allocation_id "
     "JOIN resources r ON r.id = a.resource_id "
     "WHERE s.id = %s"
 )
 _KIND_FOR_RUN: LiteralString = (
-    "SELECT r.kind AS kind, r.name AS name FROM runs rn "
+    "SELECT r.kind AS kind, r.name AS name, r.capabilities AS capabilities FROM runs rn "
     "JOIN systems s ON s.id = rn.system_id "
     "JOIN allocations a ON a.id = s.allocation_id "
     "JOIN resources r ON r.id = a.resource_id "
     "WHERE rn.id = %s"
 )
 _KIND_FOR_ALLOCATION: LiteralString = (
-    "SELECT r.kind AS kind, r.name AS name FROM allocations a "
+    "SELECT r.kind AS kind, r.name AS name, r.capabilities AS capabilities FROM allocations a "
     "JOIN resources r ON r.id = a.resource_id "
     "WHERE a.id = %s"
 )
 _KIND_FOR_SESSION: LiteralString = (
-    "SELECT res.kind AS kind, res.name AS name FROM debug_sessions ds "
+    "SELECT res.kind AS kind, res.name AS name, res.capabilities AS capabilities "
+    "FROM debug_sessions ds "
     "JOIN runs rn ON rn.id = ds.run_id "
     "JOIN systems s ON s.id = rn.system_id "
     "JOIN allocations a ON a.id = s.allocation_id "
@@ -144,16 +145,16 @@ class ProviderResolver:
 
     async def binding_for_system(self, conn: AsyncConnection, system_id: UUID) -> ProviderBinding:
         """Resolve the System's provider kind and bound runtime (ADR-0191 F)."""
-        kind, name = await self._kind_and_name(conn, _KIND_FOR_SYSTEM, system_id, "system")
+        kind, name, caps = await self._resource_row(conn, _KIND_FOR_SYSTEM, system_id, "system")
         return ProviderBinding(
-            kind=kind, runtime=self.resolve(kind).for_resource(name), resource_name=name
+            kind=kind, runtime=self.resolve(kind).for_resource(name, caps), resource_name=name
         )
 
     async def binding_for_run(self, conn: AsyncConnection, run_id: UUID) -> ProviderBinding:
         """Resolve the Run's provider kind and bound runtime (ADR-0191 F)."""
-        kind, name = await self._kind_and_name(conn, _KIND_FOR_RUN, run_id, "run")
+        kind, name, caps = await self._resource_row(conn, _KIND_FOR_RUN, run_id, "run")
         return ProviderBinding(
-            kind=kind, runtime=self.resolve(kind).for_resource(name), resource_name=name
+            kind=kind, runtime=self.resolve(kind).for_resource(name, caps), resource_name=name
         )
 
     async def runtime_for_system(self, conn: AsyncConnection, system_id: UUID) -> ProviderRuntime:
@@ -165,24 +166,28 @@ class ProviderResolver:
     async def runtime_for_allocation(
         self, conn: AsyncConnection, allocation_id: UUID
     ) -> ProviderRuntime:
-        kind, name = await self._kind_and_name(
+        kind, name, caps = await self._resource_row(
             conn, _KIND_FOR_ALLOCATION, allocation_id, "allocation"
         )
-        return self.resolve(kind).for_resource(name)
+        return self.resolve(kind).for_resource(name, caps)
 
     async def runtime_for_session(self, conn: AsyncConnection, session_id: UUID) -> ProviderRuntime:
         return (await self.binding_for_session(conn, session_id)).runtime
 
     async def binding_for_session(self, conn: AsyncConnection, session_id: UUID) -> ProviderBinding:
-        kind, name = await self._kind_and_name(conn, _KIND_FOR_SESSION, session_id, "session")
+        kind, name, caps = await self._resource_row(conn, _KIND_FOR_SESSION, session_id, "session")
         return ProviderBinding(
-            kind=kind, runtime=self.resolve(kind).for_resource(name), resource_name=name
+            kind=kind, runtime=self.resolve(kind).for_resource(name, caps), resource_name=name
         )
 
-    async def _kind_and_name(
+    async def _resource_row(
         self, conn: AsyncConnection, sql: LiteralString, object_id: UUID, object_kind: str
-    ) -> tuple[ResourceKind, str]:
-        """Resolve the object's Resource ``(kind, name)``; name threads per-op identity (#395)."""
+    ) -> tuple[ResourceKind, str, Mapping[str, object]]:
+        """Resolve the object's Resource ``(kind, name, capabilities)``.
+
+        The name threads per-op identity (#395); the row's capabilities let a provider configured
+        on the row (fault-inject, ADR-0074) bind from it.
+        """
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(sql, (object_id,))
             row = await cur.fetchone()
@@ -192,4 +197,4 @@ class ProviderResolver:
                 category=ErrorCategory.NOT_FOUND,
                 details={"object_kind": object_kind, "object_id": str(object_id)},
             )
-        return ResourceKind(row["kind"]), row["name"]
+        return ResourceKind(row["kind"]), row["name"], row["capabilities"] or {}

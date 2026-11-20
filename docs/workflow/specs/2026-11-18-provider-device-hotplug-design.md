@@ -27,27 +27,37 @@ runs the synchronous port in a thread, as it does for `Snapshotter`.
 All three resolve the runtime with `with_runtime_for_system`, validate the id, then refuse a
 provider with an empty `hotplug_devices`, or one that lacks the requested kind, with
 `capability_unsupported(system_id, capability="hotplug:<kind>", provider=<name>,
-supported=<sorted kinds>)`.
+supported=<sorted kinds>)`. Where there is no valid kind to name (`unplug_device`, `list_devices`,
+and a `plug_device` whose `kind` does not parse) a provider with an empty set is refused with
+`capability="hotplug"`.
 
 `systems.plug_device(system_id, kind, network=None, size_gb=None, idempotency_key=None)`,
 contributor, job. `kind` is `nic` or `disk`. `network` applies to `nic` only, 1 to 64 characters of
 `[A-Za-z0-9._-]`; `None` selects the provider default. `size_gb` is required for `disk`, an integer
-1 to 32 (GB, one device). A parameter for the wrong kind, a missing `size_gb`, or a value out of
-range is `configuration_error` with `data.reason` `invalid_kind`, `invalid_network`, `invalid_size`
-or `parameter_mismatch`. On admission, in one transaction under the per-System advisory lock: insert
-the row as `plugging`, enqueue `PLUG_DEVICE` (payload `system_id`, `device_id`, dedup key
-`plug:<device_id>`; a fresh `device_id` per call). Response: status `running`, `data={job_id,
-device_id, kind, state: "plugging", settle_timeout_s: 60}`, `suggested_next_actions=["jobs.get",
-"systems.list_devices"]`. `idempotency_key` is the existing `keyed_mutation` key: a repeat with the
-same key replays the stored envelope, with the same `device_id`; without a key, each call mints a
-new device.
+1 to 32 (GB, one device). Each parameter error is `configuration_error` with `data.reason`:
+
+| Condition | `data.reason` |
+|---|---|
+| `kind` is neither `nic` nor `disk` | `invalid_kind` |
+| `kind=nic` and `network` does not match the pattern above | `invalid_network` |
+| `kind=disk` and `size_gb` is missing, a boolean, or outside 1 to 32 | `invalid_size` |
+| `size_gb` given with `kind=nic`, or `network` given with `kind=disk` | `parameter_mismatch` |
+
+The capability refusal above is judged before these parameter checks, and `parameter_mismatch` is
+checked before `invalid_network` and `invalid_size`. On admission, in one transaction under the
+per-System advisory lock: insert the row as `plugging`, enqueue `PLUG_DEVICE` (payload `system_id`,
+`device_id`, dedup key `plug:<device_id>`; a fresh `device_id` per call). Response: status
+`running`, `data={job_id, device_id, kind, state: "plugging", settle_timeout_s: 60}`,
+`suggested_next_actions=["jobs.wait", "systems.list_devices"]`. `idempotency_key` is the existing
+`keyed_mutation` key: a repeat with the same key replays the stored envelope, with the same
+`device_id`; without a key, each call mints a new device.
 
 `systems.unplug_device(system_id, device_id, idempotency_key=None)`, contributor, job. Admitted for
 `attached`, `failed` and `lost` rows. Sets the row `unplugging` and enqueues `UNPLUG_DEVICE`
 (payload `system_id`, `device_id`, `from_state`; dedup key `unplug:<device_id>:<attempt>`, where
 `attempt` is the `idempotency_key` or a uuid minted at admission, so a retry after a terminal job
 enqueues fresh work) in one transaction. Response: status `running`, `data={job_id, device_id,
-state: "unplugging", settle_timeout_s: 30}`. A `device_id` that is not a row of this System is
+state: "unplugging", settle_timeout_s: 30}`, the same `suggested_next_actions` as plug. A `device_id` that is not a row of this System is
 `not_found` with the fixed detail (ADR-0123).
 
 `systems.list_devices(system_id)`, viewer, database read. `data={devices, device_count,
@@ -62,8 +72,11 @@ their existing System advisory lock (teardown is exempt): `conflict`, `reason: d
 while a `PLUG_DEVICE` or `UNPLUG_DEVICE` job is queued or running on the System. Admission refusals
 shared by plug and un-plug, all `conflict` with `data.reason`: `system_not_ready` (state is not
 `READY`), `device_op_in_flight` (a plug or un-plug job is queued or running on the System, or the
-target row is `plugging`/`unplugging`), and, for plug only, `device_limit` (8 rows already). Role
-denial is `authorization_denied`. Both mutating tools are audited with `transition` `plug_device` /
+target row is `plugging`/`unplugging`), and, for plug only, `device_limit` (8 rows already). Both mutating
+tools are also refused by external-boot admission (`ExternalBootOperation.SYSTEM_DEVICE_HOTPLUG`),
+which admits neither in any restricting activation state; the denial is the matrix's `conflict`
+with its own next actions. It is checked after `system_not_ready` and, for plug, before
+`device_op_in_flight` and `device_limit`. Role denial is `authorization_denied`. Both mutating tools are audited with `transition` `plug_device` /
 `unplug_device`.
 
 The wrapper docstrings must carry the limits below. Both job kinds enqueue with `max_attempts=1`
@@ -93,36 +106,46 @@ CHECKs on `kind` and `state`, and an index on `system_id`. It also widens `jobs_
 | From | To | Cause |
 |---|---|---|
 | `plugging` | `attached` | provider settled |
-| `plugging` | `failed` | provider error, `settle_timeout`, or reconciler |
+| `plugging` | `failed` | provider error, `settle_timeout`, `system_not_ready` at job start, or reconciler |
 | `attached` | `unplugging` | `unplug_device` admitted |
-| `attached` | `lost` | power OFF/CYCLE or snapshot restore succeeded |
-| `unplugging` | `from_state` | `unplug_refused` (a `failed`/`lost` row stays so) |
+| `attached` | `lost` | power OFF/CYCLE or snapshot restore succeeded, or a reprovision failed after `release_all` |
+| `unplugging` | `from_state` | `unplug_refused`, or `system_not_ready` at job start (a `failed`/`lost` row stays so) |
 | `unplugging` | `failed` | `settle_timeout`, provider fault, or reconciler |
 | `failed`, `lost` | `unplugging` | `unplug_device` admitted |
 | `unplugging` | row deleted | provider settled |
 
+Both handlers re-check that the System is `READY` when the job starts, before any provider call. A
+plug that finds it is not moves its row to `failed` (with `detail`) and the job fails `conflict`,
+`reason: system_not_ready`, `data.current_status`; an un-plug returns its row to `from_state` and
+the job fails the same way.
+
 The worker sets `settle_deadline` when it starts the job, and commits `provider_handle` and
 `identity` as soon as `plug` returns, before it polls. `unplug` returning `False` means accepted and
 not settled, so the worker polls `is_attached`; a retried job whose row is already deleted succeeds,
-and one whose row is `failed` proceeds. Teardown, reprovision and the system-reclaim job call
-`release_all` best effort and delete the System's rows with a new `delete_devices_for_system`
-(system-reclaim runs it under its own flag, as `reclaim_snapshot_ledger` gates the snapshot delete),
-called beside `delete_snapshots_for_system`; the foreign-key cascade only covers the eventual
+and one whose row is `failed` proceeds. Teardown calls
+`release_all` best effort, then deletes the System's rows with a new `delete_devices_for_system`,
+called beside `delete_snapshots_for_system`. Reprovision calls `release_all` best effort before the
+provider call and, on success, deletes the rows in the transaction that returns the System to
+`READY`; when the reprovision fails, the System's `attached` rows move to `lost` in the transaction
+that records the failure, since `release_all` already freed their backing storage. The
+system-reclaim path only deletes the rows, under its own flag (`reclaim_device_ledger`, as
+`reclaim_snapshot_ledger` gates the snapshot delete) and with no `release_all`: the provider proved
+physical absence, so no device is left to release. The foreign-key cascade only covers the eventual
 System-row delete. `repair_stalled_device_ops` (reconciler) moves `plugging`/`unplugging` rows that
-have no active job of the matching kind to `failed`, without provider I/O. The power worker and the
-restore worker move the System's `attached` rows to `lost` in the transaction that commits their
-result. Provider text in `detail` passes the redactor.
+have no active job of the matching kind to `failed`, without provider I/O. The power worker (OFF and
+CYCLE), the restore worker and a failed reprovision move the System's `attached` rows to `lost` in
+the transaction that commits their result. Provider text in `detail` passes the redactor.
 
 ### Errors from the port
 
 A stopped domain on a `READY` System is `INFRASTRUCTURE_FAILURE` with `reason: domain_not_running`;
 un-plug of a `lost` row on a stopped domain still frees the backing volume. A plug the port rejects
-with `CONFIGURATION_ERROR` deletes its row.
-
-
-`CONTROL_FAILURE` + `unplug_refused` (guest or HMC refused; also `handle_unknown`),
-`CONTROL_FAILURE` + `settle_timeout` (worker deadline), `INFRASTRUCTURE_FAILURE` (provider fault,
-domain absent), `CONFIGURATION_ERROR` + `unknown_network`. No new `ErrorCategory` value.
+with `CONFIGURATION_ERROR` deletes its row when the provider returned no handle; otherwise the row
+becomes `failed`. The other outcomes are `CONTROL_FAILURE` +
+`unplug_refused` (guest or HMC refused; also `handle_unknown`), `CONTROL_FAILURE` + `plug_refused`
+(libvirt: the hypervisor refused the attach; the row becomes `failed`), `CONTROL_FAILURE` +
+`settle_timeout` (worker deadline), `INFRASTRUCTURE_FAILURE` (provider fault, domain absent),
+`CONFIGURATION_ERROR` + `unknown_network`. No new `ErrorCategory` value.
 
 ### Providers
 
@@ -144,9 +167,10 @@ domain absent), `CONFIGURATION_ERROR` + `unknown_network`. No new `ErrorCategory
 1. Actors and deployments: an MCP client holding contributor on a `READY` System; fault-inject,
    local-libvirt, remote-libvirt and PowerVM runtimes; x86_64 and ppc64le; one worker per job.
 2. Invariants: a ledger row exists exactly while kdive may have a device attached or backing storage
-   to free; plug and un-plug jobs never overlap each other or power, snapshot, restore and
-   reprovision; the boot disk and SSH NIC are never listed or removed; a provider without the kind
-   refuses before enqueue.
+   to free (a `lost` row kept by a failed reprovision has no storage left and only teardown clears
+   it); plug and un-plug jobs never overlap each other or power, snapshot, restore and reprovision;
+   the boot disk and SSH NIC are never listed or removed; a provider without the kind refuses before
+   enqueue.
 3. Accepted: a worker that dies between the provider call and the commit leaves a `failed` row with
    no handle (cleared by `unplug_device` when the provider can find the device by `device_id`); a
    snapshot restore can bring back an un-plugged device with no row; devices are not kept across
