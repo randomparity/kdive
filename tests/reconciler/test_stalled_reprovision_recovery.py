@@ -234,6 +234,59 @@ def test_job_appearing_under_the_lock_defers_the_candidate(
     asyncio.run(run())
 
 
+async def _seed_device(conn: psycopg.AsyncConnection, system_id: UUID, state: str) -> UUID:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO system_devices (system_id, kind, state) VALUES (%s, 'disk', %s) "
+            "RETURNING id",
+            (system_id, state),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
+async def _device_state(conn: psycopg.AsyncConnection, device_id: UUID) -> str:
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT state FROM system_devices WHERE id = %s", (device_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
+@pytest.mark.parametrize("role", [None, "kdive_reconciler"])
+def test_settled_system_marks_only_attached_devices_lost(
+    migrated_url: str, authority_role_dsns: _RoleDsns, role: str | None
+) -> None:
+    """The storage behind an `attached` row was freed before the stall (#3732)."""
+
+    async def run() -> None:
+        conn = await connect(migrated_url)
+        sid = await seed_system(conn, system_state=SystemState.REPROVISIONING)
+        attached = await _seed_device(conn, sid, "attached")
+        failed = await _seed_device(conn, sid, "failed")
+        url = migrated_url if role is None else authority_role_dsns(role)
+        assert await _repair(url) == 1
+        assert await _device_state(conn, attached) == "lost"
+        assert await _device_state(conn, failed) == "failed"
+        await conn.close()
+
+    asyncio.run(run())
+
+
+def test_deferred_system_keeps_its_attached_devices(migrated_url: str) -> None:
+    async def run() -> None:
+        conn = await connect(migrated_url)
+        sid = await seed_system(conn, system_state=SystemState.REPROVISIONING)
+        await _seed_job(conn, sid, state=JobState.RUNNING.value)
+        attached = await _seed_device(conn, sid, "attached")
+        assert await _repair(migrated_url) == 0
+        assert await _device_state(conn, attached) == "attached"
+        await conn.close()
+
+    asyncio.run(run())
+
+
 def test_repair_runs_under_the_reconciler_role(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
