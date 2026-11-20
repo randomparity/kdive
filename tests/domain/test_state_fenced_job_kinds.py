@@ -67,4 +67,5 @@ def test_the_two_lane_names_are_distinct_and_non_empty() -> None:
 def test_device_jobs_are_not_contributor_cancelable() -> None:
     # ADR-0823 rejects cancelable plug/un-plug: the ledger row's transient state is the only
     # record of the in-flight provider call.
-    assert not {JobKind.PLUG_DEVICE, JobKind.UNPLUG_DEVICE} & CONTRIBUTOR_CANCELABLE_JOB_KINDS
+    device_kinds = {JobKind.PLUG_DEVICE, JobKind.UNPLUG_DEVICE, JobKind.FORCE_UNPLUG_DEVICE}
+    assert not device_kinds & CONTRIBUTOR_CANCELABLE_JOB_KINDS
