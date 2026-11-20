@@ -1,16 +1,15 @@
-"""Adversarial: which failed System operations move `attached` device rows to `lost` (ADR-0823).
+"""Adversarial: a failed provision or teardown never moves `attached` device rows to `lost`.
 
 `devices_replaced` defaults to `False`; only `reprovision_handler` passes `True`, because only
-reprovision recreates the domain without the hot-plugged devices. A failed provision never had
-devices to lose, so its rows stay `attached`. These tests drive the real handlers against a real
-database so a flipped default, or a second caller passing `True`, turns them red. Provision
-reaches `_record_system_failure` through `_execute_system_lifecycle_call`, which passes its own
-default explicitly, so that is the default the provision case pins; `_record_system_failure`'s own
-default is reached only by `restore_handler`, which this module does not cover.
+reprovision recreates the domain without the hot-plugged devices (ADR-0823). Provision reaches
+`_record_system_failure` through `_execute_system_lifecycle_call`, which passes its own default
+explicitly, so the provision case pins that default. The reprovision and restore failure cases
+live in `tests/jobs/handlers/test_device_ledger_hooks.py`; the restore case pins
+`_record_system_failure`'s own default.
 
 `teardown_handler` never reaches `_record_system_failure` (`tearing_down -> failed` is not an
 edge) and reclaims the device ledger itself before the provider call, so a failed teardown
-must leave no `lost` rows; that behavior is pinned here too.
+leaves no row to mark `lost`; that behavior is pinned here too.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ from kdive.domain.lifecycle.records import System, SystemDevice
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
-from kdive.jobs.payloads import Authorizing, ReprovisionPayload, SystemPayload, TeardownPayload
+from kdive.jobs.payloads import Authorizing, SystemPayload, TeardownPayload
 from tests.adversarial.conftest import seed_allocation, seed_resource
 from tests.mcp.systems_support import provider_resolver
 from tests.support.object_store import INERT_OBJECT_STORE
@@ -64,10 +63,6 @@ class _FailingProvisioner:
         raise CategorizedError("provider refused", category=ErrorCategory.PROVISIONING_FAILURE)
 
     def provision(self, *args: object, **kwargs: object) -> str:
-        self._boom()
-        raise AssertionError("unreachable")
-
-    def reprovision(self, *args: object, **kwargs: object) -> str:
         self._boom()
         raise AssertionError("unreachable")
 
@@ -152,27 +147,6 @@ def test_failed_provision_leaves_attached_devices_attached(migrated_url: str) ->
                     )
             assert await _system_state(pool, sid) is SystemState.FAILED
             assert await _device_states(pool, sid) == [SystemDeviceState.ATTACHED]
-
-    asyncio.run(_run())
-
-
-def test_failed_reprovision_marks_attached_devices_lost(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            sid = await _seed_system_with_attached_device(pool, SystemState.REPROVISIONING)
-            job = await _enqueue(
-                pool,
-                JobKind.REPROVISION,
-                ReprovisionPayload(system_id=str(sid), profile_digest="d"),
-            )
-            async with pool.connection() as conn:
-                await conn.set_autocommit(True)
-                with pytest.raises(CategorizedError, match="provider refused"):
-                    await systems_handlers.reprovision_handler(
-                        conn, job, resolver=provider_resolver(provisioner=_FailingProvisioner())
-                    )
-            assert await _system_state(pool, sid) is SystemState.FAILED
-            assert await _device_states(pool, sid) == [SystemDeviceState.LOST]
 
     asyncio.run(_run())
 
