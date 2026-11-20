@@ -24,9 +24,10 @@ import subprocess  # noqa: S404 - fixed argv, no shell  # nosec B404
 import tempfile
 import xml.etree.ElementTree as ET  # noqa: S405 - the worker's own domain XML  # nosec B405
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from functools import cache, partial
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 import libvirt
@@ -35,8 +36,8 @@ import pytest
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
 from kdive.mcp.responses import ToolResponse
-from kdive.providers.ports.fault_injection import FAULT_KNOB_PARAMETERS
 from scripts.coverage_campaign.contract import Cell
+from tests.integration.live_stack import faultinject_proof
 from tests.integration.live_stack.cleanup import domain_disks
 from tests.integration.live_stack.image_smoke import Endpoint, os_matches, ssh
 from tests.integration.live_stack.scenario import (
@@ -205,99 +206,70 @@ async def _ssh_info(caller: HttpCaller, token: str, guest: Guest) -> dict[str, o
     return {"user": coords.get("user"), "port_matches_domain": True, "guest_is_domain": True}
 
 
-_DEBUGFS = "/sys/kernel/debug"
-_KNOBS = ("failslab", "fail_page_alloc")
 # Local-libvirt only (ADR-0825): the remote cells stay unbound and the contract classes them as a
 # capability_unsupported refusal.
 _LOCAL_ONLY = frozenset({"faultinject.inspect", "faultinject.reset", "faultinject.set"})
-_ARM = {"knob": "failslab", "probability": 1, "times": 1}
-
-
-def _guest_knob(endpoint: Endpoint, key: Path, knob: str) -> dict[str, object]:
-    """The guest's own debugfs view of one knob, read over SSH without the helper."""
-    probe = f"test -d {_DEBUGFS}/{knob} || {{ echo absent; exit 0; }}; cd {_DEBUGFS}/{knob} && "
-    names = " ".join(FAULT_KNOB_PARAMETERS[knob])
-    show = f"for f in {names}; do [ -f $f ] && echo $f=$(cat $f); done; true"
-    result = ssh(endpoint, key, probe + show)
-    assert result.returncode == 0, f"reading {knob} exited {result.returncode}"
-    if result.stdout.strip() == "absent":
-        return {"present": False}
-    pairs = (line.split("=", 1) for line in result.stdout.split() if "=" in line)
-    return {"present": True, **{name: int(value) for name, value in pairs}}
+_ARM = faultinject_proof.ARM
 
 
 async def _inspect(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
-    guest_views = {
-        knob: await asyncio.to_thread(_guest_knob, guest.endpoint, guest.key, knob)
-        for knob in _KNOBS
-    }
-    env = await caller.call("faultinject.inspect", {"system_id": guest.system_id}, token)
-    assert isinstance(env, ToolResponse), "expected one envelope"
-    if not any(view["present"] for view in guest_views.values()):
-        # A kernel built without fault injection exposes neither knob: the tool refuses with the
-        # fixed remediation instead of reporting two absent knobs.
-        assert env.error_category == ErrorCategory.CONFIGURATION_ERROR.value, env.error_category
-        assert env.data.get("reason") == "fault_injection_unsupported", env.data
-        return {"guest_knobs": "absent", "refused": "fault_injection_unsupported"}
-    assert env.error_category is None, f"{env.error_category}: {env.detail}"
-    knobs = data_mapping(env, "knobs")
-    assert set(knobs) == set(_KNOBS), f"knobs {sorted(knobs)}"
-    for knob, guest_view in guest_views.items():
-        reported = cast(dict[str, object], knobs[knob])
-        compared = {k: reported[k] for k in guest_view if k in reported}
-        assert compared == guest_view, f"{knob}: tool {reported} vs guest {guest_view}"
-        armed = (
-            bool(reported["present"])
-            and cast(int, reported["probability"]) > 0
-            and reported["times"] != 0
-        )
-        assert reported["armed"] is armed, f"{knob} armed flag {reported}"
-    return {"knobs": len(knobs), "matches_guest_debugfs": True}
-
-
-def _guest_views(guest: Guest) -> dict[str, dict[str, object]]:
-    return {knob: _guest_knob(guest.endpoint, guest.key, knob) for knob in _KNOBS}
+    key, endpoint = guest.key, guest.endpoint
+    await faultinject_proof.arm(caller, token, guest, faultinject_proof.INERT)
+    try:
+        views = await asyncio.to_thread(faultinject_proof.guest_views, endpoint, key)
+        env = await caller.call("faultinject.inspect", {"system_id": guest.system_id}, token)
+        assert isinstance(env, ToolResponse), "expected one envelope"
+        assert env.error_category is None, f"{env.error_category}: {env.detail}"
+        knobs = data_mapping(env, "knobs")
+        assert set(knobs) == set(faultinject_proof.KNOBS), f"knobs {sorted(knobs)}"
+        for knob, view in views.items():
+            assert view["present"] is True, f"the fixture kernel has no {knob}: {view}"
+            faultinject_proof.assert_matches_guest(knobs[knob], view, knob)
+        failslab = cast(dict[str, object], knobs["failslab"])
+        assert failslab["armed"] is True, failslab
+        assert cast(dict[str, object], knobs["fail_page_alloc"])["armed"] is False, knobs
+    finally:
+        await faultinject_proof.reset(caller, token, guest)
+    return {"knobs": len(knobs), "matches_guest_debugfs": True, "armed_knob_reported": True}
 
 
 async def _set(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
-    args = {"system_id": guest.system_id, **_ARM}
-    views = await asyncio.to_thread(_guest_views, guest)
-    env = await caller.call("faultinject.set", args, token)
-    assert isinstance(env, ToolResponse), "expected one envelope"
-    if not views["failslab"]["present"]:
-        assert env.error_category == ErrorCategory.CONFIGURATION_ERROR.value, env.error_category
-        assert env.data.get("reason") == "knob_absent", env.data
-        return {"guest_knobs": "absent", "refused": "knob_absent"}
+    key, endpoint = guest.key, guest.endpoint
+    before = await asyncio.to_thread(faultinject_proof.injections, endpoint, key)
     try:
-        assert env.error_category is None, f"{env.error_category}: {env.detail}"
-        reported = cast(dict[str, object], data_mapping(env, "knobs")["failslab"])
-        after = await asyncio.to_thread(_guest_knob, guest.endpoint, guest.key, "failslab")
-        assert {k: reported[k] for k in after if k in reported} == after, f"{reported} vs {after}"
-        assert (after["probability"], after["times"]) == (1, 1), after
+        env = await faultinject_proof.arm(caller, token, guest, _ARM)
+        reported = faultinject_proof.failslab_of(env)
+        assert (reported["probability"], reported["times"]) == (100, 1), reported
         assert reported["armed"] is True, reported
+        spent = await faultinject_proof.await_fired(endpoint, key)
+        after = await asyncio.to_thread(faultinject_proof.injections, endpoint, key)
     finally:
-        await caller.call("faultinject.reset", {"system_id": guest.system_id}, token)
-    return {"armed_readback_matches_guest": True}
+        await faultinject_proof.reset(caller, token, guest)
+    assert len(after) - len(before) == 2, f"expected one injection line pair: {before} -> {after}"
+    assert "name failslab" in after[-1], after[-1]
+    seen = await caller.call("faultinject.inspect", {"system_id": guest.system_id}, token)
+    assert isinstance(seen, ToolResponse) and seen.error_category is None, seen
+    assert faultinject_proof.failslab_of(seen)["armed"] is False, seen.data
+    return {"failure_injected": True, "times_spent": spent["times"], "log_lines": len(after)}
 
 
 async def _reset(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
-    views = await asyncio.to_thread(_guest_views, guest)
-    if not any(view["present"] for view in views.values()):
-        env = await caller.call("faultinject.reset", {"system_id": guest.system_id}, token)
-        assert isinstance(env, ToolResponse), "expected one envelope"
-        assert env.error_category == ErrorCategory.CONFIGURATION_ERROR.value, env.error_category
-        assert env.data.get("reason") == "fault_injection_unsupported", env.data
-        return {"guest_knobs": "absent", "refused": "fault_injection_unsupported"}
-    armed = await caller.call("faultinject.set", {"system_id": guest.system_id, **_ARM}, token)
-    assert isinstance(armed, ToolResponse) and armed.error_category is None, armed
-    env = await caller.call("faultinject.reset", {"system_id": guest.system_id}, token)
-    assert isinstance(env, ToolResponse), "expected one envelope"
-    assert env.error_category is None, f"{env.error_category}: {env.detail}"
-    after = await asyncio.to_thread(_guest_views, guest)
-    assert after["failslab"]["probability"] == 0, after
+    key, endpoint = guest.key, guest.endpoint
+    await faultinject_proof.arm(caller, token, guest, faultinject_proof.INERT)
+    armed = await asyncio.to_thread(faultinject_proof.guest_knob, endpoint, key, "failslab")
+    assert armed["probability"] == 100, f"the guest did not arm failslab: {armed}"
+    env = await faultinject_proof.reset(caller, token, guest)
     knobs = data_mapping(env, "knobs")
     assert all(cast(dict[str, object], knobs[k])["armed"] is False for k in knobs), knobs
-    return {"disarmed_matches_guest_debugfs": True}
+    after = await asyncio.to_thread(faultinject_proof.guest_views, endpoint, key)
+    for knob, view in after.items():
+        faultinject_proof.assert_matches_guest(knobs[knob], view, knob)
+    assert after["failslab"]["probability"] == 0, after
+    seen = await caller.call("faultinject.inspect", {"system_id": guest.system_id}, token)
+    assert isinstance(seen, ToolResponse) and seen.error_category is None, seen
+    inspected = faultinject_proof.failslab_of(seen)
+    assert inspected["armed"] is False, inspected
+    return {"disarmed_matches_guest_debugfs": True, "inspect_armed": False}
 
 
 async def _authorize(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
@@ -377,15 +349,27 @@ async def _functional(
     project = f"cov-{secrets.token_hex(4)}"
     token = caller.token(_grants(project, _GATES[tool]))
     provision = _provisioner(caller, token) if tool == "systems.provision" else provision_catalog
+    body = partial(_FUNCTIONAL[tool], caller, token)
+    if tool in _LOCAL_ONLY:  # the lane's stock kernel has no fault injection: boot the fixture
+        body = partial(_on_fixture_kernel, run, body, *faultinject_proof.fixture(_arch(run)))
     await on_lane_system(
-        run,
-        base_url,
-        issuer,
-        db_url,
-        project=project,
-        body=partial(_FUNCTIONAL[tool], caller, token),
-        provision=provision,
+        run, base_url, issuer, db_url, project=project, body=body, provision=provision
     )
+
+
+def _arch(run: CellRun) -> str:
+    return str(run.cell.guest_arch)
+
+
+async def _on_fixture_kernel(
+    run: CellRun,
+    body: Callable[[Guest], Awaitable[dict[str, object]]],
+    tree: Path,
+    manifest: dict[str, Any],
+    guest: Guest,
+) -> dict[str, object]:
+    endpoint = await faultinject_proof.boot_fixture_kernel(run, guest, tree, manifest)
+    return await body(replace(guest, endpoint=endpoint))
 
 
 def _target_args(
