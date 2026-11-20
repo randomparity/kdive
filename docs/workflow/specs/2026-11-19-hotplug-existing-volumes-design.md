@@ -51,14 +51,21 @@ role, `system_not_ready`, external-boot admission, `device_op_in_flight`, `devic
 ADR-0823), then image resolution. Resolution is one query in a new helper
 (`resolve_hotplug_image(conn, provider, name, arch)`) over `image_catalog` with
 `state = 'registered' AND visibility = 'public'`, the predicate `fetch_public_provisioning_rootfs`
-applies, and it returns `(id, name, digest, volume)`. The `provider` and `arch` are the System's,
-never the caller's. Absent, unregistered, wrong-provider, wrong-arch and any future not-visible
+applies, and it returns `(id, name, digest, volume)`. The `provider` is the System's, and `arch` is the System's
+provisioning profile `arch` (`System.requested_arch` is nullable, `domain/lifecycle/records.py:67`,
+so it is not the source); neither is ever the caller's. Absent, unregistered, wrong-provider, wrong-arch and any future not-visible
 case return the same `image_not_found` with one fixed detail; the tool never says which. The role
 denial for a caller without contributor on the System precedes all of it, so an unauthorized caller
 learns nothing about the catalog.
 
+The row's source columns differ by provider, and a row that lacks the one its provider needs is
+`image_not_staged` at staging: local-libvirt uses the staged `path` or the `object_key` with its
+`digest`; remote-libvirt requires `volume` (the remote provider has no object-store
+materialization, ADR-0759). A replayed `idempotency_key` returns the first envelope whatever
+`image` it names, as for every keyed mutation (`_idempotency.py:134-175`).
+
 The tool response adds `data.image` and, for an image disk, `stage_timeout_s: 300`. The audit
-`args` gain `image`. `suggested_next_actions` are unchanged.
+`args` gain `image` and the resolved `digest`. `suggested_next_actions` are unchanged.
 
 The authorization decision is two checks: the caller may mutate this System (contributor, ADR-0823)
 and the catalog offers this image to this System's project (today: public). Widening the second
@@ -79,6 +86,10 @@ rules that follow, each stated so a test can check it:
    teardown and reprovision are unchanged from ADR-0823 and remove the overlay.
 4. The ledger row is the only place that records which image an overlay came from.
 
+5. `stage_disk_source` refuses a base whose path or volume name matches the device-overlay name
+   pattern (`*-dev-*.qcow2`, or a name starting `kdive-` and containing `-dev-`), so an operator
+   mistake cannot place a catalog base inside a prefix `remove_all` sweeps.
+
 Invariant tests (implementation PRs): the base file and staged volume exist, byte-identical, after
 un-plug, `release_all` and a failed plug; no delete call receives a path outside the overlay
 prefix.
@@ -88,12 +99,22 @@ prefix.
 ```python
 @dataclass(frozen=True, slots=True)
 class DiskSource:
+    # The resolved catalog row; the worker builds it, never the tool input.
+    image_id: UUID
     # Catalog image name, for messages and the audit trail.
     name: str
-    # The row's content digest, checked against what the provider materialized.
-    digest: str
+    # The row's content digest; None for a staged-path row, which is operator-attested.
+    digest: str | None
     # The row's staged pool volume (remote); None for a local object or staged path.
     volume: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class StagedDisk:
+    # Local: the validated base path. Remote: the staged volume's path in the pool.
+    base_path: str
+    # Virtual size in bytes, read from the base; at most 32 GB.
+    capacity_bytes: int
 
 
 # DeviceSpec gains: disk only; set exactly when size_gb is None.
@@ -101,52 +122,65 @@ class DiskSource:
 
 
 class DeviceHotplugger(Protocol):
-    # Idempotent; needs no domain.
-    def stage_disk_source(self, source: DiskSource) -> None: ...
+    # Idempotent; needs no domain. Raises CategorizedError on any refusal below.
+    def stage_disk_source(self, source: DiskSource) -> StagedDisk: ...
 ```
 
-The worker, not the tool input, builds `DiskSource` from the re-resolved row. `DeviceVolumes` gains
-`create_overlay(conn, domain_name, device_id, source) -> str` (idempotent, replaces a stale overlay
-the same way `create` does) and returns the host path that `render_disk_xml` already takes. The
+The worker, not the tool input, builds `DiskSource` from the re-resolved row, and `plug` takes the
+`StagedDisk` the same job obtained (`DeviceHotplugger.plug(domain_name, spec, staged=None)`), so
+the file that was checked is the file the overlay is built on. `DeviceVolumes` gains
+`create_overlay(conn, domain_name, device_id, staged) -> str` (idempotent, replaces a stale overlay
+the same way `create` does) and returns the host path `render_disk_xml` already takes. The
 ADR-0823 port rules hold: a kind outside the advertised set is refused, `plug` is idempotent on
 `device_id`, and `unplug` never forces.
 
 `stage_disk_source` makes the base available and checks it, before any domain call:
 
-- **local-libvirt:** the injected `CatalogFetch` (`rootfs_catalog_fetch_from_env`) resolves the
-  public row and returns a path (a staged path validated against allowed roots, or a digest-keyed
-  cache file). The port requires the row's digest to equal `source.digest`, else `configuration_error`
-  `image_changed` (an operator re-published the name between admission and job). It then runs
-  `qemu-img info --output=json` with the resolved tool path and requires `format = qcow2`, no
-  `backing-filename`, and `virtual-size` of at most 32 GB, else `configuration_error` with
-  `invalid_image_format`, `image_has_backing_file` or `image_too_large`.
-- **remote-libvirt:** looks up `source.volume` in the configured pool (the `lookup_volume_staged`
-  helper, ADR-0150) and requires it present (`image_not_staged`, `configuration_error`), qcow2,
-  with no `backingStore` of its own (`volume_backing_path`, `remote_libvirt/lifecycle/xml.py:77`),
-  and a capacity of at most 32 GB. A row with `volume is None` is `image_not_staged`: the remote
-  provider has no object-store materialization (ADR-0759).
+- **local-libvirt:** a new id-keyed fetch beside `fetch_public_provisioning_rootfs`
+  (`fetch_registered_public_rootfs_by_id(conn, image_id, ...) -> (Path, digest)`), so the lookup
+  the worker did and the lookup the port does are the same row, not two by-name resolutions that a
+  re-publish can split. The existing fetch cannot serve: it returns only a `Path` and resolves by
+  `(provider, name, arch)` (`images/rootfs/fetch.py:179-230`). When `source.digest` is not `None`
+  the port requires the observed digest to equal it, else `configuration_error` `image_changed`.
+  It then runs `qemu-img info -f qcow2 --output=json` (format forced, not probed) and requires no
+  `backing-filename`, no `full-backing-filename`, no `data-file` or `data-file-raw` in
+  `format-specific`, `encrypted` and `corrupt` false, and `virtual-size` of at most 32 GB, else
+  `configuration_error` with `invalid_image_format`, `image_has_backing_file`, `image_unsafe` or
+  `image_too_large`.
+- **remote-libvirt:** reuses the lookup and `XMLDesc` path of `ensure_named_overlay`
+  (`remote_libvirt/lifecycle/storage.py:138`, `:225`), not `lookup_volume_staged`, which reports
+  only staged, absent or pool-absent (`storage.py:95`). It requires the volume present
+  (`image_not_staged`), qcow2, no `<backingStore>` of its own (`volume_backing_path`,
+  `remote_libvirt/lifecycle/xml.py:77`) and a capacity of at most 32 GB. libvirt volume XML does not
+  expose a qcow2 `data-file`, so the content of a staged volume is operator-attested and is not
+  re-hashed at plug time (Accepted, below).
 
 `plug` then calls `create_overlay`, which is idempotent. Local: `qemu-img create -f qcow2 -F qcow2
 -b <base> <overlay>` with the virtual size inherited from the base, then `chmod` to the shared
-libvirt mode as `create_scratch_qcow2` does. Remote: `pool.createXML` of a qcow2 volume whose
-`backingStore` path is the staged volume's path, with the ownership of the System overlay
-(`_overlay_identity`). The device XML, serial and alias are the scratch disk's: `identity` is
-`{"serial": ...}`. If the domain attach fails, the existing cleanup removes the overlay
-(`libvirt_hotplug.py:406-411`).
+libvirt mode as `create_scratch_qcow2` does, then `qemu-img info -f qcow2` on the overlay requiring
+exactly the one backing file and no `data-file`. Remote: `pool.createXML` of a qcow2 volume with an
+explicit `capacity` equal to `staged.capacity_bytes` (volume XML requires one, unlike `qemu-img
+create`) and a `backingStore` path of the staged volume, with the ownership of the System overlay
+(`_overlay_identity`). The device XML is the scratch disk's plus an explicit `<backingStore>` built
+with `append_qcow2_backing_store(..., relabel=False)` (`providers/shared/libvirt_xml.py:39-53`,
+ADR-0623): without it libvirt walks the backing chain at attach and relabels the shared base, which
+changes the base's label and ctime for every System that boots from it. The serial and alias are the
+scratch disk's, and `identity` is `{"serial": ...}`. If the domain attach fails, the existing
+cleanup removes the overlay (`libvirt_hotplug.py:406-411`).
 
-fault-inject: `stage_disk_source` is a no-op that honours `hotplug_behaviour=hang` as a
-`stage_timeout`; `plug` records the source in its in-memory table; `image_not_staged` is injectable
-through the existing `fault_rate` plane. No new resource capability key.
+fault-inject: `stage_disk_source` is a no-op that returns a fixed `StagedDisk`; `plug` records the
+source in its in-memory table. No new resource capability key.
 
 ### Ledger and tools
 
 Migration (number assigned by the implementation PR): `ALTER TABLE system_devices ADD COLUMN image
-text, ADD COLUMN source_image_id uuid`, no foreign key (the row outlives a pruned catalog row only
-until teardown, and a dangling id must not block image deletion), and a CHECK that
-`(image IS NULL) = (source_image_id IS NULL)` and that both are null for `kind = 'nic'`. `size_gb`
-stays null for an image disk; the capacity is the image's virtual size, shown as
-`identity.capacity_gb` set by the worker after `plug` (a decimal string, as `identity` is a string
-map). `SystemDevice` gains `image: str | None` and `source_image_id: UUID | None`.
+text, ADD COLUMN source_image_id uuid, ADD COLUMN source_digest text`, no foreign key (a dangling id
+must not block image deletion; the name and digest keep the record readable after it), and CHECKs:
+the three are all null or `image` and `source_image_id` are both set; they are null for
+`kind = 'nic'`; and for `kind = 'disk'` exactly one of `size_gb` and `image` is set. `source_digest`
+is null for a staged-path row, whose bytes are operator-attested. `size_gb` stays null for an image
+disk. `SystemDevice` gains `image: str | None`, `source_image_id: UUID | None` and
+`source_digest: str | None`.
 
 `list_devices` adds `image` to each device (null for a scratch disk and a NIC). `unplug_device` and
 the job payloads other than the plug-time spec are unchanged; `PlugDevicePayload` is unchanged
@@ -154,10 +188,23 @@ because the worker reads the row.
 
 `plug_device_handler`, in order: read the row; re-check `READY`; if `image` is set, re-resolve
 `source_image_id` with the same predicate (a miss is `image_not_found`, which the existing path
-turns into a deleted row because no handle was returned); call `stage_disk_source` under its own
-300 s window; then `start_device_settle_window` and the existing plug and poll. A `stage_timeout`
-fails the job `CONTROL_FAILURE` with `data.reason: stage_timeout`, `waited_s`, and the row becomes
-`failed` with no handle, which `unplug_device` clears.
+turns into a deleted row because no handle was returned); stamp `settle_deadline` at job start
+plus 300 s, so `list_devices` never shows a started `plugging` row with a null deadline; call
+`stage_disk_source` in a thread under a 300 s window; re-stamp `settle_deadline` to now plus 60 s
+(`start_device_settle_window`) and run the existing plug and poll with the `StagedDisk`. A
+`stage_timeout` fails the job `CONTROL_FAILURE` with `data.reason: stage_timeout`, `waited_s`, and
+the row becomes `failed` with no handle, which `unplug_device` clears. The blocking fetch runs in a
+thread, as every provider call does, so the worker's heartbeat keeps running through it. Both job
+kinds keep `max_attempts=1`, so a dead worker is not redelivered; the existing
+`repair_stalled_device_ops` fails the stranded row (`reconciler/repairs/systems.py:749`).
+
+A timed-out stage call abandons its thread, which can still finish the download. Two plugs of one
+cold image, or a retry racing the abandoned thread, would share the temp name
+`<digest>.qcow2.partial` and a short file could be renamed into the cache under the full digest
+(`images/rootfs/fetch.py:121-123`; the cache hit at `:101` is not re-verified, and the object is
+read whole into memory at `:112`). That defect already exists for concurrent provisioning, but this
+feature makes it reachable by a contributor, so item 2 includes a unique temp name per call, a
+per-digest single-flight lock and a size check on a cache hit.
 
 `systems.get` and the capability model are unchanged: the `disk` kind already advertises the
 feature, and a provider whose port lacks `stage_disk_source` cannot be built (the port is one
@@ -169,7 +216,7 @@ guest two filesystems with one UUID.
 
 | Limit | Unit | Clock | Scope | On violation | Recovery |
 |---|---|---|---|---|---|
-| Stage window: 300 s | seconds | worker monotonic clock from the start of the job, before the settle window opens | one plug job, covering fetch and format checks | job fails `control_failure`, `reason: stage_timeout`, `data.waited_s`; row `failed`; the fetch may complete and warm the cache | retry the plug; `unplug_device` clears the row |
+| Stage window: 300 s | seconds | worker monotonic clock from the start of the job, before the settle window opens | one plug job, covering fetch and format checks; the wait is bounded, the abandoned fetch thread is not | job fails `control_failure`, `reason: stage_timeout`, `data.waited_s`; row `failed`; the fetch may complete and warm the cache | retry the plug; `unplug_device` clears the row |
 | Image virtual size: 32 GB | gigabytes | none | per device | `configuration_error`, `image_too_large`, row deleted | choose a smaller image |
 | 8 devices, 60 s settle, 30 s un-plug | as ADR-0823 | as ADR-0823 | as ADR-0823 | as ADR-0823 | as ADR-0823 |
 
@@ -180,7 +227,9 @@ implementation PR may tune it with evidence from a live cold fetch.
 
 - Snapshot with an overlay attached is allowed (ADR-0823). The overlay is a qcow2 with a read-only
   backing file, the same shape as the System rootfs overlay that internal snapshots already
-  cover; the backing file is never part of a snapshot and is never written.
+  cover; the backing file is never part of a snapshot and is never written. As for a scratch disk,
+  this relies on a snapshot covering every qcow2 disk of the live domain; the live proof for item 2
+  must take a snapshot and restore with an overlay attached, and assert the base is unchanged.
 - Restore and power OFF or CYCLE move `attached` rows to `lost`; un-plug of a `lost` row removes
   the overlay. A restore can bring back a device that was un-plugged; the overlay is then gone and
   the guest sees a missing disk. This is the ADR-0823 accepted case, unchanged.
@@ -206,7 +255,12 @@ implementation PR may tune it with evidence from a live cold fetch.
    operator replacing a staged volume is the same in-place rewrite); the remote staged volume is
    operator-attested, so its content digest is not re-hashed at plug time; an overlay is not
    charged to a quota (ADR-0823); the guest may see duplicate filesystem identifiers;
-   a cold local fetch holds a worker for up to 300 s.
+   a cold local fetch holds a worker thread to completion even after the 300 s wait gives up, and
+   there is no per-project cap on concurrent staging beyond one plug job per System; deleting or
+   re-publishing a catalog row does not check ledger rows, so only the guard on private-image expiry
+   (ADR-0829) will ever count them; the remote staged volume's qcow2 header cannot be inspected for
+   a `data-file` through libvirt; attaching the image a System booted from gives the guest two
+   filesystems with one UUID, which the docstring warns about and the tool does not refuse.
 4. Covered elsewhere: forced un-plug, PCIe, SR-IOV and vFC (ADR-0823 deferrals); PowerVM (#3688).
 
 ## Trust boundary and security pass (design-time)
@@ -217,19 +271,22 @@ implementation PR may tune it with evidence from a live cold fetch.
 | Cross-project read of a private image | Public images only; the predicate is evaluated for the System's provider and arch, not the caller's other projects. |
 | Existence oracle for private or unregistered images | One `image_not_found` envelope and fixed detail for every miss; role denial precedes resolution. |
 | Write-through corrupts a shared image | Only an overlay is attached; the base is opened read-only by the backing chain. `-F qcow2` is explicit, so qemu does not probe the base's format. |
-| A base qcow2 whose header names a host file as backing, leaking it through the overlay | `stage_disk_source` rejects any base with a backing file (`image_has_backing_file`); the remote staged volume is checked the same way. Publishing is operator-controlled (ADR-0759, ADR-0093), so this is defence in depth. |
+| A base qcow2 whose header names a host file as backing or as an external data file, leaking it through the overlay | Local `stage_disk_source` forces `-f qcow2` and rejects a backing file, a `data-file`, encryption and the corrupt flag, and `create_overlay` re-inspects the new overlay for exactly one backing file. Remote can check for a backing file only; its staged volume is operator-attested. Publishing is operator-controlled (ADR-0759, ADR-0093), so this is defence in depth. |
+| Shared base relabelled or touched by a hot-plug | The remote image-disk XML carries an explicit `<backingStore>` with `relabel=no` (ADR-0623); the live proof asserts the base's label and ctime are unchanged. |
+| Catalog base placed in a prefix `remove_all` sweeps | `stage_disk_source` refuses a base whose name matches the device-overlay pattern (invariant 5). |
+| Cache poisoning through a shared temp name or a truncated cache file | Item 2 adds a unique temp name, a per-digest single-flight lock and a size check on a cache hit. |
 | Name injection through the overlay or serial | Overlay name and serial derive from `device_id` (a UUID), as for scratch. |
 | Un-plug or `release_all` deleting a referenced volume | Unreachable by construction: invariants 1 and 2 above, with the invariant tests. |
-| Time-of-check to time-of-use on image state | Admission resolves; the worker re-resolves by id and checks the digest after the fetch. A change fails the plug before any attach. |
+| Time-of-check to time-of-use on image state | Admission resolves; the worker re-resolves by id; the id-keyed fetch returns the observed digest, compared to the row's; `plug` builds the overlay on the `StagedDisk` the same job validated. A change fails the plug before any attach. A staged-path file rewritten between the checks and the attach is operator action and is accepted. |
 | Resource exhaustion by repeated overlays | 8 devices per System, 32 GB virtual size per device, as scratch. Quota charging stays an unowned deferral (ADR-0823). |
-| Audit gap | The audit `args` carry `image`; the ledger keeps `image` and `source_image_id` until teardown. |
+| Audit gap | The audit `args` carry `image` and the resolved digest; the ledger keeps `image`, `source_image_id` and `source_digest` until teardown, so a later re-publish does not erase which bytes a System attached. Refused admissions are not audited, as for every refusal in these tools. |
 
 ## Non-goals and owners
 
 - Private (project-owned) images as a disk source: unowned. Needs a project-aware materialization
   seam first; ADR-0829 states the retention guard change it must carry.
 - Registering a non-bootable data image: unowned; needs a registration role that skips the
-  guest-contract check of ADR-0093. The split lists it as optional follow-on work.
+  guest-contract check of ADR-0093. It is not in the split below.
 - Attaching a volume with write-through persistence, shared across Systems, or from an arbitrary
   pool volume: unowned; requires a volume registry and an ownership model this design avoids.
 - Read-only attach, resize of an image disk, and boot-order or `bus` selection: unowned.
@@ -241,11 +298,10 @@ implementation PR may tune it with evidence from a live cold fetch.
 
 | # | Title | Scope | Order | Effort | Live proof |
 |---|---|---|---|---|---|
-| 1 | Hot-plug image disks: contract, ledger, tool and worker | `DiskSource`, `DeviceSpec.disk_source`, `stage_disk_source`, `create_overlay` on the port and fault-inject; migration (two columns, CHECK, `SystemDevice`); `image` parameter, errors, audit, `list_devices.image`; `resolve_hotplug_image`; handler staging step; limit and docstring; invariant tests; ADR status flip | first | L | no (fault-inject proves the contract) |
-| 2 | local-libvirt image-disk overlay | `LocalDeviceVolumes.create_overlay`, `stage_disk_source` over `CatalogFetch`, format and backing checks | after 1 | M | yes, local-libvirt on x86_64: plug an image disk, read data in the guest, un-plug, assert the base file unchanged; cold-cache fetch within the stage window |
-| 3 | remote-libvirt image-disk overlay | `RemoteDeviceVolumes.create_overlay`, staged-volume checks, ownership copy | after 1, parallel with 2 | M | yes, remote-libvirt: plug against an operator-staged volume, un-plug, assert the staged volume intact |
-| 4 | Data-image registration (optional) | a registration role for non-bootable data images skipping the guest contract; separate decision | after 2 and 3, if wanted | L | provider-dependent |
+| 1a | Hot-plug image disks: ledger, tool and admission | migration (three columns, CHECKs, `SystemDevice`); `image` parameter, errors, audit, `list_devices.image`, docstring; `resolve_hotplug_image`; tests | first | M | no |
+| 1b | Hot-plug image disks: port, worker and fault-inject | `DiskSource`, `StagedDisk`, `DeviceSpec.disk_source`, `stage_disk_source`, `plug(..., staged)`, `create_overlay`; handler staging step and deadline stamps; fault-inject; libvirt providers refuse a `disk_source` (`configuration_error`, `image_unsupported`) until 2 and 3 land; invariant tests | after 1a | M | no (fault-inject proves the contract) |
+| 2 | local-libvirt image-disk overlay | `fetch_registered_public_rootfs_by_id`; fetch hardening (unique temp name, per-digest single-flight, size check on a cache hit); `LocalDeviceVolumes.create_overlay`; `stage_disk_source`; format checks; removes the local `image_unsupported` refusal | after 1b | M | yes, local-libvirt on x86_64: plug an image disk, read data in the guest, snapshot and restore with it attached, un-plug, assert the base file byte-identical; cold-cache fetch inside the stage window |
+| 3 | remote-libvirt image-disk overlay | `RemoteDeviceVolumes.create_overlay`, staged-volume checks, ownership copy, `relabel=no` backing store in the device XML; removes the remote refusal; flips ADR-0829 to Accepted (the last provider to ship) | after 1b, parallel with 2 | M | yes, remote-libvirt: plug against an operator-staged volume, un-plug, assert the staged volume, its label and its ctime unchanged |
 
-Item 1 can merge with fault-inject alone because both libvirt providers advertise the `disk` kind
-with the `image` parameter refused by the port (`configuration_error`, `image_unsupported`) until 2
-and 3 land; that refusal is part of item 1.
+Registering a non-bootable data image is deliberately not an item: it is a separate decision
+(Non-goals), and the first release attaches a registered image's contents.

@@ -55,8 +55,9 @@ existing contributor role on the System. The image must satisfy the predicate pr
 to materialize a rootfs: registered, public, same provider, same arch. An image that is absent,
 unregistered, of another provider or arch, or not visible all produce one `configuration_error`
 with `data.reason: image_not_found` and a fixed detail, so the response is not an existence
-oracle. Private images are out of this decision (see Considered & rejected); the contract is
-written so widening the predicate for provisioning widens it here with no tool change.
+oracle. The System's architecture is its provisioning profile's, not the caller's. Private images
+are out of this decision (see Considered & rejected); widening later changes the resolution helper,
+the worker's re-resolution and the materialization seam, and each must then apply the owner check.
 
 **kdive attaches a copy-on-write overlay, never the referenced volume.** The provider creates a
 qcow2 overlay of the image's base (`qemu-img create -f qcow2 -F qcow2 -b <base>` locally; a pool
@@ -73,15 +74,19 @@ Un-plug, teardown, reprovision and `release_all` therefore keep their ADR-0823 b
 delete a referenced volume, because the volume is not attached. "Owned scratch" and "referenced"
 differ only in the ledger, which records the source for display and audit.
 
-**One port field, one port step.** `DeviceSpec` gains `disk_source: DiskSource | None`
-(`name`, `digest`, `volume`; built by the worker from the resolved row, never from tool input);
-`size_gb` is `None` when it is set. `DeviceVolumes` gains `create_overlay`. `DeviceHotplugger` gains
-`stage_disk_source(source)`, called by the plug worker before the settle window opens, so a cold
-multi-GB local fetch does not consume the 60 s settle window. It has its own 300 s limit and fails
-`CONTROL_FAILURE` with `data.reason: stage_timeout`.
+**One port field, one port step.** `DeviceSpec` gains `disk_source: DiskSource | None` (the image
+id, name, digest and staged volume; built by the worker from the resolved row, never from tool
+input); `size_gb` is `None` when it is set. `DeviceHotplugger` gains `stage_disk_source(source)`,
+which makes the base available, checks it and returns the `StagedDisk` that `plug` and
+`DeviceVolumes.create_overlay` then build on, so the file that was checked is the file that is used.
+The plug worker calls it before the settle window opens, so a cold multi-GB local fetch does not
+consume the 60 s settle window. It has its own 300 s limit and fails `CONTROL_FAILURE` with
+`data.reason: stage_timeout`. The base must be a plain qcow2: no backing file, no external data file,
+not encrypted.
 
-**The ledger records the reference.** `system_devices` gains `image text` and `source_image_id uuid`
-(both null for a scratch disk and a NIC), set at admission and immutable. The worker re-resolves
+**The ledger records the reference.** `system_devices` gains `image text`, `source_image_id uuid`
+and `source_digest text` (null for a scratch disk and a NIC), set at admission and immutable, so a
+later re-publish of the name does not erase which bytes a System attached. The worker re-resolves
 `source_image_id` at job start; a row that is no longer registered and public fails the plug with
 `image_not_found` and the existing "nothing attached" path deletes the row. `list_devices` reports
 `image`.
@@ -102,7 +107,7 @@ proposed implementation split are in the spec.
   through this surface, and cannot attach one volume to two Systems with shared writes.
 - Because the catalog accepts only bootable rootfs images, the first release attaches a bootable
   image's filesystem as a second disk. A prepared non-bootable data image needs a separate
-  registration path (unowned; the spec's split lists it as optional follow-on).
+  registration path (unowned; not in the spec's split).
 - Attaching the image a System booted from gives the guest two filesystems with the same UUID; the
   tool docstring says so.
 - The local cache file backing an overlay is digest-keyed and not evicted by kdive code
