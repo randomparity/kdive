@@ -458,3 +458,13 @@ async def enqueue_provision(conn_pool: AsyncConnectionPool, system_id: str, allo
             {"principal": "user-1", "agent_session": "s", "project": "proj"},
             f"{alloc_id}:provision",
         )
+
+
+async def stored_key_kind(pool: AsyncConnectionPool, key: str) -> str:
+    """The ``kind`` an idempotency key was recorded under."""
+    async with pool.connection() as conn:
+        row = await (
+            await conn.execute("SELECT kind FROM idempotency_keys WHERE key = %s", (key,))
+        ).fetchone()
+    assert row is not None, key
+    return str(row[0])
