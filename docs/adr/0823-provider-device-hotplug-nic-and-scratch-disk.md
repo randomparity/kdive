@@ -229,3 +229,11 @@ quota" and that "no follow-up exists yet". #3720 is that follow-up, and
 [ADR-0827](0827-charge-hot-plugged-scratch-disks-to-a-project-storage-cap.md) proposes the
 decision: a server-configured per-project cap, charged from the device ledger. Until it is
 implemented, the storage stays uncharged as this record states.
+
+### Amendment (2026-11-19): pre-existing volumes as disks are decided in ADR-0829 (#3722)
+
+This amends the "Deferred" list in "Decision", not the decision: the deferral "pre-existing
+volumes as disks (needs a storage-reference model)" now has a proposed decision,
+[ADR-0829](0829-hotplug-existing-volumes-attach-an-overlay-of-a-catalog-image.md), which names a
+catalog image as the reference and attaches a kdive-owned overlay. The `disk` kind defined above
+is unchanged.
