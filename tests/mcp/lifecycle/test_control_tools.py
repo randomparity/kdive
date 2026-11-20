@@ -1422,6 +1422,32 @@ def test_keyed_control_tool_reused_with_changed_arguments_conflicts(
     asyncio.run(_run())
 
 
+def test_watch_key_digests_the_clamped_deadline(migrated_url: str) -> None:
+    """Two deadlines past the cap are one request, because the cap is what runs (#3735)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id, _ = await _two_systems(pool)
+
+            async def watch(deadline_s: float) -> Any:
+                return await control_tools.watch_for_crash_system(
+                    pool,
+                    _ctx(),
+                    system_id=sys_id,
+                    deadline_s=deadline_s,
+                    resolver=provider_resolver(),
+                    idempotency_key="k",
+                )
+
+            first = await watch(WATCH_MAX_DEADLINE_S + 100)
+            assert first.error_category is None, first.model_dump()
+            replay = await watch(WATCH_MAX_DEADLINE_S + 200)
+
+            assert replay.model_dump() == first.model_dump()
+
+    asyncio.run(_run())
+
+
 def test_an_omitted_argument_and_its_explicit_default_are_the_same_request(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
