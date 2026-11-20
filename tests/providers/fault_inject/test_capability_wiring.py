@@ -137,3 +137,17 @@ def test_hotplug_ledger_survives_a_rebind_with_changed_behaviour() -> None:
     with pytest.raises(CategorizedError):
         busy.unplug(domain, "dev0", handle)
     assert busy.is_attached(domain, "dev0", handle) is True
+
+
+def test_build_time_behaviour_is_the_default_for_a_row_without_the_key() -> None:
+    from kdive.providers.fault_inject.lifecycle.hotplug import HotplugBehaviour
+
+    runtime = composition.build_fault_inject_runtime(hotplug_behaviour=HotplugBehaviour.BUSY)
+    bound = runtime.for_resource("fi-1", {})
+
+    assert bound.device_hotplug is not None
+    domain = bound.provisioner.provision(_SYSTEM_ID, _provisioning_profile())
+    spec = DeviceSpec(HotplugDeviceKind.NIC, "dev0", network=None, size_gb=None)
+    handle = bound.device_hotplug.plug(domain, spec).provider_handle
+    with pytest.raises(CategorizedError):
+        bound.device_hotplug.unplug(domain, "dev0", handle)

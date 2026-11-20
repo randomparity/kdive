@@ -18,6 +18,7 @@ FaultedHotplug`.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import threading
 from collections.abc import Mapping
@@ -119,9 +120,8 @@ class FaultInjectHotplug:
 
         A resource row's behaviour is read at each binding; the ledger must outlive the binding.
         """
-        sibling = FaultInjectHotplug(self._inventory, behaviour, kinds=self._kinds)
-        sibling._domains = self._domains  # noqa: SLF001 - one ledger across sibling ports
-        sibling._lock = self._lock  # noqa: SLF001
+        sibling = copy.copy(self)  # a shallow copy shares the ledger and lock by reference
+        sibling._behaviour = behaviour  # noqa: SLF001 - the one attribute a sibling varies
         return sibling
 
     def plug(self, domain_name: str, spec: DeviceSpec) -> PlugOutcome:

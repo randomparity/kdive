@@ -116,6 +116,7 @@ def build_runtime(
     introspect = FaultInjectIntrospect()
     external_boot = FaultInjectExternalBoot()
     hotplug = FaultInjectHotplug(inventory, hotplug_behaviour)
+    debug = DebugCapabilities(attach_seam=fault_inject_attach_seam, engine=FaultInjectDebugEngine())
 
     def assemble(engine: FaultEngine | None, behaviour: HotplugBehaviour | None) -> ProviderRuntime:
         faulted_install = FaultedInstall(install, engine) if engine is not None else install
@@ -134,10 +135,7 @@ def build_runtime(
             vmcore_introspector=introspect,
             live_introspector=introspect,
             support=_support(),
-            debug=DebugCapabilities(
-                attach_seam=fault_inject_attach_seam,
-                engine=FaultInjectDebugEngine(),
-            ),
+            debug=debug,
             external_boot=external_boot,
             external_boot_preparation=external_boot,
             external_boot_recovery_objects=external_boot,
@@ -151,8 +149,10 @@ def build_runtime(
         )
 
     def _from_capabilities(_name: str, capabilities: Mapping[str, object]) -> ProviderRuntime:
+        # The build-time engine and behaviour are defaults a row without the keys inherits.
         return assemble(
-            _engine_from(capabilities), HotplugBehaviour.from_capabilities(capabilities)
+            _engine_from(capabilities) or engine,
+            HotplugBehaviour.from_capabilities(capabilities) or hotplug_behaviour,
         )
 
     return assemble(engine, hotplug_behaviour)
