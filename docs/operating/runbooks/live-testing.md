@@ -1724,6 +1724,14 @@ qualified: 24 `success` and 96 `rejection`, including the four `gateway` validat
 `systems.provision` and `systems.reprovision`. After `demo-down.sh --wipe --yes` the worker's
 libvirt defined no domain. An earlier run at `0539e447b` gave the same result.
 
+Fault-injection cells (#3726): candidate `ef4b3bb96` (server, worker and reconciler at that SHA), the
+same kind of guest, with the `longterm` fixture kernel (6.18.54) built from the updated
+`fixtures/kernel/debug.config`. The six default-configuration local functional cells of
+`faultinject.inspect`, `faultinject.set` and `faultinject.reset` (direct and gateway) passed in
+about twelve minutes, and `qualify` reported them `success` with the kernel inputs bound. In both
+`set` cells the guest's `failslab` `times` was spent (0) after the arm, with `faultinject.inspect`
+reporting it disarmed and `faultinject.reset` restoring probability 0.
+
 #### Run and image tool cells (#3119)
 
 `tests/integration/test_run_tool_cells_live.py::test_run_tool_cell` carries the 96 x86_64
