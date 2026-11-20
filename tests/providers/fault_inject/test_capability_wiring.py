@@ -169,3 +169,35 @@ def test_build_time_behaviour_is_the_default_for_a_row_without_the_key() -> None
     handle = bound.device_hotplug.plug(domain, spec).provider_handle
     with pytest.raises(CategorizedError):
         bound.device_hotplug.unplug(domain, "dev0", handle)
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        *(
+            {key: value}
+            for key in (FAULT_RATE_KEY, MAX_LATENCY_S_KEY)
+            for value in (0, False, "", [])
+        ),
+        {FAULT_RATE_KEY: {"provision": 2.0}},
+        {SEED_KEY: "7"},
+        {SEED_KEY: None},
+        {HOTPLUG_BEHAVIOUR_KEY: "explode"},
+    ],
+)
+def test_row_with_a_malformed_or_falsy_key_fails_closed_at_binding(
+    capabilities: dict[str, Any],
+) -> None:
+    with pytest.raises(CategorizedError) as raised:
+        _bind(capabilities)
+    assert raised.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [{}, {SEED_KEY: 7}, {FAULT_RATE_KEY: {}, MAX_LATENCY_S_KEY: {}}, {FAULT_RATE_KEY: None}],
+)
+def test_row_with_no_fault_configured_binds_without_wrappers(
+    capabilities: dict[str, Any],
+) -> None:
+    assert _provision(_bind(capabilities))
