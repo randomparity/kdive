@@ -43,13 +43,14 @@ contributor, job. `kind` is `nic` or `disk`. `network` applies to `nic` only, 1 
 | `kind=disk` and `size_gb` is missing, a boolean, or outside 1 to 32 | `invalid_size` |
 | `size_gb` given with `kind=nic`, or `network` given with `kind=disk` | `parameter_mismatch` |
 
-The capability refusal above is judged before these parameter checks. On admission, in one transaction under the per-System advisory lock: insert
-the row as `plugging`, enqueue `PLUG_DEVICE` (payload `system_id`, `device_id`, dedup key
-`plug:<device_id>`; a fresh `device_id` per call). Response: status `running`, `data={job_id,
-device_id, kind, state: "plugging", settle_timeout_s: 60}`, `suggested_next_actions=["jobs.wait",
-"systems.list_devices"]`. `idempotency_key` is the existing `keyed_mutation` key: a repeat with the
-same key replays the stored envelope, with the same `device_id`; without a key, each call mints a
-new device.
+The capability refusal above is judged before these parameter checks, and `parameter_mismatch` is
+checked before `invalid_network` and `invalid_size`. On admission, in one transaction under the
+per-System advisory lock: insert the row as `plugging`, enqueue `PLUG_DEVICE` (payload `system_id`,
+`device_id`, dedup key `plug:<device_id>`; a fresh `device_id` per call). Response: status
+`running`, `data={job_id, device_id, kind, state: "plugging", settle_timeout_s: 60}`,
+`suggested_next_actions=["jobs.wait", "systems.list_devices"]`. `idempotency_key` is the existing
+`keyed_mutation` key: a repeat with the same key replays the stored envelope, with the same
+`device_id`; without a key, each call mints a new device.
 
 `systems.unplug_device(system_id, device_id, idempotency_key=None)`, contributor, job. Admitted for
 `attached`, `failed` and `lost` rows. Sets the row `unplugging` and enqueues `UNPLUG_DEVICE`
@@ -139,7 +140,8 @@ the transaction that commits their result. Provider text in `detail` passes the 
 
 A stopped domain on a `READY` System is `INFRASTRUCTURE_FAILURE` with `reason: domain_not_running`;
 un-plug of a `lost` row on a stopped domain still frees the backing volume. A plug the port rejects
-with `CONFIGURATION_ERROR` deletes its row. The other outcomes are `CONTROL_FAILURE` +
+with `CONFIGURATION_ERROR` deletes its row when the provider returned no handle; otherwise the row
+becomes `failed`. The other outcomes are `CONTROL_FAILURE` +
 `unplug_refused` (guest or HMC refused; also `handle_unknown`), `CONTROL_FAILURE` + `plug_refused`
 (libvirt: the hypervisor refused the attach; the row becomes `failed`), `CONTROL_FAILURE` +
 `settle_timeout` (worker deadline), `INFRASTRUCTURE_FAILURE` (provider fault, domain absent),
@@ -165,9 +167,10 @@ with `CONFIGURATION_ERROR` deletes its row. The other outcomes are `CONTROL_FAIL
 1. Actors and deployments: an MCP client holding contributor on a `READY` System; fault-inject,
    local-libvirt, remote-libvirt and PowerVM runtimes; x86_64 and ppc64le; one worker per job.
 2. Invariants: a ledger row exists exactly while kdive may have a device attached or backing storage
-   to free; plug and un-plug jobs never overlap each other or power, snapshot, restore and
-   reprovision; the boot disk and SSH NIC are never listed or removed; a provider without the kind
-   refuses before enqueue.
+   to free (a `lost` row kept by a failed reprovision has no storage left and only teardown clears
+   it); plug and un-plug jobs never overlap each other or power, snapshot, restore and reprovision;
+   the boot disk and SSH NIC are never listed or removed; a provider without the kind refuses before
+   enqueue.
 3. Accepted: a worker that dies between the provider call and the commit leaves a `failed` row with
    no handle (cleared by `unplug_device` when the provider can find the device by `device_id`); a
    snapshot restore can bring back an un-plugged device with no row; devices are not kept across
