@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from uuid import UUID, uuid4
 
 from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper
@@ -120,3 +121,12 @@ def test_next_draw_counts_per_domain_from_one_and_restarts_on_record_and_forget(
     assert inventory.next_draw("dom-a") == (system, 1)
     inventory.forget("dom-a")
     assert inventory.next_draw("dom-a") is None
+
+
+def test_next_draw_hands_each_concurrent_caller_a_distinct_ordinal() -> None:
+    inventory = FaultInjectInventory()
+    inventory.record(_SYSTEM, "dom-a")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        draws = list(pool.map(lambda _: inventory.next_draw("dom-a"), range(200)))
+
+    assert sorted(draw[1] for draw in draws if draw) == list(range(1, 201))
