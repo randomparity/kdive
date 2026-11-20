@@ -239,8 +239,10 @@ async def _set(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object
     try:
         env = await faultinject_proof.arm(caller, token, guest, _ARM)
         reported = faultinject_proof.failslab_of(env)
-        assert (reported["probability"], reported["times"]) == (100, 1), reported
-        assert reported["armed"] is True, reported
+        # The next atomic allocation can spend the one failure before the helper's readback.
+        assert (reported["probability"], reported["verbose"]) == (100, 1), reported
+        assert reported["times"] in (0, 1), reported
+        assert reported["armed"] is (reported["times"] == 1), reported
         spent = await faultinject_proof.await_fired(endpoint, key)
         after = await asyncio.to_thread(faultinject_proof.injections, endpoint, key)
     finally:
