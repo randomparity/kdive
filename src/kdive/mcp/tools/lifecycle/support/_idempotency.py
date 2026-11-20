@@ -125,8 +125,8 @@ def object_scoped_kind(kind: str, object_id: UUID) -> str:
 
     ``idempotency_keys`` is unique on ``(principal, key)``, so a key reused on a second object
     of the same tool misses the replay lookup and collides on insert, which
-    ``keyed_mutation`` surfaces as ``conflict`` (ADR-0193 §4). The canonical UUID form keeps
-    one object's spellings in one scope.
+    ``keyed_mutation`` surfaces as ``conflict`` (ADR-0193, 2026-11-19 amendment). The canonical
+    UUID form keeps one object's spellings in one scope.
     """
     return f"{kind}:{object_id}"
 

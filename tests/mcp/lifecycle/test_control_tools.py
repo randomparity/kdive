@@ -1272,7 +1272,7 @@ def test_capture_traffic_viewer_is_denied(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-# --- idempotency key scope: one key, one target object (#3713, ADR-0193 §4a) ----------------
+# --- idempotency key scope: one key, one target object (#3713, ADR-0193 amendment) ----------------
 
 
 async def _keyed_power(pool: AsyncConnectionPool, target: str, key: str) -> Any:
@@ -1366,3 +1366,27 @@ async def _job_count(pool: AsyncConnectionPool) -> int:
         row = await cur.fetchone()
     assert row is not None
     return int(row["n"])
+
+
+def test_a_key_stored_under_the_bare_tool_name_conflicts_once_and_enqueues_nothing(
+    migrated_url: str,
+) -> None:
+    """A row written before the scoped kind existed is not replayed: the retry fails closed."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO idempotency_keys (key, principal, project, kind, result) "
+                    "VALUES ('legacy-key', 'user-1', 'proj', 'control.power', '{\"envelope\": {}}')"
+                )
+
+            resp = await _keyed_power(pool, sys_id, "legacy-key")
+
+            assert resp.error_category == "conflict", resp.model_dump()
+            assert resp.data["reason"] == "idempotency_key_in_use"
+            assert await _job_count(pool) == 0
+
+    asyncio.run(_run())

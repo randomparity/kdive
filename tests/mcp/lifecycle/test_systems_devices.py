@@ -825,7 +825,7 @@ def test_concurrent_plugs_serialize_on_the_system_lock(
     _scenario(migrated_url, authority_role_dsns, body)
 
 
-# --- idempotency key scope: one key, one System (#3713, ADR-0193 §4a) -------------------------
+# --- idempotency key scope: one key, one System (#3713, ADR-0193 amendment) ------------------
 
 
 @pytest.mark.parametrize("tool", ["plug", "unplug"])
