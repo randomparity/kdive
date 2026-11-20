@@ -278,12 +278,12 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                     if group.authority:
                         roles = (*roles, "authority")
                     owner = group.owner
-                    # Lifecycle, break-glass, debug, capture and power/snapshot ppc64le cells
-                    # wait for the POWER lane (#2818); x86_64 remote System cells are #3080's,
+                    # Lifecycle, break-glass, debug, capture, power/snapshot and hot-plug ppc64le
+                    # cells wait for the POWER lane (#2818); x86_64 remote System cells are #3080's,
                     # remote run/image cells #3120's, remote debug cells #3113's, remote capture
                     # cells #3114's, remote power/snapshot/control cells #3116's.
                     if (
-                        group.owner in (2813, 2814, 2815, 3062, 3098, 3112, 3119)
+                        group.owner in (2813, 2814, 2815, 3062, 3098, 3112, 3119, 3687)
                         and arch == "ppc64le"
                     ):
                         owner = 2818
