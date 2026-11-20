@@ -1270,3 +1270,99 @@ def test_capture_traffic_viewer_is_denied(migrated_url: str) -> None:
                 await _capture_traffic(pool, _ctx(Role.VIEWER), run_id=run_id)
 
     asyncio.run(_run())
+
+
+# --- idempotency key scope: one key, one target object (#3713, ADR-0193 §4a) ----------------
+
+
+async def _keyed_power(pool: AsyncConnectionPool, target: str, key: str) -> Any:
+    return await _power(pool, _ctx(), system_id=target, action="on", idempotency_key=key)
+
+
+async def _keyed_force_crash(pool: AsyncConnectionPool, target: str, key: str) -> Any:
+    return await control_tools.force_crash_system(
+        pool, _admin_ctx(), system_id=target, resolver=provider_resolver(), idempotency_key=key
+    )
+
+
+async def _keyed_sysrq(pool: AsyncConnectionPool, target: str, key: str) -> Any:
+    return await control_tools.diagnostic_sysrq_system(
+        pool,
+        _ctx(),
+        system_id=target,
+        command="show_blocked_tasks",
+        resolver=provider_resolver(),
+        idempotency_key=key,
+    )
+
+
+async def _keyed_watch(pool: AsyncConnectionPool, target: str, key: str) -> Any:
+    return await control_tools.watch_for_crash_system(
+        pool,
+        _ctx(),
+        system_id=target,
+        deadline_s=45.0,
+        resolver=provider_resolver(),
+        idempotency_key=key,
+    )
+
+
+async def _keyed_capture(pool: AsyncConnectionPool, target: str, key: str) -> Any:
+    return await _capture_traffic(pool, _ctx(), run_id=target, idempotency_key=key)
+
+
+async def _two_systems(pool: AsyncConnectionPool) -> tuple[str, str]:
+    alloc_id = await _granted_allocation(pool)
+    ops = ["force_crash"]
+    return (
+        await _seed_system(pool, alloc_id, SystemState.READY, destructive_ops=ops),
+        await _seed_system(pool, alloc_id, SystemState.READY, destructive_ops=ops),
+    )
+
+
+async def _two_runs_on_one_system(pool: AsyncConnectionPool) -> tuple[str, str]:
+    alloc_id = await _granted_allocation(pool)
+    sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+    return await _seed_bound_run(pool, sys_id), await _seed_bound_run(pool, sys_id)
+
+
+@pytest.mark.parametrize(
+    ("tool", "seed"),
+    [
+        (_keyed_power, _two_systems),
+        (_keyed_force_crash, _two_systems),
+        (_keyed_sysrq, _two_systems),
+        (_keyed_watch, _two_systems),
+        (_keyed_capture, _two_runs_on_one_system),
+    ],
+    ids=["power", "force_crash", "diagnostic_sysrq", "watch_for_crash", "capture_traffic"],
+)
+def test_keyed_control_tool_is_scoped_to_its_target_object(
+    migrated_url: str, tool: Any, seed: Any
+) -> None:
+    """The same key replays on its own target and fails closed on another, enqueuing nothing."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            first_target, second_target = await seed(pool)
+            first = await tool(pool, first_target, "shared-key")
+            assert first.error_category is None, first.model_dump()
+            replay = await tool(pool, first_target, "shared-key")
+            assert replay.model_dump() == first.model_dump()
+            jobs_before = await _job_count(pool)
+
+            other = await tool(pool, second_target, "shared-key")
+
+            assert other.error_category == "conflict", other.model_dump()
+            assert other.data["reason"] == "idempotency_key_in_use"
+            assert await _job_count(pool) == jobs_before
+
+    asyncio.run(_run())
+
+
+async def _job_count(pool: AsyncConnectionPool) -> int:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT count(*) AS n FROM jobs")
+        row = await cur.fetchone()
+    assert row is not None
+    return int(row["n"])

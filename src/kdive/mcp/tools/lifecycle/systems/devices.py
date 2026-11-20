@@ -38,7 +38,7 @@ from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools.lifecycle._recovery import iso
 from kdive.mcp.tools.lifecycle.support._device_ops import device_job_active, device_op_in_flight
-from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation
+from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation, object_scoped_kind
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.ports.lifecycle import HotplugDeviceKind
 from kdive.security import audit
@@ -291,7 +291,7 @@ async def _keyed_admission(
                     idempotency_key=idempotency_key,
                     principal=ctx.principal,
                     project=system.project,
-                    kind=kind,
+                    kind=object_scoped_kind(kind, uid),
                     do_work=lambda: admit(conn),
                 )
 
