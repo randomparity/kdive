@@ -46,24 +46,21 @@ HOTPLUG_DISK_PROJECT_MAX_GB = Setting(
 `_nonnegative_int` rejects a negative value at startup. `0` refuses every
 hot-plugged disk. The setting appears in the generated config reference
 (`docs/guide/reference/config.md`; `just config-docs`, checked by `config-docs-check`) and gets an
-operator note beside the image caps (`docs/operating/runbooks/image-lifecycle.md` names
-`KDIVE_IMAGE_PRIVATE_MAX_BYTES`; the hot-plug note goes in the runbook that covers
-`systems.plug_device`, or `docs/operating/project-onboarding.md` if none does). The worker and
-reconciler do not read it.
+operator note in `docs/operating/runbooks/live-testing.md`, where the hot-plug cells are described.
+The worker and reconciler do not read it.
 
 ### The charge
 
-One function in a new `services/systems/hotplug_quota.py`:
+One function in `db/repositories.py`, beside `devices_for_system` (the services layer does not
+import from `kdive.mcp`, so it cannot take `DISK_MAX_GB` from `devices.py`, and needs no bound):
 
 ```python
-async def hotplug_disk_charged_gb(conn: AsyncConnection, project: str) -> int:
+async def hotplug_disk_gb_for_project(conn: AsyncConnection, project: str) -> int:
     """GB held by the project's hot-plugged disks, in every ledger state."""
 ```
 
-It runs the sum in the ADR over `system_devices JOIN systems`, `kind = 'disk'`, any state, binding
-`DISK_MAX_GB` for a row whose `size_gb` is NULL. The tool never stores a disk row without a size
-(`devices.py:104-127`), so the fallback only applies to a future disk kind. The caller holds the
-PROJECT lock. `kdive_server` reads both tables (`0201`, `0107`). There is no new index: the join
+It runs the sum in the ADR over `system_devices JOIN systems`, `kind = 'disk'`, any state. The tool
+never stores a disk row without a size (`devices.py:104-127`). The caller holds the PROJECT lock. `kdive_server` reads both tables (`0201`, `0107`). There is no new index: the join
 uses `system_devices_system_id_idx`, and the `systems.project` filter is the scan
 `_within_system_quota` already runs (`services/systems/admission.py:491-514`).
 
@@ -82,12 +79,12 @@ conn.transaction()
 
 This is the `PROJECT → SYSTEM` order of ADR-0040 and `systems.provision`
 (`services/systems/admission.py:547`). `_admit_plug` re-reads the System under both locks, as it
-does today (`_ready_system`). `_plug_refusal` (`devices.py:196-212`) takes `kind` and `size_gb` and
-gains a last step, after external-boot, in-flight and `device_limit`, for `kind=disk` only:
+does today (`_ready_system`). `_plug_refusal` (`devices.py:196-212`) gains `kind` and `size_gb`
+parameters (`_admit_plug` has both) and a last step, after external-boot, in-flight and `device_limit`, for `kind=disk` only:
 
 ```python
 cap_gb = config.require(HOTPLUG_DISK_PROJECT_MAX_GB)
-charged_gb = await hotplug_disk_charged_gb(conn, system.project)
+charged_gb = await hotplug_disk_gb_for_project(conn, system.project)
 if charged_gb + size_gb > cap_gb:
     return _quota_refusal(system_id, cap_gb, charged_gb, size_gb)
 ```
@@ -104,15 +101,18 @@ A NIC skips the step. The refusal:
 
 The detail text names the three figures and tells the caller to un-plug a device, or ask the
 operator to raise `KDIVE_HOTPLUG_DISK_PROJECT_MAX_GB`. `quota_exceeded` is already in the category
-table (`mcp/resources/_content/errors.md`) and is not retried by a bare retry
+table (`docs/guide/errors.md`, snapshotted into `mcp/resources/_content/errors.md` by
+`just resources-docs`) and is not retried by a bare retry
 (`domain/errors.py:133`), which fits: a retry succeeds only after something changes. The
-envelope's other fields follow `_conflict`'s shape (`devices.py:60-67`). The tool docs for
-`systems.plug_device` list the new refusal, and the error reference lists
-`hotplug_disk_quota_exceeded` under `quota_exceeded`.
+envelope's other fields follow `_conflict`'s shape (`devices.py:67-74`). The tool text of
+`systems.plug_device` lists the new refusal (regenerated into `docs/guide/reference/systems.md` by
+`just docs`, checked by `docs-check`), and the error reference lists `hotplug_disk_quota_exceeded`
+under `quota_exceeded`.
 
 ### Release
 
-The charge is the ledger, so it ends when the row does. Every path, with its charge effect:
+The charge is the ledger, so it ends when the row does. Every row delete and state change, with its
+charge effect:
 
 | Event | Row | Charge |
 |---|---|---|
@@ -125,7 +125,10 @@ The charge is the ledger, so it ends when the row does. Every path, with its cha
 | reprovision fails after `release_all` | `attached` rows to `lost`; the System is `FAILED` | held until teardown (un-plug needs `READY`) |
 | power OFF/CYCLE, snapshot restore succeeds | `attached` rows to `lost`; the System stays `READY` | held until `unplug_device` or teardown; the backing volume stays on the host |
 | system-reclaim proves absence | rows deleted (`jobs/handlers/system_reclaim.py:113`) | released |
+| un-plug settle timeout or provider fault | `unplugging` to `failed` | held |
+| plug re-verify finds the System not `READY` | `plugging` to `failed` | held |
 | reconciler `repair_stalled_device_ops` | `plugging`/`unplugging` to `failed` | held |
+| reconciler fails a stalled restore or reprovision | rows stay `attached` on a `FAILED` System | held until teardown |
 | System row deleted | cascade | released |
 
 No release code is added. The implementation PR adds tests that assert the charge after each row
@@ -145,13 +148,16 @@ the charge is under it; nothing is un-plugged.
 2. Invariants: while the PROJECT lock is held, `charged_gb` counts exactly the disk rows
    committed; a plug that commits has passed `charged + size <= cap` against that count; a row's
    charge ends only when the row is deleted, and a row is deleted only after the provider freed the
-   storage or proved it absent (ADR-0823), except teardown, which deletes after a best-effort
-   release.
+   storage or proved it absent (ADR-0823), except teardown and reprovision success, which delete
+   after a best-effort `release_all`.
 3. Accepted: a `failed` or `lost` row can charge storage already freed (until un-plug or teardown);
-   teardown deletes rows when `release_all` faulted, so a leaked volume stops charging while it
-   still exists (ADR-0823 accepts the leak); a volume the ledger never recorded is not charged; two
+   teardown and reprovision success delete rows when `release_all` faulted, so a leaked volume stops
+   charging while it still exists (ADR-0823 accepts the leak); a volume the ledger never recorded is not charged; two
    projects cannot have different caps; a server restart can lower the cap below the current
-   charge; servers with different settings behind one database apply their own cap.
+   charge; servers with different settings behind one database apply their own cap; during a rolling upgrade
+   servers on the old version admit plugs with no check, so the cap can be exceeded until all run
+   the new one; a refusal is not audited, like the tool's other refusals, so an operator sees a
+   pinned project only through the refusal's figures.
 4. Concurrency: two plugs on different Systems of one project serialize on the PROJECT lock, so the
    second sees the first's `plugging` row (READ COMMITTED, the sum runs after the lock is held). A
    delete racing a check can only lower the count the check reads. A plug and a provision of the
@@ -183,4 +189,4 @@ other PR, and ADR-0827 flips to Accepted in it.
 
 | Title | Scope | Effort | Live proof |
 |---|---|---|---|
-| `feat(systems): refuse hot-plugged disks over the project storage cap` | the setting and its generated config reference, `hotplug_disk_charged_gb`, the PROJECT lock in the plug path, the `_plug_refusal` step and refusal envelope, tool and error docs, an operator note, `Accepted` status and ADR-0827 citations in `src/` and `tests/`; tests: boundary (cap, cap+1), cap 0, NIC unaffected, a NULL-size disk row charges `DISK_MAX_GB`, two Systems of one project racing for the last gigabytes under the lock, the charge after every row event in the release table | M | no: the rule is a database sum; the existing fault-inject and libvirt hot-plug cells keep passing under the 256 GB default and need no change |
+| `feat(systems): refuse hot-plugged disks over the project storage cap` | the setting and its generated config reference (`just config-docs`), `hotplug_disk_gb_for_project`, the PROJECT lock in the plug path, the `_plug_refusal` step and refusal envelope, tool and error docs (`just docs`, `just resources-docs`), the `live-testing.md` note, `Accepted` status and ADR-0827 citations in `src/` and `tests/`; tests: boundary (cap, cap+1), cap 0, NIC unaffected, two Systems of one project racing for the last gigabytes under the lock, the charge after every row event in the release table | M | no: the rule is a database sum; the existing fault-inject and libvirt hot-plug cells keep passing under the 256 GB default and need no change |

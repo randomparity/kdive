@@ -61,14 +61,13 @@ changes it in its environment and restarts the server, as with the image caps.
 **The charge is derived from the ledger, not stored.** The charge of a project is
 
 ```sql
-SELECT coalesce(sum(coalesce(d.size_gb, %s)), 0)
+SELECT coalesce(sum(d.size_gb), 0)
 FROM system_devices d JOIN systems s ON s.id = d.system_id
 WHERE s.project = %s AND d.kind = 'disk'
 ```
 
-with `%s` bound to `DISK_MAX_GB` for a disk row that records no size, so a disk is never free. Today
-every disk row carries `size_gb`. The sum covers every state: a row in any state may have backing
-storage, and `lost` and `failed` rows keep it until an un-plug or teardown frees it. NICs have no
+over every state: a row in any state may have backing storage, and `lost` and `failed` rows keep it
+until an un-plug or teardown frees it. Every disk row carries `size_gb` (`devices.py:104-127`). NICs have no
 size and are not charged. There is no counter column and no second table, so a charge cannot drift
 from the devices the ledger lists.
 
@@ -84,9 +83,9 @@ hotplug_disk_quota_exceeded`, and the integers `limit_gb`, `charged_gb`, `reques
 `suggested_next_actions` is `["systems.unplug_device", "systems.list_devices"]`. No row and no job
 are written.
 
-**Release is deleting the row.** Each of the five delete points above runs in the same transaction
-as, or after, the provider call that frees the storage, and lowers the charge the moment it
-commits. This record adds no release code. A row that stays charges: a `failed` plug, a refused
+**Release is deleting the row.** Each of the five delete points above lowers the charge the moment
+it commits. The un-plug and plug-rejection deletes follow a provider call that freed the storage or
+attached nothing; teardown and reprovision success delete after a best-effort `release_all`. This record adds no release code. A row that stays charges: a `failed` plug, a refused
 un-plug, a `lost` row after power OFF/CYCLE or restore, and a row the reconciler failed. On a
 `READY` System the agent clears each with `systems.unplug_device`, which frees any backing volume
 and deletes the row; a `lost` row after a failed reprovision sits on a System that is not `READY`,
@@ -114,7 +113,15 @@ split are in the spec, `docs/workflow/specs/2026-11-19-hotplug-disk-quota-3720-d
   project lock: they only lower the charge, and a reader that misses an uncommitted delete refuses
   a plug that would have fit, never admits one that does not.
 - A `failed` or `lost` row charges storage that may already be gone (a failed reprovision ran
-  `release_all`). The over-charge ends at un-plug or teardown and errs toward refusing.
+  `release_all`). The over-charge ends at un-plug or teardown and errs toward refusing. The
+  opposite error exists too: teardown and reprovision success delete rows after a best-effort
+  `release_all`, so a faulted release stops charging a volume that may still exist (ADR-0823
+  accepts that leak).
+- A refusal is not audited, like the plug tool's other refusals (`device_limit`, in-flight); the
+  image cap audits its denials. An operator learns a project is at its cap from the refusal's
+  figures. A deployment that wants a signal can add a log line or metric later.
+- During a rolling upgrade, servers still on the old version admit plugs with no check and no
+  PROJECT lock, so the cap can be exceeded until every server runs this version.
 - The charge is a count of provisioned gigabytes, not a time integral. It adds nothing to the kcu
   budget, and a hot-plugged disk is still free of kcu.
 - The host's own disk is not part of the check. A project under its cap can still exceed the
@@ -145,7 +152,7 @@ split are in the spec, `docs/workflow/specs/2026-11-19-hotplug-disk-quota-3720-d
   of Systems is not a size, and the per-System limit (8 × 32 GB) is the bound the issue calls
   insufficient.
 - **A stored counter or a charge table.** verified: five code paths delete rows, plus the
-  reconciler and the foreign-key cascade; a counter needs every one to decrement in the same
+  foreign-key cascade, and the reconciler changes row state; a counter needs every one to decrement in the same
   transaction and a repair for the ones that do not, and a missed path silently lowers the
   project's capacity for good. The sum over at most 8 rows per System is the same kind of scan
   `_within_system_quota` already runs on `systems`, and it cannot drift.
