@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from kdive.components.references import (
     ROOTFS_COMPONENT,
     ComponentKind,
@@ -18,7 +20,9 @@ from kdive.providers.core.runtime import (
     DebugCapabilities,
     ProviderRuntime,
     ProviderSupport,
+    ResourceBindingCapabilities,
 )
+from kdive.providers.fault_inject.capabilities import FAULT_RATE_KEY, MAX_LATENCY_S_KEY
 from kdive.providers.fault_inject.debug.gdb import (
     FaultInjectDebugEngine,
     fault_inject_attach_seam,
@@ -99,47 +103,79 @@ def build_runtime(
     engine: FaultEngine | None = None,
     hotplug_behaviour: HotplugBehaviour | None = None,
 ) -> ProviderRuntime:
-    """Build fault-inject mock provider ports (ADR-0072 happy path; ADR-0074 faults)."""
+    """Build fault-inject mock provider ports (ADR-0072 happy path; ADR-0074 faults).
+
+    The runtime also binds per resource row: ``for_resource(name, capabilities)`` re-assembles the
+    fault wrappers and hot-plug behaviour from that row's capabilities over the same stateful
+    ports (ADR-0074 amendment, #3716).
+    """
     inventory = inventory if inventory is not None else FaultInjectInventory()
     provisioner = FaultInjectProvisioning(inventory)
     install = FaultInjectInstall()
     retrieve = FaultInjectRetrieve(store_factory=lambda: store)
     introspect = FaultInjectIntrospect()
-    faulted_install = FaultedInstall(install, engine) if engine is not None else install
     external_boot = FaultInjectExternalBoot()
     hotplug = FaultInjectHotplug(inventory, hotplug_behaviour)
-    return ProviderRuntime(
-        profile_policy=FaultInjectProfilePolicy(),
-        provisioner=FaultedProvisioning(provisioner, engine) if engine is not None else provisioner,
-        installer=faulted_install,
-        booter=faulted_install,
-        connector=FaultInjectConnect(),
-        controller=FaultInjectControl(hotplug),
-        retriever=retrieve,
-        crash_postmortem=retrieve,
-        vmcore_introspector=introspect,
-        live_introspector=introspect,
-        support=ProviderSupport(
-            supports_build=True,
-            supports_boot=True,
-            component_sources=_component_sources(),
-            capture_methods=frozenset(
-                {CaptureMethod.CONSOLE, CaptureMethod.HOST_DUMP, CaptureMethod.GDBSTUB}
+
+    def assemble(engine: FaultEngine | None, behaviour: HotplugBehaviour | None) -> ProviderRuntime:
+        faulted_install = FaultedInstall(install, engine) if engine is not None else install
+        port = hotplug.with_behaviour(behaviour)
+        return ProviderRuntime(
+            profile_policy=FaultInjectProfilePolicy(),
+            provisioner=(
+                FaultedProvisioning(provisioner, engine) if engine is not None else provisioner
             ),
-            # ADR-0208: fault-inject reports its synthetic capability: both connector transports
-            # and both introspection modes FaultInjectIntrospect realizes.
-            debug_transports=frozenset({"gdbstub", "drgn-live"}),
-            introspection=frozenset({"offline-vmcore", "live"}),
-            hotplug_devices=ADVERTISED_KINDS,
+            installer=faulted_install,
+            booter=faulted_install,
+            connector=FaultInjectConnect(),
+            controller=FaultInjectControl(hotplug),
+            retriever=retrieve,
+            crash_postmortem=retrieve,
+            vmcore_introspector=introspect,
+            live_introspector=introspect,
+            support=_support(),
+            debug=DebugCapabilities(
+                attach_seam=fault_inject_attach_seam,
+                engine=FaultInjectDebugEngine(),
+            ),
+            external_boot=external_boot,
+            external_boot_preparation=external_boot,
+            external_boot_recovery_objects=external_boot,
+            device_hotplug=(
+                FaultedHotplug(port, engine, inventory) if engine is not None else port
+            ),
+            binding=ResourceBindingCapabilities(
+                rebind_for_resource=lambda _name: assemble(engine, behaviour),
+                rebind_with_capabilities=_from_capabilities,
+            ),
+        )
+
+    def _from_capabilities(_name: str, capabilities: Mapping[str, object]) -> ProviderRuntime:
+        return assemble(
+            _engine_from(capabilities), HotplugBehaviour.from_capabilities(capabilities)
+        )
+
+    return assemble(engine, hotplug_behaviour)
+
+
+def _engine_from(capabilities: Mapping[str, object]) -> FaultEngine | None:
+    """Return the row's engine, or ``None`` when no fault or latency is configured (ADR-0074)."""
+    if not capabilities.get(FAULT_RATE_KEY) and not capabilities.get(MAX_LATENCY_S_KEY):
+        return None
+    return FaultEngine.from_capabilities(capabilities)
+
+
+def _support() -> ProviderSupport:
+    return ProviderSupport(
+        supports_build=True,
+        supports_boot=True,
+        component_sources=_component_sources(),
+        capture_methods=frozenset(
+            {CaptureMethod.CONSOLE, CaptureMethod.HOST_DUMP, CaptureMethod.GDBSTUB}
         ),
-        debug=DebugCapabilities(
-            attach_seam=fault_inject_attach_seam,
-            engine=FaultInjectDebugEngine(),
-        ),
-        external_boot=external_boot,
-        external_boot_preparation=external_boot,
-        external_boot_recovery_objects=external_boot,
-        device_hotplug=(
-            FaultedHotplug(hotplug, engine, inventory) if engine is not None else hotplug
-        ),
+        # ADR-0208: fault-inject reports its synthetic capability: both connector transports
+        # and both introspection modes FaultInjectIntrospect realizes.
+        debug_transports=frozenset({"gdbstub", "drgn-live"}),
+        introspection=frozenset({"offline-vmcore", "live"}),
+        hotplug_devices=ADVERTISED_KINDS,
     )

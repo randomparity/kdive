@@ -20,6 +20,7 @@ from kdive.providers.fault_inject.capabilities import (
     MAX_LATENCY_S_KEY,
     SEED_KEY,
 )
+from kdive.providers.fault_inject.lifecycle import faulted
 from kdive.providers.ports.lifecycle import DeviceSpec, HotplugDeviceKind
 from tests.providers.test_composition import _provisioning_profile
 
@@ -79,17 +80,19 @@ def test_row_fault_rate_fails_provisioning_through_the_registry_runtime() -> Non
         _provision(binding)
 
 
-def test_row_max_latency_is_slept_through_the_registry_runtime(
+def test_row_max_latency_is_drawn_through_the_registry_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    slept: list[float] = []
-    monkeypatch.setattr("time.sleep", slept.append)
+    drawn: list[float] = []
+    monkeypatch.setattr(
+        faulted, "_apply", lambda decision, _sleep: drawn.append(decision.latency_s)
+    )
     binding = _bind({SEED_KEY: 7, MAX_LATENCY_S_KEY: {"provision": 30.0}})
 
     _provision(binding)
 
-    assert slept
-    assert 0.0 < slept[0] <= 30.0
+    assert len(drawn) == 1
+    assert 0.0 < drawn[0] <= 30.0
 
 
 def test_row_without_fault_keys_provisions_cleanly() -> None:
@@ -112,3 +115,25 @@ def test_row_hotplug_behaviour_busy_refuses_an_unplug() -> None:
 def test_row_with_invalid_capabilities_fails_closed_at_binding() -> None:
     with pytest.raises(CategorizedError):
         _bind({FAULT_RATE_KEY: {"provision": 2.0}})
+
+
+def test_hotplug_ledger_survives_a_rebind_with_changed_behaviour() -> None:
+    resolver = composition.ProviderComposition().build_provider_resolver(
+        enable_fault_inject=True, enable_local_libvirt=False
+    )
+    spec = DeviceSpec(HotplugDeviceKind.NIC, "dev0", network=None, size_gb=None)
+
+    def bind(capabilities: dict[str, Any]) -> ProviderBinding:
+        conn = cast(AsyncConnection, _Conn(capabilities))
+        return asyncio.run(resolver.binding_for_system(conn, _SYSTEM_ID))
+
+    first = bind({})
+    domain = _provision(first)
+    assert first.runtime.device_hotplug is not None
+    handle = first.runtime.device_hotplug.plug(domain, spec).provider_handle
+
+    busy = bind({HOTPLUG_BEHAVIOUR_KEY: "busy"}).runtime.device_hotplug
+    assert busy is not None
+    with pytest.raises(CategorizedError):
+        busy.unplug(domain, "dev0", handle)
+    assert busy.is_attached(domain, "dev0", handle) is True

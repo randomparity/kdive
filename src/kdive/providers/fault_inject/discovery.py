@@ -5,7 +5,7 @@ no host to enumerate. Its ``capabilities`` jsonb carries the per-plane concurren
 cap plus the fault-engine keys (``seed`` / ``fault_rate`` / ``max_latency_s`` /
 ``secret_ref``); the seeded engine and forced secret resolution read those keys. Happy-path
 discovery writes an empty ``fault_rate``/``max_latency_s`` so no fault is drawn until a
-deployment configures one.
+deployment configures one on the resource row, which the runtime reads at each binding.
 
 The billable sizing (``vcpus`` / ``memory_mb``) is **not** advertised here — it comes from
 the ``systems.toml`` config overlay (``reconcile_resources``, ADR-0112 #393), which is the

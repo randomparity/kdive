@@ -114,6 +114,16 @@ class FaultInjectHotplug:
         self._domains: dict[str, _Domain] = {}
         self._lock = threading.Lock()
 
+    def with_behaviour(self, behaviour: HotplugBehaviour | None) -> FaultInjectHotplug:
+        """Return a port with ``behaviour`` that shares this port's device ledger and lock.
+
+        A resource row's behaviour is read at each binding; the ledger must outlive the binding.
+        """
+        sibling = FaultInjectHotplug(self._inventory, behaviour, kinds=self._kinds)
+        sibling._domains = self._domains  # noqa: SLF001 - one ledger across sibling ports
+        sibling._lock = self._lock  # noqa: SLF001
+        return sibling
+
     def plug(self, domain_name: str, spec: DeviceSpec) -> PlugOutcome:
         self._require_kind(spec.kind)
         with self._lock:

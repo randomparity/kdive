@@ -109,6 +109,30 @@ states, so the plan must not conflate them:
 No handler changes are required for issue 5: the provision `fail` path and the lease-expiry
 latency path both terminate in *already-shipped* transitions.
 
+### Amendment (2026-11-20): the runtime binds from the resource row's capabilities (#3716)
+
+This qualifies the first Decision paragraph, which said the wrapper is constructed in
+`build_faultinject_runtime` "only when the resource `capabilities` carry a non-empty
+`fault_rate` / `max_latency_s`". Nothing read those capabilities in production: the registry
+builds one runtime per kind (ADR-0071) while capabilities live on each resource row, so the keys
+(and the later `hotplug_behaviour`, ADR-0823) had no effect outside tests.
+
+The binding point is now per operation. `ResourceBindingCapabilities` gains an optional
+`rebind_with_capabilities(name, capabilities)` hook; `ProviderRuntime.for_resource(name,
+capabilities=None)` calls it when both are present and otherwise behaves as before. The resolver's
+four lookups select `resources.capabilities` and pass it through. Only fault-inject sets the hook.
+It builds `FaultEngine.from_capabilities` (installing the wrappers only when `fault_rate` or
+`max_latency_s` is non-empty) and `HotplugBehaviour.from_capabilities`; invalid values raise
+`configuration_error` at binding. Stateful ports (inventory, hot-plug ledger, external-boot state)
+are built once per kind and shared, so rebinding per operation cannot lose a device or domain.
+A row edit takes effect on the next operation. `attempt` stays 1 and the per-call hot-plug draw
+stays out of scope (#3715).
+
+Rejected: reading capabilities inside the ports (a synchronous database read in a `to_thread`
+port, against ADR-0063's pure ports); sourcing the keys from `systems.toml` (leaves the row, the
+documented source, ignored); populating a cache from discovery registration (that runs only in
+the reconciler and admin processes, not the worker or server where the ports execute).
+
 ## Consequences
 
 - Each of issue 5's five drift cases is driven by a **real seeded engine decision**: the

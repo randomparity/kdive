@@ -7,7 +7,7 @@ provider port protocols and domain value types; concrete provider assembly stays
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -146,6 +146,10 @@ class ResourceBindingCapabilities:
     """Per-resource runtime rebinding support for multi-resource providers."""
 
     rebind_for_resource: Callable[[str], ProviderRuntime]
+    # Optional: a provider whose behaviour is configured on the resource row's capabilities jsonb
+    # (fault-inject, ADR-0074) rebinds from ``(resource name, capabilities)``. Absent, the
+    # resolver's capabilities are ignored and ``rebind_for_resource`` serves every binding.
+    rebind_with_capabilities: Callable[[str, Mapping[str, object]], ProviderRuntime] | None = None
 
 
 class DomainPresence(Protocol):
@@ -238,13 +242,18 @@ class ProviderRuntime:
         if self.discovery_registrar is not None:
             await self.discovery_registrar(pool)
 
-    def for_resource(self, resource_name: str) -> ProviderRuntime:
+    def for_resource(
+        self, resource_name: str, capabilities: Mapping[str, object] | None = None
+    ) -> ProviderRuntime:
         """Return a runtime bound to ``resource_name``; identity when no rebind hook is set.
 
         The resolver calls this at the per-op chokepoint so a provider serving many hosts
         (remote-libvirt) resolves the *allocated* host's connection config, while single-host
-        providers return themselves unchanged (ADR-0187).
+        providers return themselves unchanged (ADR-0187). ``capabilities`` is the resource row's
+        jsonb; only a provider that sets ``rebind_with_capabilities`` reads it (ADR-0074).
         """
         if self.binding is None:
             return self
+        if capabilities is not None and self.binding.rebind_with_capabilities is not None:
+            return self.binding.rebind_with_capabilities(resource_name, capabilities)
         return self.binding.rebind_for_resource(resource_name)
