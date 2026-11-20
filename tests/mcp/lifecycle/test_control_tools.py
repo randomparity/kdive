@@ -1368,7 +1368,7 @@ async def _job_count(pool: AsyncConnectionPool) -> int:
     return int(row["n"])
 
 
-def test_a_key_stored_under_the_bare_tool_name_conflicts_once_and_enqueues_nothing(
+def test_a_key_stored_under_the_bare_tool_name_conflicts_and_enqueues_nothing(
     migrated_url: str,
 ) -> None:
     """A row written before the scoped kind existed is not replayed: the retry fails closed."""
