@@ -70,7 +70,11 @@ from kdive.mcp.tools._common import (
 )
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools.lifecycle.support._device_ops import device_job_active, device_op_in_flight
-from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay, keyed_mutation
+from kdive.mcp.tools.lifecycle.support._idempotency import (
+    dedup_replay,
+    keyed_mutation,
+    object_scoped_kind,
+)
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
@@ -185,7 +189,7 @@ async def power_system(
                     idempotency_key=idempotency_key,
                     principal=ctx.principal,
                     project=system.project,
-                    kind=_POWER_KIND,
+                    kind=object_scoped_kind(_POWER_KIND, uid),
                     do_work=_enqueue,
                 )
 
@@ -337,7 +341,7 @@ async def force_crash_system(
                     idempotency_key=idempotency_key,
                     principal=ctx.principal,
                     project=system.project,
-                    kind=_FORCE_CRASH_KIND,
+                    kind=object_scoped_kind(_FORCE_CRASH_KIND, uid),
                     do_work=_enqueue,
                 )
 
@@ -411,7 +415,7 @@ async def diagnostic_sysrq_system(
                     idempotency_key=idempotency_key,
                     principal=ctx.principal,
                     project=system.project,
-                    kind=_DIAGNOSTIC_SYSRQ_KIND,
+                    kind=object_scoped_kind(_DIAGNOSTIC_SYSRQ_KIND, uid),
                     do_work=_enqueue,
                 )
 
@@ -515,7 +519,7 @@ async def watch_for_crash_system(
                     idempotency_key=idempotency_key,
                     principal=ctx.principal,
                     project=system.project,
-                    kind=_WATCH_FOR_CRASH_KIND,
+                    kind=object_scoped_kind(_WATCH_FOR_CRASH_KIND, uid),
                     do_work=_enqueue,
                 )
 
@@ -656,7 +660,7 @@ async def _capture_traffic(
                     idempotency_key=idempotency_key,
                     principal=ctx.principal,
                     project=run.project,
-                    kind=_CAPTURE_TRAFFIC_KIND,
+                    kind=object_scoped_kind(_CAPTURE_TRAFFIC_KIND, uid),
                     do_work=_enqueue,
                 )
 

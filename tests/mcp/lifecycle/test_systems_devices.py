@@ -823,3 +823,64 @@ def test_concurrent_plugs_serialize_on_the_system_lock(
             assert len(await devices_for_system(conn, UUID(env.system_id))) == 1
 
     _scenario(migrated_url, authority_role_dsns, body)
+
+
+# --- idempotency key scope: one key, one System (#3713, ADR-0193 amendment) ------------------
+
+
+@pytest.mark.parametrize("tool", ["plug", "unplug"])
+def test_a_key_reused_on_a_second_system_conflicts_and_changes_nothing(
+    migrated_url: str, authority_role_dsns: _RoleDsns, tool: str
+) -> None:
+    async def body(env: _Env) -> None:
+        other_system = await runs_support.seed_system(env.owner)
+        env.inventory.record(UUID(other_system), domain_name_for(UUID(other_system)))
+        mine, theirs = await env.add_row(_ATTACHED), await env.add_row(_ATTACHED, other_system)
+
+        async def call(system_id: str, device_id: UUID) -> ToolResponse:
+            if tool == "plug":
+                return await env.plug(system_id=system_id, idempotency_key="shared-key")
+            return await env.unplug(
+                str(device_id), system_id=system_id, idempotency_key="shared-key"
+            )
+
+        first = await call(env.system_id, mine)
+        assert first.status == "running", first.model_dump()
+        assert (await call(env.system_id, mine)).model_dump() == first.model_dump()
+
+        other = await call(other_system, theirs)
+
+        assert other.error_category == "conflict", other.model_dump()
+        assert _reason(other) == "idempotency_key_in_use"
+        job_kind = JobKind.PLUG_DEVICE if tool == "plug" else JobKind.UNPLUG_DEVICE
+        assert len(await env.jobs(job_kind)) == 1
+        async with env.owner.connection() as conn:
+            cur = await conn.execute(
+                "SELECT count(*) FROM jobs WHERE kind = %s AND payload->>'system_id' = %s",
+                (job_kind.value, other_system),
+            )
+            assert await cur.fetchone() == (0,)
+
+    _scenario(migrated_url, authority_role_dsns, body)
+
+
+def test_an_unplug_key_reused_on_a_second_device_conflicts_and_changes_nothing(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def body(env: _Env) -> None:
+        first_device, second_device = await env.add_row(_ATTACHED), await env.add_row(_ATTACHED)
+        first = await env.unplug(str(first_device), idempotency_key="shared-key")
+        assert first.status == "running", first.model_dump()
+        await env.settle_job(str(first.data["job_id"]))
+        async with env.owner.connection() as conn:  # the first un-plug settled back to attached
+            await SYSTEM_DEVICES.update_state(conn, first_device, _ATTACHED)
+
+        other = await env.unplug(str(second_device), idempotency_key="shared-key")
+
+        assert other.error_category == "conflict", other.model_dump()
+        assert _reason(other) == "idempotency_key_in_use"
+        assert len(await env.jobs(JobKind.UNPLUG_DEVICE)) == 1
+        row = await env.row(second_device)
+        assert row is not None and row.state is _ATTACHED
+
+    _scenario(migrated_url, authority_role_dsns, body)
