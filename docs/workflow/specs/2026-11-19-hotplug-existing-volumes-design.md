@@ -274,8 +274,8 @@ implementation PR may tune it with evidence from a live cold fetch.
    breaks the backing chain of overlays that use it, as for the System rootfs overlay (ADR-0060);
    a replaced catalog row does not (the local cache is digest-keyed and kept, and a remote
    operator replacing a staged volume is the same in-place rewrite); the remote staged volume is
-   operator-attested, so its content digest is not re-hashed at plug time; an overlay is not
-   charged to a quota (ADR-0823); the guest may see duplicate filesystem identifiers;
+   operator-attested, so its content digest is not re-hashed at plug time; an overlay is charged to
+   the ADR-0827 project cap at its image's virtual size (item 1a), not at its actual growth; the guest may see duplicate filesystem identifiers;
    a cold local fetch holds a worker thread to completion even after the 300 s wait gives up, and
    there is no per-project cap on concurrent staging beyond one plug job per System; deleting or
    re-publishing a catalog row does not check ledger rows, so only the guard on private-image expiry
@@ -299,7 +299,7 @@ implementation PR may tune it with evidence from a live cold fetch.
 | Name injection through the overlay or serial | Overlay name and serial derive from `device_id` (a UUID), as for scratch. |
 | Un-plug or `release_all` deleting a referenced volume | Unreachable by construction: invariants 1 and 2 above, with the invariant tests. |
 | Time-of-check to time-of-use on image state | Admission resolves; the worker re-resolves by id; the id-keyed fetch returns the observed digest, compared to the row's; `plug` builds the overlay on the `StagedDisk` the same job validated. A change fails the plug before any attach. A staged-path file rewritten between the checks and the attach is operator action and is accepted. |
-| Resource exhaustion by repeated overlays | 8 devices per System, 32 GB virtual size per device, as scratch. Quota charging stays an unowned deferral (ADR-0823). |
+| Resource exhaustion by repeated overlays | 8 devices per System, 32 GB virtual size per device, as scratch. The ADR-0827 project cap charges an image disk at its image's virtual size (item 1a). |
 | Audit gap | The audit `args` carry `image` and the resolved digest; the ledger keeps `image`, `source_image_id` and `source_digest` until teardown, so a later re-publish does not erase which bytes a System attached. Refused admissions are not audited, as for every refusal in these tools. |
 
 ## Non-goals and owners
@@ -319,10 +319,10 @@ implementation PR may tune it with evidence from a live cold fetch.
 
 | # | Title | Scope | Order | Effort | Live proof |
 |---|---|---|---|---|---|
-| 1a | Hot-plug image disks: ledger, tool and admission | migration (three columns, CHECKs, `SystemDevice`); `image` parameter, errors, audit, `list_devices.image`, docstring; `resolve_hotplug_image`; tests | first | M | no |
+| 1a | Hot-plug image disks: ledger, tool and admission | migration (three columns, CHECKs, `SystemDevice`); `image` parameter, errors, audit, `list_devices.image`, docstring; `resolve_hotplug_image`; the ADR-0827 project-cap charge for an image disk at the image's virtual size; tests | first | M | no |
 | 1b | Hot-plug image disks: port, worker and fault-inject | `DiskSource`, `StagedDisk`, `DeviceSpec.disk_source`, `stage_disk_source`, `plug(..., staged)`, `create_overlay`; handler staging step and deadline stamps; fault-inject; libvirt providers refuse a `disk_source` (`configuration_error`, `image_unsupported`) until 2 and 3 land; invariant tests | after 1a | M | no (fault-inject proves the contract) |
 | 2 | local-libvirt image-disk overlay | `fetch_registered_public_rootfs_by_id`; fetch hardening (unique temp name, per-digest single-flight, size check on a cache hit); `LocalDeviceVolumes.create_overlay`; `stage_disk_source`; format checks; removes the local `image_unsupported` refusal | after 1b | M | yes, local-libvirt on x86_64: plug an image disk, read data in the guest, snapshot and restore with it attached, un-plug, assert the base file byte-identical; cold-cache fetch inside the stage window |
-| 3 | remote-libvirt image-disk overlay | `RemoteDeviceVolumes.create_overlay`, staged-volume checks, ownership copy, `relabel=no` backing store in the device XML; removes the remote refusal; flips ADR-0829 to Accepted (the last provider to ship) | after 1b, parallel with 2 | M | yes, remote-libvirt: plug against an operator-staged volume, un-plug, assert the staged volume, its label and its ctime unchanged |
+| 3 | remote-libvirt image-disk overlay | `RemoteDeviceVolumes.create_overlay`, staged-volume checks, ownership copy, `relabel=no` backing store in the device XML; removes the remote refusal | after 1b, parallel with 2 | M | yes, remote-libvirt: plug against an operator-staged volume, un-plug, assert the staged volume, its label and its ctime unchanged |
 
 Registering a non-bootable data image is deliberately not an item: it is a separate decision
 (Non-goals), and the first release attaches a registered image's contents.

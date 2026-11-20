@@ -2,11 +2,11 @@
 
 ## Status
 
-Proposed
+Accepted (2026-11-20)
 
 Design only. Implementation is split in the spec,
-`docs/workflow/specs/2026-11-19-hotplug-existing-volumes-design.md`; the pull request that
-implements the decision flips this status. The issue is #3722; ADR 0823 defers the feature
+`docs/workflow/specs/2026-11-19-hotplug-existing-volumes-design.md`, and is tracked by the
+follow-on issues filed from it. Nothing in this record is implemented yet. The issue is #3722; ADR 0823 defers the feature
 ("pre-existing volumes as disks (needs a storage-reference model)").
 
 ## Context
@@ -117,7 +117,11 @@ proposed implementation split are in the spec.
   deletes or rewrites in place breaks the backing chain; that is the same exposure the System's
   own rootfs overlay has (ADR-0060) and is not new here.
 - An overlay's growth is bounded by the image's virtual size, capped at 32 GB per device like a
-  scratch disk, and is not charged to a quota (ADR-0823).
+  scratch disk.
+- ADR-0827 charges a project for its hot-plugged disks by summing `size_gb`, which an image disk
+  does not carry. An image disk is charged at its image's virtual size, rounded up to a whole
+  gigabyte, from admission like a scratch disk; the first implementation issue (1a in the spec)
+  owns that, so an overlay cannot bypass the project cap.
 
 ## Considered & rejected
 
