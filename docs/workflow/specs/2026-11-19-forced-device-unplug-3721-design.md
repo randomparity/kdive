@@ -48,10 +48,12 @@ guest, the 30 s window, and carries the shared hot-plug limits text.
 Admission, in this order. A step's refusal ends the call.
 
 1. `system_id` or `device_id` not a UUID: `configuration_error` (as F6).
-2. Provider has no forced kind (`forced_unplug_devices` empty):
-   `capability_unsupported(capability="forced_unplug", supported=[])`. No audit.
-3. System missing or not in `ctx.projects`: `configuration_error` (the in-project check precedes
-   the gate so the denial audit's project is always readable, ADR-0028).
+2. Project membership, in the wrapper: a System that is missing or not in `ctx.projects` is the
+   wrapper's uniform `not_found`. The membership check precedes the gate, so the denial audit's
+   project is always readable (ADR-0028) and a non-member never reaches the gate.
+3. Provider has no forced kind (`forced_unplug_devices` empty):
+   `capability_unsupported(capability="forced_unplug", supported=[])`. No audit; the set is already
+   visible to any member through `systems.get`.
 4. Gate [F1, F3]: `DestructiveOp(kind=JobKind.FORCE_UNPLUG_DEVICE, profile_opt_in=<resolved>)`
    through `assert_destructive_allowed(ctx, allocation, op)` with the default `admin` role. On
    `DestructiveOpDenied`, audit `tool="systems.force_unplug_device"`,
@@ -59,7 +61,7 @@ Admission, in this order. A step's refusal ends the call.
    `authorization_denied` listing `missing`. The authorize helper (`_authorize_destructive`, now
    private to `control/registrar.py`) moves to `lifecycle/support/` and both tools call it; it
    is not copied.
-5. Under the System advisory lock and `keyed_mutation` (key kind scoped to the device, as F6):
+5. Under the System advisory lock and `keyed_mutation` (replay kind `object_scoped_kind("systems.force_unplug_device", device_uid)`, never the graceful tool's kind, so one key cannot replay across the two tools):
    - state not `READY`: `conflict`, `system_not_ready`;
    - external-boot admission with `ExternalBootOperation.SYSTEM_DEVICE_HOTPLUG` (no new member);
    - row absent or of another System: `not_found` with the fixed detail (ADR-0123);
@@ -76,9 +78,9 @@ Admission, in this order. A step's refusal ends the call.
    "systems.list_devices"]`.
 
 The gate precedes the replay lookup: a repeat of a keyed call by a caller who has since lost
-the role or whose System's profile does not opt in is denied, not replayed. A principal that is
-not a member of the project gets the membership refusal at step 3, so the gate reveals nothing
-about other projects.
+the role or whose System's profile does not opt in is denied, not replayed. A non-member gets the
+membership refusal at step 2, so the gate reveals nothing about other projects, and no device or
+state check runs before the gate, so a non-admin cannot probe device state through this tool.
 
 ### Gate token and profile
 
@@ -117,9 +119,12 @@ other port field.
 
 `FORCE_UNPLUG_DEVICE` joins `ACTIVE_JOB_KINDS` (automatic), `STATE_FENCED_JOB_KINDS`,
 `DEVICE_JOB_KINDS`, the payload map (`UnplugDevicePayload`) [F8, F10], and the reconciler pairing,
-which becomes "`unplugging` rows are owned by either un-plug kind" and queries `kind = ANY(...)`
-[F9]. It is not in `CONTRIBUTOR_CANCELABLE_JOB_KINDS`. One migration widens `jobs_kind_check` the
-way `0200_system_devices.sql` did. The registry binds the existing handler twice; the handler picks
+whose `(state, kind)` pairs become `(state, kinds)`: a `plugging` row is owned by `PLUG_DEVICE`
+alone, an `unplugging` row by either un-plug kind, and the `NOT EXISTS` probe matches
+`kind = ANY(kinds)` [F9]. It is not in `CONTRIBUTOR_CANCELABLE_JOB_KINDS`. One migration, numbered by the implementer (0201 is the latest today), drops and re-adds
+`jobs_kind_check` with the full current list from `0200_system_devices.sql` plus
+`'force_unplug_device'`; the `SystemDeviceState`/`JobKind` tie test and the `migrations[-K:]` window
+tests move with it. The registry binds the existing handler twice; the handler picks
 `hotplugger.force_unplug` when `job.kind is JobKind.FORCE_UNPLUG_DEVICE` and `hotplugger.unplug`
 otherwise, and everything else in [F7] applies unchanged: same 30 s window, same `from_state`
 return on a refusal, same `failed` on timeout or fault, same row deletion on success.
@@ -147,7 +152,9 @@ fault, reconciler). `forced` is carried by the audit row and the job envelope on
 
 - **fault-inject** advertises `forced_unplug_devices = {nic, disk}`. `force_unplug` removes the
   device from the in-memory table immediately and returns `True`, ignoring the `busy`, `slow` and
-  `hang` behaviours that stall the graceful path; that is the point of the op. The per-plane
+  `hang` behaviours and a device already `removing` or `settling`, which stall the graceful path;
+  that is the point of the op. A handle that does not match the device, or a `None` handle for an
+  absent device, raises `handle_unknown` exactly as `unplug` does. The per-plane
   `fault_rate` still injects `INFRASTRUCTURE_FAILURE`. One new `hotplug_behaviour` value,
   `no_force`, makes `force_unplug` raise `unplug_refused`, so the row-returns-to-`from_state` path
   is testable. A device that is not present returns `True`, as `unplug` does.
@@ -195,11 +202,22 @@ fault, reconciler). `forced` is carried by the audit row and the job envelope on
 - **Argument handling.** `device_id` is parsed as a UUID; the provider re-parses it
   (`parse_device_id`) and derives the alias from it, never from caller text. No caller string reaches
   a provider command.
-- **Authority at enqueue only.** The job carries the authorizing principal; the profile is fixed
-  for the System's life, so the opt-in cannot change between enqueue and run. A role revoked in that
-  window does not cancel a queued job, as for `force_crash`.
-- **Audit.** Success and denial are both audited with the device id and prior state; `detail` text
-  from the provider still passes the redactor before reaching `list_devices`.
+- **Authority at enqueue.** The job carries the authorizing principal and the worker does not
+  re-run the gate, as for `force_crash`. The profile can change (`systems.reprovision` rewrites it
+  and needs only contributor), so the opt-in is contributor-settable, as it already is for
+  `force_crash`; the admin role is the factor a contributor cannot supply. What keeps the opt-in
+  stable between enqueue and run is the exclusion: reprovision, power, snapshot and restore refuse
+  while a device job is active, which holds only because `FORCE_UNPLUG_DEVICE` is in
+  `DEVICE_JOB_KINDS`, so implementation issue 1 adds a test that fails when it is missing. A role
+  revoked inside the 30 s window does not cancel a queued job; accepted, as for `force_crash`.
+- **Dispatch default.** The shared handler runs `force_unplug` only when `job.kind` is
+  `FORCE_UNPLUG_DEVICE` and runs the graceful `unplug` otherwise; a test shows a contributor-enqueued
+  `UNPLUG_DEVICE` never reaches `force_unplug`.
+- **Audit.** Denial and the enqueue are audited with the device id and prior state. A refusal after
+  the gate (`device_op_in_flight`, `device_not_forceable`, `capability_unsupported`, `not_found`) and
+  the job's outcome are not audited, as for `force_crash`: the job row of kind
+  `force_unplug_device` is the record of outcome. `detail` text from the provider still passes the
+  redactor before reaching `list_devices`.
 - **Default.** `forced_unplug_devices` is empty and `destructive_ops` is empty: the op is denied
   twice over until a provider proves a kind and a profile opts in.
 - **No new secret, dependency, network exposure or permission grant.**
@@ -209,7 +227,7 @@ fault, reconciler). `forced` is carried by the audit row and the job envelope on
 | Non-goal | Owner |
 |---|---|
 | PowerVM forced remove | #3688 |
-| libvirt mechanism before the spike proves one | the libvirt implementation issue |
+| a libvirt mechanism, until the spike proves one | implementation issue 1 (the spike), sequenced first |
 | Forcing devices kdive did not plug; pre-existing volumes; PCIe, SR-IOV, vFC | unowned (ADR-0823) |
 | A per-call `confirm` argument; a graceful-first precondition | not planned |
 | Detecting guest-side use of a removed device | not planned (no guest channel) |
@@ -222,7 +240,7 @@ order.
 
 | # | Title | Scope | Effort | Live proof |
 |---|---|---|---|---|
-| 1 | feat(hotplug): force-unplug port, job kind and fault-inject provider | `JobKind.FORCE_UNPLUG_DEVICE` in `OPT_IN_DESTRUCTIVE_JOB_KINDS`, `STATE_FENCED_JOB_KINDS`, `DEVICE_JOB_KINDS`, payload map; migration widening `jobs_kind_check` and the four window tests; `ProviderSupport.forced_unplug_devices` and the subset check; `DeviceHotplugger.force_unplug` on the protocol, the libvirt adapter (raises `forced_unplug_unsupported`) and fault-inject (with `no_force`); handler and reconciler generalised; `ProvisioningProfile`, profile docs and `destructive_ops` token docs. No tool. | M | none: unit and DB integration tests, including a controlled fault on the gate-token validation |
-| 2 | feat(mcp): `systems.force_unplug_device` | Tool, admission order above, shared authorize helper moved to `support/`, audit, exposure `_ADMIN`, `DESTRUCTIVE_TOOLS`, `systems.get` `data.forced_unplug_devices`, generated RBAC and toolset docs, CLI verb, the hot-plug limits text. Depends on 1. | M | fault-inject live-stack cell: denial without opt-in, denial for a contributor, forced removal of a `hang` device, `no_force` refusal, audit rows |
-| 3 | spike and feat(libvirt): forced un-plug for NIC and disk, or a recorded negative | The spike of "Providers"; if a mechanism passes the postcondition, `force_unplug` and `forced_unplug_devices` in the shared adapter, else an ADR-0828 amendment. Depends on 1; the live proof of the tool path needs 2. | L | local libvirt on x86_64 (a guest that refuses release, per kind); ppc64le only if the mechanism differs |
-| 4 | test(remote-libvirt): live proof of forced un-plug | Advertise on remote-libvirt the kinds issue 3 proved, with a recorded run. Only if 3 finds a mechanism. Depends on 2 and 3. | S | remote libvirt |
+| 1 | spike(libvirt): can a guest-refused NIC or disk be removed from the live domain? | The "Providers" spike, no dependency on the others, runs first. Output: a recorded result per kind, an advertised kind set with a prototype `force_unplug` in the shared adapter, or an ADR-0828 amendment saying libvirt cannot force that kind. | M | local libvirt on x86_64 with a guest that refuses release, per kind |
+| 2 | feat(hotplug): force-unplug port, job kind and fault-inject provider | `JobKind.FORCE_UNPLUG_DEVICE` in `OPT_IN_DESTRUCTIVE_JOB_KINDS`, `STATE_FENCED_JOB_KINDS`, `DEVICE_JOB_KINDS`, payload map; the migration and its window tests; `ProviderSupport.forced_unplug_devices` and the subset check; `DeviceHotplugger.force_unplug` on the protocol, the libvirt adapter (raises `forced_unplug_unsupported` unless issue 1 found a mechanism) and fault-inject (with `no_force`); handler and reconciler generalised; profile and `destructive_ops` docs. Tests: `FORCE_UNPLUG_DEVICE` missing from `DEVICE_JOB_KINDS` fails; a contributor-enqueued `UNPLUG_DEVICE` never calls `force_unplug`. No tool. | M | none: unit and DB integration tests, with a controlled fault on the token validation |
+| 3 | feat(mcp): `systems.force_unplug_device` | Tool, admission order above, shared authorize helper moved to `support/`, audit, exposure `_ADMIN`, `DESTRUCTIVE_TOOLS`, `systems.get` `data.forced_unplug_devices`, generated RBAC and toolset docs, CLI verb, the hot-plug limits text. Depends on 2. It ships on fault-inject whatever issue 1 finds: fault-inject is a first-class provider whose purpose is agent-visible failure testing, and every other provider refuses with `capability_unsupported`. | M | fault-inject live-stack cell: denial without opt-in, denial for a contributor, forced removal of a `hang` device, `no_force` refusal, audit rows |
+| 4 | feat(libvirt): advertise forced un-plug | Only if issue 1 found a mechanism: wire it for the proven kinds in the shared adapter and advertise on local-libvirt; remote-libvirt advertises the kinds its own run proves. Depends on 1 and 2; its tool-path proof needs 3. | M | local libvirt on x86_64, remote libvirt; ppc64le only if the mechanism differs |

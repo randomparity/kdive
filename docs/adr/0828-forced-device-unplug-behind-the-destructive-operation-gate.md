@@ -4,8 +4,8 @@
 
 Accepted (2026-11-19)
 
-Implementation is tracked by the issues the spec proposes (it files none). Nothing in this record
-is implemented yet.
+Implementation will be tracked by the issues the spec proposes (it files none). Nothing in this
+record is implemented yet.
 
 ## Context
 
@@ -91,11 +91,13 @@ row is gone, the device has no row, and teardown's `release_all` frees what rema
 removal adds is one fact the ledger does not hold: it was forced. That fact is in the audit row
 (`transition` `force_unplug_device`) and in the job envelope (`data.forced: true`).
 
-**Admission.** In order: ids; provider has any forced kind (else `capability_unsupported`,
-`capability: forced_unplug`); project membership; the gate; then under the System advisory lock and
-the replay key, `READY`, external-boot admission, the row (`not_found`), the row's state, the
-row's kind against the provider's forced set (`capability_unsupported`, `capability:
-forced_unplug:<kind>`). Admitted row states are `attached` and `failed`. A `lost` row has no device
+**Admission.** In order: ids; project membership (the wrapper, `not_found` for a non-member);
+provider has any forced kind (else `capability_unsupported`, `capability: forced_unplug`); the gate;
+then under the System advisory lock and the replay key, `READY`, external-boot admission, the row
+(`not_found`), the row's state, the row's kind against the provider's forced set
+(`capability_unsupported`, `capability: forced_unplug:<kind>`). The replay key's kind is the tool's
+own name scoped to the device, so a graceful call and a forced call that share a key never replay
+each other. Admitted row states are `attached` and `failed`. A `lost` row has no device
 for the provider to force, and its graceful path already frees the volume, so it is refused
 `conflict`, `data.reason: device_not_forceable`, pointing at `systems.unplug_device`. A `plugging` or
 `unplugging` row, or any active plug or un-plug job on the System, is `device_op_in_flight`: the
