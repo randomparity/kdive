@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from uuid import UUID, uuid4
 
@@ -130,3 +132,67 @@ def test_next_draw_hands_each_concurrent_caller_a_distinct_ordinal() -> None:
         draws = list(pool.map(lambda _: inventory.next_draw("dom-a"), range(200)))
 
     assert sorted(draw[1] for draw in draws if draw) == list(range(1, 201))
+
+
+class _MutatingDict(dict[str, UUID]):
+    """A domain map that lets another thread mutate it while ``items()`` is half-consumed."""
+
+    def __init__(self, mutate: Callable[[], None]) -> None:
+        super().__init__()
+        self._mutate = mutate
+
+    def items(self) -> Iterator[tuple[str, UUID]]:  # ty: ignore[invalid-method-override]
+        entries = iter(super().items())
+        yield next(entries)
+        self._mutate()
+        yield from entries
+
+
+def test_owned_domains_snapshot_survives_a_record_landing_mid_listing() -> None:
+    inventory = FaultInjectInventory()
+    writer = threading.Thread(target=inventory.record, args=(_OTHER, "dom-new"))
+
+    def land_record_mid_iteration() -> None:
+        writer.start()
+        # Unlocked, the writer finishes here and the iteration raises RuntimeError; locked, the
+        # writer blocks until the listing returns, so this wait times out by design.
+        writer.join(timeout=0.2)
+
+    inventory._domains = _MutatingDict(land_record_mid_iteration)
+    inventory._domains["dom-a"] = _SYSTEM
+    inventory._domains["dom-b"] = _SYSTEM
+
+    listed = inventory.owned_domains()
+    writer.join()
+
+    assert {d.name for d in listed} == {"dom-a", "dom-b"}
+    assert inventory.system_id_of("dom-new") == _OTHER
+
+
+def test_flag_orphan_after_forget_stores_nothing() -> None:
+    inventory = FaultInjectInventory()
+    inventory.record(_SYSTEM, "dom-a")
+    inventory.forget("dom-a")
+
+    inventory.flag_orphan("dom-a")
+    inventory.record(_OTHER, "dom-a")
+
+    assert inventory.is_orphaned("dom-a") is False
+
+
+def test_readers_wait_for_the_inventory_lock() -> None:
+    inventory = FaultInjectInventory()
+    inventory.record(_SYSTEM, "dom-a")
+    readers = {
+        "owned_domains": inventory.owned_domains,
+        "is_orphaned": lambda: inventory.is_orphaned("dom-a"),
+        "system_id_of": lambda: inventory.system_id_of("dom-a"),
+        "flag_orphan": lambda: inventory.flag_orphan("dom-a"),
+    }
+    for name, call in readers.items():
+        thread = threading.Thread(target=call, name=name)
+        with inventory._lock:
+            thread.start()
+            thread.join(timeout=0.2)
+            assert thread.is_alive(), f"{name} did not take the inventory lock"
+        thread.join()
