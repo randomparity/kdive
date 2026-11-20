@@ -178,6 +178,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "systems.delete_snapshot": ("tests/mcp/lifecycle/test_systems_snapshot.py",),
     "systems.plug_device": ("tests/mcp/lifecycle/test_systems_devices.py",),
     "systems.unplug_device": ("tests/mcp/lifecycle/test_systems_devices.py",),
+    "systems.force_unplug_device": ("tests/mcp/lifecycle/test_systems_force_unplug.py",),
     "systems.list_devices": ("tests/mcp/lifecycle/test_systems_devices.py",),
     "tools.invoke": ("tests/mcp/tools/test_gateway_invoke.py",),
     "tools.search": ("tests/mcp/tools/test_gateway_search.py",),
@@ -935,7 +936,7 @@ def test_backstop_actually_detects_the_known_gate_callers(gate_reachers: frozens
     # here. systems.teardown and systems.reprovision are deliberately absent: ADR-0129 dropped
     # teardown to a single require_role(ADMIN) check and ADR-0326 made reprovision contributor
     # leaseholder control, so neither reaches the destructive-op gate.
-    assert gate_reachers == {"control.force_crash"}
+    assert gate_reachers == {"control.force_crash", "systems.force_unplug_device"}
 
 
 # --- #1367: docstring quality gates -------------------------------------------------------
@@ -1040,6 +1041,7 @@ _JOB_HANDLE_TOOLS = frozenset(
         "systems.delete_snapshot",
         "systems.plug_device",
         "systems.unplug_device",
+        "systems.force_unplug_device",
         "vmcore.fetch",
     }
 )

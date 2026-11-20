@@ -122,6 +122,7 @@
 | [`systems.authorize_ssh_key`](systems.md#systemsauthorize_ssh_key) | `implemented` |
 | [`systems.check_ssh_reachable`](systems.md#systemscheck_ssh_reachable) | `implemented` |
 | [`systems.delete_snapshot`](systems.md#systemsdelete_snapshot) | `implemented` |
+| [`systems.force_unplug_device`](systems.md#systemsforce_unplug_device) | `implemented` |
 | [`systems.get`](systems.md#systemsget) | `implemented` |
 | [`systems.list`](systems.md#systemslist) | `implemented` |
 | [`systems.list_devices`](systems.md#systemslist_devices) | `implemented` |

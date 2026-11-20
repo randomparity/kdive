@@ -1,11 +1,12 @@
 """Device hot-plug ``systems.*`` MCP handlers (ADR-0823, #3700).
 
-Three handlers back ``systems.plug_device``, ``systems.unplug_device`` and
-``systems.list_devices``. Each is invoked through ``with_runtime_for_system`` (which resolves the
-provider runtime and enforces the required role), then refuses a provider that lacks the kind with
-``capability_unsupported``. Plug and un-plug are worker jobs because the provider call can wait on
-the guest, so the synchronous admission here only validates, writes the ``system_devices`` ledger
-row and enqueues. ``list_devices`` is a database read.
+Four handlers back ``systems.plug_device``, ``systems.unplug_device``,
+``systems.force_unplug_device`` (ADR-0828) and ``systems.list_devices``. Each is invoked through
+``with_runtime_for_system`` (which resolves the provider runtime and enforces the required role),
+then refuses a provider that lacks the kind with ``capability_unsupported``. Plug and un-plug are
+worker jobs because the provider call can wait on the guest, so the synchronous admission here
+only validates, writes the ``system_devices`` ledger row and enqueues. The forced un-plug adds the
+destructive-operation gate before any state check. ``list_devices`` is a database read.
 """
 
 from __future__ import annotations
@@ -37,8 +38,10 @@ from kdive.mcp.tools._common import external_boot_denial as _external_boot_denia
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools.lifecycle._recovery import iso
+from kdive.mcp.tools.lifecycle.support._destructive import authorize_destructive
 from kdive.mcp.tools.lifecycle.support._device_ops import device_job_active, device_op_in_flight
 from kdive.mcp.tools.lifecycle.support._idempotency import keyed_mutation, object_scoped_kind
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.ports.lifecycle import HotplugDeviceKind
 from kdive.security import audit
@@ -61,6 +64,7 @@ _UNPLUGGABLE = frozenset(
 _TRANSIENT = frozenset({SystemDeviceState.PLUGGING, SystemDeviceState.UNPLUGGING})
 _PLUG_KIND = "systems.plug_device"
 _UNPLUG_KIND = "systems.unplug_device"
+_FORCE_UNPLUG_KIND = "systems.force_unplug_device"
 _NEXT_ACTIONS = ["jobs.wait", "systems.list_devices"]
 
 
@@ -179,7 +183,13 @@ async def _audit_op(
 
 
 def _job_envelope(
-    device_id: UUID, job_id: UUID, kind: str, state: SystemDeviceState, window_s: float
+    device_id: UUID,
+    job_id: UUID,
+    kind: str,
+    state: SystemDeviceState,
+    window_s: float,
+    *,
+    forced: bool = False,
 ) -> ToolResponse:
     data: dict[str, JsonValue] = {
         "job_id": str(job_id),
@@ -188,6 +198,8 @@ def _job_envelope(
         "state": state.value,
         "settle_timeout_s": int(window_s),
     }
+    if forced:
+        data["forced"] = True
     return ToolResponse.success(
         str(device_id), "running", suggested_next_actions=list(_NEXT_ACTIONS), data=data
     )
@@ -277,13 +289,20 @@ async def _keyed_admission(
     arguments: Mapping[str, object] | None = None,
     idempotency_key: str | None,
     admit: Callable[[AsyncConnection], Awaitable[ToolResponse]],
+    gate: Callable[[AsyncConnection, System], Awaitable[ToolResponse | None]] | None = None,
 ) -> ToolResponse:
-    """Run ``admit`` under the System lock and the optional replay key."""
+    """Run ``admit`` under the System lock and the optional replay key.
+
+    ``gate`` runs after the in-project check and before the lock and the replay lookup, so a
+    caller who no longer passes it is denied rather than replayed.
+    """
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             system = await SYSTEMS.get(conn, uid)
             if system is None or system.project not in ctx.projects:
                 return _config_error(system_id)
+            if gate is not None and (denial := await gate(conn, system)) is not None:
+                return denial
             # SAVEPOINT-style nesting: the lock is held to the request's own commit, so the row
             # insert and the enqueue below are one transaction under it.
             async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, uid):
@@ -417,6 +436,139 @@ async def unplug_device(
     )
 
 
+def _forced_refusal(
+    runtime: ProviderRuntime, system_id: str, kind: HotplugDeviceKind | None
+) -> ToolResponse | None:
+    """Refuse a provider with no forced kind, or one that cannot force ``kind`` (ADR-0828)."""
+    forced = runtime.support.forced_unplug_devices
+    if forced and (kind is None or kind in forced):
+        return None
+    return _capability_unsupported(
+        system_id,
+        capability="forced_unplug" if kind is None else f"forced_unplug:{kind.value}",
+        provider=runtime.support.component_sources.provider,
+        supported=[k.value for k in forced],
+    )
+
+
+async def _force_unplug_target(
+    conn: AsyncConnection, runtime: ProviderRuntime, system: System, device_id: UUID
+) -> SystemDevice | ToolResponse:
+    """The row a forced un-plug may act on, or the first refusal, in the spec's order."""
+    system_id = str(system.id)
+    row = await SYSTEM_DEVICES.get(conn, device_id)
+    if row is None or row.system_id != system.id:
+        return _not_found(str(device_id))
+    if await device_job_active(conn, system.id) or any(
+        r.state in _TRANSIENT for r in await devices_for_system(conn, system.id)
+    ):
+        return device_op_in_flight(system_id)
+    if row.state is SystemDeviceState.LOST:
+        return ToolResponse.failure(
+            system_id,
+            ErrorCategory.CONFLICT,
+            detail="a lost row has no live device to force; un-plug it gracefully to clear it",
+            suggested_next_actions=["systems.unplug_device"],
+            data={"reason": "device_not_forceable"},
+        )
+    return _forced_refusal(runtime, system_id, HotplugDeviceKind(row.kind)) or row
+
+
+async def _admit_force_unplug(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    runtime: ProviderRuntime,
+    uid: UUID,
+    system_id: str,
+    device_id: UUID,
+    attempt: str,
+) -> ToolResponse:
+    system = await _ready_system(conn, ctx, uid, system_id)
+    if isinstance(system, ToolResponse):
+        return system
+    if (denial := await _external_boot_refusal(conn, ctx, system)) is not None:
+        return denial
+    row = await _force_unplug_target(conn, runtime, system, device_id)
+    if isinstance(row, ToolResponse):
+        return row
+    await SYSTEM_DEVICES.update_state(conn, row.id, SystemDeviceState.UNPLUGGING)
+    await _audit_op(
+        conn,
+        ctx,
+        system,
+        tool=_FORCE_UNPLUG_KIND,
+        transition="force_unplug_device",
+        args={
+            "system_id": system_id,
+            "device_id": str(device_id),
+            "kind": row.kind,
+            "from_state": row.state.value,
+        },
+    )
+    job = await queue.enqueue(
+        conn,
+        JobKind.FORCE_UNPLUG_DEVICE,
+        UnplugDevicePayload(system_id=str(uid), device_id=str(device_id), from_state=row.state),
+        job_authorizing(ctx, system.project),
+        f"force_unplug:{device_id}:{attempt}",
+        max_attempts=1,
+    )
+    return _job_envelope(
+        device_id, job.id, row.kind, SystemDeviceState.UNPLUGGING, UNPLUG_WINDOW_S, forced=True
+    )
+
+
+async def force_unplug_device(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    runtime: ProviderRuntime,
+    resolver: ProviderResolver,
+    *,
+    system_id: str,
+    device_id: str,
+    idempotency_key: str | None,
+) -> ToolResponse:
+    """Gate and admit a forced un-plug of an ``attached`` or ``failed`` row (ADR-0828).
+
+    Order: UUID parse, provider capability, the destructive-operation gate (before the replay
+    lookup and every device or state check), then the admission under the System lock.
+    """
+    uid = _as_uuid(system_id)
+    if uid is None:
+        return _config_error(system_id)
+    device_uid = _as_uuid(device_id)
+    if device_uid is None:
+        return _invalid_uuid_error("device_id", device_id)
+    refusal = _forced_refusal(runtime, system_id, None)
+    if refusal is not None:
+        return refusal
+    attempt = idempotency_key if idempotency_key is not None else uuid4().hex
+
+    async def gate(conn: AsyncConnection, system: System) -> ToolResponse | None:
+        return await authorize_destructive(
+            conn,
+            ctx,
+            system,
+            uid,
+            JobKind.FORCE_UNPLUG_DEVICE,
+            resolver=resolver,
+            tool=_FORCE_UNPLUG_KIND,
+        )
+
+    return await _keyed_admission(
+        pool,
+        ctx,
+        uid,
+        system_id,
+        kind=object_scoped_kind(_FORCE_UNPLUG_KIND, device_uid),
+        idempotency_key=idempotency_key,
+        admit=lambda conn: _admit_force_unplug(
+            conn, ctx, runtime, uid, system_id, device_uid, attempt
+        ),
+        gate=gate,
+    )
+
+
 def _device_item(row: SystemDevice) -> dict[str, JsonValue]:
     deadline = row.settle_deadline if row.state in _TRANSIENT else None
     return {
@@ -475,6 +627,7 @@ __all__ = [
     "DISK_MAX_GB",
     "DISK_MIN_GB",
     "NETWORK_MAX_LEN",
+    "force_unplug_device",
     "list_devices",
     "plug_device",
     "unplug_device",

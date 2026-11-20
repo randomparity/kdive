@@ -190,6 +190,7 @@ def system_envelope(
     active_run: dict[str, JsonValue] | None = None,
     supports_snapshots: bool | None = None,
     hotplug_devices: list[str] | None = None,
+    forced_unplug_devices: list[str] | None = None,
     supports_traffic_capture: bool | None = None,
     supported_capture_methods: list[str] | None = None,
     failure_job: FailureJobLookup = FAILURE_JOB_NOT_LOOKED_UP,
@@ -236,6 +237,8 @@ def system_envelope(
         data["supports_snapshots"] = supports_snapshots
     if hotplug_devices is not None:
         data["hotplug_devices"] = list(hotplug_devices)
+    if forced_unplug_devices is not None:
+        data["forced_unplug_devices"] = list(forced_unplug_devices)
     if supports_traffic_capture is not None:
         data["supports_traffic_capture"] = supports_traffic_capture
     if supported_capture_methods is not None:
@@ -490,16 +493,21 @@ async def get_system(
             # the System down) by omitting the field rather than failing the whole read.
             supports_snapshots: bool | None = None
             hotplug_devices: list[str] | None = None
+            forced_unplug_devices: list[str] | None = None
             supports_traffic_capture: bool | None = None
             supported_capture_methods: list[str] | None = None
             try:
                 runtime = await resolver.runtime_for_system(conn, system.id)
                 supports_snapshots = runtime.support.supports_snapshots
                 hotplug_devices = sorted(kind.value for kind in runtime.support.hotplug_devices)
+                forced_unplug_devices = sorted(
+                    kind.value for kind in runtime.support.forced_unplug_devices
+                )
                 supports_traffic_capture = runtime.support.supports_traffic_capture
             except CategorizedError:
                 supports_snapshots = None
                 hotplug_devices = None
+                forced_unplug_devices = None
                 supports_traffic_capture = None
             else:
                 # The provider set narrowed by the guest profile architecture (ADR-0757), with the
@@ -526,6 +534,7 @@ async def get_system(
             external_boot_conflict=external_boot_conflict,
             supports_snapshots=supports_snapshots,
             hotplug_devices=hotplug_devices,
+            forced_unplug_devices=forced_unplug_devices,
             supports_traffic_capture=supports_traffic_capture,
             supported_capture_methods=supported_capture_methods,
             failure_job=(

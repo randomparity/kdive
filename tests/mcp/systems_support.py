@@ -180,6 +180,7 @@ def provider_resolver(
     external_boot_recovery_objects: object | None = None,
     authority_sender: object | None = None,
     hotplugger: object | None = None,
+    forced_unplug_devices: frozenset[HotplugDeviceKind] = frozenset(),
 ) -> ProviderResolver:
     """Return a local-libvirt resolver with optional fake runtime ports.
 
@@ -243,6 +244,7 @@ def provider_resolver(
             ),
             supports_snapshots=supports_snapshots,
             hotplug_devices=frozenset(HotplugDeviceKind) if hotplugger is not None else frozenset(),
+            forced_unplug_devices=forced_unplug_devices,
             supports_traffic_capture=supports_traffic_capture,
             supports_diagnostic_sysrq=supports_diagnostic_sysrq,
             supports_crash_watch=supports_crash_watch,

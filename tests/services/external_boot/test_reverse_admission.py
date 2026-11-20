@@ -45,7 +45,11 @@ from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
 from kdive.mcp.tools.lifecycle.runs.steps import _enqueue_external_boot, boot_run, install_run
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_system
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
-from kdive.mcp.tools.lifecycle.systems.devices import plug_device, unplug_device
+from kdive.mcp.tools.lifecycle.systems.devices import (
+    force_unplug_device,
+    plug_device,
+    unplug_device,
+)
 from kdive.mcp.tools.lifecycle.systems.snapshot import (
     delete_snapshot,
     restore_system,
@@ -54,6 +58,7 @@ from kdive.mcp.tools.lifecycle.systems.snapshot import (
 from kdive.mcp.tools.lifecycle.systems.ssh_access import authorize_ssh_key
 from kdive.mcp.tools.lifecycle.vmcore.handlers import VmcoreHandlers
 from kdive.providers.ports.handles import SystemHandle, TransportHandle
+from kdive.providers.ports.lifecycle import HotplugDeviceKind
 from kdive.providers.system_authority.routing import authority_admission_routes_for_resource
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
@@ -115,7 +120,11 @@ def _resolver() -> Any:
 
 def _hotplug_resolver() -> Any:
     """A hot-plug-capable provider; admission never calls the port, so any object serves."""
-    return provider_resolver(connector=_FakeConnector(), hotplugger=object())
+    return provider_resolver(
+        connector=_FakeConnector(),
+        hotplugger=object(),
+        forced_unplug_devices=frozenset(HotplugDeviceKind),
+    )
 
 
 def _assert_denied(response: ToolResponse, actions: list[str]) -> None:
@@ -145,13 +154,17 @@ async def _restrict(
 
 
 def _profile() -> dict[str, Any]:
-    """The standard local-libvirt profile, opted in to ``force_crash``.
+    """The standard local-libvirt profile, opted in to both destructive operations.
 
-    ``control.force_crash`` runs the ADR-0028 destructive gate before the admission guard, so
-    without the opt-in the gate would answer first and the guard would never be reached.
+    ``control.force_crash`` and ``systems.force_unplug_device`` run the ADR-0028 destructive gate
+    before the admission guard, so without the opt-in the gate would answer first and the guard
+    would never be reached.
     """
     profile = provisioning_profile()
-    profile["provider"]["local-libvirt"]["destructive_ops"] = ["force_crash"]
+    profile["provider"]["local-libvirt"]["destructive_ops"] = [
+        "force_crash",
+        "force_unplug_device",
+    ]
     return profile
 
 
@@ -361,6 +374,32 @@ async def _unplug_keyed(
             idempotency_key=key,
         ),
         required_role=Role.CONTRIBUTOR,
+    )
+
+
+async def _force_unplug(restricted: _Restricted) -> ToolResponse:
+    return await _force_unplug_keyed(restricted.pool, restricted.system_id, _ABSENT_DEVICE, None)
+
+
+async def _force_unplug_keyed(
+    pool: AsyncConnectionPool, system_id: str, device_id: str, key: str | None
+) -> ToolResponse:
+    resolver = _hotplug_resolver()
+    return await with_runtime_for_system(
+        pool,
+        resolver,
+        _ctx(),
+        system_id,
+        lambda runtime: force_unplug_device(
+            pool,
+            _ctx(),
+            runtime,
+            resolver,
+            system_id=system_id,
+            device_id=device_id,
+            idempotency_key=key,
+        ),
+        required_role=Role.VIEWER,
     )
 
 
@@ -833,6 +872,7 @@ _READY_DENIED: dict[str, Callable[[_Restricted], Awaitable[ToolResponse]]] = {
     "systems.delete_snapshot": _delete_snapshot,
     "systems.plug_device": _plug,
     "systems.unplug_device": _unplug,
+    "systems.force_unplug_device": _force_unplug,
     "systems.reprovision": _reprovision,
     "systems.authorize_ssh_key": _authorize_ssh_key,
     "control.capture_traffic": _capture_traffic_other_run,
@@ -936,6 +976,18 @@ async def _unplug_seeded(restricted: _Restricted) -> ToolResponse:
     return await _unplug_seeded_keyed(restricted.pool, restricted.system_id, "", None)
 
 
+async def _force_unplug_seeded_keyed(
+    pool: AsyncConnectionPool, system_id: str, _run: str, key: str | None
+) -> ToolResponse:
+    async with pool.connection() as conn:
+        rows = await devices_for_system(conn, UUID(system_id))
+    return await _force_unplug_keyed(pool, system_id, str(rows[0].id), key)
+
+
+async def _force_unplug_seeded(restricted: _Restricted) -> ToolResponse:
+    return await _force_unplug_seeded_keyed(restricted.pool, restricted.system_id, "", None)
+
+
 async def _plug_keyed(
     pool: AsyncConnectionPool, system_id: str, _run: str, key: str
 ) -> ToolResponse:
@@ -983,6 +1035,9 @@ _REPLAY_CASES: dict[str, _ReplayCase] = {
     "systems.plug_device": _ReplayCase(_STATE.ACTIVE, _plug_keyed, status="running"),
     "systems.unplug_device": _ReplayCase(
         _STATE.ACTIVE, _unplug_seeded_keyed, _seed_attached_device, status="running"
+    ),
+    "systems.force_unplug_device": _ReplayCase(
+        _STATE.ACTIVE, _force_unplug_seeded_keyed, _seed_attached_device, status="running"
     ),
     "control.watch_for_crash": _ReplayCase(_STATE.RECOVERY_CONFLICT, _watch_keyed),
     "vmcore.fetch": _ReplayCase(_STATE.RECOVERY_CONFLICT, _vmcore_keyed, _crash_the_system),
@@ -1663,6 +1718,9 @@ _JOB_TOOLS: dict[str, _JobTool] = {
     "systems.plug_device": _JobTool(_STATE.ACTIVE, _plug, status="running"),
     "systems.unplug_device": _JobTool(
         _STATE.ACTIVE, _unplug_seeded, _prepare_attached_device, status="running"
+    ),
+    "systems.force_unplug_device": _JobTool(
+        _STATE.ACTIVE, _force_unplug_seeded, _prepare_attached_device, status="running"
     ),
     "systems.reprovision": _JobTool(_STATE.ACTIVE, _reprovision),
     "systems.restore": _JobTool(_STATE.ACTIVE, _restore, _prepare_available_snapshot),

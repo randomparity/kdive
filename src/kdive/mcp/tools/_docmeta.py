@@ -37,6 +37,7 @@ def normalize_maturity(value: object) -> ToolMaturityValue:
 DESTRUCTIVE_TOOLS = frozenset(
     {
         "control.force_crash",
+        "systems.force_unplug_device",
         "systems.teardown",
         "ops.force_teardown",
         "ops.force_release",

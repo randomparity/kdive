@@ -48,6 +48,9 @@ from kdive.mcp.tools.lifecycle.systems.devices import (
     DISK_MIN_GB,
     NETWORK_MAX_LEN,
 )
+from kdive.mcp.tools.lifecycle.systems.devices import (
+    force_unplug_device as _force_unplug_device,
+)
 from kdive.mcp.tools.lifecycle.systems.devices import list_devices as _list_devices
 from kdive.mcp.tools.lifecycle.systems.devices import plug_device as _plug_device
 from kdive.mcp.tools.lifecycle.systems.devices import unplug_device as _unplug_device
@@ -203,6 +206,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_systems_delete_snapshot(app, pool, resolver)
     _register_systems_plug_device(app, pool, resolver)
     _register_systems_unplug_device(app, pool, resolver)
+    _register_systems_force_unplug_device(app, pool, resolver)
     _register_systems_list_devices(app, pool, resolver)
     _register_systems_resolve_external_boot_conflict(app, pool, resolver)
 
@@ -338,7 +342,9 @@ def _register_systems_get(
         snapshot support. ``data.supports_traffic_capture`` likewise reports whether the provider
         can capture this System's traffic. ``data.hotplug_devices`` is the sorted list of device
         kinds (``nic``, ``disk``) the provider can hot-plug with ``systems.plug_device``; an empty
-        list means none. All three capability fields are absent when the System's provider is no
+        list means none. ``data.forced_unplug_devices`` is the sorted subset a forced un-plug
+        (``systems.force_unplug_device``) can remove; empty on every provider but fault-inject.
+        All four capability fields are absent when the System's provider is no
         longer registered.
 
         ``data.supported_capture_methods`` is the sorted list of the provider's capture methods
@@ -794,12 +800,12 @@ _HOTPLUG_LIMITS = (
 
 _HOTPLUG_ADMISSION = (
     "READY Systems only (`conflict`, `reason: system_not_ready` otherwise). Refused `conflict` "
-    "with `reason: device_op_in_flight` while another plug or un-plug job is queued or running "
-    "on the System; `control.power`, `systems.snapshot`, `systems.restore` and "
+    "with `reason: device_op_in_flight` while another plug, un-plug or forced un-plug job is "
+    "queued or running on the System; `control.power`, `systems.snapshot`, `systems.restore` and "
     "`systems.reprovision` are refused the same way while a device job is active "
     "(`systems.teardown` is not). A provider that cannot hot-plug the kind is refused "
     "`configuration_error` (`reason: capability_unsupported`, `data.supported`); "
-    "`systems.get` reports `data.hotplug_devices`."
+    "`systems.get` reports `data.hotplug_devices` and `data.forced_unplug_devices`."
 )
 
 
@@ -950,6 +956,70 @@ def _register_systems_unplug_device(
                 idempotency_key=idempotency_key,
             ),
             required_role=Role.CONTRIBUTOR,
+        )
+
+
+def _register_systems_force_unplug_device(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
+    @app.tool(
+        name="systems.force_unplug_device",
+        annotations=_docmeta.destructive(),
+        meta=_docmeta.maturity_meta("implemented"),
+    )
+    @_with_hotplug_limits(window_s=UNPLUG_WINDOW_S)
+    async def systems_force_unplug_device(
+        system_id: Annotated[str, Field(description="The READY System that holds the device.")],
+        device_id: Annotated[
+            str,
+            Field(
+                description="A device_id from systems.plug_device or systems.list_devices; an id "
+                "that is not a device of this System is `not_found`. Only `attached` and `failed` "
+                "rows can be forced; a `lost` row is `device_not_forceable`."
+            ),
+        ],
+        idempotency_key: Annotated[
+            str | None,
+            Field(
+                description="Replay-safe key; a repeated key returns the prior envelope, but only "
+                "while the caller still passes the gate. Without a key a retry after a finished "
+                "job enqueues fresh work."
+            ),
+        ] = None,
+    ) -> ToolResponse:
+        """Forcibly remove a device that systems.plug_device added, without waiting for the guest
+        to release it, so a driver can be tested against a device vanishing under it. DESTRUCTIVE:
+        it can wedge or crash the guest. Requires the project's admin role AND the System's
+        provisioning profile opting in (`destructive_ops: ["force_unplug_device"]`); a denial
+        names every missing factor (`authorization_denied`, `data.missing`) and is audited. Only
+        the fault-inject provider forces an un-plug today: local-libvirt and remote-libvirt
+        advertise no forced kind and answer `configuration_error` (`reason:
+        capability_unsupported`), even with the opt-in; `systems.get` reports
+        `data.forced_unplug_devices`. Enqueues a job and returns `status: running` with
+        `data.job_id`, `data.device_id`, `data.kind`, `data.state: unplugging`,
+        `data.settle_timeout_s` (__WINDOW__) and `data.forced: true`; poll `jobs.wait`, then
+        `systems.list_devices`: on success the row is gone. If the provider refuses
+        (`unplug_refused`), the row returns to the state it started from and the job fails
+        `control_failure`. A `lost` row is refused `conflict` (`reason: device_not_forceable`):
+        clear it with `systems.unplug_device`. Not cancelable once enqueued. __ADMISSION__
+        __LIMITS__"""
+        ctx = current_context()
+        return await with_runtime_for_system(
+            pool,
+            resolver,
+            ctx,
+            system_id,
+            lambda runtime: _force_unplug_device(
+                pool,
+                ctx,
+                runtime,
+                resolver,
+                system_id=system_id,
+                device_id=device_id,
+                idempotency_key=idempotency_key,
+            ),
+            # Membership only: the destructive-operation gate judges the admin role.
+            required_role=Role.VIEWER,
         )
 
 
