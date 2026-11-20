@@ -29,7 +29,7 @@ both passthrough kinds. This spec holds the contract the implementation issues b
 | The capability view keeps only the five descriptor fields | `domain/catalog/resource_capabilities.py:289-308` |
 | `live_devices` finds only `<interface>` and `<disk>` and types every `<interface>` as `nic` | `providers/shared/libvirt_hotplug.py:174-193` |
 | Admission limits: 8 rows, unpluggable states, advisory lock | `mcp/tools/lifecycle/systems/devices.py:52`, `:58`, `:196-268` |
-| Handlers: settle windows and state edges | `jobs/handlers/devices.py:41-42`, `:136-285` |
+| Handlers: settle windows and state edges | `jobs/handlers/devices.py:48-49`, `:136-285` |
 | Every provider advertises through one `ADVERTISED_KINDS` | `providers/local_libvirt/composition.py:525`; `providers/remote_libvirt/composition.py:549`; `providers/fault_inject/composition.py:180` |
 | q35 System XML renders no `<controller>`; remote defaults to i440fx | `providers/local_libvirt/lifecycle/xml.py` (none; comment at `:436`); `providers/remote_libvirt/config.py:38-47` |
 
@@ -149,7 +149,8 @@ migration notes require.
 
 `active_claims(conn, resource_id)` returns the union of the non-terminal allocations' claims and
 one claim per `system_devices` row of that resource with a `host_device`, whatever its state, so
-a `failed` or `lost` row keeps the device occupied. The ids on a row-derived claim come from the
+a `failed` or `lost` row keeps the device occupied. A `sriov_vf` row also yields a claim on its
+`physical_port`, so a port is not offered to another allocation while any of its VFs is bound. The ids on a row-derived claim come from the
 host's descriptor list. The fleet availability read (`availability._claims_by_resource`) is
 rewritten onto one shared fleet-wide union function with `active_claims`, and a test asserts the two
 agree.
@@ -166,9 +167,9 @@ never requests a VF of its own port.
 | Event | Rule |
 |---|---|
 | un-plug settles | row deleted; the device is unbound again; the reservation stays |
-| teardown | `release_all` best effort; `delete_devices_for_system` is narrowed to the `nic` and `disk` kinds and still runs before the destroy; passthrough rows are deleted by a new `delete_passthrough_devices_for_system` after `provisioner.teardown` returns, in the commit that publishes the terminal state; a failed destroy leaves them, so the device stays occupied |
-| reprovision | success: all kinds deleted in the commit that returns the System to `READY` (the provider call has recreated the domain); failure: `attached` rows become `lost` and stay occupying |
-| system-reclaim (`reclaim_device_ledger`: `system_reclaim.py:111`, and its callers in `system_authority.py`, `external_boot/lifecycle.py`, `repairs/jobs.py:117`) | all kinds deleted through a new delete-all function; each caller runs after the provider proved the domain absent (verify per caller) |
+| teardown | `release_all` best effort; `delete_devices_for_system` is narrowed to the `nic` and `disk` kinds and still runs before the destroy; passthrough rows are deleted by a new `delete_passthrough_devices_for_system` in `teardown_handler` in their own transaction right after `provisioner.teardown` returns, whatever the System's state (`_finalize_teardown` returns early for a `FAILED` or `TORN_DOWN` System that an operator tears down again, so it is not the place); a failed destroy leaves them, so the device stays occupied |
+| reprovision | success: all kinds deleted by the delete-all function (replacing the `delete_devices_for_system` call at `systems.py:264`) in the commit that returns the System to `READY` (the provider call has recreated the domain); failure: `attached` rows become `lost` and stay occupying |
+| system-reclaim (`reclaim_device_ledger`: `system_reclaim.py:111`, and its callers in `system_authority.py`, `external_boot/lifecycle.py`, `repairs/jobs.py:117`) | all kinds deleted through the delete-all function; passthrough rows cannot exist on an authority or external-boot System because plug admission refuses those (`devices.py:146-156`), so these callers delete only `nic` and `disk` rows in practice |
 | power OFF/CYCLE, snapshot restore | `attached` rows become `lost`; occupancy unchanged; `unplug_device` on a `lost` row deletes it after the provider finds the device absent |
 | allocation released or expired with a live System | claim stops counting; the rows keep the device occupied until the reaper's teardown deletes them; plug admission refuses (`allocation_not_active`) |
 
@@ -242,7 +243,10 @@ moves the row to `failed`, like `system_not_ready`.
    allocation's own reservation can sit unused while its row is `lost`; a host without an IOMMU or
    unbound devices cannot use the feature; a VF created or removed on the host after discovery shows
    only after re-discovery; guest-side loss of a device without a hypervisor event shows as a stale
-   `attached` row until the next `is_attached` poll.
+   `attached` row until the next `is_attached` poll; a `FAILED` System (for example after a failed
+   reprovision) holding `lost` passthrough rows keeps the device occupied until an operator runs
+   `systems.teardown`, because the orphan-teardown lane skips terminal Systems
+   (`reconciler/repairs/systems.py:54-72`) and the allocation can end meanwhile.
 4. Covered elsewhere: forced un-plug (#3721); PowerVM slots and logical ports (#3688); disk quota
    for scratch disks (#3720); creating VFs, binding devices to `vfio-pci` and IOMMU enablement (host
    setup, unowned until an issue names it); VF VLAN and rate settings (unowned); live migration and
@@ -278,5 +282,8 @@ Unverified until the live proof: that libvirt refuses an unbound device as state
 that a hostdev detach completes through the guest's hot-unplug request; that spare `pcie-root-port`
 controllers make a q35 hostdev hot-plug succeed on the QEMU version kdive boots; that vfio assignment
 blocks internal snapshots; the effect of the root-port change on the NIC-slot pin at `xml.py:436`;
-that a fault-inject resource accepts `pcie_devices` descriptors without a fixture change. No lab host
+that a fault-inject resource accepts `pcie_devices` descriptors without a fixture change; that the
+IOMMU-group rule (every peer bound to `vfio-pci` and held by one domain) is met by the operator's
+setup, since no group-peer occupancy is modelled and a violation surfaces as `plug_refused` after the
+row exists; and that libvirt raises the memlock limit for a hot-plugged hostdev. No lab host
 with an IOMMU and an SR-IOV adapter is named; the orchestrator schedules it.
