@@ -354,6 +354,8 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         # scratch disk on a ready System (ADR-0823, #3686).
         "plug_device",
         "unplug_device",
+        # The admin-gated forced variant of unplug_device (ADR-0828).
+        "force_unplug_device",
     }
 
 

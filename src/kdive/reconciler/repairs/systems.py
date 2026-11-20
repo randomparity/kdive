@@ -738,15 +738,15 @@ async def repair_stalled_creating_snapshots(conn: AsyncConnection) -> int:
     return recovered
 
 
-# The transient device state each job kind owns; a row in one with no active job of that kind
-# can never settle (ADR-0823).
+# The transient device state each job kind owns; a row in one with no active job of any owning
+# kind can never settle (ADR-0823). An `unplugging` row is owned by either un-plug kind (ADR-0828).
 _DEVICE_OP_KINDS = (
-    (SystemDeviceState.PLUGGING, JobKind.PLUG_DEVICE),
-    (SystemDeviceState.UNPLUGGING, JobKind.UNPLUG_DEVICE),
+    (SystemDeviceState.PLUGGING, (JobKind.PLUG_DEVICE,)),
+    (SystemDeviceState.UNPLUGGING, (JobKind.UNPLUG_DEVICE, JobKind.FORCE_UNPLUG_DEVICE)),
 )
 _STALLED_DEVICE_DETAIL = (
     "the worker ended before the device operation settled; the device may or may not be in the "
-    "guest. Retry systems.unplug_device, or plug again."
+    "guest. Retry systems.unplug_device or systems.force_unplug_device, or plug again."
 )
 
 
@@ -754,23 +754,23 @@ async def repair_stalled_device_ops(conn: AsyncConnection) -> int:
     """Fail a `plugging`/`unplugging` device row whose job can never finish (ADR-0823).
 
     A worker that died mid-call, or an operator `jobs.cancel`, strands the row with no active job of
-    the matching kind. Move it to `failed` so `systems.unplug_device` can clear it. No provider call
+    an owning kind. Move it to `failed` so an un-plug retry can clear it. No provider call
     is made: the state of the device is unknown, and the retry path asks the provider. A row whose
     job is still queued or running is left alone.
     """
     recovered = 0
-    for state, kind in _DEVICE_OP_KINDS:
+    for state, kinds in _DEVICE_OP_KINDS:
         async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT d.id FROM system_devices d "
                 "WHERE d.state = %s "
                 "  AND NOT EXISTS ( "
                 "    SELECT 1 FROM jobs j "
-                "    WHERE j.kind = %s "
+                "    WHERE j.kind = ANY(%s) "
                 "      AND j.payload->>'device_id' = d.id::text "
                 "      AND j.state = ANY(%s) "
                 "  )",
-                (state.value, kind.value, list(_ACTIVE_JOB_STATE_VALUES)),
+                (state.value, [kind.value for kind in kinds], list(_ACTIVE_JOB_STATE_VALUES)),
             )
             candidates = [row["id"] for row in await cur.fetchall()]
         for device_id in candidates:

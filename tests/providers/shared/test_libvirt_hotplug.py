@@ -288,6 +288,20 @@ def test_unplug_removes_device_and_frees_volume_when_guest_releases() -> None:
     assert port.is_attached(DOMAIN, device_id, handle, kind=HotplugDeviceKind.DISK) is False
 
 
+def test_force_unplug_is_unsupported_and_leaves_the_device_and_volume() -> None:
+    domain, volumes, device_id = _Domain(), _Volumes(), str(uuid4())
+    port = _port(domain, volumes)
+    handle = port.plug(DOMAIN, _disk(device_id)).provider_handle
+
+    with pytest.raises(CategorizedError) as err:
+        port.force_unplug(DOMAIN, device_id, handle)
+
+    assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert err.value.details["reason"] == "forced_unplug_unsupported"
+    assert port.is_attached(DOMAIN, device_id, handle, kind=HotplugDeviceKind.DISK) is True
+    assert volumes.live != {}
+
+
 def test_unplug_unsettled_then_is_attached_frees_volume_on_first_absent_look() -> None:
     domain, volumes, device_id = _Domain(), _Volumes(), str(uuid4())
     port = _port(domain, volumes)

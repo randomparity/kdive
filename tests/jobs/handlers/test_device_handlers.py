@@ -219,16 +219,56 @@ class _Env:
         )
 
     async def unplug(
-        self, port: object, device_id: UUID, from_state: SystemDeviceState = _ATTACHED
+        self,
+        port: object,
+        device_id: UUID,
+        from_state: SystemDeviceState = _ATTACHED,
+        kind: JobKind = JobKind.UNPLUG_DEVICE,
     ) -> str | None:
         return await unplug_device_handler(
             self.worker,
-            self.job(JobKind.UNPLUG_DEVICE, device_id, from_state=from_state.value),
+            self.job(kind, device_id, from_state=from_state.value),
             resolver=provider_resolver(hotplugger=port),
             secret_registry=self.secrets,
             window_s=_WINDOW_S,
             poll_interval_s=_POLL_S,
         )
+
+
+class _ForceSpy:
+    """A port that records which un-plug call the handler made and never removes the device."""
+
+    def __init__(self, *, force_returns: bool = True) -> None:
+        self.calls: list[str] = []
+        self._force_returns = force_returns
+
+    def unplug(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
+        self.calls.append("unplug")
+        return True
+
+    def force_unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+        self.calls.append("force_unplug")
+        return self._force_returns
+
+    def is_attached(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
+        return True
+
+    def release_all(self, domain_name: str) -> None:
+        raise AssertionError("provider release_all must not be called")
 
 
 def _run(
@@ -723,5 +763,134 @@ def test_a_provider_timeout_with_window_left_is_not_a_settle_timeout(
             await env.plug(_TimesOut(), device_id)
 
         assert (await env.state(device_id)) is _FAILED
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
+# --- forced unplug (ADR-0828) -------------------------------------------------------------
+
+_FORCE = JobKind.FORCE_UNPLUG_DEVICE
+
+
+@pytest.mark.parametrize(
+    "behaviour", [HotplugBehaviour.BUSY, HotplugBehaviour.SLOW, HotplugBehaviour.HANG]
+)
+def test_forced_unplug_deletes_the_row_whatever_stalls_the_graceful_path(
+    migrated_url: str, authority_role_dsns: _RoleDsns, behaviour: HotplugBehaviour
+) -> None:
+    async def scenario(env: _Env) -> None:
+        port = env.port(behaviour)
+        device_id = await env.add_plugged(port, SystemDeviceState.UNPLUGGING)
+
+        assert await env.unplug(port, device_id, kind=_FORCE) == str(device_id)
+
+        assert await env.row(device_id) is None
+        assert (
+            port.is_attached(env.domain, str(device_id), None, kind=HotplugDeviceKind.NIC) is False
+        )
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
+def test_forced_unplug_removes_a_device_already_removing(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def scenario(env: _Env) -> None:
+        port = env.port(HotplugBehaviour.HANG)
+        device_id = await env.add_plugged(port, SystemDeviceState.UNPLUGGING)
+        port.unplug(env.domain, str(device_id), None, kind=HotplugDeviceKind.NIC)
+
+        await env.unplug(port, device_id, kind=_FORCE)
+
+        assert await env.row(device_id) is None
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
+def test_a_provider_that_will_not_force_returns_the_row_to_its_prior_state(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def scenario(env: _Env) -> None:
+        port = env.port(HotplugBehaviour.NO_FORCE)
+        device_id = await env.add_plugged(port, SystemDeviceState.UNPLUGGING)
+
+        error = await _raises(env.unplug(port, device_id, kind=_FORCE))
+
+        assert error.category is ErrorCategory.CONTROL_FAILURE
+        assert error.details["reason"] == "unplug_refused"
+        assert error.details["forced"] is True
+        row = await env.row(device_id)
+        assert row is not None and row.state is _ATTACHED
+        assert (
+            port.is_attached(env.domain, str(device_id), None, kind=HotplugDeviceKind.NIC) is True
+        )
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
+def test_forced_unplug_with_a_wrong_handle_is_refused_and_the_row_returns(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def scenario(env: _Env) -> None:
+        port = env.port()
+        device_id = await env.add_plugged(port, SystemDeviceState.UNPLUGGING)
+        await env.owner.execute(
+            "UPDATE system_devices SET provider_handle = 'another' WHERE id = %s", (device_id,)
+        )
+
+        error = await _raises(env.unplug(port, device_id, kind=_FORCE))
+
+        assert error.details["reason"] == "handle_unknown"
+        assert await env.state(device_id) is _ATTACHED
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
+def test_a_forced_unplug_that_never_settles_fails_the_row(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def scenario(env: _Env) -> None:
+        spy = _ForceSpy(force_returns=False)
+        device_id = await env.add_row(SystemDeviceState.UNPLUGGING)
+
+        error = await _raises(env.unplug(spy, device_id, kind=_FORCE))
+
+        assert error.details["reason"] == "settle_timeout"
+        assert await env.state(device_id) is _FAILED
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
+def test_an_injected_fault_fails_the_forced_unplug(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def scenario(env: _Env) -> None:
+        inner = env.port()
+        device_id = await env.add_plugged(inner, SystemDeviceState.UNPLUGGING)
+        engine = FaultEngine(seed=1, fault_rate={"hotplug": 1.0}, max_latency_s={})
+        port = FaultedHotplug(inner, engine, env.inventory)
+
+        error = await _raises(env.unplug(port, device_id, kind=_FORCE))
+
+        assert error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        assert await env.state(device_id) is _FAILED
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [(JobKind.UNPLUG_DEVICE, "unplug"), (JobKind.FORCE_UNPLUG_DEVICE, "force_unplug")],
+)
+def test_only_a_forced_job_calls_force_unplug(
+    migrated_url: str, authority_role_dsns: _RoleDsns, kind: JobKind, expected: str
+) -> None:
+    async def scenario(env: _Env) -> None:
+        spy = _ForceSpy()
+        device_id = await env.add_row(SystemDeviceState.UNPLUGGING)
+
+        await env.unplug(spy, device_id, kind=kind)
+
+        assert spy.calls == [expected]
 
     _run(migrated_url, authority_role_dsns, scenario)

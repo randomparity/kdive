@@ -175,6 +175,15 @@ class FaultedHotplug:
         self._draw(domain_name)
         return self._inner.unplug(domain_name, device_id, provider_handle, kind=kind)
 
+    def force_unplug(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+    ) -> bool:
+        self._draw(domain_name)
+        return self._inner.force_unplug(domain_name, device_id, provider_handle)
+
     def is_attached(
         self,
         domain_name: str,

@@ -91,7 +91,11 @@ async def _row(conn: psycopg.AsyncConnection, device_id: UUID) -> SystemDevice:
 
 @pytest.mark.parametrize(
     ("state", "kind"),
-    [(_PLUGGING, JobKind.PLUG_DEVICE), (_UNPLUGGING, JobKind.UNPLUG_DEVICE)],
+    [
+        (_PLUGGING, JobKind.PLUG_DEVICE),
+        (_UNPLUGGING, JobKind.UNPLUG_DEVICE),
+        (_UNPLUGGING, JobKind.FORCE_UNPLUG_DEVICE),
+    ],
 )
 @pytest.mark.parametrize(
     "job_state", [None, JobState.FAILED, JobState.SUCCEEDED, JobState.CANCELED]
@@ -120,7 +124,11 @@ def test_a_stalled_row_with_no_active_job_becomes_failed(
 
 @pytest.mark.parametrize(
     ("state", "kind"),
-    [(_PLUGGING, JobKind.PLUG_DEVICE), (_UNPLUGGING, JobKind.UNPLUG_DEVICE)],
+    [
+        (_PLUGGING, JobKind.PLUG_DEVICE),
+        (_UNPLUGGING, JobKind.UNPLUG_DEVICE),
+        (_UNPLUGGING, JobKind.FORCE_UNPLUG_DEVICE),
+    ],
 )
 @pytest.mark.parametrize("job_state", [JobState.QUEUED, JobState.RUNNING])
 def test_a_row_with_an_active_job_is_left_alone(
@@ -151,6 +159,47 @@ def test_only_a_job_of_the_rows_own_kind_counts_as_active(
 
         assert await _repair(dsn) == 1
         assert (await _row(conn, plugging)).state is SystemDeviceState.FAILED
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
+def test_a_forced_unplug_job_does_not_own_a_plugging_row(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def scenario(conn: psycopg.AsyncConnection, system_id: UUID, dsn: str) -> None:
+        plugging = await _seed_device(conn, system_id, _PLUGGING)
+        await _seed_job(conn, JobKind.FORCE_UNPLUG_DEVICE, plugging, JobState.RUNNING)
+
+        assert await _repair(dsn) == 1
+        assert (await _row(conn, plugging)).state is SystemDeviceState.FAILED
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
+def test_a_plug_job_does_not_own_an_unplugging_row(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def scenario(conn: psycopg.AsyncConnection, system_id: UUID, dsn: str) -> None:
+        unplugging = await _seed_device(conn, system_id, _UNPLUGGING)
+        await _seed_job(conn, JobKind.PLUG_DEVICE, unplugging, JobState.RUNNING)
+
+        assert await _repair(dsn) == 1
+        assert (await _row(conn, unplugging)).state is SystemDeviceState.FAILED
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
+def test_the_stalled_row_detail_names_both_unplug_tools(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def scenario(conn: psycopg.AsyncConnection, system_id: UUID, dsn: str) -> None:
+        device_id = await _seed_device(conn, system_id, _UNPLUGGING)
+
+        assert await _repair(dsn) == 1
+
+        detail = (await _row(conn, device_id)).detail
+        assert detail and "systems.unplug_device" in detail
+        assert "systems.force_unplug_device" in detail
 
     _run(migrated_url, authority_role_dsns, scenario)
 

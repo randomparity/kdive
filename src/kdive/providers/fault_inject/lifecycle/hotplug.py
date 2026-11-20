@@ -8,6 +8,10 @@ capability ``hotplug_behaviour`` picks how the table answers:
 - ``slow``: plug and un-plug are accepted unsettled and settle on the third ``is_attached``
   poll, that is, after two polls that still report the old state.
 - ``hang``: plug and un-plug are accepted unsettled and never settle.
+- ``no_force``: ``force_unplug`` is refused (``unplug_refused``, ``data.forced: true``); the
+  graceful path settles at once.
+
+``force_unplug`` (ADR-0828) ignores ``busy``, ``slow``, ``hang`` and a device already removing.
 
 With no behaviour every call settles at once. Devices are live-only, as on a real provider: a
 power OFF or CYCLE clears the domain's table (:meth:`FaultInjectHotplug.note_power`), and a
@@ -46,6 +50,7 @@ class HotplugBehaviour(StrEnum):
     BUSY = "busy"
     SLOW = "slow"
     HANG = "hang"
+    NO_FORCE = "no_force"
 
     @classmethod
     def from_capabilities(cls, capabilities: Mapping[str, object]) -> HotplugBehaviour | None:
@@ -84,8 +89,10 @@ class _Domain:
     devices: dict[str, _Device] = field(default_factory=dict)
 
 
-def _error(message: str, category: ErrorCategory, reason: str) -> CategorizedError:
-    return CategorizedError(message, category=category, details={"reason": reason})
+def _error(
+    message: str, category: ErrorCategory, reason: str, **details: object
+) -> CategorizedError:
+    return CategorizedError(message, category=category, details={"reason": reason, **details})
 
 
 def _digest(device_id: str) -> bytes:
@@ -167,13 +174,38 @@ class FaultInjectHotplug:
                     ErrorCategory.CONTROL_FAILURE,
                     "unplug_refused",
                 )
-            if self._behaviour is None:
+            if self._behaviour in (None, HotplugBehaviour.NO_FORCE):
                 del domain.devices[device_id]
                 return True
             device.removing = True
             device.settling = True
             device.polls_left = SLOW_POLLS
             return False
+
+    def force_unplug(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+    ) -> bool:
+        with self._lock:
+            domain = self._domain(domain_name)
+            device = domain.devices.get(device_id)
+            if device is None:
+                if provider_handle is None:
+                    raise self._handle_unknown(device_id)
+                return True
+            if provider_handle is not None and provider_handle != device.handle:
+                raise self._handle_unknown(device_id)
+            if self._behaviour is HotplugBehaviour.NO_FORCE:
+                raise _error(
+                    f"provider refused to force removal of device {device_id}",
+                    ErrorCategory.CONTROL_FAILURE,
+                    "unplug_refused",
+                    forced=True,
+                )
+            del domain.devices[device_id]
+            return True
 
     def is_attached(
         self,

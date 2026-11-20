@@ -749,6 +749,52 @@ def test_the_four_lifecycle_tools_refuse_while_a_device_job_is_active(
     _scenario(migrated_url, authority_role_dsns, body)
 
 
+@pytest.mark.parametrize("op", [_power, _snapshot, _restore, _reprovision])
+def test_the_four_lifecycle_tools_refuse_while_a_forced_unplug_job_is_active(
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    op: Callable[[_Env], Awaitable[ToolResponse]],
+) -> None:
+    """ADR-0828: `DEVICE_JOB_KINDS` must hold the forced kind, or the opt-in can change under it."""
+
+    async def body(env: _Env) -> None:
+        queued = await env.unplug(str(await env.add_row(_FAILED)))
+        async with env.owner.connection() as conn:
+            await conn.execute(
+                "UPDATE jobs SET kind = %s WHERE id = %s",
+                (JobKind.FORCE_UNPLUG_DEVICE.value, UUID(str(queued.data["job_id"]))),
+            )
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE system_devices SET state = 'attached', settle_deadline = NULL "
+                    "WHERE system_id = %s",
+                    (UUID(env.system_id),),
+                )
+            await SNAPSHOTS.insert(
+                conn,
+                Snapshot(
+                    id=uuid4(),
+                    created_at=runs_support.TEST_DT,
+                    updated_at=runs_support.TEST_DT,
+                    principal="user-1",
+                    project="proj",
+                    system_id=UUID(env.system_id),
+                    name="cp",
+                    include_memory=False,
+                    state=SnapshotState.AVAILABLE,
+                ),
+            )
+        async with env.server.connection() as conn:
+            assert await device_job_active(conn, UUID(env.system_id))
+
+        response = await op(env)
+
+        assert response.error_category == "conflict", response.model_dump()
+        assert _reason(response) == "device_op_in_flight"
+
+    _scenario(migrated_url, authority_role_dsns, body)
+
+
 @pytest.mark.parametrize("job_state", ["succeeded", "failed", "canceled"])
 def test_the_lifecycle_tools_resume_once_the_device_job_is_terminal(
     migrated_url: str, authority_role_dsns: _RoleDsns, job_state: str

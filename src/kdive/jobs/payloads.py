@@ -731,6 +731,7 @@ _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.OBSERVE_STRANDED_ACTIVATION: ObserveStrandedActivationPayload,
     JobKind.PLUG_DEVICE: PlugDevicePayload,
     JobKind.UNPLUG_DEVICE: UnplugDevicePayload,
+    JobKind.FORCE_UNPLUG_DEVICE: UnplugDevicePayload,
 }
 _HISTORICAL_RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,

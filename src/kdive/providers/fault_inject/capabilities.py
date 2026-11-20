@@ -22,9 +22,10 @@ SEED_KEY: Final = "seed"
 FAULT_RATE_KEY: Final = "fault_rate"
 MAX_LATENCY_S_KEY: Final = "max_latency_s"
 SECRET_REF_KEY: Final = "secret_ref"
-# Hot-plug behaviour (ADR-0823): ``busy``, ``slow`` or ``hang``; absent means un-plug and plug
-# settle at once. ``HotplugBehaviour.from_capabilities`` parses it; like the fault engine's keys,
-# the runtime reads it from the resource row at each binding (ADR-0074 amendment, #3716).
+# Hot-plug behaviour (ADR-0823): ``busy``, ``slow``, ``hang`` or ``no_force``; absent means
+# un-plug and plug settle at once. ``HotplugBehaviour.from_capabilities`` parses it; like the
+# fault engine's keys, the runtime reads it from the resource row at each binding (ADR-0074
+# amendment, #3716).
 HOTPLUG_BEHAVIOUR_KEY: Final = "hotplug_behaviour"
 
 

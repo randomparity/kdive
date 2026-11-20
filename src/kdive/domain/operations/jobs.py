@@ -61,6 +61,9 @@ class JobKind(StrEnum):
     # `plugging`/`unplugging` state is the only record of an in-flight provider operation.
     PLUG_DEVICE = "plug_device"
     UNPLUG_DEVICE = "unplug_device"
+    # Admin-only forced un-plug (ADR-0828): same payload and handler as UNPLUG_DEVICE, but the
+    # handler calls the provider's `force_unplug`. Opt-in destructive; not contributor-cancelable.
+    FORCE_UNPLUG_DEVICE = "force_unplug_device"
 
 
 RETIRED_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})
@@ -79,6 +82,7 @@ STATE_FENCED_JOB_KINDS: frozenset[JobKind] = frozenset(
         JobKind.SNAPSHOT,
         JobKind.PLUG_DEVICE,
         JobKind.UNPLUG_DEVICE,
+        JobKind.FORCE_UNPLUG_DEVICE,
     }
 )
 """The kinds whose **enqueue transaction** writes a transient state another tool rejects on.
@@ -117,11 +121,13 @@ PLATFORM_INTERNAL_JOB_KINDS: frozenset[JobKind] = frozenset(
 )
 """Maintenance jobs that tenant-facing job surfaces must never expose or mutate."""
 
-OPT_IN_DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.FORCE_CRASH})
+OPT_IN_DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
+    {JobKind.FORCE_CRASH, JobKind.FORCE_UNPLUG_DEVICE}
+)
 """Destructive ops whose opt-in factor is resolved from a profile's ``destructive_ops`` list.
-Only ``force_crash`` remains: ``teardown`` is gated by role only (ADR-0129); ``power`` is not
-destructive; ``reprovision`` became contributor leaseholder lifecycle (ADR-0326) — so none of
-the three is a valid ``destructive_ops`` token.
+Only ``force_crash`` and ``force_unplug_device`` (ADR-0828) remain: ``teardown`` is gated by role
+only (ADR-0129); ``power`` is not destructive; ``reprovision`` became contributor leaseholder
+lifecycle (ADR-0326) — so none of the three is a valid ``destructive_ops`` token.
 """
 
 SYSTEM_FAILING_JOB_KINDS: frozenset[JobKind] = frozenset(

@@ -193,14 +193,22 @@ def test_reject_unknown_destructive_ops_flags_typo_directly() -> None:
     # The message names the offending field so an operator can find the typo, and the
     # details advertise the exact closed set of accepted tokens under a stable key.
     assert str(exc.value) == "provisioning profile declares unknown destructive_ops tokens"
-    # Only force_crash opts in now (ADR-0326): power is contributor lifecycle, teardown gates by
-    # role only (ADR-0129), and reprovision became contributor leaseholder control (ADR-0326) —
-    # all three are rejected as non-gating tokens.
-    assert exc.value.details["valid_destructive_ops"] == ["force_crash"]
+    # Only force_crash and force_unplug_device (ADR-0828) opt in: power is contributor lifecycle,
+    # teardown gates by role only (ADR-0129), and reprovision became contributor leaseholder
+    # control (ADR-0326) — all three are rejected as non-gating tokens.
+    assert exc.value.details["valid_destructive_ops"] == [
+        "force_crash",
+        "force_unplug_device",
+    ]
 
 
-def test_reject_unknown_destructive_ops_accepts_known_directly() -> None:
-    _reject_unknown_destructive_ops(_profile_with_ops(["force_crash"]))
+@pytest.mark.parametrize("token", ["force_crash", "force_unplug_device"])
+def test_reject_unknown_destructive_ops_accepts_known_directly(token: str) -> None:
+    _reject_unknown_destructive_ops(_profile_with_ops([token]))
+
+
+def test_reject_unknown_destructive_ops_accepts_both_tokens_together() -> None:
+    _reject_unknown_destructive_ops(_profile_with_ops(["force_crash", "force_unplug_device"]))
 
 
 @pytest.mark.parametrize("token", ["power", "teardown", "reprovision"])
@@ -211,7 +219,10 @@ def test_reject_unknown_destructive_ops_rejects_non_opt_in_tokens(token: str) ->
     with pytest.raises(CategorizedError) as exc:
         _reject_unknown_destructive_ops(_profile_with_ops([token]))
     assert exc.value.details["unknown_destructive_ops"] == [token]
-    assert exc.value.details["valid_destructive_ops"] == ["force_crash"]
+    assert exc.value.details["valid_destructive_ops"] == [
+        "force_crash",
+        "force_unplug_device",
+    ]
 
 
 def test_validate_profile_for_provider_rejects_unknown_token() -> None:

@@ -1,4 +1,4 @@
-"""Worker handlers for ``plug_device`` and ``unplug_device`` (ADR-0823).
+"""Worker handlers for ``plug_device``, ``unplug_device``, ``force_unplug_device`` (ADR-0823/0828).
 
 Each job drives one ``system_devices`` row and the provider's :class:`DeviceHotplugger` to the
 states in the spec's transition table. The row is the durable record, so every outcome is written
@@ -279,7 +279,8 @@ async def unplug_device_handler(
         if row.state is not SystemDeviceState.UNPLUGGING:
             await settle_device(conn, device_id, SystemDeviceState.UNPLUGGING)
         hotplugger = await _hotplugger(conn, resolver, system_id)
-        await _drive_unplug(conn, hotplugger, domain, row, window_s, poll_interval_s)
+        forced = job.kind is JobKind.FORCE_UNPLUG_DEVICE
+        await _drive_unplug(conn, hotplugger, domain, row, window_s, poll_interval_s, forced=forced)
     except CategorizedError as exc:
         await _settle_failed_unplug(conn, device_id, payload.from_state, exc, redactor)
         exc.terminal = True
@@ -315,15 +316,20 @@ async def _drive_unplug(
     row: SystemDevice,
     window_s: float,
     poll_interval_s: float,
+    *,
+    forced: bool = False,
 ) -> None:
     window = _Window(window_s)
     await start_device_settle_window(conn, row.id, window_s)
     device_id = str(row.id)
     kind = HotplugDeviceKind(row.kind)
-    removed = await _call_within(
-        window,
-        functools.partial(hotplugger.unplug, domain, device_id, row.provider_handle, kind=kind),
-    )
+    if forced:
+        call = functools.partial(hotplugger.force_unplug, domain, device_id, row.provider_handle)
+    else:
+        call = functools.partial(
+            hotplugger.unplug, domain, device_id, row.provider_handle, kind=kind
+        )
+    removed = await _call_within(window, call)
     if not removed:
         await _poll_until(
             window,
@@ -349,9 +355,10 @@ def register_handlers(
             conn, job, resolver=resolver, secret_registry=secret_registry
         ),
     )
-    registry.register(
-        JobKind.UNPLUG_DEVICE,
-        lambda conn, job: unplug_device_handler(
-            conn, job, resolver=resolver, secret_registry=secret_registry
-        ),
-    )
+    for kind in (JobKind.UNPLUG_DEVICE, JobKind.FORCE_UNPLUG_DEVICE):
+        registry.register(
+            kind,
+            lambda conn, job: unplug_device_handler(
+                conn, job, resolver=resolver, secret_registry=secret_registry
+            ),
+        )

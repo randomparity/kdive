@@ -338,6 +338,20 @@ class LibvirtDeviceHotplug:
                 return True
             return False
 
+    def force_unplug(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+    ) -> bool:
+        """Always refuse: no libvirt call removes a guest-refused device (spike #3755, ADR-0828)."""
+        del device_id, provider_handle
+        raise CategorizedError(
+            f"libvirt cannot force removal of a device from domain {domain_name}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "forced_unplug_unsupported"},
+        )
+
     def is_attached(
         self,
         domain_name: str,

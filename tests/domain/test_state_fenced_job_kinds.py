@@ -16,9 +16,9 @@ from kdive.domain.operations.jobs import (
 def test_the_set_is_exactly_the_kinds_that_fence_at_enqueue() -> None:
     # The rule is "the enqueue transaction writes a transient state another tool rejects on":
     # restore -> SystemState.RESTORING, reprovision -> SystemState.REPROVISIONING,
-    # snapshot -> SnapshotState.CREATING, plug_device / unplug_device -> SystemDeviceState.PLUGGING
-    # / UNPLUGGING (ADR-0823). Pinned as an equality, not a membership check, so
-    # adding a kind without revisiting the rule fails here.
+    # snapshot -> SnapshotState.CREATING, plug_device / unplug_device / force_unplug_device ->
+    # SystemDeviceState.PLUGGING / UNPLUGGING (ADR-0823, ADR-0828). Pinned as an equality, not a
+    # membership check, so adding a kind without revisiting the rule fails here.
     assert (
         frozenset(
             {
@@ -27,6 +27,7 @@ def test_the_set_is_exactly_the_kinds_that_fence_at_enqueue() -> None:
                 JobKind.SNAPSHOT,
                 JobKind.PLUG_DEVICE,
                 JobKind.UNPLUG_DEVICE,
+                JobKind.FORCE_UNPLUG_DEVICE,
             }
         )
         == STATE_FENCED_JOB_KINDS

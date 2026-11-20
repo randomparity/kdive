@@ -183,4 +183,5 @@ def _support() -> ProviderSupport:
         debug_transports=frozenset({"gdbstub", "drgn-live"}),
         introspection=frozenset({"offline-vmcore", "live"}),
         hotplug_devices=ADVERTISED_KINDS,
+        forced_unplug_devices=ADVERTISED_KINDS,
     )

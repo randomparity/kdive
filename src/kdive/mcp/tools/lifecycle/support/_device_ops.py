@@ -17,7 +17,11 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.mcp.responses import ToolResponse
 
-DEVICE_JOB_KINDS: tuple[JobKind, ...] = (JobKind.PLUG_DEVICE, JobKind.UNPLUG_DEVICE)
+DEVICE_JOB_KINDS: tuple[JobKind, ...] = (
+    JobKind.PLUG_DEVICE,
+    JobKind.UNPLUG_DEVICE,
+    JobKind.FORCE_UNPLUG_DEVICE,
+)
 _ACTIVE_JOB_STATES: tuple[str, ...] = (JobState.QUEUED.value, JobState.RUNNING.value)
 
 DEVICE_OP_IN_FLIGHT = "device_op_in_flight"

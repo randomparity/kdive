@@ -216,8 +216,9 @@ visible to every authenticated token regardless of grants.
 
 `control.force_crash` requires both project `admin` and provisioning-profile opt-in. For local
 or remote libvirt, the matching provider block's `destructive_ops` must include `force_crash`;
-the default list is empty. The gate reports both missing factors when both are absent. A denial
-that reaches this gate is audited as `force_crash:denied`; earlier membership or input rejection
+the default list is empty. `force_unplug_device` is the second accepted token: it opts a profile
+in to the forced device un-plug job (ADR-0828), which no tool enqueues yet. The gate reports both missing factors when both are absent. A
+denial that reaches this gate is audited as `force_crash:denied`; earlier membership or input rejection
 is a different path. Passing the gate still leaves lifecycle and provider checks to satisfy.
 
 ### Admin-only destructive administration
