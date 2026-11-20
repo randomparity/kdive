@@ -56,7 +56,7 @@ per-call `confirm` argument; `force_crash` has none.
 The tool resolves the wrapper with `required_role=Role.VIEWER` (project membership only) and lets
 the gate judge `admin`, so a denial lists every missing factor and is audited as
 `force_unplug_device:denied`, as `force_crash_system` does. The gate runs before the replay lookup
-and before any device or state check, so a replay never outlives the caller's authority and a
+and before any device, state or row check, so a replay never outlives the caller's authority and a
 non-admin cannot probe device state through this tool.
 
 **The port expresses force as a separate method.** `DeviceHotplugger.force_unplug(domain_name,
@@ -114,7 +114,7 @@ un-plug handler with `force_unplug` in place of `unplug`, in the existing 30 s w
 - The sole caller of the gate gains a second op, and `destructive_ops` gains a second valid token.
   A System provisioned before the token existed has the op denied until it is reprovisioned with
   the token in its profile; the intended path is preventive (ADR-0130).
-- One migration widens `jobs_kind_check` with `force_unplug_device`. Per the migration landmine,
+- One migration widens `jobs_kind_check` with `force_unplug_device`. As with ADR-0823's migration,
   the four `migrations[-K:]` window tests need the new row.
 - A forced un-plug can wedge or crash the guest, or lose the domain. That is the purpose of the
   op and the reason it is admin-only; recovery uses the existing paths (`control.power`, teardown,
