@@ -11,7 +11,7 @@ row and enqueues. ``list_devices`` is a database read.
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -274,6 +274,7 @@ async def _keyed_admission(
     system_id: str,
     *,
     kind: str,
+    arguments: Mapping[str, object] | None = None,
     idempotency_key: str | None,
     admit: Callable[[AsyncConnection], Awaitable[ToolResponse]],
 ) -> ToolResponse:
@@ -291,7 +292,7 @@ async def _keyed_admission(
                     idempotency_key=idempotency_key,
                     principal=ctx.principal,
                     project=system.project,
-                    kind=object_scoped_kind(kind, uid),
+                    kind=object_scoped_kind(kind, uid, arguments),
                     do_work=lambda: admit(conn),
                 )
 
@@ -326,6 +327,7 @@ async def plug_device(
         uid,
         system_id,
         kind=_PLUG_KIND,
+        arguments={"kind": parsed.value, "network": network, "size_gb": size_gb},
         idempotency_key=idempotency_key,
         admit=lambda conn: _admit_plug(conn, ctx, uid, system_id, parsed, network, size_gb),
     )

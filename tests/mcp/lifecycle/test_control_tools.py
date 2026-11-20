@@ -11,6 +11,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from fastmcp import FastMCP
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -1275,40 +1276,60 @@ def test_capture_traffic_viewer_is_denied(migrated_url: str) -> None:
 # --- idempotency key scope: one key, one target object (#3713, ADR-0193 amendment) ----------------
 
 
-async def _keyed_power(pool: AsyncConnectionPool, target: str, key: str) -> Any:
-    return await _power(pool, _ctx(), system_id=target, action="on", idempotency_key=key)
+# `changed=True` varies one argument other than the target and the key (#3735, ADR-0193).
+async def _keyed_power(
+    pool: AsyncConnectionPool, target: str, key: str, *, changed: bool = False
+) -> Any:
+    action = "off" if changed else "on"
+    return await _power(pool, _ctx(), system_id=target, action=action, idempotency_key=key)
 
 
-async def _keyed_force_crash(pool: AsyncConnectionPool, target: str, key: str) -> Any:
+async def _keyed_force_crash(
+    pool: AsyncConnectionPool, target: str, key: str, *, changed: bool = False
+) -> Any:
+    run_id = await _seed_bound_run(pool, target) if changed else None
     return await control_tools.force_crash_system(
-        pool, _admin_ctx(), system_id=target, resolver=provider_resolver(), idempotency_key=key
+        pool,
+        _admin_ctx(),
+        system_id=target,
+        run_id=run_id,
+        resolver=provider_resolver(),
+        idempotency_key=key,
     )
 
 
-async def _keyed_sysrq(pool: AsyncConnectionPool, target: str, key: str) -> Any:
+async def _keyed_sysrq(
+    pool: AsyncConnectionPool, target: str, key: str, *, changed: bool = False
+) -> Any:
     return await control_tools.diagnostic_sysrq_system(
         pool,
         _ctx(),
         system_id=target,
-        command="show_blocked_tasks",
+        command="show_memory" if changed else "show_blocked_tasks",
         resolver=provider_resolver(),
         idempotency_key=key,
     )
 
 
-async def _keyed_watch(pool: AsyncConnectionPool, target: str, key: str) -> Any:
+async def _keyed_watch(
+    pool: AsyncConnectionPool, target: str, key: str, *, changed: bool = False
+) -> Any:
     return await control_tools.watch_for_crash_system(
         pool,
         _ctx(),
         system_id=target,
-        deadline_s=45.0,
+        deadline_s=60.0 if changed else 45.0,
         resolver=provider_resolver(),
         idempotency_key=key,
     )
 
 
-async def _keyed_capture(pool: AsyncConnectionPool, target: str, key: str) -> Any:
-    return await _capture_traffic(pool, _ctx(), run_id=target, idempotency_key=key)
+async def _keyed_capture(
+    pool: AsyncConnectionPool, target: str, key: str, *, changed: bool = False
+) -> Any:
+    return await _capture_traffic(
+        pool, _ctx(), run_id=target, duration_s=31 if changed else 30, idempotency_key=key
+    )
 
 
 async def _two_systems(pool: AsyncConnectionPool) -> tuple[str, str]:
@@ -1366,6 +1387,101 @@ async def _job_count(pool: AsyncConnectionPool) -> int:
         row = await cur.fetchone()
     assert row is not None
     return int(row["n"])
+
+
+@pytest.mark.parametrize(
+    ("tool", "seed"),
+    [
+        (_keyed_power, _two_systems),
+        (_keyed_force_crash, _two_systems),
+        (_keyed_sysrq, _two_systems),
+        (_keyed_watch, _two_systems),
+        (_keyed_capture, _two_runs_on_one_system),
+    ],
+    ids=["power", "force_crash", "diagnostic_sysrq", "watch_for_crash", "capture_traffic"],
+)
+def test_keyed_control_tool_reused_with_changed_arguments_conflicts(
+    migrated_url: str, tool: Any, seed: Any
+) -> None:
+    """The same key on the same target replays identical arguments, and a changed one conflicts."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            target, _ = await seed(pool)
+            first = await tool(pool, target, "shared-key")
+            assert first.error_category is None, first.model_dump()
+            assert (await tool(pool, target, "shared-key")).model_dump() == first.model_dump()
+            jobs_before = await _job_count(pool)
+
+            changed = await tool(pool, target, "shared-key", changed=True)
+
+            assert changed.error_category == "conflict", changed.model_dump()
+            assert changed.data["reason"] == "idempotency_key_in_use"
+            assert await _job_count(pool) == jobs_before
+
+    asyncio.run(_run())
+
+
+def test_an_omitted_argument_and_its_explicit_default_are_the_same_request(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry that spells out the tool defaults the first call omitted replays (#3735)."""
+    app = FastMCP("control-key-defaults")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_bound_run(pool, sys_id)
+            control_tools.register(app, pool, resolver=provider_resolver())
+            monkeypatch.setattr(control_tools, "current_context", lambda: _ctx())
+
+            omitted = await app.call_tool(
+                "control.capture_traffic", {"run_id": run_id, "idempotency_key": "k"}
+            )
+            explicit = await app.call_tool(
+                "control.capture_traffic",
+                {
+                    "run_id": run_id,
+                    "duration_s": control_tools.CAPTURE_DEFAULT_DURATION_S,
+                    "max_bytes": control_tools.CAPTURE_DEFAULT_BYTES,
+                    "snaplen": control_tools.CAPTURE_DEFAULT_SNAPLEN,
+                    "capture_filter": None,
+                    "idempotency_key": "k",
+                },
+            )
+
+            assert explicit.structured_content == omitted.structured_content
+            assert omitted.structured_content is not None
+            assert omitted.structured_content["error_category"] is None
+            assert await _job_count(pool) == 1
+
+    asyncio.run(_run())
+
+
+def test_a_key_stored_without_an_argument_digest_conflicts_and_enqueues_nothing(
+    migrated_url: str,
+) -> None:
+    """A row written before the digest existed is not replayed: the retry fails closed."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO idempotency_keys (key, principal, project, kind, result) "
+                    "VALUES ('pre-digest', 'user-1', 'proj', %s, '{\"envelope\": {}}')",
+                    (f"control.power:{sys_id}",),
+                )
+
+            resp = await _keyed_power(pool, sys_id, "pre-digest")
+
+            assert resp.error_category == "conflict", resp.model_dump()
+            assert resp.data["reason"] == "idempotency_key_in_use"
+            assert await _job_count(pool) == 0
+
+    asyncio.run(_run())
 
 
 def test_a_key_stored_under_the_bare_tool_name_conflicts_and_enqueues_nothing(
