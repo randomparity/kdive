@@ -150,7 +150,7 @@ un-plug handler with `force_unplug` in place of `unplug`, in the existing 30 s w
 - **A per-call `confirm` argument.** judgment: `force_crash` has none; the profile opt-in is the
   durable consent, and the tool name and destructive hint tell the client to prompt.
 
-## Amendment (2026-11-20, #3755): libvirt cannot force a single `nic` or `disk` out of a refusing guest
+## Amendment (2026-11-20, #3755): libvirt 12.0.0 cannot force a single `nic` or `disk` out of a refusing guest
 
 The libvirt spike answered the open question for both kinds, on libvirt 12.0.0 over QEMU 10.2.2
 (x86_64, i440fx and q35). The record is
@@ -162,8 +162,8 @@ vCPUs.
   `VIR_DOMAIN_DEVICE_MODIFY_FORCE` (`unsupported flags (0x4)`).
 - Repeated `device_del`, `detachDeviceAlias` without the flag, `domif-setlink`, `netdev_del` and the
   block backend deletes (`blockdev-del`, `drive_del`) never took the device out of the live domain.
-  `netdev_del` before a reset left the NIC in libvirt's XML after QEMU had dropped it, which is the
-  case this record forbids reporting as success.
+  In one run the full candidate sequence followed by a reset left the NIC in libvirt's XML after
+  QEMU had dropped it, which is the case this record forbids reporting as success.
 - The one call that made `is_attached` `False` for both kinds in every arm is `virDomainReset`. It
   reboots the whole guest (a paused guest stays paused) and completes the pending un-plug as part
   of the reset, so it is not a forced un-plug of one device.

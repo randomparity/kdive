@@ -51,7 +51,7 @@ where noted:
 | `updateDeviceFlags(LIVE\|FORCE)` | returns 0, no-op for a NIC or disk | no |
 | QMP `device_del` x3, spaced 8 s | each returns `{"return":{}}`, request stays pending | no |
 | NIC: `domif-setlink down` | link flag only | no |
-| NIC: QMP `netdev_del` of the tap backend | returns success; the NIC stays in the XML | no |
+| NIC: QMP `netdev_del` of the tap backend | returns `{}`; `info network` still lists the tap and the NIC stays in the XML (a first run named the wrong backend id and got `DeviceNotFound`) | no |
 | disk: QMP `blockdev-del`, HMP `drive_del` of the format and storage nodes | `Node ... is in use` | no |
 | `virDomainReset` run alone on a fresh guest start | removes the device in all six arms | yes |
 
@@ -59,18 +59,20 @@ F14 is confirmed on the running 12.0.0 daemon for both `detachDeviceFlags` and
 `detachDeviceAlias`.
 
 `virDomainReset` is not an un-plug. It resets the machine, and QEMU finishes the pending removal
-as part of that reset. The serial log shows a second kernel boot after the call, and a paused
-guest stays paused. It was run with one pending device, so whether it completes several was not tried; it discards all guest state.
+as part of that reset. In the i440fx arm the serial log shows a second kernel boot after the call; a paused
+guest stays paused. It was run with one pending device, so
+whether it completes several was not tried. It reboots the guest.
 
-Side finding: when `netdev_del` ran before the reset, the NIC left QEMU but stayed in libvirt's
-live XML (`is_attached` `True`) in all three NIC arms, so a backend removal makes libvirt and QEMU
-disagree. That outcome is the ADR-0828 forbidden case and was excluded by running the reset on its
-own.
+Side finding: in the run that executed the whole candidate sequence in order (device_del x3,
+`netdev_del`, then `virDomainReset`), the NIC left QEMU but stayed in libvirt's live XML
+(`is_attached` `True`) in all three NIC arms. That sequence was not split to isolate `netdev_del`
+as the cause. Whatever the cause, libvirt and QEMU disagreed, which is the ADR-0828 forbidden
+case, so the reset was re-run alone on a fresh guest start for the table above.
 
 ## Conclusion
 
-Per kind, `nic` and `disk`: libvirt 12.0.0 over QEMU 10.2.2 has no call that removes one refused
-device. Every per-device candidate either rejects the flag, repeats the pending request, or
+Per kind, `nic` and `disk`, on libvirt 12.0.0 over QEMU 10.2.2 (x86_64): no tested call removes
+one refused device. Every per-device candidate either rejects the flag, repeats the pending request, or
 changes only a backend or link. The one call that satisfies the postcondition is a whole-guest
 reset. No prototype `force_unplug` was written and no kind is advertised.
 
