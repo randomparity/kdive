@@ -336,6 +336,52 @@ def test_the_fault_is_deterministic_for_one_system() -> None:
     assert outcomes[0] == outcomes[1]
 
 
+def _plug_outcomes(faulted: FaultedHotplug, calls: int) -> list[str]:
+    outcomes = []
+    for _ in range(calls):
+        try:
+            faulted.plug(_DOMAIN, _NIC)
+            outcomes.append("ok")
+        except CategorizedError:
+            outcomes.append("fault")
+    return outcomes
+
+
+def test_successive_draws_on_one_system_differ_and_replay_from_the_seed() -> None:
+    first = _plug_outcomes(_faulted(0.5)[0], 12)
+    second = _plug_outcomes(_faulted(0.5)[0], 12)
+
+    assert {"ok", "fault"} <= set(first)
+    assert first == second
+
+
+def test_reprovisioning_a_domain_restarts_its_draw_sequence() -> None:
+    faulted, _ = _faulted(0.5)
+    inventory = faulted._inventory  # noqa: SLF001 - the shared ordinal ledger under test
+    first = _plug_outcomes(faulted, 8)
+
+    inventory.forget(_DOMAIN)
+    inventory.record(_SYSTEM, _DOMAIN)
+
+    assert _plug_outcomes(faulted, 8) == first
+
+
+def test_rebound_ports_share_one_draw_sequence_per_system() -> None:
+    inventory = FaultInjectInventory()
+    inventory.record(_SYSTEM, _DOMAIN)
+    runtime = build_fault_inject_runtime(inventory=inventory)
+    caps = {"fault_rate": {"hotplug": 0.5}, "seed": 1}
+    rebinding = [runtime.for_resource("row", caps) for _ in range(12)]
+    single = _faulted(0.5)[0]
+
+    outcomes = []
+    for bound in rebinding:
+        assert isinstance(bound.device_hotplug, FaultedHotplug)
+        outcomes.extend(_plug_outcomes(bound.device_hotplug, 1))
+
+    assert outcomes == _plug_outcomes(single, 12)
+
+
 # --- composition ------------------------------------------------------------------------
 
 
