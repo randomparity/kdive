@@ -22,7 +22,11 @@ from kdive.providers.core.runtime import (
     ProviderSupport,
     ResourceBindingCapabilities,
 )
-from kdive.providers.fault_inject.capabilities import FAULT_RATE_KEY, MAX_LATENCY_S_KEY
+from kdive.providers.fault_inject.capabilities import (
+    FAULT_RATE_KEY,
+    MAX_LATENCY_S_KEY,
+    validate_capabilities,
+)
 from kdive.providers.fault_inject.debug.gdb import (
     FaultInjectDebugEngine,
     fault_inject_attach_seam,
@@ -150,6 +154,7 @@ def build_runtime(
 
     def _from_capabilities(_name: str, capabilities: Mapping[str, object]) -> ProviderRuntime:
         # The build-time engine and behaviour are defaults a row without the keys inherits.
+        validate_capabilities(capabilities)
         return assemble(
             _engine_from(capabilities) or engine,
             HotplugBehaviour.from_capabilities(capabilities) or hotplug_behaviour,

@@ -47,6 +47,7 @@ from kdive.domain.catalog.resource_capabilities import (
     VCPUS_KEY,
 )
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.domain.errors import CategorizedError
 from kdive.inventory._row_typing import RowTyper
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import (
@@ -72,6 +73,7 @@ from kdive.inventory.reconcile.records import (
     ReconcileDiff,
     ReconcileRecord,
 )
+from kdive.providers.fault_inject.capabilities import validate_capabilities
 
 _log = logging.getLogger(__name__)
 
@@ -359,6 +361,8 @@ async def _upsert_config_resource(
     for key in discovery_owned_keys:
         if key in existing:
             merged[key] = existing[key]
+    if not _fault_inject_caps_valid(diff, declared, merged):
+        return
     if _needs_config_adoption(row):
         await _adopt_config_resource(
             cur,
@@ -377,6 +381,23 @@ async def _upsert_config_resource(
         declared=declared,
         caps=merged,
     )
+
+
+def _fault_inject_caps_valid(
+    diff: ReconcileDiff, declared: _DeclaredResource, caps: ResourceCaps
+) -> bool:
+    """Warn and report ``False`` for a fault-inject row whose capability keys are malformed.
+
+    The row is left as stored: binding would reject it, and a hand edit is how it is repaired.
+    """
+    if declared.kind is not ResourceKind.FAULT_INJECT:
+        return True
+    try:
+        validate_capabilities(caps)
+    except CategorizedError as exc:
+        diff.warned.append(_record(declared.kind, declared.name, str(exc)))
+        return False
+    return True
 
 
 async def _insert_config_resource(
