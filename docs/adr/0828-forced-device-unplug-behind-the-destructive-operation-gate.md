@@ -160,9 +160,12 @@ vCPUs.
 
 - F14 holds on the running daemon: `detachDeviceFlags` and `detachDeviceAlias` both reject
   `VIR_DOMAIN_DEVICE_MODIFY_FORCE` (`unsupported flags (0x4)`).
-- Among the calls tried, none took the device out of the live domain: repeated `device_del`,
-  `detachDeviceAlias` without the flag, `domif-setlink`, `netdev_del` and the block backend
-  deletes (`blockdev-del`, `drive_del`).
+- Exact results, identical for both kinds and in all three refusal arms: `detachDeviceAlias(LIVE)`
+  returns 0 and repeats the pending request; `updateDeviceFlags(LIVE|FORCE)` returns 0 and is a
+  no-op; QMP `device_del` repeated three times returns `{}` each time and the request stays
+  pending; for a NIC, `domif-setlink down` changes only the link and `netdev_del` returns `{}` while
+  the NIC stays in the live XML; for a disk, `blockdev-del` and `drive_del` fail with `is in use`.
+  None took the device out of the live domain.
   In one run the full candidate sequence followed by a reset left the NIC in libvirt's XML after
   QEMU had dropped it, which is the case this record forbids reporting as success.
 - The one call that made `is_attached` `False` for both kinds in every arm is `virDomainReset`. It
@@ -172,5 +175,10 @@ vCPUs.
 The decision stands: local-libvirt and remote-libvirt advertise no forced kind, for `nic` or
 `disk`, and no libvirt prototype exists. `virDomainReset` stays outside this contract; adopting it
 as a forced un-plug would be a new decision, with the reboot as its stated cost, and `control.power`
-already has a `reset` action. The held implementation items for libvirt (the advertising item in
+already has a `reset` action. The operator approved recording the negative result on 2026-11-20.
+The held implementation items for libvirt (the advertising item in
 particular) have no libvirt mechanism to build on.
+
+Scope of the claim: libvirt 12.0.0 and QEMU 10.2.2, local libvirt on x86_64, the two refusal methods
+above on i440fx and q35, one pending device per run. It says nothing about remote-libvirt,
+other architectures, or other libvirt or QEMU versions.
