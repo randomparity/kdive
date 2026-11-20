@@ -216,6 +216,6 @@ failure, as for a power OFF or CYCLE. The spec's Ledger section states the curre
 
 This qualifies the Consequences bullet that says the backing storage "is not charged to a project
 quota" and that "no follow-up exists yet". #3720 is that follow-up, and
-[ADR-0827](0827-charge-hot-plugged-scratch-disks-to-a-project-storage-quota.md) proposes the
-decision: a per-project `max_hotplug_disk_gb` quota, charged from the device ledger. Until it is
+[ADR-0827](0827-charge-hot-plugged-scratch-disks-to-a-project-storage-cap.md) proposes the
+decision: a server-configured per-project cap, charged from the device ledger. Until it is
 implemented, the storage stays uncharged as this record states.
