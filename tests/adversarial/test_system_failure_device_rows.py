@@ -1,10 +1,12 @@
 """Adversarial: which failed System operations move `attached` device rows to `lost` (ADR-0823).
 
-`_record_system_failure(devices_replaced=False)` is the default; only `reprovision_handler`
-passes `True`, because only reprovision recreates the domain without the hot-plugged devices.
-A failed provision never had devices to lose, so its rows stay `attached`. These tests drive the
-real handlers against a real database so a flipped default, or a second caller passing `True`,
-turns them red.
+`devices_replaced` defaults to `False`; only `reprovision_handler` passes `True`, because only
+reprovision recreates the domain without the hot-plugged devices. A failed provision never had
+devices to lose, so its rows stay `attached`. These tests drive the real handlers against a real
+database so a flipped default, or a second caller passing `True`, turns them red. Provision
+reaches `_record_system_failure` through `_execute_system_lifecycle_call`, which passes its own
+default explicitly, so that is the default the provision case pins; `_record_system_failure`'s own
+default is reached only by `restore_handler`, which this module does not cover.
 
 `teardown_handler` never reaches `_record_system_failure` (`tearing_down -> failed` is not an
 edge) and reclaims the device ledger itself before the provider call, so a failed teardown
