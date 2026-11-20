@@ -41,8 +41,8 @@ is `capability_unsupported` with `capability: hotplug:pci` or `hotplug:sriov_vf`
 two trailing fields with defaults, so existing constructors keep working:
 
 ```python
-host_device: str | None = None      # pci, sriov_vf: the resolved host device (libvirt: BDF)
-physical_port: str | None = None    # sriov_vf: the physical port the VF belongs to (libvirt: PF BDF)
+host_device: str | None = None  # pci, sriov_vf: the resolved host device (libvirt: BDF)
+physical_port: str | None = None  # sriov_vf: the physical port the VF belongs to (libvirt: PF BDF)
 ```
 
 The server resolves both from the database before it enqueues, because claims and descriptors are
