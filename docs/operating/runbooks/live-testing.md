@@ -1881,7 +1881,8 @@ through the test's own libvirt connection, not the worker's:
   declaring exactly one `[[remote_libvirt]]` instance with the staged base image.
 - `KDIVE_DATABASE_URL="$KDIVE_HARNESS_DATABASE_URL"`, as for every cell above.
 
-The cells boot no kernel, so `KDIVE_FIXTURE_ROOT` and `KDIVE_S3_ENDPOINT_URL` are not needed.
+The stack variables (`KDIVE_STACK_BASE_URL`, `KDIVE_OIDC_ISSUER`) are as for the local arm. The
+cells boot no kernel, so `KDIVE_FIXTURE_ROOT` and `KDIVE_S3_ENDPOINT_URL` are not needed.
 
 ```bash
 export REMOTE_PROVIDER_SSH=<user>@<provider-host> KDIVE_SYSTEMS_TOML=<the stack's systems.toml>
