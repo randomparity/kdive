@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper
 
@@ -106,3 +106,17 @@ def test_reaper_satisfies_the_reconciler_infra_reaper_protocol() -> None:
     assert isinstance(reaper, InfraReaper)
     (owned,) = asyncio.run(reaper.list_owned())
     assert isinstance(owned, OwnedDomain)
+
+
+def test_next_draw_counts_per_domain_from_one_and_restarts_on_record_and_forget() -> None:
+    inventory = FaultInjectInventory()
+    system = uuid4()
+    inventory.record(system, "dom-a")
+    inventory.record(uuid4(), "dom-b")
+
+    assert [inventory.next_draw("dom-a") for _ in range(2)] == [(system, 1), (system, 2)]
+    assert inventory.next_draw("dom-b") is not None
+    inventory.record(system, "dom-a")
+    assert inventory.next_draw("dom-a") == (system, 1)
+    inventory.forget("dom-a")
+    assert inventory.next_draw("dom-a") is None
