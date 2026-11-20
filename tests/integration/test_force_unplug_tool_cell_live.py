@@ -258,14 +258,14 @@ async def _body(cell: _Cell) -> dict[str, object]:
         (
             "systems.force_unplug_device",
             "force_unplug_device:denied",
-            args_digest({"system_id": plain, "missing": ["profile_opt_in"]}),
+            args_digest({"system_id": plain, "device_id": absent, "missing": ["profile_opt_in"]}),
         )
     ]
     assert await cell.audit(opted) == [
         (
             "systems.force_unplug_device",
             "force_unplug_device:denied",
-            args_digest({"system_id": opted, "missing": ["admin_role"]}),
+            args_digest({"system_id": opted, "device_id": absent, "missing": ["admin_role"]}),
         ),
         (
             "systems.force_unplug_device",

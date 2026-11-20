@@ -542,7 +542,9 @@ async def force_unplug_device(
     refusal = _forced_refusal(runtime, system_id, None)
     if refusal is not None:
         return refusal
-    attempt = idempotency_key if idempotency_key is not None else uuid4().hex
+    # Always a fresh token: replay is `keyed_mutation`'s, and a key-derived dedup key would let a
+    # replay miss re-adopt a terminal job and report it as the new one.
+    attempt = uuid4().hex
 
     async def gate(conn: AsyncConnection, system: System) -> ToolResponse | None:
         return await authorize_destructive(
@@ -553,6 +555,7 @@ async def force_unplug_device(
             JobKind.FORCE_UNPLUG_DEVICE,
             resolver=resolver,
             tool=_FORCE_UNPLUG_KIND,
+            audit_args={"device_id": str(device_uid)},
         )
 
     return await _keyed_admission(

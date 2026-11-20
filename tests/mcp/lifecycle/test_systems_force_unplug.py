@@ -168,6 +168,10 @@ class _Env:
             )
             return [(tool, transition, digest) for tool, transition, digest in await cur.fetchall()]
 
+    async def settle_job(self, job_id: str, state: str) -> None:
+        async with self.owner.connection() as conn:
+            await conn.execute("UPDATE jobs SET state = %s WHERE id = %s", (state, UUID(job_id)))
+
     async def run_worker(self, job_id: str, port: object | None = None) -> None:
         async with self.owner.connection() as conn:
             job = await JOBS.get(conn, UUID(job_id))
@@ -294,7 +298,11 @@ def test_the_gate_denies_and_audits_every_missing_factor(
         assert sorted(map(str, cast(list[Any], response.data["missing_checks"]))) == sorted(missing)
         ((tool, transition, digest),) = await env.audit()
         assert (tool, transition) == ("systems.force_unplug_device", "force_unplug_device:denied")
-        denied = {"system_id": env.system_id, "missing": response.data["missing_checks"]}
+        denied = {
+            "system_id": env.system_id,
+            "device_id": str(device_id),
+            "missing": response.data["missing_checks"],
+        }
         assert digest == args_digest(denied)
         assert await env.jobs(JobKind.FORCE_UNPLUG_DEVICE) == []
         row = await env.row(device_id)
@@ -507,6 +515,28 @@ def test_a_keyed_repeat_after_the_profile_stopped_opting_in_is_denied(
         repeat = await env.force(device_id, idempotency_key="f-1")
 
         assert repeat.error_category == "authorization_denied", repeat.model_dump()
+
+    _scenario(migrated_url, authority_role_dsns, body)
+
+
+def test_a_reused_key_whose_replay_record_is_gone_enqueues_a_fresh_job(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def body(env: _Env) -> None:
+        device_id = await env.add_row()
+        first = await env.force(device_id, idempotency_key="f-1")
+        await env.settle_job(str(first.data["job_id"]), "failed")
+        async with env.owner.connection() as conn:
+            await conn.execute(
+                "UPDATE system_devices SET state = 'attached' WHERE id = %s", (device_id,)
+            )
+            await conn.execute("DELETE FROM idempotency_keys")  # retention swept the replay
+
+        again = await env.force(device_id, idempotency_key="f-1")
+
+        assert again.status == "running", again.model_dump()
+        assert again.data["job_id"] != first.data["job_id"]
+        assert len(await env.jobs(JobKind.FORCE_UNPLUG_DEVICE)) == 2
 
     _scenario(migrated_url, authority_role_dsns, body)
 

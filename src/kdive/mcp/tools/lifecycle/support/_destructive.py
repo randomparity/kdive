@@ -9,6 +9,7 @@ naming every missing factor. The in-project check must precede the call, so the 
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -16,7 +17,7 @@ from psycopg import AsyncConnection
 from kdive.db.repositories import ALLOCATIONS
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import authz_denied as _authz_denied
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -35,8 +36,13 @@ async def authorize_destructive(
     *,
     resolver: ProviderResolver,
     tool: str,
+    audit_args: Mapping[str, JsonValue] | None = None,
 ) -> ToolResponse | None:
-    """Run the two-check gate; ``None`` when allowed, else the audited denial envelope."""
+    """Run the two-check gate; ``None`` when allowed, else the audited denial envelope.
+
+    ``audit_args`` names the operation's target (for example a device id) in the denial audit,
+    beside ``system_id`` and ``missing``.
+    """
     allocation = await ALLOCATIONS.get(conn, system.allocation_id)
     if allocation is None or allocation.project not in ctx.projects:
         return _config_error(str(system_uid))
@@ -55,7 +61,11 @@ async def authorize_destructive(
                     object_kind="systems",
                     object_id=system_uid,
                     transition=f"{op_kind.value}:denied",
-                    args={"system_id": str(system_uid), "missing": denied.missing},
+                    args={
+                        "system_id": str(system_uid),
+                        **(audit_args or {}),
+                        "missing": denied.missing,
+                    },
                     project=system.project,
                 ),
             )
