@@ -149,3 +149,36 @@ un-plug handler with `force_unplug` in place of `unplug`, in the existing 30 s w
   driver's flag check (Context).
 - **A per-call `confirm` argument.** judgment: `force_crash` has none; the profile opt-in is the
   durable consent, and the tool name and destructive hint tell the client to prompt.
+
+## Amendment (2026-11-20, #3755): libvirt 12.0.0 cannot force a single `nic` or `disk` out of a refusing guest
+
+The libvirt spike answered the open question for both kinds, on libvirt 12.0.0 over QEMU 10.2.2
+(x86_64, i440fx and q35). The record is
+[the proof](../workflow/proofs/2026-11-20-libvirt-force-unplug-3755.md). The guest refused release
+in two ways: the i440fx guest kernel ignoring the ACPI eject (`acpiphp.disable=1`), and paused
+vCPUs.
+
+- F14 holds on the running daemon: `detachDeviceFlags` and `detachDeviceAlias` both reject
+  `VIR_DOMAIN_DEVICE_MODIFY_FORCE` (`unsupported flags (0x4)`).
+- Exact results, identical for both kinds and in all three refusal arms: `detachDeviceAlias(LIVE)`
+  returns 0 and repeats the pending request; `updateDeviceFlags(LIVE|FORCE)` returns 0 and is a
+  no-op; QMP `device_del` repeated three times returns `{}` each time and the request stays
+  pending; for a NIC, `domif-setlink down` changes only the link and `netdev_del` returns `{}` while
+  the NIC stays in the live XML; for a disk, `blockdev-del` and `drive_del` fail with `is in use`.
+  None took the device out of the live domain.
+  In one run the full candidate sequence followed by a reset left the NIC in libvirt's XML after
+  QEMU had dropped it, which is the case this record forbids reporting as success.
+- The one call that made `is_attached` `False` for both kinds in every arm is `virDomainReset`. It
+  reboots the whole guest (a paused guest stays paused) and completes the pending un-plug as part
+  of the reset, so it is not a forced un-plug of one device.
+
+The decision stands: local-libvirt and remote-libvirt advertise no forced kind, for `nic` or
+`disk`, and no libvirt prototype exists. `virDomainReset` stays outside this contract; adopting it
+as a forced un-plug would be a new decision, with the reboot as its stated cost, and `control.power`
+already has a `reset` action. The operator approved recording the negative result on 2026-11-20.
+The held implementation items for libvirt (the advertising item in
+particular) have no libvirt mechanism to build on.
+
+Scope of the claim: libvirt 12.0.0 and QEMU 10.2.2, local libvirt on x86_64, the two refusal methods
+above on i440fx and q35, one pending device per run. It says nothing about remote-libvirt,
+other architectures, or other libvirt or QEMU versions.
