@@ -1049,3 +1049,13 @@ def test_the_32_authority_cells_judge_the_serving_authority(
         assert verdict.qualified is (reason is None), verdict.reasons
         if reason is not None:
             assert reason in verdict.reasons
+
+
+def test_hotplug_ppc64le_cells_belong_to_the_power_lane(inventory: Inventory) -> None:
+    cells = [
+        c
+        for c in build_contract(inventory=inventory).cells
+        if c.operation in {"systems.plug_device", "systems.unplug_device", "systems.list_devices"}
+    ]
+    assert {c.owner for c in cells if c.guest_arch == "x86_64"} == {3687}
+    assert {c.owner for c in cells if c.guest_arch == "ppc64le"} == {2818}
