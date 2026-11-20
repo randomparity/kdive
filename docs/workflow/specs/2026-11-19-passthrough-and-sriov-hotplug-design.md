@@ -24,7 +24,7 @@ both passthrough kinds. This spec holds the contract the implementation issues b
 | The fleet availability read has its own claim query | `mcp/tools/catalog/availability.py:180-203` |
 | Teardown deletes device rows, then destroys the domain | `jobs/handlers/systems.py:709-722`, `:804-805` |
 | `delete_devices_for_system` deletes every kind; reclaim callers use it | `db/repositories.py:542`; `jobs/handlers/system_reclaim.py:111`; `reconciler/repairs/jobs.py:117` |
-| Availability and the matcher each subtract a claimed-BDF set, and neither knows a descriptor's `pf_bdf` (it does not exist yet) | `mcp/tools/catalog/availability.py:200-203`; `domain/pcie.py:214-215` |
+| Availability and the matcher each subtract a claimed-BDF set, and neither knows a descriptor's `pf_bdf` (it does not exist yet) | `mcp/tools/catalog/availability.py:204-208`; `domain/pcie.py:214-215` |
 | A successful reprovision deletes rows in its commit; a failed one marks `attached` rows `lost` | `jobs/handlers/systems.py:264`; ADR-0823 Amendment (2026-11-19) |
 | Local discovery writes the five-field descriptor from node devices; remote does not enumerate | `providers/local_libvirt/discovery.py:186-228`, `:323-341`; `providers/remote_libvirt/discovery.py:11` |
 | The capability view keeps only the five descriptor fields | `domain/catalog/resource_capabilities.py:289-308` |
@@ -106,7 +106,7 @@ resource's descriptors, insert the row `plugging` with `host_device`, `physical_
   descriptor count, `in_use` the number removed.
 
 A physical port is therefore held either whole (one `pci` row) or by VF draws (`sriov_vf` rows),
-never both. Both refusals are `no_free_device`; the second needs the `physical_port` column, so
+never both. Both refusals are `no_free_device`; the first needs the `physical_port` column, so
 both ship with item C.
 
 A unique-index violation on the insert is `no_free_device` and the caller retries. The plug job
@@ -183,7 +183,7 @@ expansion.
 | un-plug settles | row deleted; the device is unbound again; the reservation stays |
 | teardown | `release_all` best effort; `delete_devices_for_system(conn, system_id, kinds=...)` takes an optional kind set, and `None` (the default, which every existing caller keeps) deletes every kind. `_reclaim_devices` passes `kinds=(nic, disk)` and still runs before the destroy; `teardown_handler` calls it with `kinds=(pci, sriov_vf)` in its own transaction right after `provisioner.teardown` returns, whatever the System's state (`_finalize_teardown` returns early unless the System is `TEARING_DOWN`, so it is not the place); a failed destroy leaves them, so the device stays occupied |
 | reprovision | success: `delete_devices_for_system(conn, system_id)` (every kind; the existing call at `systems.py:264`, unchanged) in the commit that returns the System to `READY` (the provider call has recreated the domain); failure: `attached` rows become `lost` and stay occupying |
-| system-reclaim (`reclaim_device_ledger`: `system_reclaim.py:111`, and its callers in `system_authority.py:228`, `external_boot/lifecycle.py:1159`, `repairs/jobs.py:117`) | `delete_devices_for_system(conn, system_id)`, every kind, unchanged. These callers run only after the authority's proof of absence (`retained_quarantine` excluded: `lifecycle.py:1156`; `AuthoritySystemPreactivationAbsentV1`: `system_authority.py:222`), so deleting passthrough rows is correct for them; the implementing PR verifies the proof at each of the three callers |
+| system-reclaim (`reclaim_device_ledger`: `system_reclaim.py:111`, and its callers in `system_authority.py:228`, `external_boot/lifecycle.py:1159`, `repairs/jobs.py:117`) | `delete_devices_for_system(conn, system_id)`, every kind, unchanged. These callers run only after the authority's proof of absence (`retained_quarantine` excluded: `lifecycle.py:1152`; `AuthoritySystemPreactivationAbsentV1`: `system_authority.py:222`), so deleting passthrough rows is correct for them; the implementing PR verifies the proof at each of the three callers |
 | power OFF/CYCLE, snapshot restore | `attached` rows become `lost`; occupancy unchanged; `unplug_device` on a `lost` row deletes it after the provider finds the device absent |
 | allocation released or expired with a live System | claim stops counting; the rows keep the device occupied until the reaper's teardown deletes them; plug admission refuses (`allocation_not_active`) |
 
