@@ -164,6 +164,7 @@ async def _record_system_failure(
     tool: str,
     operation: str,
     category: ErrorCategory,
+    devices_replaced: bool = False,
 ) -> None:
     """Drive ``system_id`` to ``failed`` and record **why**, in one transaction (ADR-0492).
 
@@ -188,11 +189,16 @@ async def _record_system_failure(
         operation: Human-readable operation name used in fallback logs.
         category: The provider error's category — the System's own verdict, independent of
             whatever the job row later comes to say.
+        devices_replaced: The failed operation already freed the System's hot-plugged device
+            backing storage (reprovision), so its ``attached`` rows move to ``lost`` in the same
+            transaction (ADR-0823).
     """
     try:
         async with conn.transaction():
             await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
             await record_system_failure_category(conn, system_id, category)
+            if devices_replaced:
+                await mark_attached_devices_lost(conn, system_id)
             await audit_transition(
                 conn,
                 job,
@@ -312,6 +318,7 @@ async def _execute_system_lifecycle_call(
     tool: str,
     operation: str,
     binding_kind: ResourceKind,
+    devices_replaced: bool = False,
 ) -> str:
     profile = ProvisioningProfile.parse(system.provisioning_profile)
     customizers, pubkey = await _bootstrap_key_material(conn, system.id, runtime, secret_registry)
@@ -334,6 +341,7 @@ async def _execute_system_lifecycle_call(
             tool=tool,
             operation=operation,
             category=exc.category,
+            devices_replaced=devices_replaced,
         )
         # The System is now terminally `failed`; dead-letter at once so a retry cannot mask it.
         exc.terminal = True
@@ -468,6 +476,7 @@ async def reprovision_handler(
         tool="systems.reprovision",
         operation="reprovision",
         binding_kind=binding.kind,
+        devices_replaced=True,
     )
 
 
