@@ -211,3 +211,11 @@ system-reclaim path deletes the rows alone, because the provider proved physical
 device is left to release. A reprovision deletes the rows when it succeeds; when it fails after
 `release_all`, the System's `attached` rows move to `lost` in the transaction that records the
 failure, as for a power OFF or CYCLE. The spec's Ledger section states the current behaviour.
+
+### Amendment (2026-11-19): the storage-quota deferral is owned by ADR-0827 (#3720)
+
+This qualifies the Consequences bullet that says the backing storage "is not charged to a project
+quota" and that "no follow-up exists yet". #3720 is that follow-up, and
+[ADR-0827](0827-charge-hot-plugged-scratch-disks-to-a-project-storage-cap.md) proposes the
+decision: a server-configured per-project cap, charged from the device ledger. Until it is
+implemented, the storage stays uncharged as this record states.
