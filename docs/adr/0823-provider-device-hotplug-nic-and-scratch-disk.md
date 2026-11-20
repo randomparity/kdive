@@ -201,3 +201,13 @@ as `repair_stalled_creating_snapshots` does; it makes no provider call.
   `CONTRIBUTOR_CANCELABLE_JOB_KINDS` and only an operator can cancel them.
 - **Gate un-plug with the destructive-op gate.** verified: `OPT_IN_DESTRUCTIVE_JOB_KINDS` holds
   only the `force_crash` job kind and ADR-0378 rejected the gate for restore on the same grounds.
+
+### Amendment (2026-11-19): reclaim deletes rows only; a failed reprovision marks devices `lost` (#3717)
+
+This amends "What invalidates the ledger", not the decision. That paragraph says teardown,
+reprovision and the system-reclaim job all call `release_all` best effort and delete the System's
+ledger rows. As shipped (#3710, #3714), only teardown and reprovision call `release_all`. The
+system-reclaim path deletes the rows alone, because the provider proved physical absence and no
+device is left to release. A reprovision deletes the rows when it succeeds; when it fails after
+`release_all`, the System's `attached` rows move to `lost` in the transaction that records the
+failure, as for a power OFF or CYCLE. The spec's Ledger section states the current behaviour.
