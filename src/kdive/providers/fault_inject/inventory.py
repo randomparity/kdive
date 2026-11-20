@@ -73,18 +73,24 @@ class FaultInjectInventory:
         The ``ORPHAN_FLAGGED`` cancel policy (``cancel_policy.py``) leaves the domain in the
         inventory rather than rolling it back; the flag records that the residue was left
         *deliberately* by a cancel, so a reaper/operator can tell it apart from best-effort
-        tolerated residue. The entry itself is what the leaked-domain reconciler pass reaps.
+        tolerated residue. The entry itself is what the leaked-domain reconciler pass reaps. A
+        domain already forgotten has no entry for the reaper to find, so no flag is stored.
         """
-        self._orphaned.add(domain_name)
+        with self._lock:
+            if domain_name in self._domains:
+                self._orphaned.add(domain_name)
 
     def is_orphaned(self, domain_name: str) -> bool:
-        return domain_name in self._orphaned
+        with self._lock:
+            return domain_name in self._orphaned
 
     def system_id_of(self, domain_name: str) -> UUID | None:
-        return self._domains.get(domain_name)
+        with self._lock:
+            return self._domains.get(domain_name)
 
     def owned_domains(self) -> list[OwnedDomain]:
-        return [OwnedDomain(name=name, system_id=sid) for name, sid in self._domains.items()]
+        with self._lock:
+            return [OwnedDomain(name=name, system_id=sid) for name, sid in self._domains.items()]
 
 
 class FaultInjectReaper:
