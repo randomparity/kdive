@@ -16,6 +16,7 @@ from kdive.db.repositories import (
     SNAPSHOTS,
     SYSTEM_DEVICES,
     SYSTEMS,
+    mark_attached_devices_lost,
     record_system_failure_category,
     settle_device,
 )
@@ -624,6 +625,9 @@ async def repair_stalled_reprovisioning_systems(conn: AsyncConnection) -> int:
                 if row is None:
                     continue
                 await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
+                # A stalled reprovision leaves the device set indeterminate (the handler frees
+                # backing storage before the provider call), so `attached` no longer holds (#3732).
+                await mark_attached_devices_lost(conn, system_id)
                 category = await _limbo_category(
                     conn, system_id, JobKind.REPROVISION, ErrorCategory.REPROVISION_INCOMPLETE
                 )

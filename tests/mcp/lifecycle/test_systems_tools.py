@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
@@ -79,6 +80,7 @@ from tests.mcp.systems_support import (
     provider_resolver,
     provisioning_profile,
     seed_system,
+    stored_key_kind,
     upload_profile,
 )
 from tests.services.external_boot.conftest import seed_activation
@@ -1351,7 +1353,7 @@ async def _seed_retired_teardown_authority(
         "INSERT INTO worker_incarnations "
         "(incarnation, authority_kind, authority_binding, credential_hash, fence_protocol) "
         "VALUES (%s, 'docker', '{}'::jsonb, %s, 4)",
-        (worker, b"1" * 32),
+        (worker, uuid4().bytes * 2),
     )
     row = await conn.execute(
         "SELECT s.allocation_id, e.plan_identity FROM systems AS s "
@@ -1515,8 +1517,8 @@ def test_teardown_of_preparing_activation_enqueues_authority_marker(
     asyncio.run(_run())
 
 
-async def _authority_teardown_job(pool: AsyncConnectionPool) -> tuple[str, str]:
-    """Enqueue one authority teardown for a fresh external-boot System; return System and job."""
+async def _seed_authority_teardown_system(pool: AsyncConnectionPool) -> str:
+    """A fresh external-boot System whose teardown must take the authority route."""
     alloc_id = await granted_allocation(pool)
     system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
     run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
@@ -1529,6 +1531,12 @@ async def _authority_teardown_job(pool: AsyncConnectionPool) -> tuple[str, str]:
             run_id=UUID(run_id),
         )
         await _seed_retired_teardown_authority(conn, seeded)
+    return system_id
+
+
+async def _authority_teardown_job(pool: AsyncConnectionPool) -> tuple[str, str]:
+    """Enqueue one authority teardown for a fresh external-boot System; return System and job."""
+    system_id = await _seed_authority_teardown_system(pool)
     first = await _teardown(
         pool,
         ctx(Role.ADMIN),
@@ -2944,7 +2952,8 @@ def test_reprovision_keyed_retry_replays_stored_envelope(migrated_url: str) -> N
                 await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
                 job_n = await cur.fetchone()
                 await cur.execute(
-                    "SELECT count(*) AS n FROM idempotency_keys WHERE kind = 'systems.reprovision'"
+                    "SELECT count(*) AS n FROM idempotency_keys WHERE kind LIKE %s",
+                    (f"systems.reprovision:{sys_id}:%",),
                 )
                 key_n = await cur.fetchone()
         assert job_n is not None and job_n["n"] == 1  # replayed, not re-enqueued
@@ -4108,3 +4117,230 @@ def test_system_envelope_without_history_omits_run_list() -> None:
     assert resp.data["investigation_id"] is None
     assert "run_investigation_ids" not in resp.data
     assert resp.suggested_next_actions == ["systems.get", "systems.teardown"]
+
+
+# --- idempotency keys are scoped to their System (#3734, ADR-0193) -------------------------
+
+
+async def _two_ready_systems(pool: AsyncConnectionPool) -> tuple[str, str]:
+    first = await _seed_ready_system(pool, await _scoped_active_allocation(pool))
+    second_alloc = await _second_granted_allocation(pool)
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE allocations SET state = 'active' WHERE id = %s", (second_alloc,))
+    return first, await _seed_ready_system(pool, second_alloc)
+
+
+async def _keyed_reprovision(pool: AsyncConnectionPool, system_id: str, key: str):
+    return await _reprovision(
+        pool, ctx(), system_id, _active_allocation_profile(), idempotency_key=key
+    )
+
+
+async def _keyed_teardown(pool: AsyncConnectionPool, system_id: str, key: str):
+    return await teardown_system(pool, ctx(Role.ADMIN), system_id, idempotency_key=key)
+
+
+async def _job_count(pool: AsyncConnectionPool) -> int:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT count(*) AS n FROM jobs")
+        row = await cur.fetchone()
+    assert row is not None
+    return int(row["n"])
+
+
+@pytest.mark.parametrize(
+    ("tool", "bare_kind", "digest_pattern"),
+    [
+        (_keyed_reprovision, "systems.reprovision", r":[0-9a-f]{16}"),
+        (_keyed_teardown, "systems.teardown", ""),  # teardown has no argument besides its target
+    ],
+    ids=["reprovision", "teardown"],
+)
+def test_keyed_system_admin_tool_is_scoped_to_its_system(
+    migrated_url: str, tool: Any, bare_kind: str, digest_pattern: str
+) -> None:
+    """The same key replays on its own System and fails closed on another, enqueuing nothing."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            first_system, second_system = await _two_ready_systems(pool)
+            first = await tool(pool, first_system, "shared-key")
+            assert first.error_category is None, first.model_dump()
+            assert re.fullmatch(
+                re.escape(f"{bare_kind}:{first_system}") + digest_pattern,
+                await stored_key_kind(pool, "shared-key"),
+            )
+            replay = await tool(pool, first_system, "shared-key")
+            assert replay.model_dump() == first.model_dump()
+            jobs_before = await _job_count(pool)
+
+            other = await tool(pool, second_system, "shared-key")
+
+            assert other.error_category == "conflict", other.model_dump()
+            assert other.data["reason"] == "idempotency_key_in_use"
+            assert await _job_count(pool) == jobs_before
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("tool", "bare_kind"),
+    [(_keyed_reprovision, "systems.reprovision"), (_keyed_teardown, "systems.teardown")],
+    ids=["reprovision", "teardown"],
+)
+def test_a_system_admin_key_stored_under_the_bare_tool_name_conflicts(
+    migrated_url: str, tool: Any, bare_kind: str
+) -> None:
+    """A row written before the scoped kind existed is not replayed: the retry fails closed."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            sys_id = await _seed_ready_system(pool, await _scoped_active_allocation(pool))
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO idempotency_keys (key, principal, project, kind, result) "
+                    "VALUES ('legacy-key', 'user-1', 'proj', %s, '{\"envelope\": {}}')",
+                    (bare_kind,),
+                )
+
+            resp = await tool(pool, sys_id, "legacy-key")
+
+            assert resp.error_category == "conflict", resp.model_dump()
+            assert resp.data["reason"] == "idempotency_key_in_use"
+            assert await _job_count(pool) == 0
+
+    asyncio.run(_run())
+
+
+def test_authority_teardown_key_is_scoped_to_its_system(migrated_url: str) -> None:
+    """The same key replays on its own System and fails closed on another (#3734)."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            first_system = await _seed_authority_teardown_system(pool)
+            second_system = await _seed_authority_teardown_system(pool)
+            resolver = provider_resolver(external_boot=ExternalBootOperations())
+
+            async def keyed(system_id: str) -> Any:
+                return await teardown_system(
+                    pool, ctx(Role.ADMIN), system_id, idempotency_key="shared", resolver=resolver
+                )
+
+            first = await keyed(first_system)
+            assert first.status == "queued", first.model_dump()
+            assert await stored_key_kind(pool, "shared") == f"systems.teardown:{first_system}"
+            assert (await keyed(first_system)).model_dump() == first.model_dump()
+            jobs_before = await _job_count(pool)
+
+            other = await keyed(second_system)
+
+            assert other.error_category == "conflict", other.model_dump()
+            assert other.data["reason"] == "idempotency_key_in_use"
+            assert await _job_count(pool) == jobs_before
+
+    asyncio.run(_run())
+
+
+# --- idempotency keys are bound to their arguments (#3735, ADR-0193) -------------------------
+
+
+async def _reprovision_with(
+    pool: AsyncConnectionPool, system_id: str, profile: dict[str, Any], key: str
+) -> Any:
+    return await _reprovision(pool, ctx(), system_id, profile, idempotency_key=key)
+
+
+def test_reprovision_key_reused_with_a_changed_profile_conflicts_and_runs_no_work(
+    migrated_url: str,
+) -> None:
+    """A changed profile under a reused key is `conflict` once the System can be admitted again."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id = await _seed_ready_system(pool, await _scoped_active_allocation(pool))
+            first = await _reprovision_with(pool, system_id, provisioning_profile(), "k")
+            assert first.error_category is None, first.model_dump()
+            async with pool.connection() as conn:
+                await conn.execute("UPDATE systems SET state = 'ready' WHERE id = %s", (system_id,))
+            assert (
+                await _reprovision_with(pool, system_id, provisioning_profile(), "k")
+            ).model_dump() == first.model_dump()
+            jobs_before = await _job_count(pool)
+            changed = provisioning_profile()
+            changed["vcpu"] = 8
+
+            resp = await _reprovision_with(pool, system_id, changed, "k")
+
+            assert resp.error_category == "conflict", resp.model_dump()
+            assert resp.data["reason"] == "idempotency_key_in_use"
+            assert await _job_count(pool) == jobs_before
+            async with pool.connection() as conn:
+                cur = await conn.execute("SELECT state FROM systems WHERE id = %s", (system_id,))
+                assert await cur.fetchone() == ("ready",)
+
+    asyncio.run(_run())
+
+
+def test_reprovision_key_reused_with_a_changed_profile_mid_flight_is_refused_without_work(
+    migrated_url: str,
+) -> None:
+    """While the first call's job is live the System refuses the changed profile; nothing runs."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id = await _seed_ready_system(pool, await _scoped_active_allocation(pool))
+            first = await _reprovision_with(pool, system_id, provisioning_profile(), "k")
+            assert first.error_category is None, first.model_dump()
+            jobs_before = await _job_count(pool)
+            changed = provisioning_profile()
+            changed["vcpu"] = 8
+
+            resp = await _reprovision_with(pool, system_id, changed, "k")
+
+            assert resp.error_category == "configuration_error", resp.model_dump()
+            assert await _job_count(pool) == jobs_before
+
+    asyncio.run(_run())
+
+
+def test_reprovision_omitted_profile_default_and_explicit_default_are_the_same_request(
+    migrated_url: str,
+) -> None:
+    """A retry that spells out a default the first call omitted replays the first envelope."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            system_id = await _seed_ready_system(pool, await _scoped_active_allocation(pool))
+            first = await _reprovision_with(pool, system_id, provisioning_profile(), "k")
+            assert first.error_category is None, first.model_dump()
+            explicit = provisioning_profile()
+            explicit["provider"]["local-libvirt"]["destructive_ops"] = []
+            explicit["provider"]["local-libvirt"]["debug"] = {"preserve_on_crash": False}
+
+            replay = await _reprovision_with(pool, system_id, explicit, "k")
+
+            assert replay.model_dump() == first.model_dump()
+
+    asyncio.run(_run())
+
+
+def test_a_system_admin_key_stored_without_an_argument_digest_conflicts(migrated_url: str) -> None:
+    """A reprovision row written before the digest existed is not replayed; nothing runs."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            sys_id = await _seed_ready_system(pool, await _scoped_active_allocation(pool))
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO idempotency_keys (key, principal, project, kind, result) "
+                    "VALUES ('pre-digest', 'user-1', 'proj', %s, '{\"envelope\": {}}')",
+                    (f"systems.reprovision:{sys_id}",),
+                )
+
+            resp = await _reprovision_with(pool, sys_id, provisioning_profile(), "pre-digest")
+
+            assert resp.error_category == "conflict", resp.model_dump()
+            assert resp.data["reason"] == "idempotency_key_in_use"
+            assert await _job_count(pool) == 0
+
+    asyncio.run(_run())

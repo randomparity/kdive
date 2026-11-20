@@ -13,7 +13,12 @@ from kdive.providers.fault_inject.inventory import FaultInjectInventory
 from kdive.providers.fault_inject.lifecycle.hotplug import FaultInjectHotplug
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
 from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
-from kdive.providers.ports.lifecycle import DeviceSpec, InstallRequest, PlugOutcome
+from kdive.providers.ports.lifecycle import (
+    DeviceSpec,
+    HotplugDeviceKind,
+    InstallRequest,
+    PlugOutcome,
+)
 from kdive.serialization import JsonValue
 
 _FIRST_ATTEMPT: Callable[[UUID], int] = lambda _system_id: 1  # noqa: E731 - a tiny default port
@@ -159,12 +164,26 @@ class FaultedHotplug:
         self._draw(domain_name)
         return self._inner.plug(domain_name, spec)
 
-    def unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+    def unplug(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
         self._draw(domain_name)
-        return self._inner.unplug(domain_name, device_id, provider_handle)
+        return self._inner.unplug(domain_name, device_id, provider_handle, kind=kind)
 
-    def is_attached(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
-        return self._inner.is_attached(domain_name, device_id, provider_handle)
+    def is_attached(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
+        return self._inner.is_attached(domain_name, device_id, provider_handle, kind=kind)
 
     def release_all(self, domain_name: str) -> None:
         self._inner.release_all(domain_name)

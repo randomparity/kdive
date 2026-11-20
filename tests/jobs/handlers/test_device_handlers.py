@@ -55,10 +55,24 @@ class _Untouched:
     def plug(self, domain_name: str, spec: DeviceSpec) -> Any:
         raise AssertionError("provider plug must not be called")
 
-    def unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+    def unplug(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
         raise AssertionError("provider unplug must not be called")
 
-    def is_attached(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+    def is_attached(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
         raise AssertionError("provider is_attached must not be called")
 
     def release_all(self, domain_name: str) -> None:
@@ -86,10 +100,24 @@ class _Spy:
     def plug(self, domain_name: str, spec: DeviceSpec) -> Any:
         return self.inner.plug(domain_name, spec)
 
-    def unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
-        return self.inner.unplug(domain_name, device_id, provider_handle)
+    def unplug(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
+        return self.inner.unplug(domain_name, device_id, provider_handle, kind=kind)
 
-    def is_attached(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+    def is_attached(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
         with psycopg.connect(self.dsn) as conn:
             row = conn.execute(
                 "SELECT provider_handle, settle_deadline IS NOT NULL FROM system_devices "
@@ -98,7 +126,7 @@ class _Spy:
             ).fetchone()
         assert row is not None
         self.polls.append((row[0], row[1]))
-        return self.inner.is_attached(domain_name, device_id, provider_handle)
+        return self.inner.is_attached(domain_name, device_id, provider_handle, kind=kind)
 
     def release_all(self, domain_name: str) -> None:
         self.inner.release_all(domain_name)
@@ -260,7 +288,12 @@ def test_plug_settles_the_row_attached(
         assert set(row.identity) == {identity_key}
         assert row.provider_handle is not None
         assert (row.detail, row.settle_deadline) == (None, None)
-        assert port.is_attached(env.domain, str(device_id), row.provider_handle) is True
+        assert (
+            port.is_attached(
+                env.domain, str(device_id), row.provider_handle, kind=HotplugDeviceKind.NIC
+            )
+            is True
+        )
 
     _run(migrated_url, authority_role_dsns, scenario)
 
@@ -316,7 +349,10 @@ def test_an_injected_fault_fails_the_plug(
         assert error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
         row = await env.row(device_id)
         assert row is not None and row.state is _FAILED and row.detail
-        assert env.port().is_attached(env.domain, str(device_id), None) is False
+        assert (
+            env.port().is_attached(env.domain, str(device_id), None, kind=HotplugDeviceKind.NIC)
+            is False
+        )
 
     _run(migrated_url, authority_role_dsns, scenario)
 
@@ -423,7 +459,9 @@ def test_unplug_deletes_the_row_from_any_admitted_state(
         assert await env.unplug(port, device_id, from_state) == str(device_id)
 
         assert await env.row(device_id) is None
-        assert port.is_attached(env.domain, str(device_id), None) is False
+        assert (
+            port.is_attached(env.domain, str(device_id), None, kind=HotplugDeviceKind.NIC) is False
+        )
 
     _run(migrated_url, authority_role_dsns, scenario)
 
@@ -456,7 +494,9 @@ def test_busy_guest_returns_the_row_to_the_state_it_started_from(
         row = await env.row(device_id)
         assert row is not None and row.state is _ATTACHED
         assert (row.detail, row.settle_deadline) == (None, None)
-        assert port.is_attached(env.domain, str(device_id), None) is True
+        assert (
+            port.is_attached(env.domain, str(device_id), None, kind=HotplugDeviceKind.NIC) is True
+        )
 
     _run(migrated_url, authority_role_dsns, scenario)
 
@@ -490,6 +530,48 @@ def test_unplug_without_a_handle_the_provider_cannot_find_is_refused(
     _run(migrated_url, authority_role_dsns, scenario)
 
 
+@pytest.mark.parametrize("kind", [HotplugDeviceKind.NIC, HotplugDeviceKind.DISK])
+def test_unplug_and_its_poll_carry_the_ledger_rows_kind(
+    migrated_url: str, authority_role_dsns: _RoleDsns, kind: HotplugDeviceKind
+) -> None:
+    seen: list[tuple[str, HotplugDeviceKind]] = []
+
+    class _Records(_Untouched):
+        def unplug(
+            self,
+            domain_name: str,
+            device_id: str,
+            provider_handle: str | None,
+            *,
+            kind: HotplugDeviceKind,
+        ) -> bool:
+            seen.append(("unplug", kind))
+            return False
+
+        def is_attached(
+            self,
+            domain_name: str,
+            device_id: str,
+            provider_handle: str | None,
+            *,
+            kind: HotplugDeviceKind,
+        ) -> bool:
+            seen.append(("is_attached", kind))
+            return False
+
+    async def scenario(env: _Env) -> None:
+        size_gb = 2 if kind is HotplugDeviceKind.DISK else None
+        device_id = await env.add_row(
+            SystemDeviceState.UNPLUGGING, kind=kind.value, size_gb=size_gb, provider_handle="h"
+        )
+
+        await env.unplug(_Records(), device_id)
+
+        assert seen == [("unplug", kind), ("is_attached", kind)]
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
 def test_hang_unplug_fails_with_settle_timeout_and_the_device_stays(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
@@ -503,7 +585,9 @@ def test_hang_unplug_fails_with_settle_timeout_and_the_device_stays(
         assert float(str(error.details["waited_s"])) >= _WINDOW_S - 0.1
         row = await env.row(device_id)
         assert row is not None and row.state is _FAILED and row.settle_deadline is None
-        assert port.is_attached(env.domain, str(device_id), None) is True
+        assert (
+            port.is_attached(env.domain, str(device_id), None, kind=HotplugDeviceKind.NIC) is True
+        )
 
     _run(migrated_url, authority_role_dsns, scenario)
 
@@ -572,7 +656,12 @@ def test_a_configuration_error_after_the_handle_was_recorded_fails_the_row_not_d
 ) -> None:
     class _Drifts(_Spy):
         def is_attached(
-            self, domain_name: str, device_id: str, provider_handle: str | None
+            self,
+            domain_name: str,
+            device_id: str,
+            provider_handle: str | None,
+            *,
+            kind: HotplugDeviceKind,
         ) -> bool:
             raise CategorizedError("drift", category=ErrorCategory.CONFIGURATION_ERROR)
 
@@ -595,7 +684,14 @@ def test_an_unexpected_provider_exception_fails_the_row_and_propagates(
         def plug(self, domain_name: str, spec: DeviceSpec) -> Any:
             raise ValueError("boom")
 
-        def unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+        def unplug(
+            self,
+            domain_name: str,
+            device_id: str,
+            provider_handle: str | None,
+            *,
+            kind: HotplugDeviceKind,
+        ) -> bool:
             raise ValueError("boom")
 
     async def scenario(env: _Env) -> None:

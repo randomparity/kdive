@@ -173,6 +173,70 @@ attempt until the row leaves at the retention bound of §5, and the work rolls b
 nothing runs twice. No migration is needed: `kind` is an opaque discriminator that nothing
 parses.
 
+### Amendment (2026-11-20): `systems.reprovision` and `systems.teardown` join the object scope (#3734)
+
+The 2026-11-19 amendment left these two tools on the bare tool name. They now fold the System
+named by `system_id` into `kind` (`systems.reprovision:<system-uuid>`,
+`systems.teardown:<system-uuid>`), by the same rule and with the same outcome: a key reused on a
+second System is `conflict` / `idempotency_key_in_use` and enqueues nothing, and a retry on the
+same System replays. Every conflict re-resolve, replay lookup and record of the two tools,
+including the authority-owned and settled-routing teardown paths, uses the scoped kind, so one
+System's key never resolves through another kind. The bare-tool-name behavior of the previous
+amendment applies unchanged: a pre-existing row fails the retry closed until the retention
+bound, with no migration. Runs, investigations, allocation and provisioning keep their current
+scope, and the same key with different arguments on the same System is not detected here.
+
+### Amendment (2026-11-20): A key is bound to the call's arguments (#3735)
+
+The two amendments above scope a key to its target but not to the request: the same key on
+the same target with *different* arguments found the first call's stored envelope and replayed
+it, so the second call neither ran nor failed and the client was told its changed request had
+succeeded (`systems.plug_device` with another kind or size is the example).
+
+The rule: `object_scoped_kind` takes the call's arguments and appends a digest, giving
+`<tool>:<target-uuid>:<digest>`, the first 16 hex characters of the SHA-256 of the arguments'
+sorted-key, compact JSON. A retry that changed an argument misses the replay lookup, rolls its
+work back on the `(principal, key)` collision, and re-resolves under its own kind to `conflict`
+/ `idempotency_key_in_use`; identical arguments replay as before. No migration, no stored
+fingerprint, no change to the replay lookup or to key retention.
+
+Which arguments count: every argument other than the target the kind already names and the
+`idempotency_key` itself.
+
+| Tool | Digested arguments |
+| --- | --- |
+| `systems.plug_device` | `kind`, `network`, `size_gb` |
+| `systems.reprovision` | `profile`, as the digest of the parsed profile |
+| `control.power` | `action` |
+| `control.force_crash` | `run_id` |
+| `control.diagnostic_sysrq` | `command` |
+| `control.watch_for_crash` | `deadline_s` after the `WATCH_MAX_DEADLINE_S` clamp, `run_id` |
+| `control.capture_traffic` | `duration_s`, `max_bytes`, `snaplen`, `capture_filter` |
+| `systems.unplug_device`, `systems.teardown` | none: the System, and the device, are the whole request, and stay in the kind unchanged |
+
+Canonical form: the values the work actually runs with, never the caller's spelling. Every
+optional argument is present, `null` when unset, so an omitted argument and an explicit
+`null` are one request. Defaults are applied by the tool signature before the handler runs, so
+a client that omits an optional argument on the first call and passes its default on the retry
+sends the same request and replays, as does a profile that omits a field the parser defaults
+(`destructive_ops`, `debug`). A value the tool clamps is digested after clamping, because the
+clamped value is what runs. UUIDs use their canonical form. The digest is a single helper in
+`object_scoped_kind`, not a per-site computation, and a site that reaches several lookup and
+record points (`systems.reprovision` has three) derives the kind once and passes it along.
+
+Where a tool refuses before it records, a changed retry meets that refusal rather than the
+`conflict`: a `systems.reprovision` with another profile while the first call's System is still
+`reprovisioning` is a `configuration_error`, and a second `systems.plug_device` while the first
+device is `plugging` is `device_op_in_flight`. Nothing runs in either case. The `conflict` is
+what a retry gets once the target can be admitted again, which is when a stale replay would
+otherwise have misreported it.
+
+Upgrade behaviour: a row stored before this amendment carries no digest, so it is never matched.
+A keyed retry that spans the deploy fails closed with `conflict` instead of replaying, on every
+attempt until the row leaves at the retention bound of §5, and the work rolls back, so nothing
+runs twice. This is the same cost the two earlier amendments accepted. Tools not named in the
+table keep the bare tool name until their scope is decided.
+
 ## Consequences
 
 - One mechanism, one table, no migration. The existing GC, retention config, and
