@@ -467,7 +467,7 @@ class DeviceHotplugger(Protocol):
 
         Idempotent. ``kind`` is the ledger row's kind, as for ``unplug``. Semantics are
         ``unplug``'s except that the guest's cooperation is not awaited. ``True``
-        means the device is gone (an absent device counts, after freeing any backing volume);
+        means the device is gone (an absent device counts);
         ``False`` means the provider accepted the request and the caller polls ``is_attached``.
         Called only for kinds in ``ProviderSupport.forced_unplug_devices``.
 
