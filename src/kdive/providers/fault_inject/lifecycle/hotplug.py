@@ -18,6 +18,7 @@ FaultedHotplug`.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import threading
 from collections.abc import Mapping
@@ -113,6 +114,15 @@ class FaultInjectHotplug:
         self._kinds = kinds
         self._domains: dict[str, _Domain] = {}
         self._lock = threading.Lock()
+
+    def with_behaviour(self, behaviour: HotplugBehaviour | None) -> FaultInjectHotplug:
+        """Return a port with ``behaviour`` that shares this port's device ledger and lock.
+
+        A resource row's behaviour is read at each binding; the ledger must outlive the binding.
+        """
+        sibling = copy.copy(self)  # a shallow copy shares the ledger and lock by reference
+        sibling._behaviour = behaviour  # noqa: SLF001 - the one attribute a sibling varies
+        return sibling
 
     def plug(self, domain_name: str, spec: DeviceSpec) -> PlugOutcome:
         self._require_kind(spec.kind)
