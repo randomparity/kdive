@@ -146,7 +146,7 @@ def test_failed_provision_leaves_attached_devices_attached(migrated_url: str) ->
             job = await _enqueue(pool, JobKind.PROVISION, SystemPayload(system_id=str(sid)))
             async with pool.connection() as conn:
                 await conn.set_autocommit(True)
-                with pytest.raises(CategorizedError):
+                with pytest.raises(CategorizedError, match="provider refused"):
                     await systems_handlers.provision_handler(
                         conn, job, resolver=provider_resolver(provisioner=_FailingProvisioner())
                     )
@@ -167,7 +167,7 @@ def test_failed_reprovision_marks_attached_devices_lost(migrated_url: str) -> No
             )
             async with pool.connection() as conn:
                 await conn.set_autocommit(True)
-                with pytest.raises(CategorizedError):
+                with pytest.raises(CategorizedError, match="provider refused"):
                     await systems_handlers.reprovision_handler(
                         conn, job, resolver=provider_resolver(provisioner=_FailingProvisioner())
                     )
@@ -178,7 +178,7 @@ def test_failed_reprovision_marks_attached_devices_lost(migrated_url: str) -> No
 
 
 def test_failed_teardown_never_marks_devices_lost(migrated_url: str) -> None:
-    """Teardown reclaims the ledger itself, so a provider fault leaves no `lost` row behind."""
+    """Teardown reclaims the ledger before the provider call, so no row survives to go `lost`."""
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -186,13 +186,14 @@ def test_failed_teardown_never_marks_devices_lost(migrated_url: str) -> None:
             job = await _enqueue(pool, JobKind.TEARDOWN, TeardownPayload(system_id=str(sid)))
             async with pool.connection() as conn:
                 await conn.set_autocommit(True)
-                with pytest.raises(CategorizedError):
+                with pytest.raises(CategorizedError, match="provider refused"):
                     await systems_handlers.teardown_handler(
                         conn,
                         job,
                         resolver=provider_resolver(provisioner=_FailingProvisioner()),
                         artifact_store=INERT_OBJECT_STORE,
                     )
-            assert SystemDeviceState.LOST not in await _device_states(pool, sid)
+            assert await _system_state(pool, sid) is SystemState.TEARING_DOWN
+            assert await _device_states(pool, sid) == []
 
     asyncio.run(_run())
