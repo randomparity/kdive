@@ -862,3 +862,25 @@ def test_a_key_reused_on_a_second_system_conflicts_and_changes_nothing(
             assert await cur.fetchone() == (0,)
 
     _scenario(migrated_url, authority_role_dsns, body)
+
+
+def test_an_unplug_key_reused_on_a_second_device_conflicts_and_changes_nothing(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def body(env: _Env) -> None:
+        first_device, second_device = await env.add_row(_ATTACHED), await env.add_row(_ATTACHED)
+        first = await env.unplug(str(first_device), idempotency_key="shared-key")
+        assert first.status == "running", first.model_dump()
+        await env.settle_job(str(first.data["job_id"]))
+        async with env.owner.connection() as conn:  # the first un-plug settled back to attached
+            await SYSTEM_DEVICES.update_state(conn, first_device, _ATTACHED)
+
+        other = await env.unplug(str(second_device), idempotency_key="shared-key")
+
+        assert other.error_category == "conflict", other.model_dump()
+        assert _reason(other) == "idempotency_key_in_use"
+        assert len(await env.jobs(JobKind.UNPLUG_DEVICE)) == 1
+        row = await env.row(second_device)
+        assert row is not None and row.state is _ATTACHED
+
+    _scenario(migrated_url, authority_role_dsns, body)

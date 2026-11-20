@@ -161,15 +161,17 @@ object then takes the cross-tool path of §4, with no new error path: the replay
 misses, the work rolls back on the `(principal, key)` collision, and the re-resolve under the
 new `kind` finds nothing, so the caller gets `conflict` / `idempotency_key_in_use`. A retry on
 the same object still replays. The object folded in is the one the tool's id argument names:
-the System for `systems.plug_device`, `systems.unplug_device`, `control.power`,
-`control.force_crash`, `control.diagnostic_sysrq` and `control.watch_for_crash`, and the Run
-for `control.capture_traffic`, which takes a `run_id`. Other keyed tools keep the bare tool
-name until their object scope is decided.
+the System for `systems.plug_device`, `control.power`, `control.force_crash`,
+`control.diagnostic_sysrq` and `control.watch_for_crash`; the device and its System for
+`systems.unplug_device`, whose target is one device on a System; and the Run for
+`control.capture_traffic`, which takes a `run_id`. Other keyed tools keep the bare tool name
+until their object scope is decided.
 
 A key row stored under the bare tool name before this amendment is never matched by the
-scoped lookup. A retry of that key then fails with `conflict` instead of replaying, once, and
-the work rolls back, so nothing runs twice. No migration is needed: `kind` is an opaque
-discriminator that nothing parses, and rows leave at the retention bound of §5.
+scoped lookup. A retry of that key fails with `conflict` instead of replaying, on every
+attempt until the row leaves at the retention bound of §5, and the work rolls back, so
+nothing runs twice. No migration is needed: `kind` is an opaque discriminator that nothing
+parses.
 
 ## Consequences
 

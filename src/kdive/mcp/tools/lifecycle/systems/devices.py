@@ -408,7 +408,8 @@ async def unplug_device(
         ctx,
         uid,
         system_id,
-        kind=_UNPLUG_KIND,
+        # The device is the target; the System id is folded in by `_keyed_admission`.
+        kind=object_scoped_kind(_UNPLUG_KIND, device_uid),
         idempotency_key=idempotency_key,
         admit=lambda conn: _admit_unplug(conn, ctx, uid, system_id, device_uid, attempt),
     )
