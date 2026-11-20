@@ -460,10 +460,13 @@ class DeviceHotplugger(Protocol):
         domain_name: str,
         device_id: str,
         provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
     ) -> bool:
-        """Remove a device without waiting for the guest to release it (ADR-0828); idempotent.
+        """Remove a device of ``kind`` without waiting for the guest to release it (ADR-0828).
 
-        Semantics are ``unplug``'s except that the guest's cooperation is not awaited. ``True``
+        Idempotent. ``kind`` is the ledger row's kind, as for ``unplug``. Semantics are
+        ``unplug``'s except that the guest's cooperation is not awaited. ``True``
         means the device is gone (an absent device counts, after freeing any backing volume);
         ``False`` means the provider accepted the request and the caller polls ``is_attached``.
         Called only for kinds in ``ProviderSupport.forced_unplug_devices``.

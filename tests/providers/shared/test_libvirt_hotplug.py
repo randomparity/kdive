@@ -294,7 +294,7 @@ def test_force_unplug_is_unsupported_and_leaves_the_device_and_volume() -> None:
     handle = port.plug(DOMAIN, _disk(device_id)).provider_handle
 
     with pytest.raises(CategorizedError) as err:
-        port.force_unplug(DOMAIN, device_id, handle)
+        port.force_unplug(DOMAIN, device_id, handle, kind=HotplugDeviceKind.DISK)
 
     assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert err.value.details["reason"] == "forced_unplug_unsupported"

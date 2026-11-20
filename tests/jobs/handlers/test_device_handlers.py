@@ -253,7 +253,14 @@ class _ForceSpy:
         self.calls.append("unplug")
         return True
 
-    def force_unplug(self, domain_name: str, device_id: str, provider_handle: str | None) -> bool:
+    def force_unplug(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
         self.calls.append("force_unplug")
         return self._force_returns
 

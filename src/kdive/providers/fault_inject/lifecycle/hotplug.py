@@ -187,7 +187,10 @@ class FaultInjectHotplug:
         domain_name: str,
         device_id: str,
         provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
     ) -> bool:
+        del kind  # the ledger already records the kind of every device it holds
         with self._lock:
             domain = self._domain(domain_name)
             device = domain.devices.get(device_id)

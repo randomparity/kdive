@@ -456,7 +456,7 @@ def test_force_unplug_removes_the_device_at_once_whatever_the_behaviour(
     port = _port(behaviour)
     handle = port.plug(_DOMAIN, spec).provider_handle
 
-    assert port.force_unplug(_DOMAIN, spec.device_id, handle) is True
+    assert port.force_unplug(_DOMAIN, spec.device_id, handle, kind=spec.kind) is True
     assert _gone(port, spec, handle)
 
 
@@ -467,16 +467,16 @@ def test_force_unplug_removes_a_device_that_is_removing_or_settling() -> None:
     assert hung.unplug(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is False
     assert port.is_attached(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is True
 
-    assert port.force_unplug(_DOMAIN, _NIC.device_id, handle) is True
+    assert port.force_unplug(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is True
     assert _gone(port, _NIC, handle)
 
 
 def test_force_unplug_of_an_absent_device_is_idempotent() -> None:
     port = _port()
     handle = port.plug(_DOMAIN, _NIC).provider_handle
-    port.force_unplug(_DOMAIN, _NIC.device_id, handle)
+    port.force_unplug(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC)
 
-    assert port.force_unplug(_DOMAIN, _NIC.device_id, handle) is True
+    assert port.force_unplug(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is True
 
 
 def test_force_unplug_with_a_foreign_handle_is_handle_unknown_and_keeps_the_device() -> None:
@@ -484,14 +484,14 @@ def test_force_unplug_with_a_foreign_handle_is_handle_unknown_and_keeps_the_devi
     handle = port.plug(_DOMAIN, _NIC).provider_handle
 
     with _raises(ErrorCategory.CONTROL_FAILURE, "handle_unknown"):
-        port.force_unplug(_DOMAIN, _NIC.device_id, "another-handle")
+        port.force_unplug(_DOMAIN, _NIC.device_id, "another-handle", kind=HotplugDeviceKind.NIC)
 
     assert port.is_attached(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is True
 
 
 def test_force_unplug_of_an_absent_device_without_a_handle_is_handle_unknown() -> None:
     with _raises(ErrorCategory.CONTROL_FAILURE, "handle_unknown"):
-        _port().force_unplug(_DOMAIN, "never-plugged", None)
+        _port().force_unplug(_DOMAIN, "never-plugged", None, kind=HotplugDeviceKind.NIC)
 
 
 def test_no_force_refuses_with_the_forced_flag_and_keeps_the_device() -> None:
@@ -499,7 +499,7 @@ def test_no_force_refuses_with_the_forced_flag_and_keeps_the_device() -> None:
     handle = port.plug(_DOMAIN, _NIC).provider_handle
 
     with pytest.raises(CategorizedError) as excinfo:
-        port.force_unplug(_DOMAIN, _NIC.device_id, handle)
+        port.force_unplug(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC)
 
     assert excinfo.value.category is ErrorCategory.CONTROL_FAILURE
     assert excinfo.value.details == {"reason": "unplug_refused", "forced": True}
@@ -521,7 +521,9 @@ def test_an_injected_fault_fails_force_unplug_and_leaves_the_device() -> None:
     engine = FaultEngine(seed=1, fault_rate={"hotplug": 1.0}, max_latency_s={})
 
     with pytest.raises(CategorizedError) as excinfo:
-        FaultedHotplug(inner, engine, inventory).force_unplug(_DOMAIN, _NIC.device_id, handle)
+        FaultedHotplug(inner, engine, inventory).force_unplug(
+            _DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC
+        )
 
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert inner.is_attached(_DOMAIN, _NIC.device_id, handle, kind=HotplugDeviceKind.NIC) is True

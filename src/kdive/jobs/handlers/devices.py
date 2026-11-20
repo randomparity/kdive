@@ -324,7 +324,9 @@ async def _drive_unplug(
     device_id = str(row.id)
     kind = HotplugDeviceKind(row.kind)
     if forced:
-        call = functools.partial(hotplugger.force_unplug, domain, device_id, row.provider_handle)
+        call = functools.partial(
+            hotplugger.force_unplug, domain, device_id, row.provider_handle, kind=kind
+        )
     else:
         call = functools.partial(
             hotplugger.unplug, domain, device_id, row.provider_handle, kind=kind

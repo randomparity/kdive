@@ -111,6 +111,5 @@ def test_fault_inject_runtime_advertises_both_kinds_and_wires_the_port() -> None
     runtime = build_fault_inject_runtime()
 
     assert runtime.support.forced_unplug_devices == frozenset(HotplugDeviceKind)
-
     assert runtime.support.hotplug_devices == frozenset(HotplugDeviceKind)
     assert runtime.device_hotplug is not None

@@ -343,9 +343,11 @@ class LibvirtDeviceHotplug:
         domain_name: str,
         device_id: str,
         provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
     ) -> bool:
         """Always refuse: no libvirt call removes a guest-refused device (spike #3755, ADR-0828)."""
-        del device_id, provider_handle
+        del device_id, provider_handle, kind
         raise CategorizedError(
             f"libvirt cannot force removal of a device from domain {domain_name}",
             category=ErrorCategory.CONFIGURATION_ERROR,
