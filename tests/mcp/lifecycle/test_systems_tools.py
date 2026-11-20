@@ -1351,7 +1351,7 @@ async def _seed_retired_teardown_authority(
         "INSERT INTO worker_incarnations "
         "(incarnation, authority_kind, authority_binding, credential_hash, fence_protocol) "
         "VALUES (%s, 'docker', '{}'::jsonb, %s, 4)",
-        (worker, b"1" * 32),
+        (worker, uuid4().bytes * 2),
     )
     row = await conn.execute(
         "SELECT s.allocation_id, e.plan_identity FROM systems AS s "
@@ -1515,8 +1515,8 @@ def test_teardown_of_preparing_activation_enqueues_authority_marker(
     asyncio.run(_run())
 
 
-async def _authority_teardown_job(pool: AsyncConnectionPool) -> tuple[str, str]:
-    """Enqueue one authority teardown for a fresh external-boot System; return System and job."""
+async def _seed_authority_teardown_system(pool: AsyncConnectionPool) -> str:
+    """A fresh external-boot System whose teardown must take the authority route."""
     alloc_id = await granted_allocation(pool)
     system_id = await _seed_teardown_system(pool, alloc_id, SystemState.READY)
     run_id = await _seed_run(pool, system_id, RunState.SUCCEEDED)
@@ -1529,6 +1529,12 @@ async def _authority_teardown_job(pool: AsyncConnectionPool) -> tuple[str, str]:
             run_id=UUID(run_id),
         )
         await _seed_retired_teardown_authority(conn, seeded)
+    return system_id
+
+
+async def _authority_teardown_job(pool: AsyncConnectionPool) -> tuple[str, str]:
+    """Enqueue one authority teardown for a fresh external-boot System; return System and job."""
+    system_id = await _seed_authority_teardown_system(pool)
     first = await _teardown(
         pool,
         ctx(Role.ADMIN),
@@ -4189,5 +4195,33 @@ def test_a_system_admin_key_stored_under_the_bare_tool_name_conflicts(
             assert resp.error_category == "conflict", resp.model_dump()
             assert resp.data["reason"] == "idempotency_key_in_use"
             assert await _job_count(pool) == 0
+
+    asyncio.run(_run())
+
+
+def test_authority_teardown_key_is_scoped_to_its_system(migrated_url: str) -> None:
+    """The same key replays on its own System and fails closed on another (#3734)."""
+
+    async def _run() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            first_system = await _seed_authority_teardown_system(pool)
+            second_system = await _seed_authority_teardown_system(pool)
+            resolver = provider_resolver(external_boot=ExternalBootOperations())
+
+            async def keyed(system_id: str) -> Any:
+                return await teardown_system(
+                    pool, ctx(Role.ADMIN), system_id, idempotency_key="shared", resolver=resolver
+                )
+
+            first = await keyed(first_system)
+            assert first.status == "queued", first.model_dump()
+            assert (await keyed(first_system)).model_dump() == first.model_dump()
+            jobs_before = await _job_count(pool)
+
+            other = await keyed(second_system)
+
+            assert other.error_category == "conflict", other.model_dump()
+            assert other.data["reason"] == "idempotency_key_in_use"
+            assert await _job_count(pool) == jobs_before
 
     asyncio.run(_run())

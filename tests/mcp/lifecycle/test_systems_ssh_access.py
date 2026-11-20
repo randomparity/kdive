@@ -20,6 +20,7 @@ from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.connectivity.ssh_authorize import authorize_ssh_key_handler
 from kdive.jobs.handlers.connectivity.ssh_reachable import ReachResult, check_ssh_reachable_handler
+from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
 from kdive.mcp.tools.lifecycle.systems.ssh_access import (
     authorize_ssh_key,
     check_ssh_reachable,
@@ -895,3 +896,26 @@ def test_an_authorize_job_reaches_the_owned_system_as_the_worker_role(
     asyncio.run(_run())
     assert probed == [("127.0.0.1", _FORWARD)]
     assert delivered == [_GOOD_KEY]
+
+
+def test_preactivation_authority_teardown_key_is_scoped_to_its_system(migrated_url: str) -> None:
+    """The same key replays on its own System and fails closed on another (#3734)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            first_system = await _authority_system(pool)
+            second_system = await _authority_system(pool)
+            admin = _ctx(role=Role.ADMIN)
+            first = await teardown_system(pool, admin, first_system, idempotency_key="shared")
+            assert first.error_category is None, first.model_dump()
+            replay = await teardown_system(pool, admin, first_system, idempotency_key="shared")
+            assert replay.model_dump() == first.model_dump()
+            jobs_before = await _job_count(pool)
+
+            other = await teardown_system(pool, admin, second_system, idempotency_key="shared")
+
+            assert other.error_category == "conflict", other.model_dump()
+            assert other.data["reason"] == "idempotency_key_in_use"
+            assert await _job_count(pool) == jobs_before
+
+    asyncio.run(_run())
