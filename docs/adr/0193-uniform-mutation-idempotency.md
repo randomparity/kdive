@@ -180,7 +180,7 @@ named by `system_id` into `kind` (`systems.reprovision:<system-uuid>`,
 `systems.teardown:<system-uuid>`), by the same rule and with the same outcome: a key reused on a
 second System is `conflict` / `idempotency_key_in_use` and enqueues nothing, and a retry on the
 same System replays. Every conflict re-resolve, replay lookup and record of the two tools,
-including the authority-owned and break-glass teardown paths, uses the scoped kind, so one
+including the authority-owned and settled-routing teardown paths, uses the scoped kind, so one
 System's key never resolves through another kind. The bare-tool-name behavior of the previous
 amendment applies unchanged: a pre-existing row fails the retry closed until the retention
 bound, with no migration. Runs, investigations, allocation and provisioning keep their current

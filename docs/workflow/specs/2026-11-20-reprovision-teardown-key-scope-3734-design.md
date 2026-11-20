@@ -18,10 +18,10 @@ investigations, allocation and provisioning scopes; same-target argument-mismatc
 ## Contract
 
 - Every replay lookup, conflict re-resolve and record in the two tools passes
-  `object_scoped_kind(<tool kind>, system_id)`. Reprovision has three such sites; teardown has
-  the ordinary, authority-owned preactivation, settled-routing and break-glass record sites, the
-  keyed replay, the `UniqueViolation` re-resolve and the `_key_names_job` lookup, which now takes
-  the System id.
+  `object_scoped_kind(<tool kind>, system_id)`. Reprovision has three sites (replay, conflict
+  re-resolve, record). Teardown has the replay and conflict re-resolve plus four record sites
+  (ordinary, settled routing, authority-owned preactivation, authority replacement) and the
+  `_key_names_job` lookup, which now takes the System id.
 - Same key, second System: `conflict` / `idempotency_key_in_use`, no job enqueued. Same key,
   same System: stored envelope replays.
 - A row stored under the bare tool name is never matched: the retry fails closed, nothing runs.
