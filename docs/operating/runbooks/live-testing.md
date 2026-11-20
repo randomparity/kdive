@@ -1723,7 +1723,7 @@ qualified: 24 `success` and 96 `rejection`, including the four `gateway` validat
 `systems.provision` and `systems.reprovision`. After `demo-down.sh --wipe --yes` the worker's
 libvirt defined no domain. An earlier run at `0539e447b` gave the same result.
 
-Fault-injection cells (#3726): candidate `ef4b3bb96` (server, worker and reconciler at that SHA), an
+Fault-injection cells (#3726): candidate `b963ee480` (server, worker and reconciler at that SHA), an
 Ubuntu 26.04 x86_64 KVM lab host staging `fedora-kdive-ready-44`, with the `longterm` fixture kernel
 (6.18.54) built from the updated
 `fixtures/kernel/debug.config`. The six default-configuration local functional cells of
