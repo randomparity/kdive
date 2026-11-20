@@ -24,6 +24,7 @@ both passthrough kinds. This spec holds the contract the implementation issues b
 | The fleet availability read has its own claim query | `mcp/tools/catalog/availability.py:180-203` |
 | Teardown deletes device rows, then destroys the domain | `jobs/handlers/systems.py:709-722`, `:804-805` |
 | `delete_devices_for_system` deletes every kind; reclaim callers use it | `db/repositories.py:542`; `jobs/handlers/system_reclaim.py:111`; `reconciler/repairs/jobs.py:117` |
+| Availability and the matcher each subtract a claimed-BDF set, and neither knows a descriptor's `pf_bdf` (it does not exist yet) | `mcp/tools/catalog/availability.py:200-203`; `domain/pcie.py:214-215` |
 | A successful reprovision deletes rows in its commit; a failed one marks `attached` rows `lost` | `jobs/handlers/systems.py:264`; ADR-0823 Amendment (2026-11-19) |
 | Local discovery writes the five-field descriptor from node devices; remote does not enumerate | `providers/local_libvirt/discovery.py:186-228`, `:323-341`; `providers/remote_libvirt/discovery.py:11` |
 | The capability view keeps only the five descriptor fields | `domain/catalog/resource_capabilities.py:289-308` |
@@ -88,19 +89,25 @@ Conflicts, `conflict` with `data.reason`, checked after the ADR-0823 ones (`syst
 | Condition | `data.reason` |
 |---|---|
 | the System's allocation is `released`, `expired` or `failed` | `allocation_not_active` |
-| every matching claimed device already has a row, or the port's pool is exhausted | `no_free_device`; for a VF, `data.pool: {total, in_use}` |
+| every matching claimed device already has a row, or is the port of a row; or the port's pool is exhausted, or a `pci` row names the port | `no_free_device`; for a VF, `data.pool: {total, in_use}` |
 
 Admission, in the existing transaction under the System advisory lock: read the allocation row
 `FOR SHARE` and require a non-terminal state, resolve the target from its `pcie_claim` and the
 resource's descriptors, insert the row `plugging` with `host_device`, `physical_port`,
 `resource_id` and `identity.pci_id`, enqueue `PLUG_DEVICE`.
 
-- `pci`: candidates are the claimed devices that match `device` and hold no row; take the lowest
-  BDF. A claimed port is a valid `pci` target (the operator decided what is bound to `vfio-pci`).
-- `sriov_vf`: the claimed ports matching `port` must be exactly one; candidates are the VF
-  descriptors whose `pf_bdf` is that port, minus every BDF `active_claims` returns (other
-  allocations' claims, this allocation's own direct claims, ledger rows); take the lowest BDF.
-  `data.pool.total` is the VF descriptor count, `in_use` the number removed.
+- `pci`: candidates are the claimed devices that match `device`, hold no row, and are not the
+  `physical_port` of any row on this resource; take the lowest BDF. A claimed port is a valid `pci`
+  target (the operator decided what is bound to `vfio-pci`) only while none of its VFs is plugged.
+- `sriov_vf`: the claimed ports matching `port` must be exactly one, and no `pci` row on this
+  resource may name that port (else `no_free_device`); candidates are the VF descriptors whose
+  `pf_bdf` is that port, minus every BDF `active_claims` returns (other allocations' claims, this
+  allocation's own direct claims, ledger rows); take the lowest BDF. `data.pool.total` is the VF
+  descriptor count, `in_use` the number removed.
+
+A physical port is therefore held either whole (one `pci` row) or by VF draws (`sriov_vf` rows),
+never both. Both refusals are `no_free_device`; the second needs the `physical_port` column, so
+both ship with item C.
 
 A unique-index violation on the insert is `no_free_device` and the caller retries. The plug job
 re-reads the allocation before the provider call; a terminal allocation fails the job `conflict`,
@@ -151,25 +158,32 @@ migration notes require.
 one claim per `system_devices` row of that resource with a `host_device`, whatever its state, so
 a `failed` or `lost` row keeps the device occupied. A `sriov_vf` row also yields a claim on its
 `physical_port`, so a port is not offered to another allocation while any of its VFs is bound. The ids on a row-derived claim come from the
-host's descriptor list. The fleet availability read (`availability._claims_by_resource`) is
-rewritten onto one shared fleet-wide union function with `active_claims`, and a test asserts the two
-agree.
+host's descriptor list; occupancy depends only on the BDF, so a row whose BDF no longer has a
+descriptor still occupies it. The fleet availability read (`availability._claims_by_resource`) is
+rewritten onto one shared fleet-wide union function with `active_claims`.
 
-The pool-draw expansion lives only in `resolve_union` at admission, where every claim in the list
-belongs to another allocation: it adds every descriptor whose `pf_bdf` is in the claimed set to the
-claimed set before it subtracts, so the pure matcher and its unit tests own the rule. The plug draw
-uses the raw `active_claims` list, not the expansion, so the PF owner's own pool stays open. A VF
-claimed before its PF is skipped by the draw; an allocation resolves its claim once, so the owner
+The VF-of-claimed-PF expansion has one home: `occupied_bdfs(descriptors, claims)` in
+`domain/pcie.py`, a pure function returning the claimed BDFs plus every descriptor BDF whose
+`pf_bdf` is in that set. Both `resolve_multiset` (so `resolve_union` at admission, where every claim
+belongs to another allocation) and the availability free-descriptor read (`_free_descriptors`) call
+it, so a claimed port's VFs are unavailable in both places; neither re-implements the rule. The plug
+draw uses the raw `active_claims` list, not the expansion, so the PF owner's own pool stays open. A
+VF claimed before its PF is skipped by the draw; an allocation resolves its claim once, so the owner
 never requests a VF of its own port.
+
+The agreement test builds one host with a PF claim and its VFs, a direct VF claim and an
+`sriov_vf` row, and asserts that the free descriptors availability reports equal what
+`resolve_union` can hand out and that both claim sources match; it fails if either path drops the
+expansion.
 
 ### Reclaim
 
 | Event | Rule |
 |---|---|
 | un-plug settles | row deleted; the device is unbound again; the reservation stays |
-| teardown | `release_all` best effort; `delete_devices_for_system` is narrowed to the `nic` and `disk` kinds and still runs before the destroy; passthrough rows are deleted by a new `delete_passthrough_devices_for_system` in `teardown_handler` in their own transaction right after `provisioner.teardown` returns, whatever the System's state (`_finalize_teardown` returns early for a `FAILED` or `TORN_DOWN` System that an operator tears down again, so it is not the place); a failed destroy leaves them, so the device stays occupied |
-| reprovision | success: all kinds deleted by the delete-all function (replacing the `delete_devices_for_system` call at `systems.py:264`) in the commit that returns the System to `READY` (the provider call has recreated the domain); failure: `attached` rows become `lost` and stay occupying |
-| system-reclaim (`reclaim_device_ledger`: `system_reclaim.py:111`, and its callers in `system_authority.py`, `external_boot/lifecycle.py`, `repairs/jobs.py:117`) | all kinds deleted through the delete-all function; passthrough rows cannot exist on an authority or external-boot System because plug admission refuses those (`devices.py:146-156`), so these callers delete only `nic` and `disk` rows in practice |
+| teardown | `release_all` best effort; `delete_devices_for_system(conn, system_id, kinds=...)` takes an optional kind set, and `None` (the default, which every existing caller keeps) deletes every kind. `_reclaim_devices` passes `kinds=(nic, disk)` and still runs before the destroy; `teardown_handler` calls it with `kinds=(pci, sriov_vf)` in its own transaction right after `provisioner.teardown` returns, whatever the System's state (`_finalize_teardown` returns early unless the System is `TEARING_DOWN`, so it is not the place); a failed destroy leaves them, so the device stays occupied |
+| reprovision | success: `delete_devices_for_system(conn, system_id)` (every kind; the existing call at `systems.py:264`, unchanged) in the commit that returns the System to `READY` (the provider call has recreated the domain); failure: `attached` rows become `lost` and stay occupying |
+| system-reclaim (`reclaim_device_ledger`: `system_reclaim.py:111`, and its callers in `system_authority.py:228`, `external_boot/lifecycle.py:1159`, `repairs/jobs.py:117`) | `delete_devices_for_system(conn, system_id)`, every kind, unchanged. These callers run only after the authority's proof of absence (`retained_quarantine` excluded: `lifecycle.py:1156`; `AuthoritySystemPreactivationAbsentV1`: `system_authority.py:222`), so deleting passthrough rows is correct for them; the implementing PR verifies the proof at each of the three callers |
 | power OFF/CYCLE, snapshot restore | `attached` rows become `lost`; occupancy unchanged; `unplug_device` on a `lost` row deletes it after the provider finds the device absent |
 | allocation released or expired with a live System | claim stops counting; the rows keep the device occupied until the reaper's teardown deletes them; plug admission refuses (`allocation_not_active`) |
 
@@ -234,9 +248,13 @@ moves the row to `failed`, like `system_not_ready`.
    allocations.
 2. Invariants: at most one ledger row names a host device, and a device is never offered to a second
    allocation while a live claim or any row names it; a passthrough row exists until the domain that
-   may hold the device is destroyed or proven absent; kdive never unbinds a host driver; only claimed
+   may hold the device is destroyed or proven absent, or the provider confirms the device absent
+   (an un-plug settling, or `unplug_device` on a `lost` row); a physical port is held either whole by
+   one `pci` row or by `sriov_vf` rows, never both; kdive never unbinds a host driver; only claimed
    devices and the VFs of claimed ports can be plugged, and only while the allocation is live; no
    plug or un-plug overlaps power, snapshot, restore or reprovision (ADR-0823).
+   A teardown that races an in-flight plug job is safe: plug needs `READY`, a late settle hits a
+   deleted row, and an attach to a destroyed domain fails.
 3. Accepted: a worker that dies after the provider call and before the commit leaves a `failed` row
    with no handle, found by `device_id` on retry; a device in a domain whose destroy fails stays
    occupied until an operator tears the System down; devices do not survive a power cycle; an
@@ -271,9 +289,9 @@ Not filed; each is one PR. A belongs to #3723, C and D to #3724, B to #3723, E t
 
 | # | Title | Scope | Issue | Order | Effort | Live proof |
 |---|---|---|---|---|---|---|
-| A | Passthrough ledger, occupancy and tools | `pci` kind, `DeviceSpec` fields, migration, `active_claims` and availability ledger source, `allocation_not_active` check, tool parameters and refusals, reclaim split (`delete_devices_for_system` narrowed, passthrough and delete-all functions, callers), fault-inject provider, guide and RBAC docs; at the upper size bound, so the implementer may cut it into schema-and-occupancy, then tools-and-fault-inject | #3723 (shared by #3724) | 1 | L | none; fault-inject |
+| A | Passthrough ledger, occupancy and tools | `pci` kind, `DeviceSpec` fields, migration, `active_claims` and availability ledger source, `allocation_not_active` check, tool parameters and refusals, reclaim split (`delete_devices_for_system` gains the `kinds` parameter; `_reclaim_devices` and `teardown_handler` pass the two kind sets; reclaim and reprovision keep the default; the implementer verifies the proof of absence at each reclaim caller), fault-inject provider, guide and RBAC docs; at the upper size bound, so the implementer may cut it into schema-and-occupancy, then tools-and-fault-inject | #3723 (shared by #3724) | 1 | L | none; fault-inject |
 | B | libvirt `pci` hostdev attach | `live_devices` shapes, hostdev XML, vfio-pci driver check, free-slot check, spare root ports on q35, advertise `pci` on local-libvirt | #3723 | 2 (after A) | L | local-libvirt on an x86_64 host with an IOMMU and a device bound to `vfio-pci` |
-| C | SR-IOV descriptor field and pool draw | `sriov_vf` kind and its migration, `pf_bdf` in discovery and the capability view, matcher VF-of-claimed-PF rule, `sriov_vf` resolution and pool counts, fault-inject VFs | #3724 | 2 (after A, parallel with B) | M | none; fault-inject |
+| C | SR-IOV descriptor field and pool draw | `sriov_vf` kind and its migration, `pf_bdf` in discovery and the capability view, `occupied_bdfs` in `domain/pcie.py` called by `resolve_multiset` and availability `_free_descriptors` (with the agreement test), `sriov_vf` resolution and pool counts, the whole-port and VF mutual-exclusion refusals with their tests (a `pci` plug of a port with a VF row, an `sriov_vf` plug on a port with a `pci` row, both `no_free_device`), fault-inject VFs | #3724 | 2 (after A, parallel with B) | M | none; fault-inject |
 | D | libvirt `interface type=hostdev` VF attach | interface-hostdev XML, MAC set and restore, advertise `sriov_vf` on local-libvirt | #3724 | 3 (after B and C) | M | local-libvirt on a host with an SR-IOV NIC whose VFs are bound to `vfio-pci` |
 | E | remote-libvirt node-device enumeration and advertise (optional: neither Expected section needs it, and the issues carry the remote label) | node-device inventory over the TLS transport, advertise both kinds | #3723 and #3724 | 4 (after B and D) | M | remote-libvirt host with an assignable device |
 

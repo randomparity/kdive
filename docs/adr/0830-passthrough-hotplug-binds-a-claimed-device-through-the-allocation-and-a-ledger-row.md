@@ -76,10 +76,17 @@ second allocation has since claimed.
 **Occupancy covers the ledger.** A device is occupied when a non-terminal allocation's claim holds
 it **or** a `system_devices` row on that host names it. `active_claims` adds the second source.
 This closes the window above: an expired allocation's device stays unavailable until the domain
-that may hold it is proven gone. The fleet availability read uses the same predicate, so admission
-and availability agree. Passthrough rows are deleted only after the provider has destroyed the
+that may hold it is proven gone. The fleet availability read uses the same predicate and the same
+VF-of-claimed-PF expansion (one pure function, `occupied_bdfs` in `domain/pcie.py`, called by both
+the admission matcher and availability), so admission and availability agree. A physical port is
+held either whole by a `pci` row or by `sriov_vf` rows, never both; admission refuses the second
+with `no_free_device`. Passthrough rows are deleted only after the provider has destroyed the
 domain (teardown and reprovision) or proved it absent (system-reclaim); they are not deleted with
-the `nic` and `disk` rows ahead of the destroy call.
+the `nic` and `disk` rows ahead of the destroy call. Teardown deletes them in `teardown_handler`
+immediately after `provisioner.teardown` returns, in any System state, through
+`delete_devices_for_system(..., kinds=...)`; the `nic` and `disk` rows still go ahead of the
+destroy. Un-plug settle, and `unplug_device` on a `lost` row, delete a row while the domain lives,
+after the provider confirms the device absent.
 
 **Hosts must opt devices in; kdive never rebinds host drivers.** libvirt attaches with
 `managed='no'`, which requires the device to be bound to `vfio-pci` already (unverified until the
