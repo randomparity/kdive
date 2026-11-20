@@ -746,7 +746,7 @@ _DEVICE_OP_KINDS = (
 )
 _STALLED_DEVICE_DETAIL = (
     "the worker ended before the device operation settled; the device may or may not be in the "
-    "guest. Retry systems.unplug_device, or plug again."
+    "guest. Retry systems.unplug_device or systems.force_unplug_device, or plug again."
 )
 
 
