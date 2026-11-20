@@ -147,6 +147,32 @@ replays only within the retention window; after GC a repeat is treated as a fres
 - **M2** — `docs/guide/async-jobs.md` documents the replay/GC window and that a keyed
   enqueue replays the same job envelope within the window.
 
+### Amendment (2026-11-19): A key is bound to its target object, not only its tool (#3713)
+
+This qualifies §1 ("`kind` is the **tool name**") and the cross-tool bullet of §4, which treat
+`(principal, key, kind)` as the replay identity. For a tool that mutates an existing object
+named by an id argument, the tool name alone leaves a gap: one key reused against a *second*
+object on the same tool found the first object's stored envelope and replayed it, so the second
+object was never mutated and the client was told it had been.
+
+The rule: a keyed mutation on an existing object folds that object's canonical UUID into
+`kind` (`<tool>:<object-uuid>`, via `object_scoped_kind`). Reuse of a key on a different
+object then takes the cross-tool path of §4, with no new error path: the replay lookup
+misses, the work rolls back on the `(principal, key)` collision, and the re-resolve under the
+new `kind` finds nothing, so the caller gets `conflict` / `idempotency_key_in_use`. A retry on
+the same object still replays. The object folded in is the one the tool's id argument names:
+the System for `systems.plug_device`, `control.power`, `control.force_crash`,
+`control.diagnostic_sysrq` and `control.watch_for_crash`; the device and its System for
+`systems.unplug_device`, whose target is one device on a System; and the Run for
+`control.capture_traffic`, which takes a `run_id`. Other keyed tools keep the bare tool name
+until their object scope is decided.
+
+A key row stored under the bare tool name before this amendment is never matched by the
+scoped lookup. A retry of that key fails with `conflict` instead of replaying, on every
+attempt until the row leaves at the retention bound of §5, and the work rolls back, so
+nothing runs twice. No migration is needed: `kind` is an opaque discriminator that nothing
+parses.
+
 ## Consequences
 
 - One mechanism, one table, no migration. The existing GC, retention config, and

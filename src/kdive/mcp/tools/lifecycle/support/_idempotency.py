@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.errors import UniqueViolation
@@ -119,6 +120,17 @@ async def resolve_conflict(
     return _envelope(await _resolve_conflict(conn, principal=principal, key=key, kind=kind))
 
 
+def object_scoped_kind(kind: str, object_id: UUID) -> str:
+    """The ``kind`` for a mutation whose key must not replay against another object.
+
+    ``idempotency_keys`` is unique on ``(principal, key)``, so a key reused on a second object
+    of the same tool misses the replay lookup and collides on insert, which
+    ``keyed_mutation`` surfaces as ``conflict`` (ADR-0193, 2026-11-19 amendment). The canonical
+    UUID form keeps one object's spellings in one scope.
+    """
+    return f"{kind}:{object_id}"
+
+
 async def keyed_mutation(
     conn: AsyncConnection,
     *,
@@ -163,6 +175,7 @@ async def keyed_mutation(
 
 __all__ = [
     "keyed_mutation",
+    "object_scoped_kind",
     "record_envelope",
     "resolve_conflict",
     "resolve_envelope_replay",
