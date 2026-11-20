@@ -41,6 +41,7 @@ from tests.mcp.systems_support import (
     granted_allocation,
     provider_resolver,
     seed_system,
+    stored_key_kind,
 )
 from tests.services.external_boot.conftest import seed_activation
 from tests.support.object_store import INERT_OBJECT_STORE
@@ -370,7 +371,7 @@ def test_a_keyed_replacement_is_audited_and_keeps_a_key_that_named_the_old_row(
                     principal=ctx(Role.ADMIN).principal,
                     key="settled-retry",
                     project="proj",
-                    kind="systems.teardown",
+                    kind=f"systems.teardown:{system_id}",
                     envelope=job_envelope(old, "system_id", UUID(system_id)),
                 )
             response = await teardown_system(
@@ -387,5 +388,32 @@ def test_a_keyed_replacement_is_audited_and_keeps_a_key_that_named_the_old_row(
         assert response.object_id == str(prior)
         assert _is_ordinary(job) and job.state is JobState.QUEUED
         assert recycled == (1,)
+
+    asyncio.run(body())
+
+
+def test_a_settled_replacement_key_is_scoped_to_its_system(migrated_url: str) -> None:
+    """The same key replays on its own System and fails closed on another (#3734)."""
+
+    async def body() -> None:
+        async with systems_support.pool(migrated_url) as pool:
+            first_system, _ = await _system_with_activation(pool, settled=True)
+            second_system, _ = await _system_with_activation(pool, settled=True)
+            for system_id in (first_system, second_system):
+                await _prior_teardown(pool, system_id, state=JobState.FAILED)
+            admin = ctx(Role.ADMIN)
+            first = await teardown_system(pool, admin, first_system, idempotency_key="shared")
+            assert first.error_category is None, first.model_dump()
+            assert await stored_key_kind(pool, "shared") == f"systems.teardown:{first_system}"
+            replay = await teardown_system(pool, admin, first_system, idempotency_key="shared")
+            assert replay.model_dump() == first.model_dump()
+            before = await _job(pool, second_system)
+
+            other = await teardown_system(pool, admin, second_system, idempotency_key="shared")
+
+            after = await _job(pool, second_system)
+        assert other.error_category == "conflict", other.model_dump()
+        assert other.data["reason"] == "idempotency_key_in_use"
+        assert (after.state, after.payload) == (before.state, before.payload)
 
     asyncio.run(body())
