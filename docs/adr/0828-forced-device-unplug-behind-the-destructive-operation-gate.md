@@ -160,8 +160,9 @@ vCPUs.
 
 - F14 holds on the running daemon: `detachDeviceFlags` and `detachDeviceAlias` both reject
   `VIR_DOMAIN_DEVICE_MODIFY_FORCE` (`unsupported flags (0x4)`).
-- Repeated `device_del`, `detachDeviceAlias` without the flag, `domif-setlink`, `netdev_del` and the
-  block backend deletes (`blockdev-del`, `drive_del`) never took the device out of the live domain.
+- Among the calls tried, none took the device out of the live domain: repeated `device_del`,
+  `detachDeviceAlias` without the flag, `domif-setlink`, `netdev_del` and the block backend
+  deletes (`blockdev-del`, `drive_del`).
   In one run the full candidate sequence followed by a reset left the NIC in libvirt's XML after
   QEMU had dropped it, which is the case this record forbids reporting as success.
 - The one call that made `is_attached` `False` for both kinds in every arm is `virDomainReset`. It

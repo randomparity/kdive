@@ -78,6 +78,9 @@ reset. No prototype `force_unplug` was written and no kind is advertised.
 
 ## Not proven
 
+- Some observations were made in the live session and are not in the retained raw output: the
+  `pciehp_disable` non-refusal, the second kernel boot after the reset, the guest kernel and
+  sizing, and the package versions.
 - Behaviour on remote-libvirt, on a ppc64le or s390x guest, or with a different QEMU.
 - A guest that refuses by keeping a mounted file system busy: PCI eject does not consult the file
   system, so this was not tried as a separate refusal.
