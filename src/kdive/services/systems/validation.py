@@ -35,7 +35,7 @@ def _reject_unknown_destructive_ops(profile: ProvisioningProfile) -> None:
     Once profile opt-in is the load-bearing grant, a typo would be a silent permanent denial
     indistinguishable from an intentional empty list. Runs at the write boundary only;
     ``ProvisioningProfile.parse`` stays structural so the unguarded read-path parse in
-    ``control._op_opt_in`` cannot raise on a stored legacy token.
+    ``support._destructive._op_opt_in`` cannot raise on a stored legacy token.
     """
     unknown = sorted(
         op for op in profile.provider.destructive_ops if op not in _VALID_DESTRUCTIVE_OP_VALUES
