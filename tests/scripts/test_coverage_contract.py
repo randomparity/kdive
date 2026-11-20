@@ -906,7 +906,8 @@ def test_cli_cells_twin_the_core_direct_cells(inventory: Inventory) -> None:
     for cell in cli:
         twin = by_id[cell.id.replace("/cli/", "/direct/")]
         assert replace(cell, id=twin.id, exposure="direct", owner=twin.owner) == twin
-        assert cell.owner == 3099 and cell.node_id is not None
+        assert cell.owner == (2818 if cell.guest_arch == "ppc64le" else 3099)
+        assert cell.node_id is not None
     core = {t for g in load_mapping().groups if g.owner in _CLI_GROUPS for t in g.tools}
     assert {c.operation for c in cli} == core and len(core) == 52
 
@@ -1059,3 +1060,14 @@ def test_hotplug_ppc64le_cells_belong_to_the_power_lane(inventory: Inventory) ->
     ]
     assert {c.owner for c in cells if c.guest_arch == "x86_64"} == {3687}
     assert {c.owner for c in cells if c.guest_arch == "ppc64le"} == {2818}
+
+
+def test_closed_owner_ppc64le_cells_belong_to_the_power_lane(inventory: Inventory) -> None:
+    cells = build_contract(inventory=inventory).cells
+    stranded = [c for c in cells if c.operation == "ops.recover_stranded_activation"]
+    cli = [c for c in cells if c.exposure == "cli"]
+    assert {c.owner for c in stranded if c.guest_arch == "ppc64le"} == {2818}
+    assert {c.owner for c in stranded if c.guest_arch == "x86_64"} == {3552}
+    assert {c.owner for c in cli if c.guest_arch == "ppc64le"} == {2818}
+    assert {c.owner for c in cli if c.guest_arch == "x86_64"} == {3099}
+    assert not {c.id for c in cells if c.guest_arch == "ppc64le" and c.owner in {3552, 3099}}
