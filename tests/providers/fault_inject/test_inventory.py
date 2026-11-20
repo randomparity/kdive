@@ -150,10 +150,17 @@ class _MutatingDict(dict[str, UUID]):
 
 def test_owned_domains_snapshot_survives_a_record_landing_mid_listing() -> None:
     inventory = FaultInjectInventory()
-    writer = threading.Thread(target=inventory.record, args=(_OTHER, "dom-new"))
+    entered = threading.Event()
+
+    def record_new() -> None:
+        entered.set()
+        inventory.record(_OTHER, "dom-new")
+
+    writer = threading.Thread(target=record_new)
 
     def land_record_mid_iteration() -> None:
         writer.start()
+        entered.wait()
         # Unlocked, the writer finishes here and the iteration raises RuntimeError; locked, the
         # writer blocks until the listing returns, so this wait times out by design.
         writer.join(timeout=0.2)
