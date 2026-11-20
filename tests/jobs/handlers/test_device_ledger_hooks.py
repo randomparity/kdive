@@ -348,13 +348,13 @@ def test_reprovision_releases_devices_first_and_deletes_every_row(
     )
 
 
-def test_a_failed_reprovision_keeps_the_rows_for_teardown_to_clear(
+def test_a_failed_reprovision_marks_attached_rows_lost_and_keeps_every_row(
     migrated_url: str, authority_role_dsns: _RoleDsns
 ) -> None:
     async def scenario(
         owner: psycopg.AsyncConnection, pool: AsyncConnectionPool, sid: UUID
     ) -> None:
-        await _seed_rows(owner, sid)
+        rows = await _seed_rows(owner, sid)
         digest = profile_digest(ProvisioningProfile.parse(PROVISIONING_PROFILE))
         async with pool.connection() as conn:
             with pytest.raises(CategorizedError):
@@ -367,7 +367,13 @@ def test_a_failed_reprovision_keeps_the_rows_for_teardown_to_clear(
                     ),
                 )
 
-        assert len(await devices_for_system(owner, sid)) == len(_STATES)
+        after = await _states(owner, sid)
+        assert after == {
+            row_id: SystemDeviceState.LOST if state is SystemDeviceState.ATTACHED else state
+            for state, row_id in rows.items()
+        }
+        system = await SYSTEMS.get(owner, sid)
+        assert system is not None and system.state is SystemState.FAILED
 
     _run(
         migrated_url,
