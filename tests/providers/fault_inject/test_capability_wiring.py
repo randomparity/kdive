@@ -22,9 +22,27 @@ from kdive.providers.fault_inject.capabilities import (
 )
 from kdive.providers.fault_inject.lifecycle import faulted
 from kdive.providers.ports.lifecycle import DeviceSpec, HotplugDeviceKind
-from tests.providers.test_composition import _provisioning_profile
 
 _SYSTEM_ID = UUID("33333333-3333-3333-3333-333333333333")
+
+
+def _provisioning_profile() -> ProvisioningProfile:
+    return ProvisioningProfile.parse(
+        {
+            "schema_version": 1,
+            "arch": "x86_64",
+            "vcpu": 1,
+            "memory_mb": 1024,
+            "disk_gb": 10,
+            "boot_method": "direct-kernel",
+            "kernel_source_ref": "git+https://git.kernel.org/pub/scm/linux.git#v6.9",
+            "provider": {
+                "local-libvirt": {
+                    "rootfs": {"kind": "local", "path": "/var/lib/kdive/rootfs/x.qcow2"},
+                }
+            },
+        }
+    )
 
 
 class _Cursor:

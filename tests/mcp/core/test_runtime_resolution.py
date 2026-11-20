@@ -169,7 +169,13 @@ def _row(
     name: str = "host-a",
     system_id: UUID | None = _OBJECT_UUID,
 ):
-    return {"project": project, "kind": kind, "name": name, "system_id": system_id}
+    return {
+        "project": project,
+        "kind": kind,
+        "name": name,
+        "capabilities": {},
+        "system_id": system_id,
+    }
 
 
 async def _call(
@@ -340,5 +346,8 @@ class _BindableRuntime:
     def __init__(self, bound_to: str | None = None) -> None:
         self.bound_to = bound_to
 
-    def for_resource(self, resource_name: str) -> _BindableRuntime:
+    def for_resource(
+        self, resource_name: str, capabilities: object | None = None
+    ) -> _BindableRuntime:
+        del capabilities
         return _BindableRuntime(resource_name)
