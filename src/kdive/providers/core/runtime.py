@@ -103,6 +103,9 @@ class ProviderSupport:
     # Device hot-plug kinds this provider can prove (ADR-0823). Fail closed: empty means
     # unsupported, and a provider advertises only the kinds it can attach and observe.
     hotplug_devices: frozenset[HotplugDeviceKind] = frozenset()
+    # Kinds whose forced un-plug the provider proves leaves the device absent (ADR-0828). Must be
+    # a subset of `hotplug_devices`; empty means no forced un-plug.
+    forced_unplug_devices: frozenset[HotplugDeviceKind] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +240,11 @@ class ProviderRuntime:
             capability_name="support.hotplug_devices",
             port_name="device_hotplug",
         )
+        if not self.support.forced_unplug_devices <= self.support.hotplug_devices:
+            raise ValueError(
+                "support.forced_unplug_devices must be a subset of support.hotplug_devices: "
+                f"{sorted(self.support.forced_unplug_devices - self.support.hotplug_devices)}"
+            )
 
     async def register_discovery(self, pool: AsyncConnectionPool) -> None:
         if self.discovery_registrar is not None:

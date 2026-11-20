@@ -2737,6 +2737,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                     "observe_stranded_activation",
                     "plug_device",
                     "unplug_device",
+                    "force_unplug_device",
                 ),
             ),
             GeneratedFlag(

@@ -323,7 +323,7 @@ def _fenced_payload(kind: JobKind) -> Any:
         return RestorePayload(system_id=system_id, name="snap", start_paused=False)
     if kind is JobKind.PLUG_DEVICE:
         return PlugDevicePayload(system_id=system_id, device_id=str(uuid4()))
-    if kind is JobKind.UNPLUG_DEVICE:
+    if kind in (JobKind.UNPLUG_DEVICE, JobKind.FORCE_UNPLUG_DEVICE):
         return UnplugDevicePayload(
             system_id=system_id, device_id=str(uuid4()), from_state=SystemDeviceState.ATTACHED
         )

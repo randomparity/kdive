@@ -66,6 +66,38 @@ def test_runtime_accepts_advertised_hotplug_with_port() -> None:
     assert runtime.device_hotplug is port
 
 
+def test_runtime_rejects_forced_kinds_outside_the_hotplug_kinds() -> None:
+    support = ProviderSupport(
+        hotplug_devices=frozenset({HotplugDeviceKind.NIC}),
+        forced_unplug_devices=frozenset({HotplugDeviceKind.NIC, HotplugDeviceKind.DISK}),
+    )
+
+    with pytest.raises(ValueError, match=r"forced_unplug_devices.*subset.*disk"):
+        replace(_bare_runtime(), support=support, device_hotplug=cast(DeviceHotplugger, object()))
+
+
+def test_runtime_accepts_forced_kinds_within_the_hotplug_kinds() -> None:
+    support = ProviderSupport(
+        hotplug_devices=frozenset(HotplugDeviceKind),
+        forced_unplug_devices=frozenset({HotplugDeviceKind.NIC}),
+    )
+
+    runtime = replace(
+        _bare_runtime(), support=support, device_hotplug=cast(DeviceHotplugger, object())
+    )
+
+    assert runtime.support.forced_unplug_devices == {HotplugDeviceKind.NIC}
+
+
+def test_forced_unplug_is_not_advertised_by_default_or_by_libvirt() -> None:
+    assert _bare_runtime().support.forced_unplug_devices == frozenset()
+    for runtime in (
+        build_local_runtime(secret_registry=SecretRegistry()),
+        build_remote_runtime(secret_registry=SecretRegistry()),
+    ):
+        assert runtime.support.forced_unplug_devices == frozenset()
+
+
 def test_libvirt_runtimes_advertise_nic_and_disk_and_wire_the_port() -> None:
     for runtime in (
         build_local_runtime(secret_registry=SecretRegistry()),
@@ -78,5 +110,6 @@ def test_libvirt_runtimes_advertise_nic_and_disk_and_wire_the_port() -> None:
 def test_fault_inject_runtime_advertises_both_kinds_and_wires_the_port() -> None:
     runtime = build_fault_inject_runtime()
 
+    assert runtime.support.forced_unplug_devices == frozenset(HotplugDeviceKind)
     assert runtime.support.hotplug_devices == frozenset(HotplugDeviceKind)
     assert runtime.device_hotplug is not None

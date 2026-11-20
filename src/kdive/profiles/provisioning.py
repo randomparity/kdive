@@ -181,8 +181,9 @@ class LibvirtProfile(_ProfileBase):
     ``baseline_kernel`` is an optional hint naming the baseline kernel to boot when the
     rootfs ``/boot`` holds more than one kernel; ``None`` (the common single-kernel case) keeps
     fail-closed selection.
-    ``destructive_ops`` is the optionally-empty opt-in list for ``force_crash``
-    (e.g. ``["force_crash"]``); the control plane's gate resolves the opt-in factor from it
+    ``destructive_ops`` is the optionally-empty opt-in list for ``force_crash`` and
+    ``force_unplug_device`` (e.g. ``["force_crash", "force_unplug_device"]``); the control
+    plane's gate resolves the opt-in factor from it
     (deny-by-default — an absent or empty list refuses it). ``control.power`` and
     ``systems.reprovision`` are contributor leaseholder lifecycle and are not gated by it.
     ``debug`` declares
@@ -245,8 +246,8 @@ class RemoteLibvirtProfile(_ProfileBase):
 
     ``crashkernel`` mirrors the local section (the kdump prerequisite token; the
     booted kernel is the arbiter of its grammar). ``destructive_ops`` is the
-    deny-by-default opt-in factor for ``force_crash`` (not ``control.power`` or
-    ``systems.reprovision``, which are contributor lifecycle).
+    deny-by-default opt-in factor for ``force_crash`` and ``force_unplug_device`` (not
+    ``control.power`` or ``systems.reprovision``, which are contributor lifecycle).
     ``host_dump`` is the deny-by-default opt-in authorizing the remote host-side dump
     — a ``virsh dump`` of a halted guest's memory to an operator-pool coredump volume,
     streamed to the object store. It mirrors the *policy* of local's

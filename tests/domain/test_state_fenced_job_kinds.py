@@ -16,9 +16,9 @@ from kdive.domain.operations.jobs import (
 def test_the_set_is_exactly_the_kinds_that_fence_at_enqueue() -> None:
     # The rule is "the enqueue transaction writes a transient state another tool rejects on":
     # restore -> SystemState.RESTORING, reprovision -> SystemState.REPROVISIONING,
-    # snapshot -> SnapshotState.CREATING, plug_device / unplug_device -> SystemDeviceState.PLUGGING
-    # / UNPLUGGING (ADR-0823). Pinned as an equality, not a membership check, so
-    # adding a kind without revisiting the rule fails here.
+    # snapshot -> SnapshotState.CREATING, plug_device / unplug_device / force_unplug_device ->
+    # SystemDeviceState.PLUGGING / UNPLUGGING (ADR-0823, ADR-0828). Pinned as an equality, not a
+    # membership check, so adding a kind without revisiting the rule fails here.
     assert (
         frozenset(
             {
@@ -27,6 +27,7 @@ def test_the_set_is_exactly_the_kinds_that_fence_at_enqueue() -> None:
                 JobKind.SNAPSHOT,
                 JobKind.PLUG_DEVICE,
                 JobKind.UNPLUG_DEVICE,
+                JobKind.FORCE_UNPLUG_DEVICE,
             }
         )
         == STATE_FENCED_JOB_KINDS
@@ -66,4 +67,5 @@ def test_the_two_lane_names_are_distinct_and_non_empty() -> None:
 def test_device_jobs_are_not_contributor_cancelable() -> None:
     # ADR-0823 rejects cancelable plug/un-plug: the ledger row's transient state is the only
     # record of the in-flight provider call.
-    assert not {JobKind.PLUG_DEVICE, JobKind.UNPLUG_DEVICE} & CONTRIBUTOR_CANCELABLE_JOB_KINDS
+    device_kinds = {JobKind.PLUG_DEVICE, JobKind.UNPLUG_DEVICE, JobKind.FORCE_UNPLUG_DEVICE}
+    assert not device_kinds & CONTRIBUTOR_CANCELABLE_JOB_KINDS

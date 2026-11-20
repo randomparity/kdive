@@ -409,7 +409,8 @@ class DeviceHotplugger(Protocol):
     A provider that advertises ``ProviderSupport.hotplug_devices`` wires a ``DeviceHotplugger``
     into ``ProviderRuntime.device_hotplug``. Every method refuses a kind outside the advertised
     set with ``CONFIGURATION_ERROR``. Each call carries its own timeout bounded by the job's
-    remaining window. ``unplug`` never forces the guest: it issues the graceful request only.
+    remaining window. ``unplug`` never forces the guest: it issues the graceful request only;
+    ``force_unplug`` (ADR-0828) is the separate admin-gated op for a provider that can force.
     """
 
     def plug(self, domain_name: str, spec: DeviceSpec) -> PlugOutcome:
@@ -451,6 +452,30 @@ class DeviceHotplugger(Protocol):
                 absent domain, or a stopped domain that still holds the device
                 (``data.reason: domain_not_running``). An absent device on a stopped domain
                 is not an error: it returns ``True`` after freeing any backing volume.
+        """
+        ...
+
+    def force_unplug(
+        self,
+        domain_name: str,
+        device_id: str,
+        provider_handle: str | None,
+        *,
+        kind: HotplugDeviceKind,
+    ) -> bool:
+        """Remove a device of ``kind`` without waiting for the guest to release it (ADR-0828).
+
+        Idempotent. ``kind`` is the ledger row's kind, as for ``unplug``. Semantics are
+        ``unplug``'s except that the guest's cooperation is not awaited. ``True``
+        means the device is gone (an absent device counts);
+        ``False`` means the provider accepted the request and the caller polls ``is_attached``.
+        Called only for kinds in ``ProviderSupport.forced_unplug_devices``.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` with
+                ``data.reason: forced_unplug_unsupported`` when the provider cannot force the
+                device's kind; ``CONTROL_FAILURE`` with ``data.reason: unplug_refused`` and
+                ``data.forced: true`` when the provider refuses; otherwise as ``unplug``.
         """
         ...
 

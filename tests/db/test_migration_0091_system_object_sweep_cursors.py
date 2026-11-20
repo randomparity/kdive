@@ -13,7 +13,7 @@ from kdive.db import migrate
 def test_latest_migrations_are_discovered_in_order() -> None:
     migrations = migrate.discover_migrations()
 
-    assert [(item.version, item.filename) for item in migrations[-93:]] == [
+    assert [(item.version, item.filename) for item in migrations[-94:]] == [
         ("0103", "0103_worker_incarnations.sql"),
         ("0104", "0104_worker_fence_roles.sql"),
         ("0105", "0105_worker_fence_functions.sql"),
@@ -107,6 +107,7 @@ def test_latest_migrations_are_discovered_in_order() -> None:
         ("0199", "0199_capture_predicates_string_bodies.sql"),
         ("0200", "0200_system_devices.sql"),
         ("0201", "0201_system_devices_role_grants.sql"),
+        ("0202", "0202_force_unplug_job_kind.sql"),
     ]
 
 
