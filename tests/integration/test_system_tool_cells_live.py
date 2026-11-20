@@ -47,7 +47,7 @@ from tests.integration.live_stack.scenario import (
     provision_catalog,
     ssh_probe,
 )
-from tests.integration.live_stack.spine import await_system_state, drain_job
+from tests.integration.live_stack.spine import await_system_state, drain_job, ok, scalar
 from tests.integration.live_stack.tool_cells import (
     IDENTITY_PROBE,
     REMOTE_LANE_FAMILIES,
@@ -214,7 +214,9 @@ _ARM = faultinject_proof.ARM
 
 async def _inspect(caller: HttpCaller, token: str, guest: Guest) -> dict[str, object]:
     key, endpoint = guest.key, guest.endpoint
-    await faultinject_proof.arm(caller, token, guest, faultinject_proof.INERT)
+    # The tool under test is viewer-gated: the operator client arms and clears the knob.
+    inert = {"system_id": guest.system_id, **faultinject_proof.INERT}
+    ok(await scalar(guest.op, "faultinject.set", **inert), "arm")
     try:
         views = await asyncio.to_thread(faultinject_proof.guest_views, endpoint, key)
         env = await caller.call("faultinject.inspect", {"system_id": guest.system_id}, token)
@@ -229,7 +231,7 @@ async def _inspect(caller: HttpCaller, token: str, guest: Guest) -> dict[str, ob
         assert failslab["armed"] is True, failslab
         assert cast(dict[str, object], knobs["fail_page_alloc"])["armed"] is False, knobs
     finally:
-        await faultinject_proof.reset(caller, token, guest)
+        await scalar(guest.op, "faultinject.reset", system_id=guest.system_id)
     return {"knobs": len(knobs), "matches_guest_debugfs": True, "armed_knob_reported": True}
 
 

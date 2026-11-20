@@ -1677,7 +1677,8 @@ remote-libvirt cells (#3080), which block without a provider host, so select the
   kernel inputs like the power cells, so write the bindings with `--kernel-baseline longterm` and
   build the fixture first (`scripts/kernel_fixtures.py build --baseline longterm`, as in the
   deep-lifecycle section). A fixture tree built before #3726 lacks the options and `verify` rejects
-  it; rebuild it. The inspect cell arms `failslab` inert (`probability` 100, `interval` 1000000,
+  it; rebuild it. The inspect cell has the operator client arm `failslab` inert (`probability` 100,
+  `interval` 1000000,
   `times` 1), calls the tool at viewer and compares both knobs with the guest's own
   `/sys/kernel/debug/<knob>` files read over SSH, then resets. It needs a staged
   `fedora-kdive-ready-44` built after #3694, because an older image has no `kdive-faultinject` and
@@ -1692,9 +1693,9 @@ remote-libvirt cells (#3080), which block without a provider host, so select the
   first live run logged none. The bounds cannot wedge the guest: `times` counts injected failures
   across the whole guest, so one allocation fails and the kernel disarms itself, and the default
   `ignore-gfp-wait` limits that failure to an allocation that cannot sleep, which its caller drops
-  or retries. `reset` runs in a
-  `finally`. The `reset` cell arms the inert setting, resets, and compares the cleared knob with
-  the guest's debugfs and with `faultinject.inspect`. Both need contributor.
+  or retries. `reset` runs in a `finally`. The `reset` cell arms the inert setting, resets, and
+  compares the cleared knob with the guest's debugfs and with `faultinject.inspect`. Both need
+  contributor.
 - A rejection cell aims at one target per stack: a System provisioned, observed, torn down and
   released by the first rejection cell, whose project then must not change. Every role check of
   these tools runs before any state check, so a torn-down System and a released Allocation are
