@@ -370,7 +370,7 @@ def test_a_keyed_replacement_is_audited_and_keeps_a_key_that_named_the_old_row(
                     principal=ctx(Role.ADMIN).principal,
                     key="settled-retry",
                     project="proj",
-                    kind="systems.teardown",
+                    kind=f"systems.teardown:{system_id}",
                     envelope=job_envelope(old, "system_id", UUID(system_id)),
                 )
             response = await teardown_system(
