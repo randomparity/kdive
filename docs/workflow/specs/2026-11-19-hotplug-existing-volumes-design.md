@@ -53,7 +53,8 @@ ADR-0823), then image resolution. Resolution is one query in a new helper
 `state = 'registered' AND visibility = 'public'`, the predicate `fetch_public_provisioning_rootfs`
 applies, and it returns `(id, name, digest, volume)`. The `provider` is the System's, and `arch` is the System's
 provisioning profile `arch` (`System.requested_arch` is nullable, `domain/lifecycle/records.py:67`,
-so it is not the source); neither is ever the caller's. Absent, unregistered, wrong-provider, wrong-arch and any future not-visible
+so it is not the source; the admission code reads the stored profile and a System whose profile
+carries no arch is `image_not_found`); neither is ever the caller's. Absent, unregistered, wrong-provider, wrong-arch and any future not-visible
 case return the same `image_not_found` with one fixed detail; the tool never says which. The role
 denial for a caller without contributor on the System precedes all of it, so an unauthorized caller
 learns nothing about the catalog.
@@ -86,8 +87,8 @@ rules that follow, each stated so a test can check it:
    teardown and reprovision are unchanged from ADR-0823 and remove the overlay.
 4. The ledger row is the only place that records which image an overlay came from.
 
-5. `stage_disk_source` refuses a base whose path or volume name matches the device-overlay name
-   pattern (`*-dev-*.qcow2`, or a name starting `kdive-` and containing `-dev-`), so an operator
+5. `stage_disk_source` refuses a base whose path or volume name matches the exact sweep patterns
+   (`<domain>-dev-*.qcow2` locally, `kdive-<system>-dev-` remotely), so an operator
    mistake cannot place a catalog base inside a prefix `remove_all` sweeps.
 
 Invariant tests (implementation PRs): the base file and staged volume exist, byte-identical, after
@@ -103,7 +104,7 @@ class DiskSource:
     image_id: UUID
     # Catalog image name, for messages and the audit trail.
     name: str
-    # The row's content digest; None for a staged-path row, which is operator-attested.
+    # The row's content digest when present, else None (a staged-path row may carry none).
     digest: str | None
     # The row's staged pool volume (remote); None for a local object or staged path.
     volume: str | None
@@ -132,7 +133,24 @@ the file that was checked is the file the overlay is built on. `DeviceVolumes` g
 `create_overlay(conn, domain_name, device_id, staged) -> str` (idempotent, replaces a stale overlay
 the same way `create` does) and returns the host path `render_disk_xml` already takes. The
 ADR-0823 port rules hold: a kind outside the advertised set is refused, `plug` is idempotent on
-`device_id`, and `unplug` never forces.
+`device_id` (an already-attached device ignores `staged`), and `unplug` never forces. A
+`disk_source` with `staged=None`, or `staged` on a scratch disk or NIC, is a
+`configuration_error`. Item 1b updates every `DeviceHotplugger` implementer: both libvirt ports,
+fault-inject and the test fakes.
+
+Worker-side refusals, all raised by the port or the handler before any attach:
+
+| `data.reason` | Category | Row outcome |
+|---|---|---|
+| `image_not_found` (re-resolve miss) | `configuration_error` | deleted (nothing attached) |
+| `image_changed` (digest differs from the ledger or from the fetch) | `configuration_error` | deleted |
+| `image_not_staged` (no usable path, object or volume for this provider) | `configuration_error` | deleted |
+| `invalid_image_format`, `image_has_backing_file`, `image_unsafe`, `image_too_large` | `configuration_error` | deleted |
+| `image_unsupported` (provider has not implemented image disks; items 1b to 3 only) | `configuration_error` | deleted |
+| `stage_timeout` | `control_failure` | `failed`, no handle |
+| provider fault while fetching or creating the overlay | `infrastructure_failure` | `failed` |
+
+The admission errors are in the table under Reference and authorization.
 
 `stage_disk_source` makes the base available and checks it, before any domain call:
 
@@ -178,7 +196,9 @@ text, ADD COLUMN source_image_id uuid, ADD COLUMN source_digest text`, no foreig
 must not block image deletion; the name and digest keep the record readable after it), and CHECKs:
 the three are all null or `image` and `source_image_id` are both set; they are null for
 `kind = 'nic'`; and for `kind = 'disk'` exactly one of `size_gb` and `image` is set. `source_digest`
-is null for a staged-path row, whose bytes are operator-attested. `size_gb` stays null for an image
+is the row's digest when it has one and null otherwise. The migration and the `SystemDevice` model
+(`extra="forbid"`, read by `SELECT *`) ship in one PR and the migration must not run ahead of the
+code on a rolling deploy. `size_gb` stays null for an image
 disk. `SystemDevice` gains `image: str | None`, `source_image_id: UUID | None` and
 `source_digest: str | None`.
 
@@ -188,7 +208,8 @@ because the worker reads the row.
 
 `plug_device_handler`, in order: read the row; re-check `READY`; if `image` is set, re-resolve
 `source_image_id` with the same predicate (a miss is `image_not_found`, which the existing path
-turns into a deleted row because no handle was returned); stamp `settle_deadline` at job start
+turns into a deleted row because no handle was returned) and, when the ledger's `source_digest` is
+non-null, require the re-resolved digest to equal it, else `image_changed`; stamp `settle_deadline` at job start
 plus 300 s, so `list_devices` never shows a started `plugging` row with a null deadline; call
 `stage_disk_source` in a thread under a 300 s window; re-stamp `settle_deadline` to now plus 60 s
 (`start_device_settle_window`) and run the existing plug and poll with the `StagedDisk`. A
