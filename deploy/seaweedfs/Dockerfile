@@ -13,7 +13,7 @@ RUN wget -O seaweedfs.tar.gz "https://codeload.github.com/seaweedfs/seaweedfs/ta
     && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
        go build -trimpath -buildvcs=false -o /out/weed ./weed
 
-FROM alpine@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
+FROM alpine@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 RUN addgroup -S seaweed && adduser -S -G seaweed seaweed \
     && mkdir /data && chown seaweed:seaweed /data
 COPY --from=build /out/weed /usr/local/bin/weed
