@@ -40,7 +40,7 @@ _KNOWN_KINDS = {kind.value for kind in ResourceKind}
 # line numbers: nothing keeps one accurate. `test_raising_lanes_resolve` checks each path exists
 # and each symbol is defined in it, so a rename or move reddens instead of rotting silently.
 _RAISING_LANES = (
-    "src/kdive/mcp/tools/lifecycle/control/registrar.py (_op_opt_in)",
+    "src/kdive/mcp/tools/lifecycle/support/_destructive.py (_op_opt_in)",
     "src/kdive/services/runs/steps.py (install_method_for)",
     "src/kdive/jobs/handlers/runs/boot_evidence.py (inert_capture)",
     "src/kdive/mcp/tools/lifecycle/vmcore/handlers.py (_resolve_capture_method)",

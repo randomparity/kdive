@@ -1912,6 +1912,63 @@ remote provider was a Rocky Linux 10.2 host with nested KVM and a Fedora 43 gues
 120 passed and each run skipped the default configuration's 60. After `demo-down.sh --wipe --yes`
 neither libvirt defined a domain.
 
+#### Forced device un-plug cell (#3762)
+
+`tests/integration/test_force_unplug_tool_cell_live.py::test_force_unplug_device_on_fault_inject`
+proves `systems.force_unplug_device`
+([ADR-0828](../../adr/0828-forced-device-unplug-behind-the-destructive-operation-gate.md)) on the
+fault-inject provider, which needs no hypervisor and no guest. It is not one of the coverage
+campaign's contract cells; it registers its own `fault-inject` Resource, funds a throwaway
+project and removes everything it created. One run provisions two Systems (one whose profile
+lists `force_unplug_device`, one that does not) and checks, over HTTP, that: an admin without the
+opt-in is denied with `missing_checks: [profile_opt_in]`; a contributor is denied with
+`[admin_role]`, even for a device id that does not exist; under `hotplug_behaviour: hang` a
+graceful un-plug times out and leaves a `failed` row that the forced un-plug then removes; under
+`no_force` the forced job fails `control_failure` (`unplug_refused`) and the row returns to
+`attached`; and the audit log holds both denials and both enqueues with the documented arguments.
+The cell flips `hotplug_behaviour` on its own Resource row, so it needs the harness database
+login as for the cells above.
+
+The stack needs `KDIVE_FAULT_INJECT=1` on the server, worker and reconciler. The container tier
+([Compose guide](../../../deploy/compose/README.md)) serves it with two adjustments: the compose
+server validates the issuer `http://oidc:8080/default`, which a host-minted token does not carry, so
+the override sets the server's `KDIVE_OIDC_ISSUER` to the published issuer and leaves the JWKS
+address in-network. Build the image from the checkout under test and give the stack its own tag
+and Compose project name: an older `kdive:dev` image or an existing `kdive_*` volume would
+otherwise be reused, and its migrations would not match the checkout.
+
+```bash
+override=$(mktemp --suffix=.yml)
+cat > "$override" <<'YAML'
+services:
+  server:
+    environment:
+      KDIVE_FAULT_INJECT: "1"
+      KDIVE_OIDC_ISSUER: http://localhost:8090/default
+  worker:
+    environment:
+      KDIVE_FAULT_INJECT: "1"
+  reconciler:
+    environment:
+      KDIVE_FAULT_INJECT: "1"
+YAML
+docker build -t kdive:force-unplug .
+export COMPOSE_PROJECT_NAME=kdive-force-unplug KDIVE_IMAGE=kdive:force-unplug
+export COMPOSE_FILE="docker-compose.yml:$override"
+just compose-up
+export KDIVE_OIDC_ISSUER=http://localhost:8090/default KDIVE_STACK_BASE_URL=http://127.0.0.1:8000/mcp
+export KDIVE_DATABASE_URL=postgresql://kdive:kdive@localhost:5432/kdive  # pragma: allowlist secret
+KDIVE_STACK_SKEW_POLICY=off uv run python -m pytest -m live_stack \
+  tests/integration/test_force_unplug_tool_cell_live.py
+just compose-down
+rm -f "$override"
+```
+
+`KDIVE_STACK_SKEW_POLICY=off` is needed because the compose tier does not publish the aux
+`/readyz` the skew probe reads; confirm the image was built from the commit under test instead.
+If `8090` is taken, set `KDIVE_OIDC_PORT` to a free `ADDR:PORT` and use that port in the override
+and in `KDIVE_OIDC_ISSUER`.
+
 #### Capture and introspection tool cells (#2814)
 
 `tests/integration/test_capture_tool_cells_live.py::test_capture_tool_cell` carries the 164

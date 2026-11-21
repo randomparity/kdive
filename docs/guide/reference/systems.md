@@ -85,6 +85,33 @@ so this is a background op.
 | `name` | string | yes | The checkpoint to delete, freeing its name+disk. |
 | `system_id` | string | yes | The System whose checkpoint to delete. |
 
+## `systems.force_unplug_device`
+
+`implemented` · `destructive`
+
+Forcibly remove a device that systems.plug_device added, without waiting for the guest
+to release it, so a driver can be tested against a device vanishing under it. DESTRUCTIVE:
+it can wedge or crash the guest. Requires the project's admin role AND the System's
+provisioning profile opting in (`destructive_ops: ["force_unplug_device"]`); a denial
+names every missing factor (`authorization_denied`, `data.missing_checks`) and is
+audited. Only the fault-inject provider forces an un-plug today: local-libvirt and
+remote-libvirt advertise no forced kind and answer `configuration_error` (`reason:
+capability_unsupported`), even with the opt-in; `systems.get` reports
+`data.forced_unplug_devices`. Enqueues a job and returns `status: running` with
+`data.job_id`, `data.device_id`, `data.kind`, `data.state: unplugging`,
+`data.settle_timeout_s` (30 s) and `data.forced: true`; poll `jobs.wait`, then
+`systems.list_devices`: on success the row is gone. If the provider refuses
+(`unplug_refused`), the row returns to the state it started from and the job fails
+`control_failure`. A `lost` row is refused `conflict` (`reason: device_not_forceable`):
+clear it with `systems.unplug_device`. Not cancelable once enqueued. READY Systems only (`conflict`, `reason: system_not_ready` otherwise). Refused `conflict` with `reason: device_op_in_flight` while another plug, un-plug or forced un-plug job is queued or running on the System; `control.power`, `systems.snapshot`, `systems.restore` and `systems.reprovision` are refused the same way while a device job is active (`systems.teardown` is not). A provider that cannot hot-plug the kind is refused `configuration_error` (`reason: capability_unsupported`, `data.supported`); `systems.get` reports `data.hotplug_devices` and `data.forced_unplug_devices`.
+Limits: a System holds at most 8 device rows in any state, counted per System (a ninth plug is refused `conflict`, `reason: device_limit`, `data.limit`; un-plug a `failed`, `lost` or `attached` row to make room). A job settles within its window, counted in seconds on the worker's clock from the moment the job starts running (queue wait is excluded) and covering the provider call and every poll; `systems.list_devices` shows the absolute `settle_deadline` against its `server_time`. At the deadline the job fails `control_failure` (`reason: settle_timeout`), the row becomes `failed` and the device may still appear or vanish later: call `systems.list_devices`, then `systems.unplug_device` (safe to repeat) or plug again.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `device_id` | string | yes | A device_id from systems.plug_device or systems.list_devices; an id that is not a device of this System is `not_found`. Only `attached` and `failed` rows can be forced; a `lost` row is `device_not_forceable`. |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope, but only while the caller still passes the gate. Without a key a retry after a finished job enqueues fresh work. |
+| `system_id` | string | yes | The READY System that holds the device. |
+
 ## `systems.get`
 
 `implemented` · `read-only`
@@ -115,7 +142,9 @@ System (``systems.snapshot`` / ``systems.restore``); ``false`` for a provider wi
 snapshot support. ``data.supports_traffic_capture`` likewise reports whether the provider
 can capture this System's traffic. ``data.hotplug_devices`` is the sorted list of device
 kinds (``nic``, ``disk``) the provider can hot-plug with ``systems.plug_device``; an empty
-list means none. All three capability fields are absent when the System's provider is no
+list means none. ``data.forced_unplug_devices`` is the sorted subset a forced un-plug
+(``systems.force_unplug_device``) can remove; empty on every provider but fault-inject.
+All four capability fields are absent when the System's provider is no
 longer registered.
 
 ``data.supported_capture_methods`` is the sorted list of the provider's capture methods
@@ -203,7 +232,7 @@ plugging` and `data.settle_timeout_s` (60 s); poll `jobs.wait` with the job
 id, then read the result with `systems.list_devices` (`attached` on success, `failed`
 with `detail` otherwise). The device is live-only: a power OFF or cycle and a snapshot
 restore turn `attached` rows into `lost`, and the boot disk and SSH NIC are never
-listed or touched. Not cancelable once enqueued. READY Systems only (`conflict`, `reason: system_not_ready` otherwise). Refused `conflict` with `reason: device_op_in_flight` while another plug or un-plug job is queued or running on the System; `control.power`, `systems.snapshot`, `systems.restore` and `systems.reprovision` are refused the same way while a device job is active (`systems.teardown` is not). A provider that cannot hot-plug the kind is refused `configuration_error` (`reason: capability_unsupported`, `data.supported`); `systems.get` reports `data.hotplug_devices`. Limits: a System holds at most 8 device rows in any state, counted per System (a ninth plug is refused `conflict`, `reason: device_limit`, `data.limit`; un-plug a `failed`, `lost` or `attached` row to make room). A job settles within its window, counted in seconds on the worker's clock from the moment the job starts running (queue wait is excluded) and covering the provider call and every poll; `systems.list_devices` shows the absolute `settle_deadline` against its `server_time`. At the deadline the job fails `control_failure` (`reason: settle_timeout`), the row becomes `failed` and the device may still appear or vanish later: call `systems.list_devices`, then `systems.unplug_device` (safe to repeat) or plug again.
+listed or touched. Not cancelable once enqueued. READY Systems only (`conflict`, `reason: system_not_ready` otherwise). Refused `conflict` with `reason: device_op_in_flight` while another plug, un-plug or forced un-plug job is queued or running on the System; `control.power`, `systems.snapshot`, `systems.restore` and `systems.reprovision` are refused the same way while a device job is active (`systems.teardown` is not). A provider that cannot hot-plug the kind is refused `configuration_error` (`reason: capability_unsupported`, `data.supported`); `systems.get` reports `data.hotplug_devices` and `data.forced_unplug_devices`. Limits: a System holds at most 8 device rows in any state, counted per System (a ninth plug is refused `conflict`, `reason: device_limit`, `data.limit`; un-plug a `failed`, `lost` or `attached` row to make room). A job settles within its window, counted in seconds on the worker's clock from the moment the job starts running (queue wait is excluded) and covering the provider call and every poll; `systems.list_devices` shows the absolute `settle_deadline` against its `server_time`. At the deadline the job fails `control_failure` (`reason: settle_timeout`), the row becomes `failed` and the device may still appear or vanish later: call `systems.list_devices`, then `systems.unplug_device` (safe to repeat) or plug again.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -542,7 +571,7 @@ Requires contributor. Enqueues a job and returns `status: running` with `data.jo
 gone. If the guest or HMC refuses (`unplug_refused`), the row returns to the state it
 started from and the job fails `control_failure`; the device stays in the guest. Repeating
 the call on a `failed` or `lost` row is safe and clears it once the device is gone. Not
-cancelable once enqueued. READY Systems only (`conflict`, `reason: system_not_ready` otherwise). Refused `conflict` with `reason: device_op_in_flight` while another plug or un-plug job is queued or running on the System; `control.power`, `systems.snapshot`, `systems.restore` and `systems.reprovision` are refused the same way while a device job is active (`systems.teardown` is not). A provider that cannot hot-plug the kind is refused `configuration_error` (`reason: capability_unsupported`, `data.supported`); `systems.get` reports `data.hotplug_devices`. Limits: a System holds at most 8 device rows in any state, counted per System (a ninth plug is refused `conflict`, `reason: device_limit`, `data.limit`; un-plug a `failed`, `lost` or `attached` row to make room). A job settles within its window, counted in seconds on the worker's clock from the moment the job starts running (queue wait is excluded) and covering the provider call and every poll; `systems.list_devices` shows the absolute `settle_deadline` against its `server_time`. At the deadline the job fails `control_failure` (`reason: settle_timeout`), the row becomes `failed` and the device may still appear or vanish later: call `systems.list_devices`, then `systems.unplug_device` (safe to repeat) or plug again.
+cancelable once enqueued. READY Systems only (`conflict`, `reason: system_not_ready` otherwise). Refused `conflict` with `reason: device_op_in_flight` while another plug, un-plug or forced un-plug job is queued or running on the System; `control.power`, `systems.snapshot`, `systems.restore` and `systems.reprovision` are refused the same way while a device job is active (`systems.teardown` is not). A provider that cannot hot-plug the kind is refused `configuration_error` (`reason: capability_unsupported`, `data.supported`); `systems.get` reports `data.hotplug_devices` and `data.forced_unplug_devices`. Limits: a System holds at most 8 device rows in any state, counted per System (a ninth plug is refused `conflict`, `reason: device_limit`, `data.limit`; un-plug a `failed`, `lost` or `attached` row to make room). A job settles within its window, counted in seconds on the worker's clock from the moment the job starts running (queue wait is excluded) and covering the provider call and every poll; `systems.list_devices` shows the absolute `settle_deadline` against its `server_time`. At the deadline the job fails `control_failure` (`reason: settle_timeout`), the row becomes `failed` and the device may still appear or vanish later: call `systems.list_devices`, then `systems.unplug_device` (safe to repeat) or plug again.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

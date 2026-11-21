@@ -22,8 +22,9 @@ It also names the owning `investigation_id` and a bounded, newest-first `run_inv
 list of the Investigations with Runs on the System (`run_investigation_ids_truncated` marks a
 longer history). Read the System's full run history with `runs.list(system_id=…)`.
 `systems.list` provides filters and cursor pagination. Missing capability/CPU data is unknown,
-not proof of support. Check `data.supports_snapshots` before using checkpoints and `data.hotplug_devices` (sorted
-device kinds, empty when none) before hot-plugging a device.
+not proof of support. Check `data.supports_snapshots` before using checkpoints, `data.hotplug_devices` (sorted
+device kinds, empty when none) before hot-plugging a device, and `data.forced_unplug_devices`
+(the subset a forced un-plug can remove, empty when none) before `systems.force_unplug_device`.
 
 ## Checkpoint and restore
 
@@ -54,13 +55,21 @@ requires viewer. These operations return jobs; poll them rather than assuming im
   of the job starting. A guest or HMC refusal returns the row to its prior state; a timeout marks
   it `failed` and the device may still be in the guest. Repeat the call to clear a `failed` or
   `lost` row.
+- `systems.force_unplug_device` is the admin-only, destructive variant: it removes an `attached`
+  or `failed` device without waiting for the guest to release it, and can wedge or crash the
+  guest. It needs the project `admin` role and a profile that lists `force_unplug_device` in its
+  provider block's `destructive_ops`; a denial names every missing factor. Only the fault-inject
+  provider forces an un-plug today: local and remote libvirt advertise no forced kind and refuse
+  with `capability_unsupported` even when the profile opts in. Check `data.forced_unplug_devices`
+  on `systems.get`. A `lost` row is refused (`device_not_forceable`); use
+  `systems.unplug_device` to clear it.
 
-At most 8 device rows per System. Only one plug or un-plug runs at a time, and while one is queued
-or running `control.power`, `systems.snapshot`, `systems.restore` and `systems.reprovision` are
+At most 8 device rows per System. Only one plug or un-plug (graceful or forced) runs at a time,
+and while one is queued or running `control.power`, `systems.snapshot`, `systems.restore` and `systems.reprovision` are
 refused `conflict` (`reason: device_op_in_flight`); `systems.teardown` is not. Devices are
 live-only: a power OFF or cycle and a snapshot restore turn `attached` rows into `lost`. A
 provider that cannot hot-plug the kind is refused `capability_unsupported`. Plug and un-plug
-require contributor; listing requires viewer.
+require contributor, a forced un-plug requires admin; listing requires viewer.
 
 ## Reach and customize the guest
 

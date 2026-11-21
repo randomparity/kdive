@@ -316,6 +316,12 @@ kernel = true
 "systems.plug_device" = "hotplug_devices"
 "systems.unplug_device" = "hotplug_devices"
 
+[[groups]]
+owner = 3762
+execution = "service"
+[groups.tools]
+"systems.force_unplug_device" = "On the fault-inject provider, verify a gated forced removal clears a device the guest would hold and the denials are audited."
+
 [implementations]
 "failure-resource/local-libvirt/x86_64/backing-service" = "tests/integration/test_orchestration_faults_live.py::test_local_orchestration_fault"
 "failure-resource/local-libvirt/x86_64/insufficient-disk" = "tests/integration/test_resource_limits_live.py::test_local_resource_boundary"

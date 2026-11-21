@@ -27,10 +27,9 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ALLOCATIONS, RUNS, SYSTEMS
+from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError
-from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind, PowerAction
 from kdive.domain.operations.sysrq import SysRqCommand, parse_command
 from kdive.jobs import queue
@@ -54,9 +53,6 @@ from kdive.mcp.tools._common import (
     authorizing as job_authorizing,
 )
 from kdive.mcp.tools._common import (
-    authz_denied as _authz_denied,
-)
-from kdive.mcp.tools._common import (
     capability_unsupported as _capability_unsupported,
 )
 from kdive.mcp.tools._common import (
@@ -69,6 +65,7 @@ from kdive.mcp.tools._common import (
     invalid_uuid_error as _invalid_uuid_error,
 )
 from kdive.mcp.tools._common import job_envelope
+from kdive.mcp.tools.lifecycle.support._destructive import authorize_destructive
 from kdive.mcp.tools.lifecycle.support._device_ops import device_job_active, device_op_in_flight
 from kdive.mcp.tools.lifecycle.support._idempotency import (
     dedup_replay,
@@ -76,17 +73,14 @@ from kdive.mcp.tools.lifecycle.support._idempotency import (
     object_scoped_kind,
 )
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run
-from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.local_libvirt.settings import (
     CLEAN_SHUTDOWN_BASE_S,
     LIBVIRT_TCG_DEADLINE_MULTIPLIER,
 )
-from kdive.security import audit
 from kdive.security.artifacts.bpf_filter import hygiene_reason
 from kdive.security.authz.context import RequestContext
-from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.external_boot import (
     ExternalBootDenied,
@@ -194,51 +188,6 @@ async def power_system(
                 )
 
 
-async def _authorize_destructive(
-    conn: AsyncConnection,
-    ctx: RequestContext,
-    system: System,
-    system_uid: UUID,
-    op_kind: JobKind,
-    *,
-    resolver: ProviderResolver,
-    tool: str,
-) -> ToolResponse | None:
-    allocation = await ALLOCATIONS.get(conn, system.allocation_id)
-    if allocation is None or allocation.project not in ctx.projects:
-        return _config_error(str(system_uid))
-    op = DestructiveOp(
-        kind=op_kind, profile_opt_in=await _op_opt_in(conn, system, op_kind, resolver)
-    )
-    try:
-        assert_destructive_allowed(ctx, allocation, op)
-    except DestructiveOpDenied as denied:
-        async with conn.transaction():
-            await audit.record(
-                conn,
-                ctx,
-                audit.AuditEvent(
-                    tool=tool,
-                    object_kind="systems",
-                    object_id=system_uid,
-                    transition=f"{op_kind.value}:denied",
-                    args={"system_id": str(system_uid), "missing": denied.missing},
-                    project=system.project,
-                ),
-            )
-        return _authz_denied(str(system_uid), denied.missing)
-    return None
-
-
-async def _op_opt_in(
-    conn: AsyncConnection, system: System, op_kind: JobKind, resolver: ProviderResolver
-) -> bool:
-    """Resolve the gate's profile opt-in factor from the System's provisioning profile."""
-    profile = ProvisioningProfile.parse(system.provisioning_profile)
-    runtime = await resolver.runtime_for_system(conn, system.id)
-    return runtime.profile_policy.destructive_opt_in(profile, op_kind)
-
-
 async def _optional_run_for_system(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -283,7 +232,7 @@ async def force_crash_system(
             run = await _optional_run_for_system(conn, ctx, run_id, uid)
             if isinstance(run, ToolResponse):
                 return run
-            gated = await _authorize_destructive(
+            gated = await authorize_destructive(
                 conn, ctx, system, uid, _FORCE_CRASH, resolver=resolver, tool="control.force_crash"
             )
             if isinstance(gated, ToolResponse):

@@ -34,6 +34,7 @@ def test_destructive_tools_set_is_the_reviewed_set() -> None:
         frozenset(
             {
                 "control.force_crash",
+                "systems.force_unplug_device",
                 "systems.teardown",
                 "ops.force_teardown",
                 "ops.force_release",
