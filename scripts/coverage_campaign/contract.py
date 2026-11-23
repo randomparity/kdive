@@ -81,6 +81,7 @@ _CORE_METHODS = frozenset(method.value for method in VMCORE_METHODS)
 HANDLER_REFUSAL = "vmcore.fetch handler: method does not produce a vmcore"
 # #3099 owns the kdivectl translation cells of the core service tools (ADR-0795).
 _CLI_OWNER = 3099
+_REMOTE_OWNERS = {2813: 3113, 2814: 3114, 3062: 3080, 3119: 3120, 2815: 3116}
 
 
 class OperationGroup(BaseModel):
@@ -259,6 +260,17 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
             refused = row.tool == "vmcore.fetch" and supported and variant not in _CORE_METHODS
             if refused:
                 supported, source = False, HANDLER_REFUSAL
+            # POWER owns its architecture lane before provider-specific ownership applies.
+            base_owner = group.owner
+            if (
+                group.owner in (2813, 2814, 2815, 3062, 3098, 3112, 3119, 3552, 3687)
+                and arch == "ppc64le"
+            ):
+                base_owner = 2818
+            elif provider == "remote-libvirt":
+                base_owner = _REMOTE_OWNERS.get(group.owner, group.owner)
+            elif group.owner == 2815 and row.tool in _LOCAL_CONTROL_TOOLS:
+                base_owner = 3115
             for configuration in row.configurations:
                 for exposure in (
                     ("direct", "gateway", "cli") if group.cli else ("direct", "gateway")
@@ -277,31 +289,11 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                     roles = tuple(group.role_overrides.get(row.tool, roles))
                     if group.authority:
                         roles = (*roles, "authority")
-                    owner = group.owner
-                    # Lifecycle, break-glass, debug, capture, power/snapshot and hot-plug ppc64le
-                    # cells wait for the POWER lane (#2818), CLI cells included; x86_64 remote
-                    # System cells are #3080's, remote run/image cells #3120's, remote debug cells
-                    # #3113's, remote capture cells #3114's, remote power/snapshot/control cells
-                    # #3116's.
-                    if (
-                        group.owner in (2813, 2814, 2815, 3062, 3098, 3112, 3119, 3552, 3687)
-                        and arch == "ppc64le"
-                    ):
-                        owner = 2818
-                    elif group.owner == 2813 and provider == "remote-libvirt":
-                        owner = 3113
-                    elif group.owner == 2814 and provider == "remote-libvirt":
-                        owner = 3114
-                    elif group.owner == 3062 and provider == "remote-libvirt":
-                        owner = 3080
-                    elif group.owner == 3119 and provider == "remote-libvirt":
-                        owner = 3120
-                    elif group.owner == 2815 and provider == "remote-libvirt":
-                        owner = 3116
-                    elif group.owner == 2815 and row.tool in _LOCAL_CONTROL_TOOLS:
-                        owner = 3115
-                    if exposure == "cli":
-                        owner = 2818 if arch == "ppc64le" else _CLI_OWNER
+                    owner = (
+                        (2818 if arch == "ppc64le" else _CLI_OWNER)
+                        if exposure == "cli"
+                        else base_owner
+                    )
                     cell = Cell(
                         identity + "/functional",
                         scenario_id + "/functional",
