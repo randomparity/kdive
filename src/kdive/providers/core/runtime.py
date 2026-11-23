@@ -205,8 +205,8 @@ class ProviderRuntime:
     traffic_capture_operation: TrafficCaptureOperationPorts | None = None
     # Device hot-plug port (ADR-0823); ``None`` when ``support.hotplug_devices`` is empty.
     device_hotplug: DeviceHotplugger | None = None
-    # Provider-neutral external Run-boot operations (ADR-0583). Existing providers leave this
-    # absent until their adapter issues land; legacy install and boot remain unchanged.
+    # Provider-neutral external Run-boot operations (ADR-0583); None when this runtime does not
+    # expose direct lifecycle mutation ports. Authority-backed execution uses its separate route.
     external_boot: ExternalBootPorts | None = None
     # Server-owned materialize/prepare receipt seam (ADR-0595). Kept separate from worker
     # lifecycle mutation ports so composition can fail closed for providers without receipts.
