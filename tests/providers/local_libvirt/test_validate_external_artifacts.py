@@ -26,7 +26,7 @@ from kdive.build_artifacts.validation import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
-    _source_tree_manifest,  # noqa: PLC2701
+    _source_tree_digest_and_counts,  # noqa: PLC2701
 )
 from kdive.serialization import JsonValue
 
@@ -1727,7 +1727,7 @@ def test_staged_manifest_equals_the_manifest_of_the_tree_with_the_file(tmp_path:
                 tar.extract(member, tree, filter="data")
     (tree / "vmlinux").write_bytes(vmlinux)
     (tree / "vmlinux").chmod(0o644)
-    expected, _count, _bytes = _source_tree_manifest(tree)
+    expected, _count, _bytes = _source_tree_digest_and_counts(tree)
     assert evidence["staged_module_source_manifest"] == expected
     assert evidence["staged_module_source_manifest"] != evidence["module_source_manifest"]
 

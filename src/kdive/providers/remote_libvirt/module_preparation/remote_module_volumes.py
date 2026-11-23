@@ -219,8 +219,10 @@ class Ext4SourceFilesystemWriter:
         with temporary as raw:
             extracted = self.extract(path, Path(raw))
             operation = (extracted / "operation-v1.json").read_bytes()
-            manifest, count, content_bytes = _source_tree_manifest(extracted / "modules")
-        return SourceFilesystemEvidence(operation, manifest, count, content_bytes)
+            manifest_digest, count, content_bytes = _source_tree_digest_and_counts(
+                extracted / "modules"
+            )
+        return SourceFilesystemEvidence(operation, manifest_digest, count, content_bytes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,13 +430,13 @@ def _canonical_archive_member_kind(member: tarfile.TarInfo) -> str:
     if kind == "directory" and (member.size != 0 or member.linkname):
         raise ValueError("canonical module archive directory metadata is invalid")
     if kind == "symlink":
-        _canonical_archive_link_target(member.name, member.linkname)
+        _validate_archive_symlink_target(member.name, member.linkname)
         if member.size != 0:
             raise ValueError("canonical module archive symlink metadata is invalid")
     return kind
 
 
-def _canonical_archive_link_target(name: str, target: str) -> None:
+def _validate_archive_symlink_target(name: str, target: str) -> None:
     try:
         target.encode("utf-8", "strict")
     except UnicodeError as exc:
@@ -506,7 +508,7 @@ def source_image_inode_count(entry_count: int) -> int:
     return entry_count + _SOURCE_ROOT_INODES
 
 
-def _source_tree_manifest(root: Path) -> tuple[str, int, int]:
+def _source_tree_digest_and_counts(root: Path) -> tuple[str, int, int]:
     documents: list[dict[str, object]] = []
     count = 0
     content_bytes = 0
