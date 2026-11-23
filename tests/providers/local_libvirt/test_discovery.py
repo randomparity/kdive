@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from pathlib import Path
+from types import SimpleNamespace
 
 import libvirt
 import pytest
 
+import kdive.config as config
 from kdive.domain.capacity.state import ResourceStatus
 from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
@@ -87,6 +90,26 @@ def test_list_resources_advertises_disk_ceiling_from_host_storage(
     )
     caps = _discovery(FakeLibvirtConn()).list_resources()[0]["capabilities"]
     assert caps[DISK_GB_KEY] == 200
+
+
+def test_disk_ceiling_uses_active_configured_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inspected: list[Path] = []
+
+    def disk_usage(path: Path) -> SimpleNamespace:
+        inspected.append(path)
+        return SimpleNamespace(total=20 * 1024**3)
+
+    monkeypatch.setattr(discovery_module.shutil, "disk_usage", disk_usage)
+    roots = [tmp_path / name for name in ("first", "second")]
+    for root in roots:
+        root.mkdir()
+        monkeypatch.setenv("KDIVE_LIBVIRT_ROOTFS_ROOT", str(root))
+        config.load()
+        caps = _discovery(FakeLibvirtConn()).list_resources()[0]["capabilities"]
+        assert caps[DISK_GB_KEY] == 20
+    assert inspected == roots
 
 
 def test_disk_ceiling_unstattable_is_infrastructure_failure(

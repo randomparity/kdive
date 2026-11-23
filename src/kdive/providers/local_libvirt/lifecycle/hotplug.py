@@ -19,7 +19,7 @@ import libvirt
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.storage import ROOTFS_DIR, create_scratch_qcow2
+from kdive.providers.local_libvirt.lifecycle.storage import create_scratch_qcow2, rootfs_dir
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.lifecycle import HotplugDeviceKind
 from kdive.providers.shared.libvirt_hotplug import (
@@ -42,8 +42,8 @@ def scratch_disk_prefix(domain_name: str) -> str:
 class LocalDeviceVolumes:
     """Scratch disks as ``<rootfs root>/<domain>-dev-<device_id>.qcow2``."""
 
-    def __init__(self, root: str = ROOTFS_DIR) -> None:
-        self._root = Path(root)
+    def __init__(self, root: str | None = None) -> None:
+        self._root = Path(rootfs_dir() if root is None else root)
 
     def _path(self, domain_name: str, device_id: str) -> Path:
         return self._root / f"{scratch_disk_prefix(domain_name)}{device_id}.qcow2"

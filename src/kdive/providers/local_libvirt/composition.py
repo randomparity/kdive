@@ -322,7 +322,7 @@ def authority_system_path_resolvers() -> tuple[SystemPath, SystemPath]:
 
     A host with an installed local System manifest provisions every local System under
     ``<authority_system_local_root>/rootfs`` (ADR-0623); any other host keeps the worker's
-    legacy ``ROOTFS_DIR`` layout. The session's ownership check compares against these exact
+    legacy rootfs directory layout. The session's ownership check compares against these exact
     strings, so they must equal ``build_local_authority_system_provider``'s ``ProvisioningFiles``.
     """
     host = AuthorityHostConfig.from_environment()

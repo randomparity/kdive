@@ -17,11 +17,8 @@ from kdive.providers.local_libvirt.settings import LIBVIRT_CONSOLE_ROOT, LIBVIRT
 _log = logging.getLogger(__name__)
 
 
-_CONSOLE_DIR = config.require(LIBVIRT_CONSOLE_ROOT)
 _PCAP_DIR = "/var/lib/kdive/pcap"
 
-#: The host directory holding per-System rootfs overlays and extracted baselines.
-ROOTFS_DIR = config.require(LIBVIRT_ROOTFS_ROOT)
 #: The host directory an investigation-scoped uploaded rootfs base is staged under, OUTSIDE the
 #: provider ``allowed_roots`` (ADR-0434 §3 / ADR-0441 §5 no-escape). A staged SENSITIVE image is
 #: never reachable as another System's ``local`` staged-path candidate.
@@ -105,9 +102,14 @@ def overlay_name(system_id: UUID | str) -> str:
     return f"{system_id}-overlay.qcow2"
 
 
+def rootfs_dir() -> str:
+    """The configured directory holding per-System overlays and extracted baselines."""
+    return config.require(LIBVIRT_ROOTFS_ROOT)
+
+
 def overlay_path(system_id: UUID | str) -> str:
     """The per-System qcow2 overlay path."""
-    return f"{ROOTFS_DIR}/{overlay_name(system_id)}"
+    return f"{rootfs_dir()}/{overlay_name(system_id)}"
 
 
 def staged_rootfs_path(investigation_id: UUID | str, token: str, *, upload_dir: Path) -> Path:
@@ -134,7 +136,7 @@ def staged_rootfs_marker_path(base: Path) -> Path:
 
 
 def console_log_path(system_id: UUID) -> Path:
-    return Path(_CONSOLE_DIR) / f"{system_id}.log"
+    return Path(config.require(LIBVIRT_CONSOLE_ROOT)) / f"{system_id}.log"
 
 
 def console_boot_marker_path(log_path: Path) -> Path:

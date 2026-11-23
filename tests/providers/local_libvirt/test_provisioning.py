@@ -1713,7 +1713,16 @@ def test_prepare_overlay_resize_failure_removes_the_created_overlay() -> None:
 
 
 def test_baseline_dir_is_per_system_under_rootfs() -> None:
-    assert storage_module.baseline_dir(_SYS) == f"{storage_module.ROOTFS_DIR}/{_SYS}-baseline"
+    assert storage_module.baseline_dir(_SYS) == f"{storage_module.rootfs_dir()}/{_SYS}-baseline"
+
+
+def test_baseline_dir_follows_loaded_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kdive.config as config
+
+    for root in ("/first/rootfs", "/second/rootfs"):
+        monkeypatch.setenv("KDIVE_LIBVIRT_ROOTFS_ROOT", root)
+        config.load()
+        assert storage_module.baseline_dir(_SYS) == f"{root}/{_SYS}-baseline"
 
 
 def test_remove_baseline_for_domain_strips_prefix_and_rmtrees() -> None:
@@ -2634,7 +2643,7 @@ def test_validate_rootfs_ref_local_uses_default_allowed_roots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A provisioning built without explicit allowed_roots validates a local rootfs against the
-    # default ROOTFS_DIR root; the default must be a usable list, not None.
+    # configured rootfs root; the default must be a usable list, not None.
     seen_roots: list[list[Path]] = []
 
     def fake_materialize(rootfs: object, *, context: RootfsMaterializationContext) -> Path:
@@ -2647,7 +2656,39 @@ def test_validate_rootfs_ref_local_uses_default_allowed_roots(
     prov = LocalLibvirtProvisioning(connect=lambda: _ProvConn())
     prov.validate_rootfs_ref(_profile().provider.local_libvirt.rootfs)
 
-    assert seen_roots == [[Path(provisioning_module.ROOTFS_DIR)]]
+    assert seen_roots == [[Path(provisioning_module.rootfs_dir())]]
+
+
+@pytest.mark.parametrize("from_env", [False, True])
+def test_provisioning_roots_bind_at_construction(
+    from_env: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kdive.config as config
+
+    seen_roots: list[list[Path]] = []
+
+    def materialize(rootfs: object, *, context: RootfsMaterializationContext) -> Path:
+        seen_roots.append(list(context.allowed_roots))
+        return tmp_path / "base.qcow2"
+
+    monkeypatch.setattr(provisioning_module, "materialize_rootfs_base", materialize)
+    first_root, second_root, explicit_root = (tmp_path / name for name in ("a", "b", "explicit"))
+
+    def construct() -> LocalLibvirtProvisioning:
+        if from_env:
+            return LocalLibvirtProvisioning.from_env()
+        return LocalLibvirtProvisioning(connect=lambda: _ProvConn())
+
+    monkeypatch.setenv("KDIVE_LIBVIRT_ROOTFS_ROOT", str(first_root))
+    config.load()
+    first = construct()
+    explicit = LocalLibvirtProvisioning(connect=lambda: _ProvConn(), allowed_roots=[explicit_root])
+    monkeypatch.setenv("KDIVE_LIBVIRT_ROOTFS_ROOT", str(second_root))
+    config.load()
+    second = construct()
+    for provisioner in (first, second, explicit):
+        provisioner.validate_rootfs_ref(_profile().provider.local_libvirt.rootfs)
+    assert seen_roots == [[first_root], [second_root], [explicit_root]]
 
 
 def test_provision_upload_rootfs_stages_via_injected_fetch() -> None:

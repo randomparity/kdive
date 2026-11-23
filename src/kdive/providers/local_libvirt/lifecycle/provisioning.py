@@ -79,10 +79,10 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.upload_acquisition import (
     rootfs_upload_fetch_from_env,
 )
 from kdive.providers.local_libvirt.lifecycle.storage import (
-    ROOTFS_DIR,
     UPLOADS_DIR,
     ProvisioningFiles,
     overlay_path,
+    rootfs_dir,
 )
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S, LIBVIRT_URI
@@ -224,7 +224,7 @@ class LocalLibvirtProvisioning:
     ) -> None:
         self._connect = connect
         self._files = files or ProvisioningFiles()
-        self._allowed_roots = allowed_roots or [Path(ROOTFS_DIR)]
+        self._allowed_roots = allowed_roots or [Path(rootfs_dir())]
         self._catalog_fetch = catalog_fetch
         self._upload_fetch = upload_fetch
         self._materialize_rootfs = materialize_rootfs or self._materialize_rootfs_base
@@ -259,7 +259,7 @@ class LocalLibvirtProvisioning:
         Resource this provisioner serves; the host-agnostic default is ``False`` (``restrict=on``).
         """
         host_uri = config.require(LIBVIRT_URI)
-        allowed_roots = [Path(ROOTFS_DIR)]
+        allowed_roots = [Path(rootfs_dir())]
         # `virConnect` structurally satisfies the narrow `_LibvirtConn` Protocol (only
         # `defineXML`/`lookupByName`), so no suppression is needed at this seam.
         return cls(

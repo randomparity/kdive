@@ -33,7 +33,7 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeDescriptor
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
-from kdive.providers.local_libvirt.lifecycle.storage import ROOTFS_DIR
+from kdive.providers.local_libvirt.lifecycle.storage import rootfs_dir
 from kdive.providers.local_libvirt.settings import LIBVIRT_ALLOCATION_CAP, LIBVIRT_URI
 from kdive.providers.ports.handles import OwnedInfra
 from kdive.providers.shared.fadump_detect import detect_pseries_fadump
@@ -59,14 +59,14 @@ def _host_disk_ceiling_gb() -> int:
     """Total capacity (GB) of the filesystem backing per-System overlays (ADR-0312).
 
     The disk-request ceiling admission enforces for a local-libvirt allocation. Walks up to
-    the nearest existing ancestor of :data:`ROOTFS_DIR` so discovery works before the rootfs
+    the nearest existing ancestor of :func:`rootfs_dir` so discovery works before the rootfs
     directory is created (a fresh host / CI runner): the overlay lands on that same
     filesystem, so its capacity is the honest bound.
 
     Raises:
         CategorizedError: ``INFRASTRUCTURE_FAILURE`` if even the ancestor cannot be stat-ed.
     """
-    path = Path(ROOTFS_DIR)
+    path = Path(rootfs_dir())
     while not path.exists() and path != path.parent:
         path = path.parent
     try:

@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+import kdive.config as config
 from kdive.providers.local_libvirt.lifecycle import hotplug
 from kdive.providers.local_libvirt.lifecycle.hotplug import LocalDeviceVolumes, scratch_disk_prefix
 from kdive.providers.ports.lifecycle import HotplugDeviceKind
@@ -36,6 +37,32 @@ def test_create_places_the_disk_beside_the_domain_prefix(
 
     assert path == str(tmp_path / f"{scratch_disk_prefix(DOMAIN)}{device_id}.qcow2")
     assert created == [(path, 3)]
+
+
+def test_volume_defaults_bind_each_snapshot_and_preserve_explicit_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots = [tmp_path / name for name in ("first", "second", "explicit")]
+    for root in roots:
+        root.mkdir()
+    created: list[tuple[str, int]] = []
+
+    def create(path: str, size_gb: int) -> None:
+        assert Path(path).parent in roots
+        _fake_create(created)(path, size_gb)
+
+    monkeypatch.setattr(hotplug, "create_scratch_qcow2", create)
+    monkeypatch.setenv("KDIVE_LIBVIRT_ROOTFS_ROOT", str(roots[0]))
+    config.load()
+    first = LocalDeviceVolumes()
+    explicit = LocalDeviceVolumes(str(roots[2]))
+    monkeypatch.setenv("KDIVE_LIBVIRT_ROOTFS_ROOT", str(roots[1]))
+    config.load()
+    second = LocalDeviceVolumes()
+    for volumes, root in zip((first, second, explicit), roots, strict=True):
+        expected = str(root / f"{scratch_disk_prefix(DOMAIN)}disk.qcow2")
+        assert volumes.create(None, DOMAIN, "disk", 3) == expected
+        assert Path(expected).read_bytes() == b"qcow2"
 
 
 def test_remove_is_idempotent_and_remove_all_spares_other_domains(

@@ -164,8 +164,8 @@ def test_native_guest_image_names_the_rootfs_mint_system_stages() -> None:
         assert len(found) == 1, f"expected exactly one `{prefix}` line in {where}, got {len(found)}"
         return found[0][len(prefix) :].split(" #")[0].strip().strip("\"'")
 
-    # Compare the two shell sources to EACH OTHER, never to a resolved constant: ROOTFS_DIR is
-    # `config.require(LIBVIRT_ROOTFS_ROOT)`, so asserting against it would make this test's verdict
+    # Compare the two shell sources to EACH OTHER, never to a configured root: asserting against
+    # `config.require(LIBVIRT_ROOTFS_ROOT)` would make this test's verdict
     # depend on the runner's own environment and go red on an untouched workflow.
     rootfs_dir = _one("rootfs_dir=", mint, "mint-system.sh")
     staged = _one("staged_rootfs=", mint, "mint-system.sh")
@@ -256,10 +256,10 @@ def _tcg_stage_dir() -> str:
 def test_tcg_block_stages_inside_the_provider_allowed_root() -> None:
     """The provisioner only accepts rootfs paths under its allowed root (ADR-0224, #731).
 
-    ``LocalLibvirtProvisioning.from_env`` hardcodes ``allowed_roots=[Path(ROOTFS_DIR)]`` with no
-    env override, so a set staged anywhere else is rejected at provision time with "local component
+    The workflow stages under the provisioner's default allowed root. A set outside the configured
+    roots is rejected at provision time with "local component
     path is outside provider allowed roots" — minutes into the run, after the whole image build.
-    Compare against ``LIBVIRT_ROOTFS_ROOT.default``, not the runtime-resolved ``ROOTFS_DIR``:
+    Compare against ``LIBVIRT_ROOTFS_ROOT.default``, not the active ``rootfs_dir()``:
     the latter is ``config.require(LIBVIRT_ROOTFS_ROOT)``, so it follows whatever the developer
     running this test has set, while live.yml's literal is the setting's default (#2549).
     """
@@ -286,7 +286,7 @@ def test_tcg_allowed_root_is_backed_by_the_large_scratch_disk() -> None:
     back that path with the scratch disk. validate_local_component_path resolves both the candidate
     and the roots, so a symlinked root still matches; `df` follows it too, which keeps
     stage-tcg-images.sh's pre-stage free-space check measuring the disk the bytes actually land on.
-    Compare against ``LIBVIRT_ROOTFS_ROOT.default``, not the runtime-resolved ``ROOTFS_DIR``: see
+    Compare against ``LIBVIRT_ROOTFS_ROOT.default``, not the active ``rootfs_dir()``: see
     ``test_tcg_block_stages_inside_the_provider_allowed_root`` above (#2549).
     """
     from kdive.providers.local_libvirt.settings import LIBVIRT_ROOTFS_ROOT
