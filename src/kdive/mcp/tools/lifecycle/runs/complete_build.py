@@ -1,6 +1,6 @@
 """`runs.complete_build` MCP handler.
 
-One finalize runs per Run in this process (ADR-0675). It owns its pool connection, so a caller
+One finalize runs per Run per app registration (ADR-0837). It owns its pool connection, so a caller
 whose request is cancelled stops waiting but does not stop the finalize, and a retry for the same
 Run joins it instead of scanning the upload again.
 """
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from uuid import UUID
 
@@ -60,20 +60,17 @@ from kdive.store.objectstore import object_store_from_env
 
 _log = logging.getLogger(__name__)
 
-_IN_FLIGHT: dict[UUID, asyncio.Task[ToolResponse]] = {}
-"""The running finalize for each Run in this process (ADR-0675).
-
-The event loop is single-threaded and nothing awaits between the lookup and the insert in
-`_join_or_start`, so the map needs no lock. A task removes its own entry when it ends.
-"""
-
 
 @dataclass(frozen=True, slots=True)
 class CompleteBuildHandlers:
-    """External-build completion handler."""
+    """External-build completion and in-flight work for one app registration."""
 
     validate_complete_build: CompleteBuildValidation | None = None
     object_store_factory: ObjectStoreFactory = object_store_from_env
+    _in_flight: dict[UUID, asyncio.Task[ToolResponse]] = field(
+        init=False, default_factory=dict, repr=False, compare=False
+    )
+    # Lookup and insertion do not await; the app loop serializes map access.
 
     async def complete_build(
         self,
@@ -149,7 +146,7 @@ class CompleteBuildHandlers:
         cancelling the finalize the other callers share; unlike ``shield``, it leaves ``_forget``
         the only reporter of a failure no caller awaits any more.
         """
-        task = _IN_FLIGHT.get(uid)
+        task = self._in_flight.get(uid)
         if task is None or task.done():
             task = asyncio.create_task(
                 self._finalize(
@@ -163,12 +160,19 @@ class CompleteBuildHandlers:
                 ),
                 name=f"runs.complete_build:{uid}",
             )
-            _IN_FLIGHT[uid] = task
-            task.add_done_callback(partial(_forget, uid))
+            self._in_flight[uid] = task
+            task.add_done_callback(partial(self._forget, uid))
         else:
             _log.info("runs.complete_build joined the in-flight finalize for run %s", uid)
         await asyncio.wait((task,))
         return task.result()
+
+    def _forget(self, uid: UUID, task: asyncio.Task[ToolResponse]) -> None:
+        """Drop a finished finalize from the map and log a failure no caller may await."""
+        if self._in_flight.get(uid) is task:
+            del self._in_flight[uid]
+        if not task.cancelled() and (exc := task.exception()) is not None:
+            _log.error("runs.complete_build finalize for run %s failed", uid, exc_info=exc)
 
     async def _finalize(
         self,
@@ -319,14 +323,6 @@ async def _target_os_id(conn: AsyncConnection, run: Run) -> str | None:
         _log.warning("guest OS lookup failed for run %s; the advisory reports unknown", run.id)
         return None
     return None if entry is None else image_os_id(entry)
-
-
-def _forget(uid: UUID, task: asyncio.Task[ToolResponse]) -> None:
-    """Drop a finished finalize from the map and log a failure no caller may await."""
-    if _IN_FLIGHT.get(uid) is task:
-        del _IN_FLIGHT[uid]
-    if not task.cancelled() and (exc := task.exception()) is not None:
-        _log.error("runs.complete_build finalize for run %s failed", uid, exc_info=exc)
 
 
 def _remint_error(run_id: str, detail: str, data: dict[str, JsonValue]) -> ToolResponse:
