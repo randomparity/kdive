@@ -1,21 +1,7 @@
-"""Admission-side PCIe resolve/claim helpers (ADR-0068).
+"""Read active PCIe claims for admission and placement (ADR-0068).
 
-The matcher (:mod:`kdive.domain.pcie`) is pure: it resolves a spec union against a list of
-descriptors minus a list of active claims. This module supplies the two admission-time
-inputs the matcher needs and wraps the resolution the in-lock claim performs:
-
-- :func:`descriptors_for` reads + **validates** a host's static descriptor list out of
-  ``capabilities`` (host-derived, untrusted — one malformed entry never blanks the pool).
-- :func:`active_claims` derives the host's occupancy set from the ``pcie_claim`` of its
-  **non-terminal** allocations, using the shared domain lifecycle state set so the occupancy
-  predicate can never drift from the capacity predicate.
-- :func:`resolve_union` resolves the requested spec union to **distinct** free devices,
-  returning the matcher's config-vs-capacity outcome (never raising on busy/absent — only
-  malformed grammar raises, fail-closed).
-
-The resolution must run **inside the per-Resource lock** (ADR-0068 Consequences): a locked
-read-modify-write, never pre-lock validation, so two requests cannot both resolve the last
-free device before either claims it.
+Grant-time callers read claims under the Resource lock before matching and persistence.
+Placement uses a preliminary snapshot; admission rechecks under that lock.
 """
 
 from __future__ import annotations
@@ -25,24 +11,10 @@ from typing import TYPE_CHECKING
 from psycopg import AsyncConnection
 
 from kdive.domain.lifecycle.rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
-from kdive.domain.pcie import MultisetResolution, PCIeClaim, PCIeDescriptor, resolve_multiset
+from kdive.domain.pcie import PCIeClaim
 
 if TYPE_CHECKING:
     from uuid import UUID
-
-    from kdive.domain.catalog.resources import Resource
-
-
-def descriptors_for(resource: Resource) -> list[PCIeDescriptor]:
-    """Read + validate the host's static PCIe descriptors from ``capabilities``.
-
-    The descriptor list is host-derived (discovery wrote it from libvirt/lspci) and so
-    crosses a trust boundary: a non-list value, a non-dict entry, or an entry missing a
-    required string field is dropped rather than trusted, so one malformed device never
-    blanks the inventory or feeds a non-string into the matcher. Returns the well-formed
-    descriptors in their advertised order.
-    """
-    return resource.capability_view.pcie_descriptors()
 
 
 async def active_claims(conn: AsyncConnection, resource_id: UUID) -> list[PCIeClaim]:
@@ -68,19 +40,3 @@ async def active_claims(conn: AsyncConnection, resource_id: UUID) -> list[PCIeCl
                 PCIeClaim(bdf=held["bdf"], vendor_id=held["vendor_id"], device_id=held["device_id"])
             )
     return claims
-
-
-def resolve_union(
-    specs: list[str], descriptors: list[PCIeDescriptor], *, claims: list[PCIeClaim]
-) -> MultisetResolution:
-    """Resolve the requested spec union to distinct free devices (the matcher's multiset).
-
-    ``specs`` is the already-composed union of explicit ``pcie_devices`` plus any resolved
-    shape ``pcie_match``. An empty union resolves to ``MATCHED`` with no devices — a
-    non-PCIe request claims nothing. Returns the matcher's ``MATCHED`` / ``CONFIG`` /
-    ``CAPACITY`` outcome; only malformed grammar raises.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` if any spec is malformed grammar.
-    """
-    return resolve_multiset(specs, descriptors, claims=claims)

@@ -261,17 +261,30 @@ def test_resolve_accel_emulator_fails_closed_naming_supported_set() -> None:
 
 
 def test_resource_capabilities_filters_malformed_pcie_descriptors() -> None:
+    second = {**_DESCRIPTOR, "bdf": "0000:3b:00.2"}
     caps = ResourceCapabilities.from_mapping(
         {
             PCIE_DEVICES_KEY: [
+                "not-a-device",
                 _DESCRIPTOR,
                 {"bdf": "0000:3b:00.1"},
-                "not-a-device",
+                {**_DESCRIPTOR, "vendor_id": 8086},
+                second,
+                None,
             ]
         }
     )
 
-    assert caps.pcie_descriptors() == [_DESCRIPTOR]
+    assert caps.pcie_descriptors() == [_DESCRIPTOR, second]
+
+
+def test_resource_capabilities_missing_pcie_descriptors_are_empty() -> None:
+    assert ResourceCapabilities.from_mapping({}).pcie_descriptors() == []
+
+
+@pytest.mark.parametrize("raw", [None, {}, "not-a-list", 1])
+def test_resource_capabilities_non_list_pcie_descriptors_are_empty(raw: object) -> None:
+    assert ResourceCapabilities.from_mapping({PCIE_DEVICES_KEY: raw}).pcie_descriptors() == []
 
 
 def test_host_cpu_reads_full_shape() -> None:

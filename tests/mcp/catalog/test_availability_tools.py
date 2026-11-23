@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEM_SHAPES
@@ -413,19 +414,41 @@ def test_offline_host_is_non_schedulable(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_invalid_cap_host_is_non_schedulable(migrated_url: str) -> None:
+@pytest.mark.parametrize("cap", [None, "invalid"])
+def test_invalid_cap_host_is_non_schedulable(migrated_url: str, cap: object) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
-            await _drop_cap(pool, res_id)
+            if cap is None:
+                await _drop_cap(pool, res_id)
+            else:
+                await _set_cap(pool, res_id, cap)
             await _add_shape(pool, "tiny")
             resp = await availability_tools.availability_tool(pool, CTX, pcie=None, shape=None)
+        assert resp.status == "ok"
         item = _host_item(resp, res_id)
         assert item.data["schedulable"] is False
         assert item.data["headroom"] == 0
         assert item.data["fits"] == []
 
     asyncio.run(_run())
+
+
+def test_zero_cap_host_is_schedulable_without_headroom(migrated_url: str) -> None:
+    async def run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            await _set_cap(pool, res_id, 0)
+            await _add_shape(pool, "tiny")
+            resp = await availability_tools.availability_tool(pool, CTX, pcie=None, shape=None)
+        assert resp.status == "ok"
+        item = _host_item(resp, res_id)
+        assert item.data["cap"] == 0
+        assert item.data["schedulable"] is True
+        assert item.data["headroom"] == 0
+        assert item.data["fits"] == []
+
+    asyncio.run(run())
 
 
 # -- queue depth ----------------------------------------------------------------------
