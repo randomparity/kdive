@@ -554,6 +554,14 @@ tool returns `configuration_error` and enqueues no ordinary teardown job. A Syst
 external-boot history that is mid-reprovision is refused with `conflict`
 (`current_status: reprovisioning`) and nothing is enqueued; retry once it settles.
 
+Ordinary teardown permits one automatic recovery admission per current request after
+explicitly retryable attempt exhaustion, using the job's existing attempt budget. This
+is a durable admission limit, with no timed retry promise. Terminal or unknown failures
+and `teardown_automatic_replay_exhausted` stop automatic recovery. Inspect the job's
+failure details, correct the cause, then call systems.teardown with a new or omitted
+idempotency_key and poll jobs.wait; the original key replays its recorded response.
+A live job replay preserves its allowance; an actual explicit failed-job restart resets it.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope unless a new external-boot history routes teardown through its recorded authority. |

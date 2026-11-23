@@ -338,12 +338,14 @@ def test_the_stalled_repair_requeues_only_a_settled_system(
             async with pool.connection() as conn:
                 await conn.execute(
                     "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, authorizing, "
-                    "dedup_key, updated_at) VALUES ('teardown', %s, 'failed', 3, 3, %s, %s, "
-                    "now() - interval '1 hour')",
+                    "dedup_key, updated_at, error_category, failure_context) "
+                    "VALUES ('teardown', %s, 'failed', 3, 3, %s, %s, "
+                    "now() - interval '1 hour', 'control_failure', %s)",
                     (
                         Jsonb({"system_id": system_id}),
                         Jsonb({"principal": "p", "agent_session": None, "project": "proj"}),
                         f"{system_id}:teardown",
+                        Jsonb({"teardown_recovery_reason": "teardown_automatic_replay_available"}),
                     ),
                 )
                 requeued = await repair_stalled_tearing_down_systems(conn)

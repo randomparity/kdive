@@ -568,6 +568,17 @@ class Worker:
             span.set_outcome("error")
             category = _failure_category(exc)
             terminal = _is_terminal(exc, category)
+            failure_context = _failure_context(exc, self._secret_registry)
+            if job.kind is JobKind.TEARDOWN:
+                # Category alone loses terminal escalation; persist the actual decision (ADR-0843).
+                reason = "teardown_terminal_failure"
+                if not terminal:
+                    reason = (
+                        "teardown_automatic_replay_exhausted"
+                        if job.payload.get("automatic_teardown_replay_v1") is not None
+                        else "teardown_automatic_replay_available"
+                    )
+                failure_context["teardown_recovery_reason"] = reason
             async with self._pool.connection() as conn:
                 failed_job = await _fail_job_and_run(
                     conn,
@@ -575,7 +586,7 @@ class Worker:
                     category,
                     incarnation_credential=self._incarnation_credential,
                     terminal=terminal,
-                    failure_context=_failure_context(exc, self._secret_registry),
+                    failure_context=failure_context,
                 )
             self._telemetry.record_job_failure(failed_job, category)
             if failed_job.state is JobState.QUEUED:

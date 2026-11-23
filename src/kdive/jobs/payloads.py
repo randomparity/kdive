@@ -619,6 +619,9 @@ class TeardownPayload(SystemPayload):
     authority_system_v1: AuthoritySystemMarkerV1 | None = None
     remote_module_attempt_v1: ModuleAttemptPreparationRequestV1 | None = None
 
+    # Only automatic stalled-System repair consumes this request allowance (ADR-0843).
+    automatic_teardown_replay_v1: Literal["consumed"] | None = None
+
     @field_validator("remote_module_attempt_v1", mode="before")
     @classmethod
     def _decode_module_attempt(cls, value: object) -> object:

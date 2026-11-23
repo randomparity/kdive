@@ -26,14 +26,16 @@ async def _seed_teardown_job(
     attempt: int = 3,
 ) -> None:
     await conn.execute(
-        "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, authorizing, dedup_key) "
-        "VALUES ('teardown', %s, %s, %s, 3, %s, %s)",
+        "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, authorizing, dedup_key, "
+        "error_category, failure_context) "
+        "VALUES ('teardown', %s, %s, %s, 3, %s, %s, 'control_failure', %s)",
         (
             Jsonb({"system_id": str(system_id)}),
             state.value,
             attempt,
             Jsonb({"principal": "reconciler-test", "agent_session": None, "project": "proj"}),
             f"{system_id}:teardown",
+            Jsonb({"teardown_recovery_reason": "teardown_automatic_replay_available"}),
         ),
     )
 
@@ -48,15 +50,20 @@ async def _teardown_job(conn: psycopg.AsyncConnection, system_id: UUID) -> tuple
 
 
 @pytest.mark.parametrize("state", [JobState.FAILED, JobState.SUCCEEDED])
-def test_requeues_terminal_teardown_for_live_allocation(migrated_url: str, state: JobState) -> None:
+def test_only_failed_retryable_teardown_is_requeued_for_live_allocation(
+    migrated_url: str, state: JobState
+) -> None:
     async def _run() -> None:
         conn = await connect(migrated_url)
         system_id = await seed_system(conn, system_state=SystemState.TEARING_DOWN)
         await _seed_teardown_job(conn, system_id, state=state)
         async with AsyncConnectionPool(migrated_url, min_size=1, open=False) as pool:
             await pool.open()
-            assert await run_repair(pool, repair_stalled_tearing_down_systems) == 1
-        assert await _teardown_job(conn, system_id) == (JobState.QUEUED.value, 0)
+            assert await run_repair(pool, repair_stalled_tearing_down_systems) == (
+                1 if state is JobState.FAILED else 0
+            )
+        expected = (JobState.QUEUED.value, 0) if state is JobState.FAILED else (state.value, 3)
+        assert await _teardown_job(conn, system_id) == expected
         row = await (
             await conn.execute("SELECT state FROM systems WHERE id = %s", (system_id,))
         ).fetchone()

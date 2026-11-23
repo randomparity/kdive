@@ -27,11 +27,16 @@ from kdive.domain.capacity.state import (
     SystemDeviceState,
     SystemState,
 )
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import ErrorCategory, retryable_category
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY, Authorizing, TeardownPayload
+from kdive.jobs.payloads import (
+    EXTERNAL_BOOT_AUTHORITY_MARKER_KEY,
+    Authorizing,
+    TeardownPayload,
+    load_payload,
+)
 from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL
 from kdive.security import audit
 from kdive.services.debug.detach import detach_audit_event, detach_system_debug_sessions
@@ -429,6 +434,28 @@ async def _stalled_teardown_candidates(
     return candidates
 
 
+def _stalled_teardown_replay_denial(existing: Job, system_id: UUID) -> str | None:
+    """Require positive worker evidence and an unused durable allowance (ADR-0843)."""
+    try:
+        payload = load_payload(existing, TeardownPayload)
+        if UUID(payload.system_id) != system_id:
+            return "teardown_replay_evidence_invalid"
+    except ValueError:  # Typed payload decoding and UUID parsing fail closed to operator recovery.
+        return "teardown_replay_evidence_invalid"
+    if payload.automatic_teardown_replay_v1 is not None:
+        return "teardown_automatic_replay_exhausted"
+    if (
+        existing.state is not JobState.FAILED
+        or existing.attempt < existing.max_attempts
+        or existing.error_category is None
+        or not retryable_category(existing.error_category)
+        or existing.failure_context.get("teardown_recovery_reason")
+        != "teardown_automatic_replay_available"
+    ):
+        return "teardown_terminal_failure"
+    return None
+
+
 async def _repair_stalled_teardown_candidate(
     conn: AsyncConnection, system_id: UUID, history: TeardownWarningHistory
 ) -> bool:
@@ -464,17 +491,34 @@ async def _repair_stalled_teardown_candidate(
                 _STUCK_TEARING_DOWN_RUNBOOK,
             )
             return False
+        if (
+            existing is not None
+            and (reason := _stalled_teardown_replay_denial(existing, system_id)) is not None
+        ):
+            _warn_stalled_teardown_once(
+                history,
+                system_id,
+                reason,
+                "reconciler: system %s is stuck in tearing_down behind teardown job %s "
+                "(%s); %s; inspect jobs.get and systems.get; after correcting a failed job's "
+                "cause, re-run systems.teardown with a new or omitted idempotency key (%s)",
+                existing.id,
+                existing.state.value,
+                reason,
+                _STUCK_TEARING_DOWN_RUNBOOK,
+            )
+            return False
         _, admitted = await queue.enqueue_with_status(
             conn,
             JobKind.TEARDOWN,
-            TeardownPayload(system_id=str(system_id)),
+            TeardownPayload(system_id=str(system_id), automatic_teardown_replay_v1="consumed"),
             Authorizing(
                 principal=SYSTEM_RECONCILER_PRINCIPAL,
                 agent_session=None,
                 project=system.project,
             ),
             f"{system_id}:teardown",
-            recycle=queue.JobRecyclePolicy.TERMINAL,
+            recycle=queue.JobRecyclePolicy.FAILED,
         )
     return admitted
 
@@ -489,7 +533,10 @@ async def repair_stalled_tearing_down_systems(
 
     The `tearing_down` marker stays put until the worker proves provider absence, discharges
     mutation obligations, and commits `torn_down` in one transaction. A failed or missing job
-    would otherwise strand that marker on a live Allocation. Recycle only terminal jobs; a canceled
+    would otherwise strand that marker on a live Allocation. Allow one automatic admission per
+    current request, consuming its durable payload allowance with enqueue (ADR-0843). Only explicit
+    worker evidence of retryable exhaustion permits a failed-job recycle; unknown or terminal
+    outcomes need systems.teardown with a new or omitted idempotency key. A canceled
     job is an operator stop, and queued/running jobs remain owned by the normal worker retry path.
 
     A System with an unsettled external-boot activation is skipped: the worker refuses its
