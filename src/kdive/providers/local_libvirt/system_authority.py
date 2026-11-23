@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 from uuid import UUID
 
-from kdive.providers.local_libvirt.lifecycle.boot.session import owned_system_semantic_identity
+from kdive.providers.local_libvirt.lifecycle.boot.owned_domain import owned_system_semantic_identity
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
 from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
     authorized_key_customizer,

@@ -14,7 +14,7 @@ import pytest
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
-from kdive.providers.local_libvirt.lifecycle.boot.session import owned_system_semantic_identity
+from kdive.providers.local_libvirt.lifecycle.boot.owned_domain import owned_system_semantic_identity
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
 from kdive.providers.local_libvirt.lifecycle.storage import (

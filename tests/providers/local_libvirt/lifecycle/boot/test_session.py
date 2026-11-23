@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import errno
 import importlib
 import io
@@ -13,6 +14,7 @@ import threading
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
+from importlib.util import resolve_name
 from pathlib import Path
 from typing import Any, BinaryIO, Literal, cast
 from uuid import UUID
@@ -39,6 +41,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LibguestfsAuthenticatedGuestTree,
     LocalLibvirtExternalBoot,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.owned_domain import owned_system_semantic_identity
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
     ReadinessResult,
@@ -66,7 +69,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     _ConcreteSession,
     _Find0TreeCursor,
     open_authority_system_teardown,
-    owned_system_semantic_identity,
     prove_no_foreign_system_storage_references,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import LocalArtifactRoot
@@ -96,6 +98,10 @@ from tests.providers.local_libvirt.lifecycle.boot.session_support import (
 )
 
 _SESSION_LOGGER = "kdive.providers.local_libvirt.lifecycle.boot.session"
+_OWNED_DOMAIN_FIXTURE_IDENTITY = (
+    "sha256:"
+    "e8f3bf9dda9e1b2d2e18b627b595d25b5d2704a39b9648fe7fb7fecb6052de28"  # pragma: allowlist secret
+)
 
 
 class FakeLease:
@@ -384,6 +390,35 @@ def test_authority_teardown_rejects_a_sibling_overlay_attachment(tmp_path: Path)
 
     assert "domain.list:0" in events
     assert "connection.close" in events
+
+
+def test_owned_domain_identity_has_no_session_dependency() -> None:
+    package = "kdive.providers.local_libvirt.lifecycle.boot"
+    path = Path(session_module.__file__).with_name("owned_domain.py")
+    tree = ast.parse(path.read_text())
+    imports: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                module = resolve_name("." * node.level + module, package)
+            imports.extend(f"{module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+    assert not [name for name in imports if name.startswith(f"{package}.session")]
+
+
+def test_authority_semantic_identity_preserves_its_literal_digest() -> None:
+    assert (
+        owned_system_semantic_identity(_xml(), SYSTEM_ID, OVERLAY) == _OWNED_DOMAIN_FIXTURE_IDENTITY
+    )
+
+
+@pytest.mark.parametrize(("unit", "amount"), [("pages", "2"), ("MiB", "many"), ("KiB", "-1")])
+def test_authority_semantic_identity_rejects_invalid_memory(unit: str, amount: str) -> None:
+    xml = _xml().replace("<os>", f'<memory unit="{unit}">{amount}</memory><os>')
+    with pytest.raises(ValueError, match="memory is not a supported integer quantity"):
+        owned_system_semantic_identity(xml, SYSTEM_ID, OVERLAY)
 
 
 def test_authority_semantic_identity_permits_libvirt_generated_device_fields() -> None:
