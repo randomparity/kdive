@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (2026-11-23)
 
 ## Context
 
@@ -18,6 +18,7 @@ and ceilings intact. Upload catches libvirt and source OSError failures after vo
 attempts abort then delete, warns on native deletion failure, and chains its original failure.
 Expected abort failures cannot prevent deletion. Pre-create validation, existing-volume policy,
 volume creation errors and public signatures remain unchanged.
+Implemented in `traffic_capture.py`, `host_dump_capture.py` and `rootfs/volume_upload.py`.
 
 ## Consequences
 

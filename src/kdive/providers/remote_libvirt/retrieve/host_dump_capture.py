@@ -1,4 +1,7 @@
-"""Remote-libvirt host-side vmcore capture workflow."""
+"""Remote-libvirt host-side vmcore capture workflow.
+
+Error propagation follows ADR-0848.
+"""
 
 from __future__ import annotations
 
@@ -280,8 +283,9 @@ class _HostDumpSpooler:
 
     def _download_to_file(self, conn: Any, volume: Any, spool: Path, system_id: UUID) -> None:
         """Spool the volume to a 0600 temp file; abort+raise if the stream overruns."""
-        stream = conn.newStream(0)
+        stream = None
         try:
+            stream = conn.newStream(0)
             fd = os.open(spool, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "wb") as handle:
                 sink = _SpoolSink(handle, system_id, self._options.max_core_bytes)
@@ -289,12 +293,14 @@ class _HostDumpSpooler:
                 stream.recvAll(sink.recv_all_callback, None)
             stream.finish()
         except CategorizedError:
-            with contextlib.suppress(Exception):
-                stream.abort()
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.abort()
             raise
         except (libvirt.libvirtError, OSError, RuntimeError) as exc:
-            with contextlib.suppress(Exception):
-                stream.abort()
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.abort()
             raise CategorizedError(
                 "host_dump stream download failed",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,

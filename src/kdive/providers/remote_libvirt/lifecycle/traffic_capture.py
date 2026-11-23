@@ -23,7 +23,7 @@ the handler's ``finally``; :meth:`prepare` additionally pre-deletes *this job's 
 mid-capture starts clean. A pcap orphaned by a job that exhausts its retries is reclaimed by the
 reconciler's capture reaper (ADR-0556).
 
-Error propagation follows ADR-0847.
+Error propagation follows ADR-0847 and ADR-0848.
 """
 
 from __future__ import annotations
@@ -485,19 +485,22 @@ class RemoteLibvirtTrafficCapture:
     def _download(
         self, conn: _CaptureConn, volume: _CaptureVolume, vol_name: str, ceiling: int
     ) -> bytes:
-        stream = conn.newStream(0)
+        stream = None
         sink = _BoundedMemorySink(ceiling)
         try:
+            stream = conn.newStream(0)
             volume.download(stream, 0, 0, 0)
             stream.recvAll(sink.recv, None)
             stream.finish()
         except CategorizedError:
-            with contextlib.suppress(Exception):
-                stream.abort()
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.abort()
             raise
         except (libvirt.libvirtError, OSError, RuntimeError) as exc:
-            with contextlib.suppress(Exception):
-                stream.abort()
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.abort()
             raise CategorizedError(
                 "remote pcap stream download failed",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,

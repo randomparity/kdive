@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import libvirt
 import pytest
@@ -70,7 +71,7 @@ class _FakePool:
         self.created_xml: str | None = None
 
     def storageVolLookupByName(self, name: str) -> _FakeVolume:  # noqa: N802
-        if self._volume_exists:
+        if self._volume_exists and not self._volume.deleted:
             return self._volume
         raise libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL)
 
@@ -78,6 +79,8 @@ class _FakePool:
         if self._create_fails:
             raise libvirt.libvirtError("create failed")
         self.created_xml = xml
+        self._volume_exists = True
+        self._volume.deleted = False
         return self._volume
 
 
@@ -202,3 +205,114 @@ def test_fresh_target_never_reuses_or_deletes_existing_volume(
             _FakeConn(pool, stream), "images", "base", _qcow2(tmp_path), require_new=True
         )
     assert not stream.sent and not stream.finished and not volume.deleted
+
+
+@pytest.mark.parametrize("stage", ["setup", "reopen", "read", "send", "finish"])
+def test_upload_failure_rolls_back_and_allows_same_name_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    source = _qcow2(tmp_path)
+    volume, stream = _FakeVolume(), _FakeStream()
+    pool = _FakePool(volume)
+    conn = _FakeConn(pool, stream)
+    error = (
+        OSError("source I/O failed")
+        if stage in {"reopen", "read"}
+        else libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+    )
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise error
+
+    original_open = Path.open
+    opens = 0
+    with monkeypatch.context() as faults:
+
+        def open_source(path: Path, *args: Any, **kwargs: Any) -> Any:
+            nonlocal opens
+            if path == source:
+                opens += 1
+                if opens == 2 and stage == "reopen":
+                    raise error
+            handle = original_open(path, *args, **kwargs)
+            if path == source and opens == 2 and stage == "read":
+                faults.setattr(handle, "read", fail)
+            return handle
+
+        if stage in {"reopen", "read"}:
+            faults.setattr(Path, "open", open_source)
+        elif stage == "setup":
+            faults.setattr(conn, "newStream", fail)
+        else:
+            faults.setattr(stream, "sendAll" if stage == "send" else "finish", fail)
+        with pytest.raises(CategorizedError) as caught:
+            upload_qcow2_volume(
+                conn, "image-stage-pool", "candidate-base.qcow2", source, require_new=True
+            )
+        assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        assert caught.value.details == {
+            "pool": "image-stage-pool",
+            "volume": "candidate-base.qcow2",
+        }
+        assert caught.value.__cause__ is error
+        assert pool.created_xml is not None and volume.deleted
+        assert stream.aborted is (stage != "setup")
+    retry = _FakeStream()
+    upload_qcow2_volume(
+        _FakeConn(pool, retry), "image-stage-pool", "candidate-base.qcow2", source, require_new=True
+    )
+    assert retry.sent == source.read_bytes() and retry.finished
+    assert not volume.deleted
+
+
+@pytest.mark.parametrize("stage", ["setup", "send"])
+@pytest.mark.parametrize("cleanup", ["abort-libvirt", "abort-os", "delete", "both"])
+def test_upload_cleanup_failure_keeps_primary_and_attempts_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    stage: str,
+    cleanup: str,
+) -> None:
+    source = _qcow2(tmp_path)
+    volume, stream = _FakeVolume(), _FakeStream()
+    conn = _FakeConn(_FakePool(volume), stream)
+    primary = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+    aborts: list[bool] = []
+    deletions: list[bool] = []
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise primary
+
+    def fail_abort() -> int:
+        aborts.append(True)
+        if cleanup == "abort-os":
+            raise OSError("abort I/O failed")
+        raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    def fail_delete(flags: int = 0) -> int:
+        deletions.append(True)
+        raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    if stage == "setup":
+        monkeypatch.setattr(conn, "newStream", fail)
+    else:
+        monkeypatch.setattr(stream, "sendAll", fail)
+    if cleanup in {"abort-libvirt", "abort-os", "both"}:
+        monkeypatch.setattr(stream, "abort", fail_abort)
+    if cleanup in {"delete", "both"}:
+        monkeypatch.setattr(volume, "delete", fail_delete)
+    with pytest.raises(CategorizedError) as caught:
+        upload_qcow2_volume(conn, "image-stage-pool", "candidate-base.qcow2", source)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"pool": "image-stage-pool", "volume": "candidate-base.qcow2"}
+    assert caught.value.__cause__ is primary
+    if cleanup in {"delete", "both"}:
+        assert deletions == [True] and not volume.deleted
+        assert "remote volume rollback failed" in caplog.text
+        assert "image-stage-pool" in caplog.text and "candidate-base.qcow2" in caplog.text
+    else:
+        assert volume.deleted
+    assert bool(aborts) is (stage == "send" and cleanup != "delete")

@@ -807,3 +807,23 @@ def test_rollback_delete_failure_keeps_original_attach_error(
         assert caught.value.details["reason"] == "capture_filter_rejected"
     assert len(pool.created) == 1 and not pool.volumes["cap.pcap"].deleted
     assert "remote pcap rollback failed" in caplog.text and "cap.pcap" in caplog.text
+
+
+def test_fetch_stream_acquisition_is_categorized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    volume = _FakeVolume("cap.pcap", b"pcap")
+    conn = _FakeConn(pool=_FakePool(volumes={"cap.pcap": volume}))
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    def fail_stream(flags: int = 0) -> _FakeStream:
+        raise error
+
+    monkeypatch.setattr(conn, "newStream", fail_stream)
+    with pytest.raises(CategorizedError) as caught:
+        _capturer(conn, tmp_path).fetch(_DEST, max_bytes=100)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"volume": "cap.pcap"}
+    assert caught.value.__cause__ is error
+    assert not conn.stream.aborted and conn.closed

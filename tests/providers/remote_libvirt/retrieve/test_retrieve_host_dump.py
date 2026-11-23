@@ -15,6 +15,7 @@ import stat
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import libvirt
@@ -816,3 +817,52 @@ def test_host_dump_spools_to_a_private_mode_file(tmp_path: Path) -> None:
     )
     # The spooled core (guest memory) must not be world/group readable.
     assert captured_mode["mode"] == 0o600
+
+
+def test_host_dump_stream_acquisition_is_categorized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kdive.providers.remote_libvirt.retrieve import host_dump_capture
+
+    original_mkdtemp = host_dump_capture.tempfile.mkdtemp
+    spools: list[Path] = []
+
+    def tracked_mkdtemp(*args: Any, **kwargs: Any) -> str:
+        is_spool = kwargs.get("prefix") == "kdive-host-dump-"
+        if is_spool:
+            kwargs["dir"] = tmp_path
+        created = original_mkdtemp(*args, **kwargs)
+        if is_spool:
+            spools.append(Path(created))
+        return created
+
+    monkeypatch.setattr(host_dump_capture.tempfile, "mkdtemp", tracked_mkdtemp)
+    volume = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    conn = FakeHostDumpConn(pool=FakePool(xml=_DIR_POOL_XML, volume=volume))
+    store = FakeStore(head=None)
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+    aborted: list[bool] = []
+
+    def fail_stream(flags: int = 0) -> FakeStream:
+        raise error
+
+    def abort() -> int:
+        aborted.append(True)
+        return 0
+
+    monkeypatch.setattr(conn, "newStream", fail_stream)
+    monkeypatch.setattr(conn.stream, "abort", abort)
+    with pytest.raises(CategorizedError) as caught:
+        _retrieve(conn, store, tmp_path).capture(
+            _SID,
+            _RID,
+            CaptureMethod.HOST_DUMP,
+            execution_id=UUID(int=1),
+        )
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"system_id": str(_SID)}
+    assert caught.value.__cause__ is error
+    assert not aborted and not volume.download_called
+    assert volume.deleted and not store.stream_requests
+    assert len(spools) == 1 and not spools[0].exists()
