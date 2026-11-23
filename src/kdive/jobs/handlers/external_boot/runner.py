@@ -52,6 +52,7 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.providers.ports.external_boot import (
     ExternalBootPorts,
 )
+from kdive.providers.ports.module_operation import ModuleAuthority
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.external_boot.routing import authority_reservation_geometry
@@ -170,6 +171,9 @@ class OperationContext:
     Read from here, never from the ports ``build_operations`` captured, which production assembly
     builds with only a client factory.
     """
+
+    module_authority: ModuleAuthority | None = None
+    """The per-invocation client retains module binding checks and its absolute deadline."""
 
 
 def _refuse(message: str) -> CategorizedError:
@@ -752,6 +756,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         local_timing=local_timing,
         prerequisites=prerequisites,
         teardown_executor=ports.teardown_executor,
+        module_authority=ports.module_authority,
     )
     context = replace(context, activation=await _debit_preparing(conn, context, ports))
     context = replace(context, activation=await _materialize_preparing(conn, context, ports))

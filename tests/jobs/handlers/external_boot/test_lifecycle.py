@@ -1675,6 +1675,7 @@ def test_a_cleanup_job_parses_a_plain_json_receipt_for_the_module_lifecycle(
             resolver=ProviderResolver(
                 {ResourceKind.LOCAL_LIBVIRT: replace(local, authority=modules)}
             ),
+            module_authority=modules.modules,
         )
         job = _job(case)
         job = job.model_copy(
@@ -1716,9 +1717,10 @@ def test_remote_module_lifecycle_steps_per_operation(
 
     actions: list[tuple[str, AuthorityOperation]] = []
     modules = object()
+    bound_client = object()
 
     async def record(**values: Any) -> None:
-        assert values["sender"] is modules
+        assert values["sender"] is bound_client
         actions.append((values["action"], values["authority"].operation))
 
     monkeypatch.setattr(
@@ -1729,6 +1731,7 @@ def test_remote_module_lifecycle_steps_per_operation(
         binding=SimpleNamespace(
             runtime=SimpleNamespace(authority=SimpleNamespace(modules=modules))
         ),
+        module_authority=bound_client,
         job=SimpleNamespace(
             id=uuid4(), attempt=1, payload={"remote_module_attempt_v1": _receipt(attempt)}
         ),

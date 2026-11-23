@@ -157,6 +157,9 @@ async def _execute_remote_module_lifecycle(
     if raw_preparation is None:
         raise _refuse("remote module lifecycle authority inputs are incomplete")
     preparation = ModuleAttemptPreparationRequestV1.from_payload(raw_preparation)
+    sender = context.module_authority
+    if sender is None:
+        raise _refuse("no operation-bound remote module authority is configured")
     steps: dict[AuthorityOperation, tuple[Literal["restore", "reap"], ...]] = {
         AuthorityOperation.RECOVER: ("restore",),
         # A resolve recovers like RECOVER and leaves the volumes for the release CLEANUP (#3414).
@@ -167,7 +170,7 @@ async def _execute_remote_module_lifecycle(
         await execute_remote_module_lifecycle_on_authority_host(
             connection=context.connection,
             repository=RemoteModuleAttemptObligationRepository(),
-            sender=authority.modules,
+            sender=sender,
             authority=request,
             preparation=preparation,
             worker_context=ModuleAttemptWorkerWriteContext(

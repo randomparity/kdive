@@ -150,3 +150,78 @@ async def test_sender_marks_only_provider_conflict_with_an_authority_reason(reas
         "journal-conflict": {"admission": "unknown"},
     }
     assert caught.value.details == expected.get(reason, {})
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("binding_state", ["matching", "mismatched", "unbound"])
+async def test_module_lifecycle_retains_the_invocation_client(binding_state: str) -> None:
+    """Run the real lifecycle bridge and client; stop at the provider before evidence writes."""
+    import asyncio
+
+    from kdive.jobs.handlers.external_boot.lifecycle import _execute_remote_module_lifecycle
+    from kdive.providers.external_boot_authority.protocol import AuthorityOperation
+    from kdive.providers.ports.module_operation import ModuleCompletion, ModuleLifecycleRequest
+    from tests.providers.external_boot_authority.service_support import _takeover
+
+    dispatched: list[tuple[ModuleLifecycleRequest, float]] = []
+
+    class Modules:
+        async def execute_remote_module_lifecycle(
+            self, request: ModuleLifecycleRequest, *, deadline: float
+        ) -> ModuleCompletion:
+            dispatched.append((request, deadline))
+            raise RuntimeError("dispatch-observed")
+
+    takeover = _takeover().model_copy(
+        update={
+            "purpose": "recover",
+            "operation": AuthorityOperation.RECOVER,
+            "provider_kind": "remote-libvirt",
+        }
+    )
+    request = _mutation(takeover)
+    values = takeover.model_dump()
+    marker = ExternalBootAuthorityMarkerV1.model_validate(
+        {key: values[key] for key in ExternalBootAuthorityMarkerV1.model_fields if key in values}
+    )
+    capability = AuthorityCapability(
+        authority_instance=marker.authority_instance,
+        sender=cast(Any, object()),
+        modules=cast(Any, Modules()),
+    )
+    runtime = SimpleNamespace(authority=capability)
+    binding = ProviderBinding(ResourceKind.REMOTE_LIBVIRT, cast(Any, runtime), "resource-a")
+    deadline = asyncio.get_running_loop().time() + 1.0
+    client = clients.external_boot_client_factory()(binding, marker, deadline)
+    if binding_state == "mismatched":
+        request = request.model_copy(update={"plan_identity": "sha256:" + "f" * 64})
+    context = SimpleNamespace(
+        binding=binding,
+        module_authority=None if binding_state == "unbound" else client,
+        job=SimpleNamespace(
+            id=uuid4(),
+            attempt=1,
+            payload={
+                "remote_module_attempt_v1": {
+                    "module_attempt_obligation": {
+                        "system_id": str(marker.system_id),
+                        "run_id": str(marker.run_id),
+                        "operation_nonce": "0" * 32,
+                    }
+                }
+            },
+        ),
+        connection=object(),
+        incarnation_credential=SecretStr("test-incarnation"),
+    )
+    if binding_state == "matching":
+        with pytest.raises(RuntimeError, match="dispatch-observed"):
+            await _execute_remote_module_lifecycle(cast(Any, context), request)
+        assert len(dispatched) == 1
+        assert dispatched[0][0].authority == request
+        assert dispatched[0][1] == deadline
+    else:
+        reason = "binding-mismatch" if binding_state == "mismatched" else "module authority"
+        with pytest.raises(CategorizedError, match=reason):
+            await _execute_remote_module_lifecycle(cast(Any, context), request)
+        assert dispatched == []

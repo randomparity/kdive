@@ -13,8 +13,10 @@ requirement. Annotate its constructor with that requirement and remove the nine
 capability casts; keep the narrow protocols and unrelated casts. Production
 composition already supplies the concrete operations implementation; preserve its
 fifteen method signatures and runtime dispatch without new detection or fallback.
-In a separate commit, send module restore/reap through `authority.modules`, remove
-the helper's executor parameter and update its three calls. Replace the lazy `Any`
+Retain the provider module-capability guard, but send module restore/reap through
+the invocation-bound `ModuleAuthority` client carried by `OperationContext`; its
+binding validation and fixed transport deadline must remain in effect. Remove the
+helper's executor parameter and update its three calls. Replace the lazy `Any`
 bridge with the existing service function's explicit keyword-only signature and
 `ModuleCompletion` result; retain lazy service loading. Narrow only that service
 function's sender annotation to `ModuleAuthority`, retaining broader preparation

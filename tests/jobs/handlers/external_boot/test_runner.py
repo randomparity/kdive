@@ -780,13 +780,16 @@ def test_remote_preparing_calls_typed_module_authority_before_phase_commit(
             authority_client_factory=lambda _binding, _marker, _deadline: cast(Any, authority),
         )
 
+        def inspect_invocation(context: OperationContext) -> None:
+            assert context.module_authority is authority
+
         await _run(
             worker,
             case,
             ports=ports,
             marker=_marker(case, provider_kind="remote-libvirt"),
             require_activation_state=frozenset({ExternalBootActivationState.PREPARING}),
-            call_port=lambda _context: None,
+            call_port=inspect_invocation,
         )
 
         assert len(module_calls) == 1
