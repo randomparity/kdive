@@ -1,8 +1,8 @@
-"""Compose the **server** readiness dependency set (ADR-0090 §5): PG + MinIO + OIDC.
+"""Compose server readiness dependencies (ADR-0090 §5): Postgres, object store and OIDC.
 
 The dependency set is assembled from injected resources, not hardcoded reachability
 logic, so the worker/reconciler (issue #267) reuse :class:`~kdive.health.HealthProbe`
-and the same primitives with their own set (Postgres + MinIO, **no OIDC** — they pull
+and the same primitives with their own set (Postgres + object store, **no OIDC** — they pull
 jobs from the DB and never verify tokens, so their readiness must not couple to the
 IdP). The Postgres and OIDC probes are passed in as coroutines built by the process
 entrypoint (it owns the pool and the JWKS client); the object-store ping is offloaded to
@@ -28,7 +28,7 @@ def build_server_checks(
     object_store_factory: Callable[[], _Pingable],
     oidc_ping: Callable[[], Awaitable[None]],
 ) -> list[BackendCheck]:
-    """Return the server's readiness checks: Postgres, MinIO, OIDC.
+    """Return the server's readiness checks: Postgres, object store, OIDC.
 
     Args:
         postgres_ping: Coroutine running a ``SELECT 1`` over the shared pool.
@@ -38,12 +38,12 @@ def build_server_checks(
         oidc_ping: Coroutine probing OIDC discovery/JWKS reachability.
     """
 
-    async def minio() -> None:
+    async def object_store() -> None:
         await asyncio.to_thread(_ping_store, object_store_factory)
 
     return [
         BackendCheck(name="postgres", probe=postgres_ping),
-        BackendCheck(name="minio", probe=minio),
+        BackendCheck(name="minio", probe=object_store),
         BackendCheck(name="oidc", probe=oidc_ping),
     ]
 

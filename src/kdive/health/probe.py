@@ -2,8 +2,9 @@
 
 A :class:`HealthProbe` composes a list of named :class:`BackendCheck` async checks and
 answers ``/readyz``. The dependency set is **injected, not hardcoded**: the server
-composes Postgres + MinIO + OIDC; the worker/reconciler (issue #267) compose Postgres +
-MinIO with no IdP coupling — both build a :class:`HealthProbe` over the same primitive.
+composes Postgres + object store + OIDC; the worker/reconciler (issue #267) compose
+Postgres + object store with no IdP coupling — both build a :class:`HealthProbe` over
+the same primitive.
 
 Two contractual behaviors:
 
@@ -34,6 +35,8 @@ class BackendCheck:
     Args:
         name: Stable identifier for the dependency (e.g. ``"postgres"``); surfaced in the
             ``/readyz`` body and is the only label that reaches a metric/span.
+            The legacy ``"minio"`` identifier denotes the configured S3-compatible object
+            store, including SeaweedFS, and is retained for readiness and telemetry consumers.
         probe: A zero-argument coroutine that returns on success and raises on failure.
             It must not block the event loop; offload synchronous client calls.
     """

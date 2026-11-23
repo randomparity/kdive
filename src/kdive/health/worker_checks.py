@@ -1,4 +1,4 @@
-"""Compose the **worker/reconciler** readiness set (ADR-0090 §5): PG + MinIO, no OIDC.
+"""Compose worker/reconciler readiness (ADR-0090 §5): Postgres and object store, no OIDC.
 
 The dependency set is assembled from injected resources, mirroring
 :mod:`kdive.health.server_checks` minus the OIDC check: the worker and reconciler pull
@@ -29,7 +29,7 @@ def build_worker_checks(
     capture_manifest_verifier: Callable[[], None] | None = None,
     capture_recovery_ready: Callable[[], bool] | None = None,
 ) -> list[BackendCheck]:
-    """Return the worker/reconciler readiness checks: Postgres, MinIO (no OIDC).
+    """Return worker/reconciler readiness checks: Postgres and object store (no OIDC).
 
     Args:
         postgres_ping: Coroutine running a ``SELECT 1`` over the shared pool.
@@ -40,12 +40,12 @@ def build_worker_checks(
         capture_recovery_ready: Optional startup gate that stays false until recovery completes.
     """
 
-    async def minio() -> None:
+    async def object_store() -> None:
         await asyncio.to_thread(_ping_store, object_store_factory)
 
     checks = [
         BackendCheck(name="postgres", probe=postgres_ping),
-        BackendCheck(name="minio", probe=minio),
+        BackendCheck(name="minio", probe=object_store),
     ]
     if capture_manifest_verifier is not None:
 
