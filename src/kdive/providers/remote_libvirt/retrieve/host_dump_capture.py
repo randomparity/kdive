@@ -170,16 +170,34 @@ class _HostDumpSpooler:
     ) -> Generator[Path]:
         pool.refresh(0)
         volume = self._resolve_volume(pool, vol_name, system_id)
-        self._enforce_ceiling(volume, vol_name, system_id)
-        spool = Path(tempfile.mkdtemp(prefix="kdive-host-dump-")) / vol_name
+        spool: Path | None = None
         try:
+            self._enforce_ceiling(volume, vol_name, system_id)
+            spool = Path(tempfile.mkdtemp(prefix="kdive-host-dump-")) / vol_name
             self._download_to_file(conn, volume, spool, system_id)
             yield spool
         finally:
-            spool.unlink(missing_ok=True)
-            with contextlib.suppress(Exception):
-                spool.parent.rmdir()
-            _delete_volume(volume)
+            if spool is not None:
+                try:
+                    spool.unlink(missing_ok=True)
+                except OSError:
+                    _log.warning(
+                        "host_dump spool unlink failed for system %s at %s", system_id, spool
+                    )
+                try:
+                    spool.parent.rmdir()
+                except OSError:
+                    _log.warning(
+                        "host_dump spool directory removal failed for system %s at %s",
+                        system_id,
+                        spool.parent,
+                    )
+            try:
+                volume.delete(0)
+            except libvirt.libvirtError:
+                _log.warning(
+                    "host_dump volume deletion failed for system %s volume %s", system_id, vol_name
+                )
 
     @staticmethod
     def _lookup_pool(conn: Any, pool_name: str) -> Any:
@@ -430,11 +448,6 @@ class _HostDumpPersister:
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id), "key": raw_key},
             )
-
-
-def _delete_volume(volume: Any) -> None:
-    with contextlib.suppress(Exception):
-        volume.delete(0)
 
 
 def pool_type_and_target_strict(
