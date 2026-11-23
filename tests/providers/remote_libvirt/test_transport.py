@@ -90,6 +90,22 @@ def test_validate_accepts_plain_tls_uri() -> None:
     validate_remote_uri("qemu+tls://host.example/system")
 
 
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "qemu+tls://[::1/system",
+        "qemu+tls://[invalid]/system",
+        "qemu+tls://example.invalid:abc/system",
+        "qemu+tls://example.invalid:65536/system",
+    ],
+)
+def test_malformed_remote_uri_is_chained_configuration_error(uri: str) -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        validate_remote_uri(uri)
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
 def test_validate_scheme_error_names_the_uri_and_required_scheme() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         validate_remote_uri("qemu+tcp://host.example/system")

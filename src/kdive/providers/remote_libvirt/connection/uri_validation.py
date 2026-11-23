@@ -53,7 +53,15 @@ def validate_remote_transport(uri: str) -> None:
             (the ciphersuite selection must stay libvirt's default), in any casing or
             ``;``-separated spelling libvirt would accept.
     """
-    parsed = urlsplit(uri)
+    try:
+        parsed = urlsplit(uri)
+        # urllib defers hostname and port validation until these properties are read.
+        _ = parsed.hostname, parsed.port
+    except ValueError as exc:
+        raise CategorizedError(
+            "remote-libvirt URI is malformed; configure a valid qemu+tls://host[:port]/system URI",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        ) from exc
     if parsed.scheme != REQUIRED_REMOTE_SCHEME:
         raise CategorizedError(
             f"remote-libvirt URI {uri!r} must use the qemu+tls:// scheme",
