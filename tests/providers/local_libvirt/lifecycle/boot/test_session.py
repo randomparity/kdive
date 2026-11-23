@@ -861,7 +861,14 @@ def test_expected_ownership_without_activation_accepts_exact_system_and_run() ->
         _expected().run_id = UUID(int=9)  # ty: ignore[invalid-assignment]
 
 
-def test_expected_ownership_mismatch_preserves_rejection_when_pin_close_fails() -> None:
+class _CloseAbort(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("close_error", [OSError("pin close"), _CloseAbort("pin close")])
+def test_expected_ownership_mismatch_preserves_rejection_when_pin_close_fails(
+    close_error: BaseException,
+) -> None:
     events: list[str] = []
 
     class CloseFaultPin:
@@ -869,7 +876,7 @@ def test_expected_ownership_mismatch_preserves_rejection_when_pin_close_fails() 
 
         def close(self) -> None:
             self.close_attempts += 1
-            raise OSError("pin close")
+            raise close_error
 
     pin = CloseFaultPin()
 
@@ -881,7 +888,7 @@ def test_expected_ownership_mismatch_preserves_rejection_when_pin_close_fails() 
     with pytest.raises(ValueError, match="expected ownership") as raised:
         _factory(events, pin_lease=pin_lease).open(_lease(), crossed)
 
-    assert raised.value.__notes__ == ["cleanup failed: OSError('pin close')"]
+    assert raised.value.__notes__ == [f"cleanup failed: {close_error!r}"]
     assert pin.close_attempts == 1
     assert events == []
 
@@ -3013,27 +3020,97 @@ def test_start_refuses_active_domain_before_preparation() -> None:
     session.close()
 
 
-def test_failed_start_invalidates_readiness_and_closes_window() -> None:
+@pytest.mark.parametrize(
+    "close_error", [None, OSError("window close"), _CloseAbort("window close")]
+)
+def test_failed_start_invalidates_readiness_and_closes_window(
+    close_error: BaseException | None,
+) -> None:
     events: list[str] = []
+
+    create_error = RuntimeError("create failed")
 
     class FailingDomain(Domain):
         def create(self) -> int:
             self.events.append("domain.create")
-            raise RuntimeError("create failed")
+            raise create_error
 
-    window = _Window(events, "failed")
+    class ClosingWindow(_Window):
+        close_attempts = 0
+
+        def close(self) -> None:
+            self.close_attempts += 1
+            super().close()
+            if close_error is not None:
+                raise close_error
+
+    window = ClosingWindow(events, "failed")
     session = _factory(
         events,
         FailingDomain(events),
         prepare_console=lambda _sid: cast(ConsoleReadinessWindow, window),
     ).open(_lease(), _expected())
 
-    with pytest.raises(RuntimeError, match="create failed"):
+    with pytest.raises(RuntimeError, match="create failed") as raised:
         session.start()
+    assert raised.value is create_error
+    if close_error is not None:
+        assert raised.value.__notes__ == [f"cleanup failed: {close_error!r}"]
     with pytest.raises(RuntimeError, match="successful start"):
         session.readiness()
     assert events.count("window.close:failed") == 1
     session.close()
+    assert window.close_attempts == 1
+
+
+@pytest.mark.parametrize("readiness_fails", [False, True])
+@pytest.mark.parametrize(
+    "close_error", [None, OSError("window close"), _CloseAbort("window close")]
+)
+def test_readiness_failure_preserves_primary_and_releases_window_once(
+    readiness_fails: bool,
+    close_error: BaseException | None,
+) -> None:
+    events: list[str] = []
+    readiness_error = RuntimeError("readiness failed")
+
+    class ClosingWindow(_Window):
+        close_attempts = 0
+
+        def close(self) -> None:
+            self.close_attempts += 1
+            super().close()
+            if close_error is not None:
+                raise close_error
+
+    window = ClosingWindow(events, "readiness")
+
+    def readiness(_sid: UUID, candidate: ConsoleReadinessWindow) -> ReadinessResult:
+        assert candidate is window
+        if readiness_fails:
+            raise readiness_error
+        return ReadinessResult(True, True)
+
+    session = _factory(
+        events,
+        prepare_console=lambda _sid: cast(ConsoleReadinessWindow, window),
+        readiness=readiness,
+    ).open(_lease(), _expected())
+    session.start()
+    if readiness_fails or close_error is not None:
+        expected_error = readiness_error if readiness_fails else close_error
+        assert expected_error is not None
+        with pytest.raises(type(expected_error)) as raised:
+            session.readiness()
+        assert raised.value is expected_error
+        if readiness_fails and close_error is not None:
+            assert raised.value.__notes__ == [f"cleanup failed: {close_error!r}"]
+        with pytest.raises(RuntimeError, match="successful start"):
+            session.readiness()
+    else:
+        assert session.readiness() == ReadinessResult(True, True)
+    session.close()
+    assert window.close_attempts == 1
 
 
 def test_repeated_readiness_returns_cached_result_and_closes_once() -> None:

@@ -1085,11 +1085,16 @@ class _ConcreteSession:
         window = self._readiness_window
         if window is None:
             raise RuntimeError("readiness requires a successful start")
+        self._readiness_window = None
         try:
             result = self._readiness(self._system_id, window)
-        finally:
-            window.close()
-            self._readiness_window = None
+        except BaseException as exc:
+            try:
+                window.close()
+            except BaseException as close_error:
+                exc.add_note(f"cleanup failed: {close_error!r}")
+            raise
+        window.close()
         self._readiness_result = result
         return result
 
@@ -1133,8 +1138,11 @@ class _ConcreteSession:
         )
         try:
             self._require_open_domain().create()
-        except BaseException:
-            window.close()
+        except BaseException as exc:
+            try:
+                window.close()
+            except BaseException as close_error:
+                exc.add_note(f"cleanup failed: {close_error!r}")
             raise
         self._readiness_window = window
 
@@ -1424,22 +1432,14 @@ class LocalExternalBootSessionFactory:
         facts = ownership.ownership
         system_id = facts.system_id
         binding = facts.binding
-        binding_matches_pin = binding.system_id == str(system_id)
-        binding_matches_expected = (
-            system_id == expected.system_id
-            and UUID(binding.run_id) == expected.run_id
-            and (
-                expected.activation_id is None
-                or UUID(binding.activation_id) == expected.activation_id
-            )
-        )
-        if not binding_matches_pin or not binding_matches_expected:
-            mismatch = ValueError("operation lease does not match expected ownership")
+        try:
+            _require_expected_ownership(facts, expected)
+        except BaseException as exc:
             try:
                 pin.close()
             except BaseException as close_error:
-                mismatch.add_note(f"cleanup failed: {close_error!r}")
-            raise mismatch
+                exc.add_note(f"cleanup failed: {close_error!r}")
+            raise
         connection: _Connection | None = None
         domain: _Domain | None = None
         overlay_fd: int | None = None
