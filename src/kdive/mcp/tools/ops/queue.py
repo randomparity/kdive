@@ -152,6 +152,7 @@ async def jobs_list(
                 return _invalid_cursor_error(_JOBS_OBJECT_ID)
         async with pool.connection() as conn:
             depth = await queue.queue_depth(conn)
+            queued_by_lane = await queue.queued_backlog_by_lane(conn)
             fetched = await queue.all_recent_jobs(
                 conn, capped + 1, states=parsed_states, before=before
             )
@@ -174,7 +175,9 @@ async def jobs_list(
                     ),
                 )
         jobs, truncated = _paginate(fetched, capped)
-        return _jobs_response(depth, jobs, limit=capped, truncated=truncated)
+        return _jobs_response(
+            depth, jobs, queued_by_lane=queued_by_lane, limit=capped, truncated=truncated
+        )
 
 
 def _parse_states(states: list[str] | None) -> list[JobState] | None:
@@ -202,7 +205,12 @@ def _parse_states(states: list[str] | None) -> list[JobState] | None:
 
 
 def _jobs_response(
-    depth: dict[str, int], jobs: list[Job], *, limit: int, truncated: bool
+    depth: dict[str, int],
+    jobs: list[Job],
+    *,
+    queued_by_lane: dict[str, queue.QueuedLaneBacklog],
+    limit: int,
+    truncated: bool,
 ) -> ToolResponse:
     items = [_job_item(job) for job in jobs]
     next_cursor = (
@@ -217,6 +225,13 @@ def _jobs_response(
         suggested_next_actions=[_SET_PAUSED_TOOL],
         data={
             **{f"depth_{state}": count for state, count in sorted(depth.items())},
+            "queued_by_lane": {
+                lane: {
+                    "queued_count": stats["queued_count"],
+                    "oldest_queued_age_seconds": stats["oldest_queued_age_seconds"],
+                }
+                for lane, stats in queued_by_lane.items()
+            },
             "limit": limit,
             "truncated": truncated,
             "next_cursor": next_cursor,
@@ -305,6 +320,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         opaque `data.next_cursor` back as `request.cursor` to read the next page. A terminal
         page returns `data.truncated=false` and `data.next_cursor=null`. The depth fields
         always summarize the whole queue, independent of the page and state filters.
+
+        `data.queued_by_lane` maps each dispatch lane to `queued_count` and
+        `oldest_queued_age_seconds`. Counts cover persisted queued rows across all projects,
+        independent of worker eligibility, state filters and pagination. Age is seconds since
+        the oldest queued row's current `created_at`, measured at database statement start.
+        Empty routed lanes have count 0 and age null; other persisted queued lanes also appear.
+        These observations do not assert worker coverage, claimability or a lease deadline.
         """
         payload = request or _OpsJobsListPayload()
         return await jobs_list(

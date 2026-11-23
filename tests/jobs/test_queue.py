@@ -1877,3 +1877,55 @@ def test_is_queue_paused_fails_closed_when_row_missing(migrated_url: str) -> Non
             assert await queue.is_queue_paused(conn) is True  # missing row → fail closed (paused)
 
     asyncio.run(_run())
+
+
+def test_queued_backlog_uses_statement_clock_inside_an_older_transaction(
+    migrated_url: str,
+) -> None:
+    async def run() -> None:
+        async with await _connect(migrated_url) as conn:
+            job = await queue.enqueue(
+                conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "backlog-clock"
+            )
+            async with conn.transaction():
+                await conn.execute("SELECT pg_sleep(0.05)")
+                before = await (
+                    await conn.execute(
+                        "SELECT EXTRACT(EPOCH FROM statement_timestamp()-created_at) "
+                        "FROM jobs WHERE id=%s",
+                        (job.id,),
+                    )
+                ).fetchone()
+                stats = (await queue.queued_backlog_by_lane(conn))[DEFAULT_JOB_DISPATCH_LANE]
+                after = await (
+                    await conn.execute(
+                        "SELECT EXTRACT(EPOCH FROM statement_timestamp()-created_at) "
+                        "FROM jobs WHERE id=%s",
+                        (job.id,),
+                    )
+                ).fetchone()
+            age = stats["oldest_queued_age_seconds"]
+            assert isinstance(age, float)
+            assert before is not None and after is not None
+            assert float(before[0]) <= age <= float(after[0])
+            assert stats["queued_count"] == 1
+
+    asyncio.run(run())
+
+
+def test_queued_backlog_retains_unrecognized_persisted_lanes(migrated_url: str) -> None:
+    async def run() -> None:
+        async with await _connect(migrated_url) as conn:
+            job = await queue.enqueue(
+                conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "backlog-unknown"
+            )
+            await conn.execute(
+                "UPDATE jobs SET dispatch_lane=%s WHERE id=%s", ("unrecognized-lane", job.id)
+            )
+            backlog = await queue.queued_backlog_by_lane(conn)
+        assert backlog["unrecognized-lane"]["queued_count"] == 1
+        assert isinstance(backlog["unrecognized-lane"]["oldest_queued_age_seconds"], float)
+        for lane in (DEFAULT_JOB_DISPATCH_LANE, STATE_FENCED_JOB_DISPATCH_LANE):
+            assert backlog[lane] == {"queued_count": 0, "oldest_queued_age_seconds": None}
+
+    asyncio.run(run())

@@ -106,6 +106,13 @@ opaque `data.next_cursor` back as `request.cursor` to read the next page. A term
 page returns `data.truncated=false` and `data.next_cursor=null`. The depth fields
 always summarize the whole queue, independent of the page and state filters.
 
+`data.queued_by_lane` maps each dispatch lane to `queued_count` and
+`oldest_queued_age_seconds`. Counts cover persisted queued rows across all projects,
+independent of worker eligibility, state filters and pagination. Age is seconds since
+the oldest queued row's current `created_at`, measured at database statement start.
+Empty routed lanes have count 0 and age null; other persisted queued lanes also appear.
+These observations do not assert worker coverage, claimability or a lease deadline.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `request` | object (nullable) | no | Operator job-list filters request; omit for all jobs. |

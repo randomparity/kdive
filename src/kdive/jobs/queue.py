@@ -5,8 +5,8 @@ eligible job with ``FOR UPDATE SKIP LOCKED``, charging an attempt and reclaiming
 lapsed lease; ``heartbeat`` renews a lease; ``complete`` and ``fail`` finalize a
 claimed job. Every worker write goes through a credential-bound database function
 that derives the active incarnation and fences the exact charged attempt. Each
-function wraps its statements in ``conn.transaction()`` so it self-commits on any
-connection, and all assume READ COMMITTED (psycopg's default).
+worker write uses ``conn.transaction()``; read helpers follow the caller's transaction
+context. All assume READ COMMITTED (psycopg's default).
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from enum import StrEnum
+from typing import TypedDict
 from uuid import UUID
 
 from psycopg import AsyncConnection, sql
@@ -25,6 +26,7 @@ from pydantic import SecretStr
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import (
+    ACTIVE_JOB_KINDS,
     DEFAULT_JOB_DISPATCH_LANE,
     PLATFORM_INTERNAL_JOB_KINDS,
     RETIRED_JOB_KINDS,
@@ -607,6 +609,38 @@ async def queue_depth(conn: AsyncConnection) -> dict[str, int]:
         await cur.execute("SELECT state, count(*) FROM jobs GROUP BY state")
         rows = await cur.fetchall()
     return {str(state): int(count) for state, count in rows}
+
+
+class QueuedLaneBacklog(TypedDict):
+    """Persisted queued work in one dispatch lane."""
+
+    queued_count: int
+    oldest_queued_age_seconds: float | None
+
+
+async def queued_backlog_by_lane(conn: AsyncConnection) -> dict[str, QueuedLaneBacklog]:
+    """Return all queued rows by lane, independent of eligibility and worker coverage (ADR-0840).
+
+    Age is seconds from the oldest queued creation timestamp to database statement start.
+    Routed lanes with no queued rows are retained with zero count and null age.
+    """
+    lanes = {dispatch_lane_for_kind(kind) for kind in ACTIVE_JOB_KINDS}
+    backlog: dict[str, QueuedLaneBacklog] = {
+        lane: {"queued_count": 0, "oldest_queued_age_seconds": None} for lane in sorted(lanes)
+    }
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT dispatch_lane, COUNT(*), "
+            "EXTRACT(EPOCH FROM statement_timestamp() - MIN(created_at)) "
+            "FROM jobs WHERE state = 'queued' GROUP BY dispatch_lane ORDER BY dispatch_lane"
+        )
+        rows = await cur.fetchall()
+    for lane, count, age in rows:
+        backlog[str(lane)] = {
+            "queued_count": int(count),
+            "oldest_queued_age_seconds": float(age),
+        }
+    return backlog
 
 
 async def recent_jobs(
