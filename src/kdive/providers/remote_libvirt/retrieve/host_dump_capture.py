@@ -236,7 +236,18 @@ class _HostDumpSpooler:
                     "error": type(exc).__name__,
                 },
             ) from exc
-        _delete_volume(stale)
+        try:
+            stale.delete(0)
+        except libvirt.libvirtError as exc:
+            raise CategorizedError(
+                "host_dump stale volume deletion failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "operation": "deleting stale host_dump volume",
+                    "volume": vol_name,
+                    "error": type(exc).__name__,
+                },
+            ) from exc
 
     def _core_dump(self, domain: Any, path: str, system_id: UUID) -> None:
         flags = libvirt.VIR_DUMP_MEMORY_ONLY

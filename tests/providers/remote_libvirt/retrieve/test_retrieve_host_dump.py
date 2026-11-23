@@ -866,3 +866,32 @@ def test_host_dump_stream_acquisition_is_categorized(
     assert not aborted and not volume.download_called
     assert volume.deleted and not store.stream_requests
     assert len(spools) == 1 and not spools[0].exists()
+
+
+def test_host_dump_stale_delete_failure_prevents_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    fresh = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = _StalePool(xml=_DIR_POOL_XML, stale=stale, fresh=fresh)
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+    error = libvirt_error(libvirt.VIR_ERR_OPERATION_DENIED)
+
+    def fail_delete(flags: int = 0) -> int:
+        raise error
+
+    monkeypatch.setattr(stale, "delete", fail_delete)
+    with pytest.raises(CategorizedError) as caught:
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.__cause__ is error
+    assert caught.value.details == {
+        "operation": "deleting stale host_dump volume",
+        "volume": host_dump_volume_name(_SID),
+        "error": "libvirtError",
+    }
+    assert not conn.domain.core_dumps and not fresh.download_called
+    assert not store.stream_requests and not pool.refreshed
