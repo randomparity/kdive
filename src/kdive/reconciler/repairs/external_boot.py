@@ -33,6 +33,10 @@ type RepairOperation = Literal[
 ]
 
 
+type RepairLane = Literal["activation", "recovery", "release", "cleanup"]
+type RepairCursors = dict[RepairLane, UUID]
+
+
 @dataclass(frozen=True, slots=True)
 class _Candidate:
     activation_id: UUID
@@ -48,7 +52,7 @@ _SOURCE_JOB_SCAN_LIMIT = 100
 _JOB_LOOKUP_TIMEOUT_MS = 2_000
 
 
-_CANDIDATE_SQL = {
+_CANDIDATE_SQL: dict[RepairLane, str] = {
     "activation": """
         SELECT a.id AS activation_id, a.system_id, a.run_id, a.plan_identity, system.project,
                'activate' AS operation
@@ -94,11 +98,19 @@ _CANDIDATE_SQL = {
 }
 
 
-async def _candidates(conn: AsyncConnection, lane: str) -> tuple[_Candidate, ...]:
+async def _candidates(
+    conn: AsyncConnection, lane: RepairLane, *, after: UUID | None = None
+) -> tuple[_Candidate, ...]:
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            cast(LiteralString, _CANDIDATE_SQL[lane] + " ORDER BY a.id LIMIT %s"),
-            (_REPAIR_BATCH,),
+            cast(
+                LiteralString,
+                "SELECT candidate.* FROM ("
+                + _CANDIDATE_SQL[lane]
+                + ") AS candidate WHERE (%s::uuid IS NULL OR candidate.activation_id > %s) "
+                "ORDER BY candidate.activation_id LIMIT %s",
+            ),
+            (after, after, _REPAIR_BATCH),
         )
         rows = await cur.fetchall()
     return tuple(
@@ -298,13 +310,25 @@ async def _enqueue_candidate(
 async def repair_external_boot_lane(
     conn: AsyncConnection,
     *,
-    lane: Literal["activation", "recovery", "release", "cleanup"],
+    lane: RepairLane,
     resolver: ProviderResolver,
     authority_instance: str,
+    cursors: RepairCursors | None = None,
 ) -> int:
-    """Enqueue deterministic successors for one post-prepared repair lane."""
+    """Inspect at most one page, retaining per-lane progress in the caller's map (ADR-0839).
+
+    Omitted state is one-shot; repeat standalone callers supply the same map. A nonempty page
+    advances after each ordinary outcome, while cancellation retries the interrupted candidate.
+    """
+    if cursors is None:
+        cursors = {}
     repaired = 0
-    candidates = await _candidates(conn, lane)
+    candidates = await _candidates(conn, lane, after=cursors.get(lane))
+    if not candidates and lane in cursors:
+        candidates = await _candidates(conn, lane)
+    if not candidates:
+        cursors.pop(lane, None)
+        return 0
     source_jobs = await _candidate_jobs(
         conn, candidates, live_only=False, authority_instance=authority_instance
     )
@@ -338,6 +362,7 @@ async def repair_external_boot_lane(
                 type(error).__name__[:80],
                 category.value,
             )
+        cursors[lane] = candidate.activation_id
     return repaired
 
 
