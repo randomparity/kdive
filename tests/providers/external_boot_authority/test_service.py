@@ -76,7 +76,7 @@ def test_journal_replay_binds_the_local_timing_snapshot() -> None:
     timing = LocalExternalBootTimingV1(accel="tcg", console_window_s=9000, deadline_budget_s=12000)
     legacy = _mutation(_takeover())
     request = legacy.model_copy(update={"local_timing": timing})
-    record = ExternalBootAuthorityService._record(request, [], JournalPhase.ADMITTED)
+    record = ExternalBootAuthorityService._build_journal_record(request, [], JournalPhase.ADMITTED)
     assert record.local_timing == timing
     assert ExternalBootAuthorityService._operation_matches(record, request)
     changed = request.model_copy(
@@ -90,7 +90,9 @@ def test_journal_replay_binds_the_local_timing_snapshot() -> None:
     assert not ExternalBootAuthorityService._operation_matches(
         record, request.model_copy(update={"local_timing": None})
     )
-    legacy_record = ExternalBootAuthorityService._record(legacy, [], JournalPhase.ADMITTED)
+    legacy_record = ExternalBootAuthorityService._build_journal_record(
+        legacy, [], JournalPhase.ADMITTED
+    )
     assert ExternalBootAuthorityService._operation_matches(legacy_record, legacy)
     assert "local_timing" not in legacy_record.model_dump(mode="json", by_alias=True)
 
@@ -1297,7 +1299,7 @@ async def test_teardown_recovery_keeps_ordinary_observe_adapter_compatible(
     request = type(_mutation(takeover)).model_validate(
         values | {"purpose": "teardown", "operation": "teardown"}
     )
-    record = service._record(request, [], JournalPhase.MUTATION_STARTED)
+    record = service._build_journal_record(request, [], JournalPhase.MUTATION_STARTED)
 
     observation = await service._recovery_observation(request, record, [record])
 

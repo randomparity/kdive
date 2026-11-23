@@ -988,7 +988,7 @@ class ExternalBootAuthorityService:
             raise AuthorityServiceError("journal_conflict", reason="head_mismatch_recover")
         return records
 
-    async def _observation_head_is_current(
+    async def _require_current_observation_head(
         self, binding: AuthorityBinding, records: list[JournalRecordV1]
     ) -> None:
         """Refuse an observation unless its local journal ends at the trusted exact head.
@@ -1167,7 +1167,10 @@ class ExternalBootAuthorityService:
                 (JournalPhase.TERMINAL, {"observation": observation, "outcome": "conflict"}),
             ):
                 records = await self._anchor(
-                    binding, journal, records, self._record(request, records, phase, **changes)
+                    binding,
+                    journal,
+                    records,
+                    self._build_journal_record(request, records, phase, **changes),
                 )
             try:
                 await self._finalize_adapter(request, records)
@@ -1250,7 +1253,7 @@ class ExternalBootAuthorityService:
         )
 
     @staticmethod
-    def _record(
+    def _build_journal_record(
         request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1,
         records: list[JournalRecordV1],
         phase: JournalPhase,
@@ -1376,7 +1379,9 @@ class ExternalBootAuthorityService:
     ) -> list[JournalRecordV1]:
         request = self._mutation_from_record(prior, binding)
         if prior.phase is JournalPhase.ADMITTED:
-            terminal = self._record(request, records, JournalPhase.TERMINAL, outcome="never-began")
+            terminal = self._build_journal_record(
+                request, records, JournalPhase.TERMINAL, outcome="never-began"
+            )
             return await self._anchor(binding, journal, records, terminal)
         if prior.phase is JournalPhase.MUTATION_STARTED:
             try:
@@ -1391,7 +1396,7 @@ class ExternalBootAuthorityService:
                 binding,
                 journal,
                 records,
-                self._record(request, records, JournalPhase.PROVIDER_RETURNED),
+                self._build_journal_record(request, records, JournalPhase.PROVIDER_RETURNED),
             )
         elif prior.phase is JournalPhase.PROVIDER_RETURNED:
             try:
@@ -1413,7 +1418,9 @@ class ExternalBootAuthorityService:
                 binding,
                 journal,
                 records,
-                self._record(request, records, JournalPhase.OBSERVED, observation=observation),
+                self._build_journal_record(
+                    request, records, JournalPhase.OBSERVED, observation=observation
+                ),
             )
         outcome = (
             observation.category
@@ -1424,7 +1431,7 @@ class ExternalBootAuthorityService:
             binding,
             journal,
             records,
-            self._record(
+            self._build_journal_record(
                 request,
                 records,
                 JournalPhase.TERMINAL,
@@ -1617,7 +1624,7 @@ class ExternalBootAuthorityService:
                     elif pending.generation >= request.generation:
                         raise AuthorityServiceError("superseded")
                     else:
-                        superseded = self._record(
+                        superseded = self._build_journal_record(
                             request,
                             records,
                             JournalPhase.TAKEOVER_SUPERSEDED,
@@ -1627,7 +1634,9 @@ class ExternalBootAuthorityService:
                         )
                         records = await self._anchor(binding, journal, records, superseded)
                 if watermark is None:
-                    watermark = self._record(request, records, JournalPhase.WATERMARK_INSTALLED)
+                    watermark = self._build_journal_record(
+                        request, records, JournalPhase.WATERMARK_INSTALLED
+                    )
                     records = await self._anchor(binding, journal, records, watermark)
                 lane.watermark_generation = request.generation
                 active = lane.active
@@ -1714,7 +1723,7 @@ class ExternalBootAuthorityService:
                     for phase in phases.values()
                 ):
                     raise AuthorityServiceError("provider_conflict")
-                acknowledgement = self._record(
+                acknowledgement = self._build_journal_record(
                     request,
                     records,
                     JournalPhase.TAKEOVER_ACKNOWLEDGED,
@@ -1942,7 +1951,7 @@ class ExternalBootAuthorityService:
                         binding,
                         journal,
                         records,
-                        self._record(request, records, JournalPhase.ADMITTED),
+                        self._build_journal_record(request, records, JournalPhase.ADMITTED),
                     )
                     lane.active = active
                 await asyncio.sleep(0)
@@ -1952,7 +1961,7 @@ class ExternalBootAuthorityService:
                             binding,
                             journal,
                             records,
-                            self._record(
+                            self._build_journal_record(
                                 request,
                                 records,
                                 JournalPhase.TERMINAL,
@@ -1964,7 +1973,7 @@ class ExternalBootAuthorityService:
                         binding,
                         journal,
                         records,
-                        self._record(request, records, JournalPhase.MUTATION_STARTED),
+                        self._build_journal_record(request, records, JournalPhase.MUTATION_STARTED),
                     )
                     active.phase = JournalPhase.MUTATION_STARTED
                     context = AuthorityCommitContextV1.for_record(records[-1])
@@ -2083,7 +2092,9 @@ class ExternalBootAuthorityService:
                         completion_binding,
                         journal,
                         records,
-                        self._record(request, records, JournalPhase.PROVIDER_RETURNED),
+                        self._build_journal_record(
+                            request, records, JournalPhase.PROVIDER_RETURNED
+                        ),
                     )
                 try:
                     if (
@@ -2112,7 +2123,7 @@ class ExternalBootAuthorityService:
                         completion_binding,
                         journal,
                         records,
-                        self._record(
+                        self._build_journal_record(
                             request, records, JournalPhase.OBSERVED, observation=observation
                         ),
                     )
@@ -2125,7 +2136,7 @@ class ExternalBootAuthorityService:
                         completion_binding,
                         journal,
                         records,
-                        self._record(
+                        self._build_journal_record(
                             request,
                             records,
                             JournalPhase.TERMINAL,
@@ -2250,13 +2261,15 @@ class ExternalBootAuthorityService:
                         binding,
                         journal,
                         records,
-                        self._record(mutation, records, JournalPhase.ADMITTED),
+                        self._build_journal_record(mutation, records, JournalPhase.ADMITTED),
                     )
                     records = await self._anchor(
                         binding,
                         journal,
                         records,
-                        self._record(mutation, records, JournalPhase.MUTATION_STARTED),
+                        self._build_journal_record(
+                            mutation, records, JournalPhase.MUTATION_STARTED
+                        ),
                     )
                     anchored_here = True
                 receipt = await self._repository.open_remote_module_attempt(
@@ -2478,7 +2491,9 @@ class ExternalBootAuthorityService:
                         completion_binding,
                         journal,
                         records,
-                        self._record(mutation, records, JournalPhase.PROVIDER_RETURNED),
+                        self._build_journal_record(
+                            mutation, records, JournalPhase.PROVIDER_RETURNED
+                        ),
                     )
                 try:
                     observation = await self._adapter.observe(mutation)
@@ -2492,7 +2507,7 @@ class ExternalBootAuthorityService:
                         completion_binding,
                         journal,
                         records,
-                        self._record(
+                        self._build_journal_record(
                             mutation, records, JournalPhase.OBSERVED, observation=observation
                         ),
                     )
@@ -2505,7 +2520,7 @@ class ExternalBootAuthorityService:
                         completion_binding,
                         journal,
                         records,
-                        self._record(
+                        self._build_journal_record(
                             mutation,
                             records,
                             JournalPhase.TERMINAL,
@@ -2615,19 +2630,21 @@ class ExternalBootAuthorityService:
                     binding,
                     journal,
                     records,
-                    self._record(mutation, records, JournalPhase.PROVIDER_RETURNED),
+                    self._build_journal_record(mutation, records, JournalPhase.PROVIDER_RETURNED),
                 )
                 records = await self._anchor(
                     binding,
                     journal,
                     records,
-                    self._record(mutation, records, JournalPhase.OBSERVED, observation=observation),
+                    self._build_journal_record(
+                        mutation, records, JournalPhase.OBSERVED, observation=observation
+                    ),
                 )
                 await self._anchor(
                     binding,
                     journal,
                     records,
-                    self._record(
+                    self._build_journal_record(
                         mutation,
                         records,
                         JournalPhase.TERMINAL,
@@ -2898,7 +2915,7 @@ class ExternalBootAuthorityService:
                     if lane.active is not None:
                         raise AuthorityServiceError("superseded")
                     _journal, records = self._lane_journal(request.system_id, lane)
-                    await self._observation_head_is_current(trusted, records)
+                    await self._require_current_observation_head(trusted, records)
                     acknowledgements = [
                         record
                         for record in records
@@ -2924,7 +2941,7 @@ class ExternalBootAuthorityService:
                     )
                     if rechecked is None or not self._binding_matches(rechecked, request):
                         raise AuthorityServiceError("superseded")
-                    await self._observation_head_is_current(rechecked, records)
+                    await self._require_current_observation_head(rechecked, records)
                     return observation
             finally:
                 self._release_lane(trusted.system_id, lane)
