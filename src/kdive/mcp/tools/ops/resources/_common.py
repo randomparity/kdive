@@ -117,13 +117,16 @@ class TcpResourceProbe:
 
 
 def _host_port(host_uri: str) -> tuple[str, int] | None:
-    """Extract ``(host, port)`` from a provider host URI, or ``None`` if no host is present."""
-    parsed = urlsplit(host_uri)
-    host = parsed.hostname
+    """Extract ``(host, port)``, or ``None`` for a malformed or hostless provider URI."""
+    try:
+        parsed = urlsplit(host_uri)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
     if not host:
         return None
-    port = parsed.port if parsed.port is not None else _DEFAULT_LIBVIRT_TLS_PORT
-    return host, port
+    return host, port if port is not None else _DEFAULT_LIBVIRT_TLS_PORT
 
 
 __all__ = [
