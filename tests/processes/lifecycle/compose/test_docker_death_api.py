@@ -7,25 +7,11 @@ from typing import cast
 
 import pytest
 
-from kdive.processes.lifecycle.compose.docker_death_api import (
-    WorkerLifecycleGate,
-    permitted_inspect_path,
-)
+from kdive.processes.lifecycle.compose.docker_death_api import WorkerLifecycleGate
 from kdive.worker_lifecycle.authority_store import DockerAuthorityBinding
 from kdive.worker_lifecycle.contracts import TerminationOutcome
 
 _CREDENTIAL = "c" * 64  # pragma: allowlist secret
-
-
-def test_only_exact_container_inspect_get_is_permitted() -> None:
-    container_id = "a" * 64
-    assert permitted_inspect_path("GET", f"/containers/{container_id}/json")
-    assert not permitted_inspect_path("GET", f"/containers/{container_id[:12]}/json")
-    assert not permitted_inspect_path("POST", f"/containers/{container_id}/json")
-    assert not permitted_inspect_path("GET", "/containers/json")
-    assert not permitted_inspect_path("GET", f"/containers/{container_id}/logs")
-    assert not permitted_inspect_path("GET", f"/containers/{container_id}/archive?path=/")
-    assert not permitted_inspect_path("GET", f"/containers/{container_id}/json?size=1")
 
 
 async def _done(*args: object) -> None:

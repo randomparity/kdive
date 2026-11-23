@@ -256,7 +256,7 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_DOCKER_DEATH_API` | server | `http://worker-death-api:2375` | no | Legacy Docker registration-marker endpoint; validated but not contacted. Recovery uses witness termination rows. |
+| `KDIVE_DOCKER_DEATH_API` | server | `http://worker-death-api:2375` | no | Legacy registration-marker compatibility endpoint; validated but not contacted. Recovery requires the exact holder's durable witness termination row. |
 | `KDIVE_KUBERNETES_CREDENTIAL_BROKER_CA` | lifecycle-witness | — | conditional | Certificate-authority file reference trusted by the broker and init client. |
 | `KDIVE_KUBERNETES_CREDENTIAL_BROKER_HOST` | lifecycle-witness | — | conditional | Private lifecycle-witness bind host for the Kubernetes worker credential broker. |
 | `KDIVE_KUBERNETES_CREDENTIAL_BROKER_PORT` | lifecycle-witness | — | conditional | Private TLS port for the Kubernetes worker credential broker. |

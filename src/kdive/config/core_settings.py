@@ -929,8 +929,8 @@ DOCKER_DEATH_API = Setting(
     group="worker-death",
     processes=_SERVER,
     help=(
-        "Legacy Docker registration-marker endpoint; validated but not contacted. "
-        "Recovery uses witness termination rows."
+        "Legacy registration-marker compatibility endpoint; validated but not contacted. "
+        "Recovery requires the exact holder's durable witness termination row."
     ),
 )
 

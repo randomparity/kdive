@@ -220,7 +220,6 @@ services:
       # its access boundary — the unauthenticated /readyz/metrics stay non-public.
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9464
       KDIVE_WORKER_DEATH_VERIFIER: docker
-      KDIVE_DOCKER_DEATH_API: http://worker-death-api:2375
     healthcheck:
       <<: *readyz_cadence
       # urlopen raises HTTPError on /readyz's 503 (not-ready), so the broad except maps
@@ -253,11 +252,6 @@ services:
         condition: service_completed_successfully
       oidc:
         condition: service_started
-      worker-death-api:
-        condition: service_started
-    networks:
-      - default
-      - worker-death
 
   # The worker does real build/install I/O as a non-root user, so it needs writable,
   # correctly-owned volumes for the build workspace and install staging (ADR-0088
@@ -391,21 +385,6 @@ services:
       - ./deploy/grafana/kdive-overview.json:/var/lib/grafana/dashboards/kdive-overview.json:ro
     ports:
       - "${KDIVE_GRAFANA_PORT:-3000}:3000"
-
-  # Inspect-only authority used by the server to prove a specific worker container stopped.
-  # The proxy is reachable only on an internal network and rejects all write API methods.
-  worker-death-api:
-    image: ${KDIVE_IMAGE:-kdive:dev}
-    entrypoint: ["python", "-m", "kdive.processes.lifecycle.compose.docker_death_api"]
-    user: root
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - worker-death
-
-networks:
-  worker-death:
-    internal: true
 
 # Every service that keeps state has a named volume here (ADR-0552). A plain `docker compose
 # down` and `just compose-stop` keep all of it; `docker compose down --volumes`,
