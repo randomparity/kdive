@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
+from types import ModuleType
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -17,6 +18,7 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.jobs.worker as worker_module
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import (
     DEFAULT_JOB_DISPATCH_LANE,
@@ -421,3 +423,61 @@ def test_shutdown_drains_a_job_still_running_on_another_lane(migrated_url: str) 
             assert await _job_state(migrated_url, restore.id) is JobState.SUCCEEDED
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("failing_lane", _BOTH_LANES)
+def test_shutdown_propagates_a_late_lane_failure(
+    failing_lane: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> None:
+        worker = _worker(
+            _unopened_pool(),
+            HandlerRegistry(),
+            worker_id="drain-proof",
+            config=WorkerConfig(accepted_lanes=_BOTH_LANES),
+        )
+        entered = {lane: asyncio.Event() for lane in _BOTH_LANES}
+        first_release, late_release = asyncio.Event(), asyncio.Event()
+        first_completion = asyncio.Event()
+        failure = _LoopDied(failing_lane)
+
+        async def run_once(lane: str) -> Job | None:
+            entered[lane].set()
+            if lane != failing_lane:
+                await first_release.wait()
+                return None
+            await late_release.wait()
+            raise failure
+
+        worker.run_once = run_once
+        original = worker_module.asyncio
+        shadow = ModuleType("asyncio")
+        shadow.__dict__.update(vars(asyncio))
+
+        async def observe_wait(*args: Any, **kwargs: Any) -> Any:
+            done, pending = await original.wait(*args, **kwargs)
+            assert len(done) == len(pending) == 1
+            assert next(iter(done)).result() is None
+            first_completion.set()
+            return done, pending
+
+        monkeypatch.setattr(shadow, "wait", observe_wait)
+        monkeypatch.setattr(worker_module, "asyncio", shadow)
+        stop = asyncio.Event()
+        runner = asyncio.create_task(worker.run(stop))
+        try:
+            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered.values())), 5)
+            stop.set()
+            first_release.set()
+            await asyncio.wait_for(first_completion.wait(), 5)
+            late_release.set()
+            with pytest.raises(_LoopDied) as caught:
+                await asyncio.wait_for(runner, 5)
+            assert caught.value is failure
+        finally:
+            stop.set()
+            first_release.set()
+            late_release.set()
+            await asyncio.wait_for(asyncio.gather(runner, return_exceptions=True), 5)
+
+    asyncio.run(run())

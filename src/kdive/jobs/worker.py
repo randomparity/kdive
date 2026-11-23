@@ -405,7 +405,8 @@ class Worker:
         ]
         try:
             done, pending = await asyncio.wait(loops, return_when=asyncio.FIRST_COMPLETED)
-            if pending and not stop.is_set():
+            draining = stop.is_set()
+            if pending and not draining:
                 _log.error(
                     "claim loop ended while the worker was still running; stopping the "
                     "remaining %d lane loop(s) so the process is restarted rather than "
@@ -418,8 +419,9 @@ class Worker:
                 # On the stop path this waits out each lane's in-flight job; on the death path
                 # the cancellations above have already landed.
                 await asyncio.gather(*pending, return_exceptions=True)
-            # Re-raise whatever ended a loop, after the siblings are down.
-            for task in done:
+            # Observe drained lanes too; cancelled siblings belong only to early-death cleanup.
+            completed = loops if draining else done
+            for task in completed:
                 task.result()
         finally:
             for task in loops:
