@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -14,6 +15,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.connection import staged_volumes
+from kdive.providers.remote_libvirt.connection.uri_validation import validate_remote_uri
 from tests.providers.remote_libvirt.conftest import libvirt_error
 
 
@@ -24,6 +26,34 @@ def _config(pool: str = "kdive-pool") -> RemoteLibvirtConfig:
         concurrent_allocation_cap=1,
         storage_pool=pool,
     )
+
+
+@pytest.mark.parametrize("validate_during_resolution", [False, True])
+@pytest.mark.parametrize(
+    "uri",
+    ["qemu+tls://[::1/system", "qemu+tls://storage.invalid:abc/system"],
+)
+def test_malformed_uri_degrades_without_opening_connection(
+    uri: str, validate_during_resolution: bool, tmp_path: Path
+) -> None:
+    def config_factory() -> RemoteLibvirtConfig:
+        if validate_during_resolution:
+            validate_remote_uri(uri)
+        return replace(_config(), uri=uri)
+
+    def open_connection(uri: str) -> _Conn:
+        raise AssertionError(f"malformed URI reached libvirt: {uri}")
+
+    result = asyncio.run(
+        staged_volumes.probe_staged_volumes(
+            ["a.qcow2", "b.qcow2"],
+            config_factory=config_factory,
+            open_connection=open_connection,
+            secret_backend_factory=_backend,
+            pki_base_dir=tmp_path,
+        )
+    )
+    assert result == {"a.qcow2": "unknown", "b.qcow2": "unknown"}
 
 
 class _Vol:
