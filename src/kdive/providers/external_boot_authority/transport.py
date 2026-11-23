@@ -558,33 +558,25 @@ async def _dispatch(
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
             _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-conflict")
-    if operation == "execute-remote-module-lifecycle":
+    if operation in {"execute-remote-module-lifecycle", "execute-remote-module-preparation"}:
         if remote_module_service is None:
             return _error("provider-not-configured")
-        if not isinstance(request, RemoteModuleLifecycleRequestV1):
+        if (
+            operation == "execute-remote-module-lifecycle"
+            and not isinstance(request, RemoteModuleLifecycleRequestV1)
+        ) or (
+            operation == "execute-remote-module-preparation"
+            and not isinstance(request, RemoteModuleVolumePreparationRequestV1)
+        ):
             raise _TransportError("invalid-request")
         try:
-            result = await remote_module_service.execute_remote_module_lifecycle(peer, request)
-            return _success(result)
-        except AuthorityServiceError as exc:
-            return _service_error(exc)
-        except CategorizedError as exc:
-            _log_module_completion(operation, exc)
-            if exc.details.get("completion") == "failed-after-mutation":
-                return _error("remote-module-failed")
-            if exc.details.get("completion") == "refused-before-mutation":
-                return _error("remote-module-refused")
-            return _error("provider-conflict")
-        except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
-            _log.exception("authority transport %s failed unexpectedly", operation)
-            return _error("provider-conflict")
-    if operation == "execute-remote-module-preparation":
-        if remote_module_service is None:
-            return _error("provider-not-configured")
-        if not isinstance(request, RemoteModuleVolumePreparationRequestV1):
-            raise _TransportError("invalid-request")
-        try:
-            result = await remote_module_service.execute_remote_module_preparation(peer, request)
+            if isinstance(request, RemoteModuleLifecycleRequestV1):
+                result = await remote_module_service.execute_remote_module_lifecycle(peer, request)
+            else:
+                assert isinstance(request, RemoteModuleVolumePreparationRequestV1)
+                result = await remote_module_service.execute_remote_module_preparation(
+                    peer, request
+                )
             return _success(result)
         except AuthorityServiceError as exc:
             return _service_error(exc)
