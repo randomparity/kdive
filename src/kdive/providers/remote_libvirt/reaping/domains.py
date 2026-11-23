@@ -143,7 +143,12 @@ def teardown_on_host(conn: _ReaperConn, storage_pool: str, name: str) -> bool:
         if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
             return False  # not on this host (or already gone) — try the next
         raise _infra("looking up leaked domain", domain=name) from exc
-    recorded_pool = _recorded_pool(domain, name)
+    try:
+        recorded_pool = _recorded_pool(domain, name)
+    except libvirt.libvirtError as exc:
+        if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+            return False
+        raise
     _destroy_and_undefine(domain, name)
     overlay_name = overlay_volume_name(name.removeprefix(DOMAIN_PREFIX))
     delete_volume(conn, recorded_pool or storage_pool, overlay_name)
@@ -152,11 +157,13 @@ def teardown_on_host(conn: _ReaperConn, storage_pool: str, name: str) -> bool:
 
 
 def _recorded_pool(domain: _Domain, name: str) -> str | None:
-    """The storage pool the domain's disk records, or ``None`` if it is already unreadable."""
+    """Recorded pool, or ``None`` when successfully read XML contains no pool metadata."""
     try:
         return disk_pool_strict(domain.XMLDesc(), operation="leaked-domain teardown", domain=name)
-    except libvirt.libvirtError:
-        return None
+    except libvirt.libvirtError as exc:
+        if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+            raise
+        raise _infra("reading leaked domain XML", domain=name) from exc
 
 
 def _destroy_and_undefine(domain: _Domain, name: str) -> None:
