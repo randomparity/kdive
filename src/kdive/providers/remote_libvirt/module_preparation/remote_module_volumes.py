@@ -23,11 +23,15 @@ import libvirt
 from defusedxml.common import DefusedXmlException
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleOperationV1,
+)
+from kdive.providers.external_boot_authority.module_protocol import (
+    PreparedModuleVolumes,
+    PreparedVolume,
+)
 from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
-)
-from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
-    RemoteModuleOperationV1,
 )
 from kdive.providers.remote_libvirt.module_preparation.remote_module_scratch import (
     ScratchState,
@@ -35,11 +39,6 @@ from kdive.providers.remote_libvirt.module_preparation.remote_module_scratch imp
     classify_head,
     format_scratch_volume,
     read_head,
-)
-from kdive.providers.remote_libvirt.module_preparation.remote_module_volume_names import (
-    ModuleVolumeOwner,
-    parse_module_volume_name,
-    render_module_volume_name,
 )
 from kdive.providers.shared.external_boot_bounds import (
     MAX_MODULE_ARCHIVE_BYTES as MAX_ARCHIVE_BYTES,
@@ -51,6 +50,11 @@ from kdive.providers.shared.external_boot_bounds import (
     MAX_MODULE_REGULAR_BYTES as MAX_CONTENT_BYTES,
 )
 from kdive.providers.shared.libvirt_xml_bounds import parse_libvirt_xml
+from kdive.providers.shared.module_volume_names import (
+    ModuleVolumeOwner,
+    parse_module_volume_name,
+    render_module_volume_name,
+)
 
 SCRATCH_CAPACITY_BYTES = 10 * 1024**3
 _DEBUGINFO_TREE_NAME = "vmlinux"
@@ -236,24 +240,6 @@ class VolumeRequest:
     work_dir: Path | None = None
     archive: Path | None = None
     debuginfo: Path | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedVolume:
-    pool: str
-    name: str
-    system_id: str
-    run_id: str
-    operation_nonce: str
-    purpose: str
-    digest: str
-    capacity_bytes: int
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedModuleVolumes:
-    source: PreparedVolume
-    scratch: PreparedVolume
 
 
 class Volume(Protocol):

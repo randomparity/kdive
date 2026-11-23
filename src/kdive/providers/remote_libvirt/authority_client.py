@@ -1,5 +1,17 @@
 """Remote-module wire codecs behind the resource-bound authority capability (ADR-0654)."""
 
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleOperationV1,
+    identity_for,
+)
+from kdive.providers.external_boot_authority.module_protocol import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
 from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.ports.module_operation import (
     ModuleBeginRequest,
@@ -10,18 +22,6 @@ from kdive.providers.ports.module_operation import (
     ModuleOperation,
     ModulePreparationRequest,
     ModuleRecovery,
-)
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModulePreparationBeginRequestV1,
-    RemoteModulePreparationBeginResponseV1,
-    RemoteModuleTerminalPreparationResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
-)
-from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
-    RemoteModuleOperationV1,
-    identity_for,
 )
 
 

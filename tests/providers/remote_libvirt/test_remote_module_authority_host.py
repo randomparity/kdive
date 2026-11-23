@@ -26,6 +26,20 @@ from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
 )
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleOperationV1,
+    RemoteModuleResultV1,
+    identity_for,
+)
+from kdive.providers.external_boot_authority.module_protocol import (
+    PreparedVolume,
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleSystemTeardownRequestV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityPreparationMutationRequestV1,
@@ -39,12 +53,6 @@ from kdive.providers.remote_libvirt.authority_client import (
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
     DurableRemoteModuleVolumePreparationHost,
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModulePreparationBeginResponseV1,
-    RemoteModuleSystemTeardownRequestV1,
-    RemoteModuleTerminalPreparationResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
     RemoteModuleVolumePreparationStore,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
@@ -58,11 +66,6 @@ from kdive.providers.remote_libvirt.module_preparation.remote_module_authority_h
     RemoteModuleAuthorityHostFactory,
     load_installed_remote_module_appliance,
 )
-from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
-    RemoteModuleOperationV1,
-    RemoteModuleResultV1,
-    identity_for,
-)
 from kdive.providers.remote_libvirt.module_preparation.remote_module_operation import (
     RemoteModuleApplianceExecution,
     RemoteModuleVolumePreparation,
@@ -73,7 +76,6 @@ from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation
 from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
     BuiltSourceImage,
     ModuleTreeEntry,
-    PreparedVolume,
     SourceFilesystemEvidence,
     render_module_volume_name,
 )

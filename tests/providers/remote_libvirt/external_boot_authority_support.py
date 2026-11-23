@@ -6,6 +6,14 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleOperationV1,
+    RemoteModuleRecoveryRefV2,
+)
+from kdive.providers.external_boot_authority.module_protocol import (
+    RemoteModuleLifecycleResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
@@ -25,15 +33,9 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootCoordinator,
     RemoteExternalBootObservedState,
     RemoteExternalBootRecoveryRecord,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
     RemoteModuleVolumePreparationStore,
 )
 from kdive.providers.remote_libvirt.lifecycle.external_boot import prepare_target_definition
-from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
-    RemoteModuleOperationV1,
-    RemoteModuleRecoveryRefV2,
-)
 from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )

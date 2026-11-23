@@ -5,11 +5,11 @@ from typing import Any, cast
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleOperationV1,
+)
 from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
-)
-from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
-    RemoteModuleOperationV1,
 )
 from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
     BuiltSourceImage,

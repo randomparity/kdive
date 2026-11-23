@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleOperationV1,
+)
+from kdive.providers.external_boot_authority.module_protocol import PreparedVolume
 from kdive.providers.ports.external_boot import ExternalBootArtifactStager
 from kdive.providers.ports.module_operation import RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance import (
@@ -16,13 +20,9 @@ from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance i
 from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
 )
-from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
-    RemoteModuleOperationV1,
-)
 from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
     FilesystemImageWriter,
     ModuleTreeEntry,
-    PreparedVolume,
     StorageConn,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry

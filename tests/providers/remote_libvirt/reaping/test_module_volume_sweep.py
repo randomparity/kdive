@@ -21,10 +21,10 @@ from kdive.providers.ports.module_operation import RemoteDeviceIdentity
 from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )
-from kdive.providers.remote_libvirt.module_preparation.remote_module_volume_names import (
+from kdive.providers.remote_libvirt.reaping.module_volume_sweep import ModuleVolumeSweepService
+from kdive.providers.shared.module_volume_names import (
     render_module_volume_name,
 )
-from kdive.providers.remote_libvirt.reaping.module_volume_sweep import ModuleVolumeSweepService
 
 POOL = "modules"
 SYSTEM = "00000000-0000-4000-8000-000000000001"

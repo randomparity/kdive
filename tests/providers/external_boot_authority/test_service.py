@@ -19,6 +19,17 @@ from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptPreparationRequestV1,
 )
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleOperationV1,
+)
+from kdive.providers.external_boot_authority.module_protocol import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
 from kdive.providers.external_boot_authority.proof_barrier import (
     ProofBarrierAbort,
     ProofBarrierShutdown,
@@ -46,17 +57,6 @@ from kdive.providers.ports.external_boot import (
     ExternalBootPreparationObservation,
     OpaqueProviderRef,
     RecoveryObjectObservation,
-)
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModulePreparationBeginRequestV1,
-    RemoteModulePreparationBeginResponseV1,
-    RemoteModuleTerminalPreparationResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
-)
-from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
-    RemoteModuleOperationV1,
 )
 from kdive.serialization import ServerFaultError
 from tests.providers.external_boot_authority.service_support import (

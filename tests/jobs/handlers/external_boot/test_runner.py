@@ -61,6 +61,9 @@ from kdive.jobs.models import (
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.module_protocol import (
+    RemoteModuleTerminalPreparationResponseV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityInstallRefusalV1,
     AuthorityObservationV1,
@@ -78,9 +81,6 @@ from kdive.providers.ports.external_boot import (
     ExternalBootPreparationObservation,
     OpaqueProviderRef,
     RunningKernelObservation,
-)
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    RemoteModuleTerminalPreparationResponseV1,
 )
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry

@@ -20,6 +20,21 @@ import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleOperationV1,
+    RemoteModuleRecoveryRefV2,
+    RemoteModuleResultV1,
+    identity_for,
+)
+from kdive.providers.external_boot_authority.module_protocol import (
+    PreparedModuleVolumes,
+    PreparedVolume,
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModuleSystemTeardownRequestV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationResponseV1,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
@@ -31,12 +46,7 @@ from kdive.providers.remote_libvirt.debuginfo_module_tree import STAGED_NAME
 from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
     PriorPower,
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModuleSystemTeardownRequestV1,
-    RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleTerminalRecord,
-    RemoteModuleVolumePreparationResponseV1,
 )
 from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance import (
     ApplianceOutcome,
@@ -49,12 +59,6 @@ from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments
     ExpectedAppliance,
     ExpectedAttachmentState,
     inspect_module_attachments,
-)
-from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
-    RemoteModuleOperationV1,
-    RemoteModuleRecoveryRefV2,
-    RemoteModuleResultV1,
-    identity_for,
 )
 from kdive.providers.remote_libvirt.module_preparation.remote_module_operation import (
     RemoteModuleApplianceExecution,
@@ -69,8 +73,6 @@ from kdive.providers.remote_libvirt.module_preparation.remote_module_result_read
 )
 from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
     Ext4SourceFilesystemWriter,
-    PreparedModuleVolumes,
-    PreparedVolume,
     VolumeRequest,
     delete_owned_attempt_volume,
     prepare_attempt_volumes,

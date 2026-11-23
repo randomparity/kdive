@@ -11,10 +11,8 @@ from pydantic import SecretStr
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority import transport
+from kdive.providers.external_boot_authority.module_protocol import RemoteModuleLifecycleRequestV1
 from kdive.providers.external_boot_authority.protocol import AuthorityMutationRequestV1
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    RemoteModuleLifecycleRequestV1,
-)
 from tests.providers.remote_libvirt.authority_module_support import _remote_preparation_request
 
 

@@ -26,6 +26,14 @@ from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityResponseV1,
     decode_device_identity_request,
 )
+from kdive.providers.external_boot_authority.module_protocol import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     ModuleVolumeSweepRequestV1,
     ModuleVolumeSweepResponseV1,
@@ -53,14 +61,6 @@ from kdive.providers.external_boot_authority.protocol import (
     authority_server_name,
     decode_authority_request,
     read_frame,
-)
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModulePreparationBeginRequestV1,
-    RemoteModulePreparationBeginResponseV1,
-    RemoteModuleTerminalPreparationResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
 )
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemAcknowledgementV1,

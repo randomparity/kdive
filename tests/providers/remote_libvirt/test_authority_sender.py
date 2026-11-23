@@ -24,6 +24,14 @@ from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityInodeV1,
     DeviceIdentityRequestV1,
 )
+from kdive.providers.external_boot_authority.module_protocol import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     ModuleVolumeSweepRequestV1,
     ModuleVolumeSweepResponseV1,
@@ -44,14 +52,6 @@ from kdive.providers.remote_libvirt.config import (
     RemoteAuthorityBinding,
     RemoteLibvirtConfig,
     TlsCertRefs,
-)
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModulePreparationBeginRequestV1,
-    RemoteModulePreparationBeginResponseV1,
-    RemoteModuleTerminalPreparationResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend

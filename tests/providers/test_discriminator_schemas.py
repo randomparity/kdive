@@ -78,16 +78,7 @@ _DIGESTS: dict[str, dict[str, str]] = {
         "RemoteSystemTeardownAnchorV1": "b22720bd9b82",  # pragma: allowlist secret
         "RemoteSystemTeardownIntentV1": "4967ca4a7b80",  # pragma: allowlist secret
         "RemoteSystemTeardownRecordV1": "0a198acd7969",  # pragma: allowlist secret
-        "RemotePreparedVolumeV1": "9e28bf7bd2f5",  # pragma: allowlist secret
-        "RemoteModuleVolumePreparationRequestV1": "08782e3f4736",  # pragma: allowlist secret
-        "RemoteModulePreparationBeginRequestV1": "817445bcdef1",  # pragma: allowlist secret
-        "RemoteModulePreparationBeginResponseV1": "fbc79b61f617",  # pragma: allowlist secret
-        "RemoteModuleVolumePreparationResponseV1": "58699e7e3001",  # pragma: allowlist secret
-        "RemoteModuleTerminalPreparationResponseV1": "a6595c552838",  # pragma: allowlist secret
         "RemoteModulePreparationCompletionV1": "d1371e7d4e94",  # pragma: allowlist secret
-        "RemoteModuleLifecycleRequestV1": "d38d5e836b04",  # pragma: allowlist secret
-        "RemoteModuleLifecycleResponseV1": "73a78015363c",  # pragma: allowlist secret
-        "RemoteModuleSystemTeardownRequestV1": "46b0d12b2f0a",  # pragma: allowlist secret
         "_PersistedRemoteModuleLifecycleV1": "74efdf371bba",  # pragma: allowlist secret
         "RemoteModuleLifecycleCompletionV1": "3538b4a80de3",  # pragma: allowlist secret
         "RemoteModuleTerminalRecord": "3d3732382e0e",  # pragma: allowlist secret
@@ -99,7 +90,18 @@ _DIGESTS: dict[str, dict[str, str]] = {
         "RemoteExternalBootRecoveryRecord": "bd592c0909a6",  # pragma: allowlist secret
         "RemoteExternalBootMaterializationRecord": "97fa3a7540eb",  # pragma: allowlist secret
     },
-    "kdive.providers.remote_libvirt.module_preparation.remote_module_documents": {
+    "kdive.providers.external_boot_authority.module_protocol": {
+        "RemotePreparedVolumeV1": "9e28bf7bd2f5",  # pragma: allowlist secret
+        "RemoteModuleVolumePreparationRequestV1": "08782e3f4736",  # pragma: allowlist secret
+        "RemoteModulePreparationBeginRequestV1": "817445bcdef1",  # pragma: allowlist secret
+        "RemoteModulePreparationBeginResponseV1": "fbc79b61f617",  # pragma: allowlist secret
+        "RemoteModuleVolumePreparationResponseV1": "58699e7e3001",  # pragma: allowlist secret
+        "RemoteModuleTerminalPreparationResponseV1": "a6595c552838",  # pragma: allowlist secret
+        "RemoteModuleLifecycleRequestV1": "d38d5e836b04",  # pragma: allowlist secret
+        "RemoteModuleLifecycleResponseV1": "73a78015363c",  # pragma: allowlist secret
+        "RemoteModuleSystemTeardownRequestV1": "46b0d12b2f0a",  # pragma: allowlist secret
+    },
+    "kdive.providers.external_boot_authority.module_documents": {
         "_RemoteModuleDocument": "72c56660e4d7",  # pragma: allowlist secret
         "_RootVolumeV1": "26dd8d35da05",  # pragma: allowlist secret
         "RemoteModuleOperationV1": "0ae5f41d469c",  # pragma: allowlist secret

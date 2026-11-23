@@ -18,24 +18,24 @@ from typing import Any, cast
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleRecoveryRefV1,
+    RemoteModuleRecoveryRefV2,
+)
+from kdive.providers.external_boot_authority.module_protocol import PreparedVolume
 from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance import (
     DeadlineExecutor,
     UnresolvedCallError,
 )
-from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
-    RemoteModuleRecoveryRefV1,
-    RemoteModuleRecoveryRefV2,
-)
 from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )
-from kdive.providers.remote_libvirt.module_preparation.remote_module_volume_names import (
-    parse_module_volume_name,
-)
 from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
     SCRATCH_CAPACITY_BYTES,
-    PreparedVolume,
     StorageConn,
+)
+from kdive.providers.shared.module_volume_names import (
+    parse_module_volume_name,
 )
 
 _RESULT_PATH = "/result-v1.json"

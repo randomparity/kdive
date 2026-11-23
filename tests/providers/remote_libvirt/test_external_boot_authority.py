@@ -37,6 +37,21 @@ from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptPreparationRequestV1,
 )
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleOperationV1,
+    RemoteModuleRecoveryRefV2,
+)
+from kdive.providers.external_boot_authority.module_protocol import (
+    PreparedModuleVolumes,
+    PreparedVolume,
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModuleSystemTeardownRequestV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+    RemoteModuleVolumePreparationResponseV1,
+    authority_reference,
+)
 from kdive.providers.external_boot_authority.orphan import _Selection
 from kdive.providers.external_boot_authority.proof_barrier import ProofBarrierShutdown
 from kdive.providers.external_boot_authority.protocol import (
@@ -94,17 +109,11 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootRecoveryRecord,
     RemoteFinalizedBootArtifactV1,
     RemoteFinalizedTeardownRefsV1,
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationHost,
-    RemoteModuleVolumePreparationRequestV1,
-    RemoteModuleVolumePreparationResponseV1,
     RemoteModuleVolumePreparationStore,
     RemoteSystemTeardownInspection,
     RemoteSystemTeardownIntentV1,
     RemoteSystemTeardownState,
-    authority_reference,
 )
 from kdive.providers.remote_libvirt.external_boot_materialization import (
     ConcreteRemoteExternalBootMaterializer,
@@ -126,16 +135,10 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
 from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
 )
-from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
-    RemoteModuleOperationV1,
-    RemoteModuleRecoveryRefV2,
-)
 from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )
 from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
-    PreparedModuleVolumes,
-    PreparedVolume,
     render_module_volume_name,
 )
 from kdive.providers.remote_libvirt.recovery_objects import RemoteExternalBootRecoveryObjects
@@ -3600,7 +3603,7 @@ async def test_remote_system_teardown_reaps_full_private_recovery_before_undefin
 
     class ModuleHost(InactiveSystemHost):
         async def execute_system_teardown(self, exact: object) -> object:
-            assert isinstance(exact, external_boot_authority.RemoteModuleSystemTeardownRequestV1)
+            assert isinstance(exact, RemoteModuleSystemTeardownRequestV1)
             assert exact.authority == request
             retained = store.reopen_system_teardown(
                 RemoteExternalBootAuthorityAdapter._teardown_anchor(request, context)

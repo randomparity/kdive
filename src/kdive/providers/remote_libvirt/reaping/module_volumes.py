@@ -30,12 +30,12 @@ from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
     all_remote_configs,
 )
-from kdive.providers.remote_libvirt.module_preparation.remote_module_volume_names import (
+from kdive.providers.shared.libvirt_attachments import path_references, volume_references
+from kdive.providers.shared.libvirt_xml_bounds import XmlEnumerationBudget
+from kdive.providers.shared.module_volume_names import (
     ModuleVolumeOwner,
     parse_module_volume_name,
 )
-from kdive.providers.shared.libvirt_attachments import path_references, volume_references
-from kdive.providers.shared.libvirt_xml_bounds import XmlEnumerationBudget
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _MAX_STORAGE_PATH_BYTES = 4096

@@ -19,13 +19,13 @@ from kdive.providers.ports.module_operation import RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )
-from kdive.providers.remote_libvirt.module_preparation.remote_module_volume_names import (
-    ModuleVolumeOwner,
-)
 from kdive.providers.remote_libvirt.reaping.module_volumes import (
     ModuleVolumeReaperConn,
     list_owned_module_volumes,
     reap_orphaned_module_volumes,
+)
+from kdive.providers.shared.module_volume_names import (
+    ModuleVolumeOwner,
 )
 
 _SWEEP_SECONDS = 300.0

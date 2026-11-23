@@ -23,6 +23,15 @@ from kdive.db.external_boot_authority_journal import (
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.module_protocol import (
+    PREPARATION_ABANDONED,
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     ModuleVolumeSweepRequestV1,
     ModuleVolumeSweepResponseV1,
@@ -74,15 +83,6 @@ from kdive.providers.ports.external_boot import (
     ExternalBootPreparationObservation,
     RecoveryObjectObservation,
     RunningKernelObservation,
-)
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    PREPARATION_ABANDONED,
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModulePreparationBeginRequestV1,
-    RemoteModulePreparationBeginResponseV1,
-    RemoteModuleTerminalPreparationResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
 )
 from kdive.providers.system_authority.service import AuthoritySystemService
 from kdive.security.secrets.redaction import REDACTION

@@ -23,7 +23,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
 from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
 )
-from kdive.providers.remote_libvirt.module_preparation.remote_module_volume_names import (
+from kdive.providers.shared.module_volume_names import (
     parse_module_volume_name,
 )
 

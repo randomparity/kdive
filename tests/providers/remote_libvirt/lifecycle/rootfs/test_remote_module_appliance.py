@@ -14,6 +14,9 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleResultV1,
+)
 from kdive.providers.remote_libvirt.module_preparation import remote_module_appliance
 from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance import (
     INVOCATION_TIMEOUT_SECONDS,
@@ -28,9 +31,6 @@ from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments
     ExpectedAppliance,
     ExpectedAttachmentState,
     inspect_module_attachments,
-)
-from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
-    RemoteModuleResultV1,
 )
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance_support import (  # noqa: F401
     DIGEST,
