@@ -52,8 +52,8 @@ def load_inventory_optional(path: Path) -> InventoryDoc | None:
     """Like :func:`load_inventory`, but a missing file returns ``None``.
 
     Use this on the default path: ``systems.toml`` is gitignored, so an absent default
-    is the normal pre-config state, not an operator error. A present-but-malformed file
-    still raises :class:`InventoryError`.
+    is the normal pre-config state, not an operator error. Other read and validation
+    failures still raise :class:`InventoryError`.
 
     Args:
         path: The default ``systems.toml`` path to load if present.
@@ -62,8 +62,11 @@ def load_inventory_optional(path: Path) -> InventoryDoc | None:
         The validated document, or ``None`` if the file is absent.
 
     Raises:
-        InventoryError: The file is present but unreadable/malformed/invalid.
+        InventoryError: The file is unreadable/malformed/invalid.
     """
-    if not path.exists():
-        return None
-    return load_inventory(path)
+    try:
+        return load_inventory(path)
+    except InventoryError as exc:
+        if exc.field == "file" and isinstance(exc.__cause__, FileNotFoundError):
+            return None
+        raise

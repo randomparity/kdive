@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import os
 from pathlib import Path
 
 import pytest
@@ -149,9 +151,10 @@ def test_load_optional_parses_present_good_file(tmp_path: Path) -> None:
     assert doc.image[0].name == "base"
 
 
-def test_load_optional_still_raises_on_present_malformed_file(tmp_path: Path) -> None:
+@pytest.mark.parametrize("raw", [BAD_TOML.encode(), BAD_SCHEMA.encode(), b"\xff\xfe"])
+def test_load_optional_still_raises_on_invalid_file(tmp_path: Path, raw: bytes) -> None:
     p = tmp_path / "systems.toml"
-    p.write_text(BAD_TOML)
+    p.write_bytes(raw)
     with pytest.raises(InventoryError):
         load_inventory_optional(p)
 
@@ -285,3 +288,88 @@ def test_repo_systems_toml_example_uses_only_known_capability_tokens() -> None:
     for img in doc.image:
         for cap in img.capabilities:
             assert cap in known, f"unknown capability token {cap!r} in systems.toml.example"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses filesystem DAC permissions")
+def test_load_optional_reports_an_inaccessible_parent(tmp_path: Path) -> None:
+    parent = tmp_path / "private"
+    parent.mkdir()
+    path = parent / "systems.toml"
+    path.write_text(GOOD)
+    parent.chmod(0)
+    try:
+        with pytest.raises(InventoryError) as required:
+            load_inventory(path)
+        assert isinstance(required.value.__cause__, PermissionError)
+        with pytest.raises(InventoryError) as optional:
+            load_inventory_optional(path)
+        assert optional.value.entry == str(path)
+        assert optional.value.field == "file"
+        assert isinstance(optional.value.__cause__, PermissionError)
+    finally:
+        parent.chmod(0o700)
+
+
+@pytest.mark.parametrize("kind", ["directory", "nondirectory-parent", "symlink-loop"])
+def test_load_optional_preserves_nonmissing_path_errors(tmp_path: Path, kind: str) -> None:
+    path = tmp_path / "systems.toml"
+    if kind == "directory":
+        path.mkdir()
+        expected = errno.EISDIR
+    elif kind == "nondirectory-parent":
+        path.write_bytes(b"not a directory")
+        path = path / "inventory.toml"
+        expected = errno.ENOTDIR
+    else:
+        path.symlink_to(path.name)
+        expected = errno.ELOOP
+
+    with pytest.raises(InventoryError) as caught:
+        load_inventory_optional(path)
+
+    assert caught.value.entry == str(path)
+    assert caught.value.field == "file"
+    assert isinstance(caught.value.__cause__, OSError)
+    assert caught.value.__cause__.errno == expected
+
+
+@pytest.mark.parametrize(
+    "failure", [PermissionError(errno.EACCES, "read denied"), OSError(errno.EIO, "read failed")]
+)
+def test_load_optional_retains_the_read_error_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: OSError
+) -> None:
+    path = tmp_path / "systems.toml"
+    path.write_text(GOOD)
+    original = Path.read_bytes
+
+    def read_bytes(actual: Path) -> bytes:
+        if actual == path:
+            raise failure
+        return original(actual)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+    with pytest.raises(InventoryError) as caught:
+        load_inventory_optional(path)
+
+    assert caught.value.entry == str(path)
+    assert caught.value.field == "file"
+    assert caught.value.__cause__ is failure
+
+
+def test_load_optional_treats_disappearance_at_read_as_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "systems.toml"
+    path.write_text(GOOD)
+    original = Path.read_bytes
+
+    def read_bytes(actual: Path) -> bytes:
+        if actual == path:
+            path.unlink()
+        return original(actual)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+    assert load_inventory_optional(path) is None
