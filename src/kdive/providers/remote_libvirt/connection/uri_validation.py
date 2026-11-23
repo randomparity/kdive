@@ -2,13 +2,38 @@
 
 from __future__ import annotations
 
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 #: The only transport a remote-libvirt URI may name (ADR-0077). Public because the reachability
 #: gate re-checks it on the URI it is about to probe, and a second copy of the literal could drift.
 REQUIRED_REMOTE_SCHEME = "qemu+tls"
+
+
+def reportable_remote_uri(uri: str) -> str:
+    """``uri`` reduced to scheme, host, port and path, for a message or an error detail.
+
+    ``remote_connection`` composes ``?pkipath=<mkdtemp dir>`` onto the URI before handing it to the
+    opener, and that directory holds the 0600 client key for the op. Reporting the composed spelling
+    would put the path to live private-key material into a WARNING that ``_enter_host`` already logs
+    with ``exc_info=True``. The netloc is rebuilt from the host and port rather than reused, so any
+    userinfo an operator put in the URI goes with the query rather than surviving into the log.
+    """
+    try:
+        parsed = urlsplit(uri)
+        host = parsed.hostname or ""
+    except ValueError:
+        return "<malformed URI>"
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        # This runs on the path that *reports* a malformed port, so it cannot re-raise on one.
+        port = None
+    netloc = f"{host}:{port}" if port else host
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 
 def _query_param_names(query: str) -> set[str]:
@@ -55,16 +80,26 @@ def validate_remote_transport(uri: str) -> None:
     """
     try:
         parsed = urlsplit(uri)
-        # urllib defers hostname and port validation until these properties are read.
-        _ = parsed.hostname, parsed.port
+        _ = parsed.hostname  # urllib defers hostname validation until this property is read.
     except ValueError as exc:
         raise CategorizedError(
-            "remote-libvirt URI is malformed; configure a valid qemu+tls://host[:port]/system URI",
+            f"remote-libvirt URI {reportable_remote_uri(uri)!r} is malformed; "
+            "configure a valid qemu+tls://host[:port]/system URI",
             category=ErrorCategory.CONFIGURATION_ERROR,
+        ) from exc
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        reportable = reportable_remote_uri(uri)
+        raise CategorizedError(
+            f"remote-libvirt URI {reportable!r} carries a port that is not an integer "
+            "between 0 and 65535",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"uri": reportable},
         ) from exc
     if parsed.scheme != REQUIRED_REMOTE_SCHEME:
         raise CategorizedError(
-            f"remote-libvirt URI {uri!r} must use the qemu+tls:// scheme",
+            f"remote-libvirt URI {reportable_remote_uri(uri)!r} must use the qemu+tls:// scheme",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     names = _query_param_names(parsed.query)

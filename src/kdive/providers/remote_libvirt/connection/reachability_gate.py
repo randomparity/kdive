@@ -38,11 +38,14 @@ import socket
 import time
 from collections.abc import Callable
 from typing import Protocol
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.connection.uri_validation import validate_remote_transport
+from kdive.providers.remote_libvirt.connection.uri_validation import (
+    reportable_remote_uri,
+    validate_remote_transport,
+)
 from kdive.providers.remote_libvirt.settings import REMOTE_LIBVIRT_CONNECT_TIMEOUT_SECONDS
 
 #: libvirt's registered port for the TLS transport, used when the URI names no port.
@@ -69,8 +72,8 @@ def remote_endpoint(uri: str) -> tuple[str, int]:
 
     Callers reach this only for a URI ``validate_remote_uri`` has already fail-closed to the
     ``qemu+tls`` scheme, so an absent port means libvirt's TLS default rather than an unknown one.
-    Nothing upstream checks the *port*, though, so a malformed one is caught here rather than left
-    to surface as a bare ``ValueError`` naming neither the URI nor the setting.
+    The transport validator rejects malformed syntax; this gate additionally requires a named
+    host and a nonzero TCP port.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when the URI names no host, or names a port that
@@ -88,39 +91,14 @@ def remote_endpoint(uri: str) -> tuple[str, int]:
     host = (parsed.hostname or "").strip()
     if not host:
         raise _misconfigured(uri, "names no host, so its reachability cannot be checked")
-    try:
-        port = parsed.port
-    except ValueError as exc:
-        raise _misconfigured(uri, "carries a port that is not an integer") from exc
+    port = parsed.port
     if port == 0:
         raise _misconfigured(uri, "carries port 0, which is not a libvirt endpoint")
     return host, port or DEFAULT_LIBVIRT_TLS_PORT
 
 
-def _reportable(uri: str) -> str:
-    """``uri`` reduced to scheme, host, port and path, for a message or an error detail.
-
-    ``remote_connection`` composes ``?pkipath=<mkdtemp dir>`` onto the URI before handing it to the
-    opener, and that directory holds the 0600 client key for the op. Reporting the composed spelling
-    would put the path to live private-key material into a WARNING that ``_enter_host`` already logs
-    with ``exc_info=True``. The netloc is rebuilt from the host and port rather than reused, so any
-    userinfo an operator put in the URI goes with the query rather than surviving into the log.
-    """
-    parsed = urlsplit(uri)
-    host = parsed.hostname or ""
-    if ":" in host:
-        host = f"[{host}]"
-    try:
-        port = parsed.port
-    except ValueError:
-        # This runs on the path that *reports* a malformed port, so it cannot re-raise on one.
-        port = None
-    netloc = f"{host}:{port}" if port else host
-    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
-
-
 def _misconfigured(uri: str, problem: str) -> CategorizedError:
-    reportable = _reportable(uri)
+    reportable = reportable_remote_uri(uri)
     return CategorizedError(
         f"remote-libvirt URI {reportable!r} {problem}",
         category=ErrorCategory.CONFIGURATION_ERROR,
@@ -188,13 +166,13 @@ def require_reachable(
         raise CategorizedError(
             f"remote-libvirt host {host} did not resolve",
             category=ErrorCategory.TRANSPORT_FAILURE,
-            details={"uri": _reportable(uri)},
+            details={"uri": reportable_remote_uri(uri)},
         ) from exc
     if not addresses:
         raise CategorizedError(
             f"remote-libvirt host {host} resolved to no address",
             category=ErrorCategory.TRANSPORT_FAILURE,
-            details={"uri": _reportable(uri)},
+            details={"uri": reportable_remote_uri(uri)},
         )
     deadline = time.monotonic() + timeout
     last_failure: OSError | None = None
@@ -219,7 +197,7 @@ def require_reachable(
         f"remote-libvirt host {host}:{port} was not reachable within {timeout}s: "
         f"{last_failure or 'the deadline expired before any address was tried'}",
         category=ErrorCategory.TRANSPORT_FAILURE,
-        details={"uri": _reportable(uri), "connect_timeout_seconds": str(timeout)},
+        details={"uri": reportable_remote_uri(uri), "connect_timeout_seconds": str(timeout)},
     ) from last_failure
 
 
