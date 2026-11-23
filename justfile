@@ -781,7 +781,7 @@ release VERSION:
 
 # Regenerate the agent-facing tool reference from the live registry (mutating).
 docs:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/generate/gen_tool_reference.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -m scripts.generate.gen_tool_reference
 
 # Verify the committed tool reference matches a fresh generation (CI gate).
 docs-check:
@@ -839,11 +839,11 @@ rbac-matrix-check:
 
 # Regenerate the committed kdivectl verb descriptors from the live tool schemas (mutating, #1447).
 cli-verbs:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/generate/gen_cli_verbs.py
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -m scripts.generate.gen_cli_verbs
 
 # Verify the committed kdivectl verb descriptors match a fresh generation (CI gate, #1447).
 cli-verbs-check:
-    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python scripts/generate/gen_cli_verbs.py --check
+    PYTHONPATH="{{WORKTREE_PYTHONPATH}}" uv run python -m scripts.generate.gen_cli_verbs --check
 
 # Structural guard: no KDIVE_* env read outside kdive.config (ADR-0087). Stdlib-only.
 config-guard:

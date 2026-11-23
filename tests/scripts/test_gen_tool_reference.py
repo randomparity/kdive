@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 import scripts.generate.gen_tool_reference as gen_tool_reference
-from kdive.assembly import ProcessAssembly
 from scripts.generate.gen_tool_reference import ToolDoc, render_namespace, tool_docs
 
 
@@ -158,7 +156,7 @@ def test_write_reference_writes_namespace_and_index_files(
 ) -> None:
     monkeypatch.setattr(
         gen_tool_reference,
-        "_registry_tools",
+        "registry_tools",
         lambda: [_tool("jobs.wait"), _tool("runs.get")],
     )
 
@@ -168,30 +166,3 @@ def test_write_reference_writes_namespace_and_index_files(
     assert "`runs.get`" in (tmp_path / "runs.md").read_text(encoding="utf-8")
     assert "jobs.md#jobswait" in (tmp_path / "index.md").read_text(encoding="utf-8")
     assert not list(tmp_path.glob(".*.md.*"))
-
-
-def test_live_registry_extraction_is_offline(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-
-    class _App:
-        async def list_tools(self) -> list[Any]:
-            return []
-
-    def _build_app(*args: Any, **kwargs: Any) -> _App:
-        captured.update(kwargs)
-        return _App()
-
-    monkeypatch.setattr(gen_tool_reference, "build_app_from_assembly", _build_app)
-
-    assert gen_tool_reference._registry_tools() == []
-    process = captured["process_assembly"]
-    assert isinstance(process, ProcessAssembly)
-    assert process.object_stores.store is not None
-
-
-def test_registry_catalog_keeps_conditionally_available_recovery_tools(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "disabled")
-    names = {tool.name for tool in gen_tool_reference._registry_tools()}
-    assert {"ops.build_uses_list", "ops.recover_build_use"} <= names

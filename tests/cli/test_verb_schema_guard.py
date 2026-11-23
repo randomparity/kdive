@@ -54,6 +54,7 @@ from kdive.cli.commands.registry import HANDLER_OVERRIDES
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 from kdive.mcp.tools._common import DEFAULT_WAIT_S, MAX_WAIT_S
 from scripts.generate import gen_cli_verbs as gen
+from scripts.generate.offline_catalog import registry_tools
 
 _OK_ENVELOPE = {"object_id": "o", "status": "ok", "data": {}, "items": []}
 
@@ -92,7 +93,7 @@ class _FakeSession:
 @pytest.fixture(scope="module")
 def tool_schemas() -> dict[str, dict[str, Any]]:
     """The live registry's tool name -> JSON schema, built once for the module."""
-    return {tool.name: (tool.parameters or {}) for tool in gen._registry_tools()}
+    return {tool.name: (tool.parameters or {}) for tool in registry_tools()}
 
 
 @pytest.fixture(scope="module")
