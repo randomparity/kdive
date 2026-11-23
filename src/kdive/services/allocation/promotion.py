@@ -53,6 +53,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.services.accounting import ledger as accounting
 from kdive.services.allocation.admission.core import (
     BUDGET_DENIAL_REASON,
+    AdmissionOutcome,
     AllocationRequest,
     admission_gate,
     price_window_and_estimate,
@@ -216,7 +217,7 @@ async def _try_one_host(
     return False, False
 
 
-def _is_budget_terminate(denial: object) -> bool:
+def _is_budget_terminate(denial: AdmissionOutcome) -> bool:
     """A budget recheck denial: ``ALLOCATION_DENIED`` with the explicit budget reason.
 
     The host-cap denial shares ``ALLOCATION_DENIED`` but is ``queueable`` and carries
@@ -224,13 +225,10 @@ def _is_budget_terminate(denial: object) -> bool:
     ``reason="affinity_denied"``. Routing on the explicit reason is the load-bearing
     distinction between terminate (budget) and wait (other denials).
     """
-    category = getattr(denial, "category", None)
-    queueable = getattr(denial, "queueable", False)
-    reason = getattr(denial, "reason", None)
     return (
-        category is ErrorCategory.ALLOCATION_DENIED
-        and reason == BUDGET_DENIAL_REASON
-        and not queueable
+        denial.category is ErrorCategory.ALLOCATION_DENIED
+        and denial.reason == BUDGET_DENIAL_REASON
+        and not denial.queueable
     )
 
 

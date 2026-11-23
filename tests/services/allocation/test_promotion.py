@@ -8,7 +8,6 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -430,12 +429,24 @@ def test_budget_terminate_only_when_not_queueable() -> None:
     assert not _is_budget_terminate(queueable_budget)
 
 
-def test_budget_terminate_defensive_getattr_on_partial_objects() -> None:
-    # The reads are defensive getattrs (denial: object). A denial lacking `queueable` defaults
-    # to not-queueable (terminate); a bare object with no category/reason is never a terminate.
-    partial = SimpleNamespace(category=ErrorCategory.ALLOCATION_DENIED, reason=BUDGET_DENIAL_REASON)
-    assert _is_budget_terminate(partial)
-    assert not _is_budget_terminate(object())
+@pytest.mark.parametrize("category", [None, ErrorCategory.QUOTA_EXCEEDED])
+def test_budget_terminate_requires_allocation_denial(category: ErrorCategory | None) -> None:
+    denial = AdmissionOutcome(
+        granted=False,
+        allocation=None,
+        category=category,
+        reason=BUDGET_DENIAL_REASON,
+    )
+    assert not _is_budget_terminate(denial)
+
+
+def test_budget_terminate_requires_explicit_reason() -> None:
+    denial = AdmissionOutcome(
+        granted=False,
+        allocation=None,
+        category=ErrorCategory.ALLOCATION_DENIED,
+    )
+    assert not _is_budget_terminate(denial)
 
 
 def test_selector_from_snapshot_carries_cost_class() -> None:
