@@ -93,6 +93,28 @@ async def _finalize_authority_system_teardown(
     return str(row[0])
 
 
+async def _mark_authority_system_teardown_retry(
+    conn: AsyncConnection,
+    candidate: tuple[UUID, int, UUID, int, str, str],
+) -> None:
+    try:
+        async with conn.transaction(), conn.cursor() as cur:
+            await cur.execute(
+                "SELECT public.mark_authority_system_teardown_repair_retry(%s,%s,%s,%s,%s,%s)",
+                candidate,
+            )
+            if await cur.fetchone() is None:
+                raise RuntimeError("authority System teardown retry marker returned no result")
+    except Exception:  # noqa: BLE001 - a retry-ordering failure must not stop healthy siblings
+        _log.warning(
+            "reconciler: authority System teardown retry ordering failed for attempt %s "
+            "(System %s); retaining its selection priority",
+            candidate[0],
+            candidate[2],
+            exc_info=True,
+        )
+
+
 async def repair_terminal_authority_system_attempts(
     conn: AsyncConnection, artifact_store: RetiredKeyBatchDeleter
 ) -> int:
@@ -100,7 +122,8 @@ async def repair_terminal_authority_system_attempts(
 
     Provision receipts can commit entirely in SQL. A preactivation-absence receipt first runs the
     idempotent core cleanup; its exact SQL finalizer refuses success until the durable cleanup facts
-    are absent. Per-System failures retain the candidate for a later pass without starving siblings.
+    are absent. Per-System failures retain the candidate and rotate its retry priority behind
+    untouched receipts.
     Last, an exhausted provision job whose System that receipt proved absent is canceled
     (ADR-0754), so a teardown finalized here or by its worker settles its stranded predecessor.
     """
@@ -127,6 +150,7 @@ async def repair_terminal_authority_system_attempts(
                 system_id,
                 exc_info=True,
             )
+            await _mark_authority_system_teardown_retry(conn, candidate)
             continue
         if status == "applied":
             repaired += 1
@@ -137,6 +161,7 @@ async def repair_terminal_authority_system_attempts(
                 authority_id,
                 system_id,
             )
+            await _mark_authority_system_teardown_retry(conn, candidate)
         elif status == "superseded":
             _log.info(
                 "reconciler: authority System teardown attempt %s was superseded (System %s)",

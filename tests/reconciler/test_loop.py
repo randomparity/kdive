@@ -567,6 +567,10 @@ def test_terminal_authority_system_teardown_logs_name_the_system(
         job_repairs, "_discharge_exhausted_authority_system_provisions", AsyncMock(return_value=0)
     )
 
+    # This connection models the log path; real DB tests cover retry marking.
+    marker = AsyncMock()
+    monkeypatch.setattr(job_repairs, "_mark_authority_system_teardown_retry", marker)
+
     with caplog.at_level(logging.INFO, logger=job_repairs.__name__):
         asyncio.run(
             repair_terminal_authority_system_attempts(cast(Any, object()), cast(Any, object()))
@@ -575,6 +579,33 @@ def test_terminal_authority_system_teardown_logs_name_the_system(
     [record] = [r for r in caplog.records if "authority System teardown" in r.getMessage()]
     assert str(authority_id) in record.getMessage()
     assert f"System {system_id}" in record.getMessage()
+
+    if status in {"raised", "cleanup-required"}:
+        marker.assert_awaited_once()
+        assert marker.await_args is not None
+        assert marker.await_args.args[1] == candidate
+    else:
+        marker.assert_not_awaited()
+
+
+def test_terminal_authority_system_retry_marker_preserves_cancellation() -> None:
+    class Connection:
+        @asynccontextmanager
+        async def transaction(self):
+            yield
+
+        @asynccontextmanager
+        async def cursor(self):
+            yield self
+
+        async def execute(self, _query: str, _params: tuple[object, ...]) -> None:
+            raise asyncio.CancelledError
+
+    candidate = (uuid4(), 1, uuid4(), 2, "sha256:" + "a" * 64, "sha256:" + "b" * 64)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            job_repairs._mark_authority_system_teardown_retry(cast(Any, Connection()), candidate)
+        )
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import datetime
 from typing import cast
 from uuid import uuid4
 
@@ -122,6 +123,7 @@ def _seed_direct_terminal_attempt(
     disposition: str,
     generation: int = 1,
     receipt_fields: dict[str, object] | None = None,
+    receipt_at: datetime | None = None,
 ) -> tuple[object, object, bytes, str, str]:
     authority_id, request_attempt_id = uuid4(), uuid4()
     operation_digest = "sha256:" + "c" * 64
@@ -146,7 +148,7 @@ def _seed_direct_terminal_attempt(
         "terminal_head_sequence,terminal_head_digest,receipt_bytes,receipt_digest,"
         "receipt_disposition,receipt_at) VALUES "
         "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'terminal',1,%s,%s,clock_timestamp(),0,%s,2,%s,"
-        "%s,%s,%s,clock_timestamp())",
+        "%s,%s,%s,COALESCE(%s,clock_timestamp()))",
         (
             authority_id,
             case["system_id"],
@@ -165,6 +167,7 @@ def _seed_direct_terminal_attempt(
             receipt,
             receipt_digest,
             disposition,
+            receipt_at,
         ),
     )
     conn.execute(
