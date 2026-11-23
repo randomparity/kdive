@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (2026-11-23)
 
 ## Context
 
@@ -17,6 +17,7 @@ Continue after either existing intermediate operation when its authenticated res
 returns a running Job. Keep the same claim and the existing maximum of two handler invocations.
 The second invocation reads the committed checkpoint through the existing handler path.
 Generalize the repeated-checkpoint warning without changing lease recovery or queue policy.
+Implemented in `jobs/worker.py` at the existing result-commit and bounded-dispatch seams.
 Do not continue on a lost fence, classified refusal, terminal result, failure or cancellation.
 
 ## Consequences

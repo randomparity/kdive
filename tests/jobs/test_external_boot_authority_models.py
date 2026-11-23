@@ -253,7 +253,11 @@ def _success(operation: str = "deadline") -> ExternalBootAuthoritySuccessV1:
         "operation": operation,
         "deadline": "2026-08-29T00:01:00Z",
     }
-    return ExternalBootAuthoritySuccessV1.model_validate(_carrier(result))
+    data = _carrier(result)
+    if operation == "recovery-attempt":
+        result.update(attempt_id=uuid4(), recovery_basis="recovery_point")
+        data.update(purpose="recover", admitted_operation="recover")
+    return ExternalBootAuthoritySuccessV1.model_validate(data)
 
 
 def test_queue_serializes_schema_alias_and_canonical_utc_timestamp() -> None:
@@ -421,9 +425,12 @@ def test_worker_routes_success_and_stale_result_through_authority_adapter(monkey
     asyncio.run(exercise())
 
 
-def test_worker_continues_only_an_applied_authenticated_deadline(monkeypatch) -> None:
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+def test_worker_continues_only_an_applied_authenticated_checkpoint(
+    monkeypatch, operation: str
+) -> None:
     async def exercise() -> None:
-        carrier = _success()
+        carrier = _success(operation)
         job = _job(_marker(carrier))
         complete = AsyncMock(return_value=job)
         monkeypatch.setattr(queue, "complete_external_boot", complete)
@@ -436,9 +443,12 @@ def test_worker_continues_only_an_applied_authenticated_deadline(monkeypatch) ->
     asyncio.run(exercise())
 
 
-def test_worker_does_not_continue_a_mismatched_or_superseded_deadline(monkeypatch) -> None:
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+def test_worker_does_not_continue_a_mismatched_or_superseded_checkpoint(
+    monkeypatch, operation: str
+) -> None:
     async def exercise() -> None:
-        carrier = _success()
+        carrier = _success(operation)
         marker = _marker(carrier)
         marker["operation_identity"] = "different"
         complete = AsyncMock(return_value=queue.ExternalBootCommitStatus.SUPERSEDED)
@@ -459,25 +469,21 @@ def test_worker_does_not_continue_a_mismatched_or_superseded_deadline(monkeypatc
     asyncio.run(exercise())
 
 
-def test_worker_bounds_same_claim_deadline_continuation(monkeypatch) -> None:
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+def test_worker_bounds_same_claim_checkpoint_continuation(monkeypatch, operation: str) -> None:
     async def exercise() -> None:
         worker = _worker()
-        invoke = AsyncMock(return_value=_success())
-        finalized = 0
-
-        async def finalize(_job: Job, _span: JobSpan, handler_task: asyncio.Task[object]) -> bool:
-            nonlocal finalized
-            finalized += 1
-            await handler_task
-            return True
-
+        carrier = _success(operation)
+        job = _job(_marker(carrier))
+        invoke = AsyncMock(return_value=carrier)
+        complete = AsyncMock(return_value=job)
         monkeypatch.setattr(worker, "_invoke_handler", invoke)
-        monkeypatch.setattr(worker, "_finalize_handler", finalize)
+        monkeypatch.setattr(queue, "complete_external_boot", complete)
 
-        await worker._run_handler(_job(), cast(Any, object()), _span())
+        await worker._run_handler(job, cast(Any, object()), _span())
 
         assert invoke.await_count == 2
-        assert finalized == 2
+        assert complete.await_count == 2
 
     asyncio.run(exercise())
 
@@ -958,3 +964,61 @@ def test_typed_payload_still_checks_carrier_operation() -> None:
     data.update({"purpose": "release", "admitted_operation": "release", "result": payload})
     with pytest.raises(ValidationError, match="result operation does not match authority purpose"):
         ExternalBootAuthoritySuccessV1.model_validate(data)
+
+
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+@pytest.mark.parametrize("state", [JobState.SUCCEEDED, JobState.FAILED])
+def test_worker_does_not_continue_a_terminal_checkpoint(monkeypatch, operation, state) -> None:
+    async def exercise() -> None:
+        carrier = _success(operation)
+        job = _job(_marker(carrier))
+        completed = job.model_copy(update={"state": state})
+        monkeypatch.setattr(queue, "complete_external_boot", AsyncMock(return_value=completed))
+        assert await _worker()._finalize_handler(job, _span(), _task_result(carrier)) is False
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+def test_worker_stops_on_missing_checkpoint_commit(monkeypatch, operation) -> None:
+    async def exercise() -> None:
+        carrier = _success(operation)
+        monkeypatch.setattr(queue, "complete_external_boot", AsyncMock(return_value=None))
+        assert (
+            await _worker()._finalize_handler(
+                _job(_marker(carrier)),
+                _span(),
+                _task_result(carrier),
+            )
+            is False
+        )
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+@pytest.mark.parametrize(
+    "status",
+    [
+        queue.ExternalBootCommitStatus.OBSERVED_IDENTITY_STALE,
+        queue.ExternalBootCommitStatus.RESERVATION_NOT_READY,
+        queue.ExternalBootCommitStatus.AUTHORITY_SUPERSEDED,
+    ],
+)
+@pytest.mark.parametrize("applied_failure", [True, False])
+def test_worker_never_continues_a_classified_checkpoint_refusal(
+    monkeypatch,
+    operation,
+    status,
+    applied_failure,
+) -> None:
+    async def exercise() -> None:
+        carrier = _success(operation)
+        job = _job(_marker(carrier))
+        monkeypatch.setattr(queue, "complete_external_boot", AsyncMock(return_value=status))
+        fail = AsyncMock(return_value=job if applied_failure else None)
+        monkeypatch.setattr(queue, "fail_external_boot", fail)
+        assert await _worker()._finalize_handler(job, _span(), _task_result(carrier)) is False
+        fail.assert_awaited_once()
+
+    asyncio.run(exercise())

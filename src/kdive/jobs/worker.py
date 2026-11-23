@@ -524,7 +524,7 @@ class Worker:
                 return
             if continuation == 1:
                 _log.warning(
-                    "external boot job %s returned a repeated intermediate deadline; "
+                    "external boot job %s returned a repeated intermediate checkpoint; "
                     "leaving its claimed lease for recovery",
                     job.id,
                 )
@@ -676,7 +676,7 @@ class Worker:
             return (
                 isinstance(committed, Job)
                 and isinstance(result, ExternalBootAuthoritySuccessV1)
-                and result.result.operation == "deadline"
+                and result.result.operation in {"deadline", "recovery-attempt"}
                 and committed.state is JobState.RUNNING
             )
         if committed is queue.ExternalBootCommitStatus.SUPERSEDED:
