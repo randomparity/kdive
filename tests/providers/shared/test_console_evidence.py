@@ -70,6 +70,34 @@ def test_tail_shorter_than_cap_is_whole_console(
     assert asyncio.run(redacted_console_tail(system_id, SecretRegistry())) == "sshd did not start\n"
 
 
+@pytest.mark.parametrize("max_chars", [0, 1, 3, 20])
+def test_tail_respects_explicit_character_limit(
+    max_chars: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = tmp_path / "console.log"
+    body = "kernel λ ready\n"
+    log.write_text(body)
+    _point_at(monkeypatch, log)
+    tail = asyncio.run(redacted_console_tail(uuid4(), SecretRegistry(), max_chars=max_chars))
+    assert tail == (body[-max_chars:] if max_chars else "")
+
+
+def test_negative_limit_is_rejected_before_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def unexpected_read(_sid: object, _reg: object) -> bytes:
+        pytest.fail("invalid bounds must be rejected before reading console evidence")
+
+    monkeypatch.setattr(console_evidence, "read_redacted_console", unexpected_read)
+    with pytest.raises(ValueError, match="max_chars"):
+        asyncio.run(redacted_console_tail(uuid4(), SecretRegistry(), max_chars=-1))
+
+
+def test_zero_limit_preserves_missing_console(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _point_at(monkeypatch, tmp_path / "absent.log")
+    assert asyncio.run(redacted_console_tail(uuid4(), SecretRegistry(), max_chars=0)) is None
+
+
 def test_tail_is_none_for_empty_or_absent_console(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
