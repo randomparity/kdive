@@ -36,14 +36,20 @@ from pydantic import SecretStr, ValidationError
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS
-from kdive.domain.capacity.state import JobState, RunState
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
 from kdive.domain.lifecycle.run_steps import (
     BOOT_OUTCOME_READY,
     RUN_STEP_SUCCEEDED,
     BootStepResult,
 )
-from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, Job, JobKind, dispatch_lane_for_kind
+from kdive.domain.operations.jobs import (
+    ACTIVE_JOB_KINDS,
+    Job,
+    JobKind,
+    dispatch_lane_for_kind,
+    run_failure_eligible_states,
+)
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
 from kdive.jobs.capture_operations.supervisor import capture_authority_scope
@@ -84,8 +90,6 @@ _MARKED_JOB_LEFT_RUNNING = (
 )
 _CONTEXT_VALUE_MAX = 1000
 _CONTEXT_KEY = re.compile(r"[^a-zA-Z0-9_.-]+")
-_RUN_COMPENSATION_STATES = frozenset({RunState.CREATED, RunState.RUNNING})
-_INSTALL_RUN_COMPENSATION_STATES = _RUN_COMPENSATION_STATES | {RunState.SUCCEEDED}
 _CLAIM_LOOP_FAILURE_REASON = re.compile(
     r"(?:pool-timeout|timeout|postgres-(?:[A-Z0-9]{5}|unknown)|unexpected)"
 )
@@ -1063,17 +1067,12 @@ async def _mark_run_failed(
     """
     if job.state is not JobState.FAILED:
         return
-    eligible_states = (
-        _INSTALL_RUN_COMPENSATION_STATES
-        if job.kind is JobKind.INSTALL
-        else _RUN_COMPENSATION_STATES
-    )
     changed = await RUNS.record_terminal_failure(
         conn,
         run_id,
         category,
         job.id,
-        eligible_states=eligible_states,
+        eligible_states=run_failure_eligible_states(job.kind),
     )
     if changed:
         _log.info("job %s terminal failure compensated run %s", job.id, run_id)

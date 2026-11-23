@@ -212,13 +212,21 @@ def test_faulting_the_run_transition_leaves_the_job_reapable(migrated_url: str) 
             # Reapable: attempt 1 of max_attempts 1, so the lapsed lease makes it a zombie the
             # reconciler dead-letters — and that sweep transitions the Run in the same pass.
             await _lapse_lease(pool, job.id)
+            async with _run_row_locked(migrated_url, run_id), pool.connection() as conn:
+                with pytest.raises(psycopg.errors.LockNotAvailable):
+                    await repair_abandoned_jobs(conn)
+            assert (await _job_row(pool, job.id))["state"] == JobState.RUNNING.value
+            assert await _run_row(pool, run_id) == {
+                "state": RunState.RUNNING.value,
+                "failure_category": None,
+                "failing_job_id": None,
+            }
             async with pool.connection() as conn:
                 assert await repair_abandoned_jobs(conn) == 1
             assert await _run_row(pool, run_id) == {
                 "state": RunState.FAILED.value,
                 "failure_category": ErrorCategory.LEASE_EXPIRED.value,
-                # The reconciler's sweep records no pointer; only the worker's write does.
-                "failing_job_id": None,
+                "failing_job_id": job.id,
             }
 
     asyncio.run(_run())

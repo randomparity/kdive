@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
-from kdive.domain.capacity.state import JobState, RunState
+from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.repositories import RUNS
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import JobKind
+from kdive.domain.operations.jobs import JobKind, run_failure_eligible_states
 from kdive.jobs.handlers.system_reclaim import (
     RetiredKeyBatchDeleter,
     reclaim_system_core_after_provider_teardown,
@@ -19,11 +23,8 @@ from kdive.jobs.payloads import PayloadValidationError, run_id_from_payload
 
 _log = logging.getLogger(__name__)
 
-_RUN_COMPENSATION_STATES = (RunState.CREATED, RunState.RUNNING)
-_RUN_COMPENSATION_STATE_VALUES = tuple(state.value for state in _RUN_COMPENSATION_STATES)
 _FAILED_JOB_STATE_VALUE = JobState.FAILED.value
 _RUNNING_JOB_STATE_VALUE = JobState.RUNNING.value
-_FAILED_RUN_STATE_VALUE = RunState.FAILED.value
 _LEASE_EXPIRED_CATEGORY_VALUE = ErrorCategory.LEASE_EXPIRED.value
 _TERMINAL_AUTHORITY_SYSTEM_REPAIR_LIMIT = 100
 
@@ -167,7 +168,7 @@ async def repair_abandoned_jobs(conn: AsyncConnection) -> int:
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT id FROM jobs "
+            "SELECT id, attempt, worker_id, created_at, kind, payload FROM jobs "
             "WHERE state = %s AND lease_expires_at < now() "
             "  AND attempt >= max_attempts "
             "  AND NOT (payload ? %s) "
@@ -178,44 +179,57 @@ async def repair_abandoned_jobs(conn: AsyncConnection) -> int:
                 _AUTHORITY_SYSTEM_MARKER,
             ),
         )
-        zombie_ids = [row["id"] for row in await cur.fetchall()]
+        candidates = await cur.fetchall()
     swept = 0
-    for job_id in zombie_ids:
-        async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+    for candidate in candidates:
+        job_id = candidate["id"]
+        payload_error = None
+        try:
+            run_id = run_id_from_payload(JobKind(candidate["kind"]), candidate["payload"])
+        except PayloadValidationError as exc:
+            run_id = None
+            payload_error = exc
+        run_lock = (
+            advisory_xact_lock(conn, LockScope.RUN, run_id) if run_id is not None else nullcontext()
+        )
+        async with conn.transaction(), run_lock, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "UPDATE jobs SET state = %s, error_category = %s "
-                "WHERE id = %s AND state = %s RETURNING kind, payload",
+                "WHERE id = %s AND state = %s AND attempt = %s AND created_at = %s "
+                "  AND worker_id IS NOT DISTINCT FROM %s AND kind = %s AND payload = %s "
+                "  AND lease_expires_at < clock_timestamp() AND attempt >= max_attempts "
+                "  AND NOT (payload ? %s) AND NOT (payload ? %s) RETURNING id, kind",
                 (
                     _FAILED_JOB_STATE_VALUE,
                     _LEASE_EXPIRED_CATEGORY_VALUE,
                     job_id,
                     _RUNNING_JOB_STATE_VALUE,
+                    candidate["attempt"],
+                    candidate["created_at"],
+                    candidate["worker_id"],
+                    candidate["kind"],
+                    Jsonb(candidate["payload"]),
+                    _EXTERNAL_BOOT_AUTHORITY_MARKER,
+                    _AUTHORITY_SYSTEM_MARKER,
                 ),
             )
             row = await cur.fetchone()
             if row is None:
                 continue
-            try:
-                run_id = run_id_from_payload(JobKind(row["kind"]), row["payload"])
-            except PayloadValidationError as exc:
-                _log.warning(
-                    "reconciler: abandoned job %s has invalid payload; "
-                    "skipping Run compensation: %s",
-                    job_id,
-                    exc,
-                )
-                run_id = None
             if run_id is not None:
-                await cur.execute(
-                    "UPDATE runs SET state = %s, failure_category = %s "
-                    "WHERE id = %s AND state = ANY(%s)",
-                    (
-                        _FAILED_RUN_STATE_VALUE,
-                        _LEASE_EXPIRED_CATEGORY_VALUE,
-                        run_id,
-                        list(_RUN_COMPENSATION_STATE_VALUES),
-                    ),
+                await RUNS.record_terminal_failure(
+                    conn,
+                    run_id,
+                    ErrorCategory.LEASE_EXPIRED,
+                    row["id"],
+                    eligible_states=run_failure_eligible_states(JobKind(row["kind"])),
                 )
+        if payload_error is not None:
+            _log.warning(
+                "reconciler: abandoned job %s has invalid payload; skipping Run compensation: %s",
+                job_id,
+                payload_error,
+            )
         swept += 1
         _log.info("reconciler: abandoned job %s -> failed (lease_expired)", job_id)
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:

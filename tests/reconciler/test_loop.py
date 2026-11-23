@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import fields
 from datetime import timedelta
@@ -17,7 +18,10 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import AllocationState, DebugSessionState, RunState, SystemState
+from kdive.domain.operations.jobs import JobKind
 from kdive.health.heartbeat import Heartbeat
+from kdive.jobs import queue
+from kdive.jobs.payloads import Authorizing, InstallPayload
 from kdive.providers.infra.reaping import DumpVolume, InfraReaper, NullReaper
 from kdive.reconciler import loop
 from kdive.reconciler.cleanup.artifacts.artifact_retention import ArtifactObjectDeleter
@@ -55,6 +59,7 @@ from tests.reconciler.conftest import (
     seed_running_job,
     seed_system,
 )
+from tests.support.worker_fence import dequeue_as_current_worker, register_worker
 
 
 def test_null_reaper_is_an_infra_reaper() -> None:
@@ -572,30 +577,139 @@ def test_terminal_authority_system_teardown_logs_name_the_system(
     assert f"System {system_id}" in record.getMessage()
 
 
-def test_zombie_job_compensates_owning_run(migrated_url: str) -> None:
+@pytest.mark.parametrize(
+    ("run_state", "kind", "expected_state"),
+    [
+        (RunState.RUNNING, JobKind.INSTALL, "failed"),
+        (RunState.SUCCEEDED, JobKind.INSTALL, "failed"),
+        (RunState.SUCCEEDED, JobKind.BOOT, "succeeded"),
+    ],
+)
+def test_zombie_job_compensates_owning_run(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    run_state: RunState,
+    kind: JobKind,
+    expected_state: str,
+) -> None:
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
             system_id = await seed_system(seed)
-            run_id = await seed_run(seed, system_id, run_state=RunState.RUNNING)
-            await seed_running_job(
+            run_id = await seed_run(seed, system_id, run_state=run_state)
+            job_id = await seed_running_job(
                 seed,
                 "dk-run-zombie",
-                kind="install",
+                kind=kind.value,
                 payload={"run_id": str(run_id)},
                 lease_seconds=-60,
                 attempt=3,
                 max_attempts=3,
             )
-        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            await run_repair(pool, repair_abandoned_jobs)
+        async with await connect(authority_role_dsns("kdive_reconciler")) as repair:
+            assert await repair_abandoned_jobs(repair) == 1
         async with await connect(migrated_url) as check:
             cur = await check.execute(
-                "SELECT state, failure_category FROM runs WHERE id = %s", (run_id,)
+                "SELECT state, error_category FROM jobs WHERE id = %s", (job_id,)
             )
-            row = await cur.fetchone()
-            assert row is not None
-            assert row[0] == "failed"
-            assert row[1] == "lease_expired"
+            assert await cur.fetchone() == ("failed", "lease_expired")
+            cur = await check.execute(
+                "SELECT state, failure_category, failing_job_id FROM runs WHERE id = %s",
+                (run_id,),
+            )
+            expected = (
+                (expected_state, "lease_expired", job_id)
+                if expected_state == "failed"
+                else (expected_state, None, None)
+            )
+            assert await cur.fetchone() == expected
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("mutation", ["heartbeat", "recycle"])
+def test_abandoned_job_selection_cannot_fail_changed_work(
+    migrated_url: str, authority_role_dsns: Callable[[str], str], mutation: str
+) -> None:
+    async def _run() -> None:
+        async with (
+            await connect(migrated_url) as holder,
+            await connect(migrated_url) as mutator,
+            await connect(authority_role_dsns("kdive_reconciler")) as repair,
+        ):
+            system_id = await seed_system(holder)
+            run_id = await seed_run(holder, system_id, run_state=RunState.RUNNING)
+            credential = await register_worker(holder, "w-dead")
+            job_id = await seed_running_job(
+                holder,
+                "dk-zombie-race",
+                kind="install",
+                payload={"run_id": str(run_id)},
+                lease_seconds=-60,
+                attempt=1,
+                max_attempts=1,
+            )
+            task = None
+            try:
+                async with holder.transaction(), advisory_xact_lock(holder, LockScope.RUN, run_id):
+                    task = asyncio.create_task(repair_abandoned_jobs(repair))
+                    async with asyncio.timeout(5):
+                        while True:
+                            assert not task.done(), "repair did not wait for the Run lock"
+                            cur = await holder.execute(
+                                "SELECT pg_blocking_pids(%s)", (repair.info.backend_pid,)
+                            )
+                            row = await cur.fetchone()
+                            assert row is not None
+                            if holder.info.backend_pid in row[0]:
+                                break
+                            await asyncio.sleep(0.01)
+                    async with mutator.transaction():
+                        if mutation == "heartbeat":
+                            assert await queue.heartbeat(
+                                mutator, job_id, attempt=1, incarnation_credential=credential
+                            )
+                        else:
+                            recycled = await queue.enqueue(
+                                mutator,
+                                JobKind.INSTALL,
+                                InstallPayload(run_id=str(run_id)),
+                                Authorizing(principal="p", agent_session=None, project="test"),
+                                "dk-zombie-race",
+                                max_attempts=1,
+                                recycle=queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED,
+                            )
+                            assert recycled.id == job_id
+                            claimed = await dequeue_as_current_worker(mutator, "w-replacement")
+                            assert claimed is not None and claimed.id == job_id
+                            assert claimed.attempt == claimed.max_attempts == 2
+                            await mutator.execute(
+                                "UPDATE jobs SET lease_expires_at = "
+                                "clock_timestamp() - interval '1 minute' WHERE id = %s",
+                                (job_id,),
+                            )
+                        cur = await mutator.execute(
+                            "SELECT state, attempt, worker_id, lease_expires_at, created_at, "
+                            "payload FROM jobs WHERE id = %s",
+                            (job_id,),
+                        )
+                        current = await cur.fetchone()
+                        assert current is not None and current[0] == "running"
+                assert await asyncio.wait_for(task, 5) == 0
+            finally:
+                if task is not None:
+                    if not task.done():
+                        task.cancel()
+                    await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+            cur = await holder.execute(
+                "SELECT state, attempt, worker_id, lease_expires_at, created_at, payload "
+                "FROM jobs WHERE id = %s",
+                (job_id,),
+            )
+            assert await cur.fetchone() == current
+            cur = await holder.execute(
+                "SELECT state, failure_category, failing_job_id FROM runs WHERE id = %s", (run_id,)
+            )
+            assert await cur.fetchone() == ("running", None, None)
 
     asyncio.run(_run())
 
