@@ -12,15 +12,17 @@ from collections.abc import Callable
 
 import pytest
 
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ExternalBootMaterialization,
-    ExternalBootPorts,
     RecoveryPoint,
     RunningKernelObservation,
 )
+from kdive.providers.ports.external_boot import (
+    ExternalBootPorts,
+)
 from tests.providers.contract.registry import ProviderBinding, discover
 
-_PORT_MODULE = "kdive.providers.ports.external_boot"
+_VALUE_MODULE = "kdive.domain.external_boot_values"
 _OPERATIONS = ("materialize", "prepare", "activate", "observe", "recover", "cleanup")
 
 
@@ -117,7 +119,7 @@ def test_recover_then_cleanup_completes_the_activation(binding: ProviderBinding)
     assert _refusal(lambda: provider.observe(recovery, authority)) is not None
 
 
-def test_every_returned_value_is_a_provider_neutral_port_type(
+def test_every_returned_value_is_a_provider_neutral_domain_type(
     binding: ProviderBinding,
 ) -> None:
     provider, materialization, recovery = _activated(binding)
@@ -125,7 +127,7 @@ def test_every_returned_value_is_a_provider_neutral_port_type(
     observation = provider.observe(recovery, binding.authority())
 
     for value in (materialization, recovery, observation):
-        assert type(value).__module__ == _PORT_MODULE, type(value)
+        assert type(value).__module__ == _VALUE_MODULE, type(value)
     assert isinstance(materialization, ExternalBootMaterialization)
     assert isinstance(recovery, RecoveryPoint)
     assert isinstance(observation, RunningKernelObservation)

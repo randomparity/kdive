@@ -32,6 +32,18 @@ from kdive.db.remote_module_attempt_obligations import (
     RemoteModuleAttemptObligationRepository,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    ExternalBootPlan,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
+    OpaqueProviderRef,
+    PresentComponentState,
+    RecoveryObjectBinding,
+    RecoveryObjectObservation,
+    RecoveryPoint,
+    RunningKernelObservation,
+)
 from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
@@ -76,18 +88,6 @@ from kdive.providers.external_boot_authority.teardown import (
     ProviderRecoveryRefusal,
     ProviderRecoveryRefusalReason,
     SystemTeardownSupersededError,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    ExternalBootPlan,
-    ExternalBootPreparationObservation,
-    ExternalBootPreparationRequest,
-    OpaqueProviderRef,
-    PresentComponentState,
-    RecoveryObjectBinding,
-    RecoveryObjectObservation,
-    RecoveryPoint,
-    RunningKernelObservation,
 )
 from kdive.providers.ports.module_operation import (
     ModuleBeginResponse,

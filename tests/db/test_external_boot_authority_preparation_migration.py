@@ -14,6 +14,12 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer
+from kdive.domain.external_boot_values import (
+    DebuginfoSource,
+    ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    OpaqueProviderRef,
+)
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
@@ -24,12 +30,6 @@ from kdive.providers.external_boot_authority.protocol import (
     record_digest,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.ports.external_boot import (
-    DebuginfoSource,
-    ExternalBootActivationBinding,
-    ExternalBootPreparationObservation,
-    OpaqueProviderRef,
-)
 from tests.db.external_boot_authority_support import (
     _PLAN,
     _RoleDsns,

@@ -25,6 +25,10 @@ from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, timing_deadline
+from kdive.domain.external_boot_values import (
+    ExternalBootPlan,
+    OpaqueProviderRef,
+)
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.external_boot.authority import AllocatedAuthority, allocate_authority
 from kdive.jobs.handlers.external_boot.ports import (
@@ -46,9 +50,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTakeoverRequestV1,
 )
 from kdive.providers.ports.external_boot import (
-    ExternalBootPlan,
     ExternalBootPorts,
-    OpaqueProviderRef,
 )
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry

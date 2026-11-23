@@ -24,6 +24,11 @@ import libvirt
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, resolve_local_timing
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    OpaqueProviderRef,
+    RunningKernelObservation,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.owned_domain import parse_owned_xml
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
@@ -39,11 +44,6 @@ from kdive.providers.local_libvirt.lifecycle.storage import baseline_dir, overla
 from kdive.providers.local_libvirt.settings import (
     LIBVIRT_BOOT_WINDOW_S,
     LIBVIRT_TCG_DEADLINE_MULTIPLIER,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    OpaqueProviderRef,
-    RunningKernelObservation,
 )
 from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.shared.libvirt_attachments import (
@@ -955,12 +955,12 @@ class _ConcreteSession:
 
     def reopen_projection(self, artifact: OpaqueProviderRef) -> TargetProjectionV1:
         """Read an exact projection selected by an owner-checked local artifact reference."""
+        from kdive.domain.external_boot_values import ActivationOwnership  # noqa: PLC0415
         from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
             TargetProjectionStore,
             TargetProjectionV1,
             _artifact_ref_parts,
         )
-        from kdive.providers.ports.external_boot import ActivationOwnership  # noqa: PLC0415
 
         self._require_open_domain()
         reference = artifact
@@ -1044,8 +1044,8 @@ class _ConcreteSession:
 
     def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int:
         """Open one payload inside its owner-checked projection digest directory."""
+        from kdive.domain.external_boot_values import ActivationOwnership  # noqa: PLC0415
         from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import _artifact_ref_parts
-        from kdive.providers.ports.external_boot import ActivationOwnership  # noqa: PLC0415
 
         self._require_open_domain()
         owner = ActivationOwnership(system_id=self._binding.system_id, run_id=self._binding.run_id)

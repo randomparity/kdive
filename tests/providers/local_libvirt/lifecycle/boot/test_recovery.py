@@ -19,6 +19,11 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.domain.external_boot_values import (
+    AbsentComponentState,
+    ExternalBootActivationBinding,
+    PresentComponentState,
+)
 from kdive.providers.local_libvirt.lifecycle.boot import recovery
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LibguestfsAuthenticatedGuestTree,
@@ -31,11 +36,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     RealGuestRecoveryWriter,
     RecoveryArchiveSink,
     RecoveryArchiveSource,
-)
-from kdive.providers.ports.external_boot import (
-    AbsentComponentState,
-    ExternalBootActivationBinding,
-    PresentComponentState,
 )
 
 SYSTEM = "00000000-0000-0000-0000-000000000001"

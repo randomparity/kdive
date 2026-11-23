@@ -6,14 +6,14 @@ from typing import Literal
 
 import pytest
 
-from kdive.providers.fault_inject.lifecycle.external_boot import (
-    FaultInjectExternalBoot,
-    PreparationInterrupted,
-)
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ExternalBootActivationBinding,
     ExternalBootPreparationRequest,
     OpaqueProviderRef,
+)
+from kdive.providers.fault_inject.lifecycle.external_boot import (
+    FaultInjectExternalBoot,
+    PreparationInterrupted,
 )
 from tests.jobs.handlers.external_boot.vehicle import synthetic_plan
 

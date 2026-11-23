@@ -8,7 +8,7 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.providers.ports.external_boot import RecoveryObjectObservation
+from kdive.domain.external_boot_values import RecoveryObjectObservation
 
 MAX_QUARANTINE_OBJECTS = 64
 

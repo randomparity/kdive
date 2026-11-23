@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding
 from kdive.domain.external_boot_activation import ExternalBootReleaseEvidenceV1, UtcDateTime
-from kdive.providers.ports.external_boot import OpaqueProviderRef
+from kdive.domain.external_boot_values import OpaqueProviderRef
 
 type AuthorityTeardownReservationDisposition = Literal["pending", "ready", "released"]
 type Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]

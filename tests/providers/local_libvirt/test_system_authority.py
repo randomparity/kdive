@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
+from kdive.domain.external_boot_values import RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.local_libvirt.lifecycle.boot.owned_domain import owned_system_semantic_identity
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
@@ -29,7 +30,6 @@ from kdive.providers.local_libvirt.system_authority import (
     _Completion,
     _Intent,
 )
-from kdive.providers.ports.external_boot import RootSpecV1
 from kdive.providers.shared.libvirt_xml import backing_store_projection
 from kdive.providers.system_authority import (
     AuthoritySystemCommitContextV1,

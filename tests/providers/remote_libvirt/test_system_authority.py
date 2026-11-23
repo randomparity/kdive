@@ -20,8 +20,8 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import RootSource, RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
-from kdive.providers.ports.external_boot import RootSource, RootSpecV1
 from kdive.providers.ports.module_operation import RemoteDeviceIdentity
 from kdive.providers.remote_libvirt.lifecycle.xml import (
     overlay_volume_name,

@@ -41,6 +41,12 @@ from kdive.domain.capacity.state import ExternalBootActivationState, JobState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    OpaqueProviderRef,
+    RunningKernelObservation,
+)
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.authority_sender import _failure, _install_failure
@@ -76,12 +82,6 @@ from kdive.providers.external_boot_authority.service import ExternalBootAuthorit
 from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
 from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
 from kdive.providers.ports.authority import AuthorityCapability
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    ExternalBootPreparationObservation,
-    OpaqueProviderRef,
-    RunningKernelObservation,
-)
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.external_boot.routing import AuthorityReservationGeometry

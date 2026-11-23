@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import Architecture, RootSpecV1
 from kdive.images.planes._build_common import (
     build_workspace,
     digest_file,
@@ -49,7 +50,6 @@ from kdive.images.planes.provenance_probes import (
     RootBootProbeSeam,
     VersionInspectSeam,
 )
-from kdive.providers.ports.external_boot import Architecture, RootSpecV1
 from kdive.providers.shared.build_timeouts import slow_build_tool_timeout_s
 
 _log = logging.getLogger(__name__)

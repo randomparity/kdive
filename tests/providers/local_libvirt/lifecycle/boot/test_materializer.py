@@ -17,6 +17,11 @@ from botocore.exceptions import ReadTimeoutError
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.build_artifacts import validation
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    ExternalBootPlan,
+    OpaqueProviderRef,
+)
 from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
 from kdive.providers.local_libvirt.lifecycle.boot import kernel_bundle as kernel_bundle_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
@@ -31,11 +36,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootSession,
     OverlayIdentity,
     _boot_identity,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    ExternalBootPlan,
-    OpaqueProviderRef,
 )
 from kdive.store.objectstore import ObjectStore
 from tests.providers.local_libvirt.external_boot_support import _SOURCE_XML

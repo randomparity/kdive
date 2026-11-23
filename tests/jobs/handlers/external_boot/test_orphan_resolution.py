@@ -20,6 +20,13 @@ from kdive.db.external_boot_authority_journal import AuthenticatedPeer, Authorit
 from kdive.db.external_boot_recovery_quarantine import record_cleanup_quarantine
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    OpaqueProviderRef,
+    RecoveryObjectBinding,
+    RecoveryObjectObservation,
+    RecoveryPoint,
+)
 from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, JobKind
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.handlers.external_boot.orphan import resolve_recovery_orphan_handler
@@ -56,13 +63,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
     RecoveryMetadataStore,
     recovery_directory_name,
     recovery_point_digest,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    OpaqueProviderRef,
-    RecoveryObjectBinding,
-    RecoveryObjectObservation,
-    RecoveryPoint,
 )
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole

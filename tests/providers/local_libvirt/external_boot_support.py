@@ -9,6 +9,11 @@ from __future__ import annotations
 
 import hashlib
 
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    KernelIdentity,
+    OpaqueProviderRef,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     AbsentComponentState,
     PresentComponentState,
@@ -19,11 +24,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
     LocalPreStopIntentV1,
     LocalRecoveryMetadataV1,
     RecoveryPhase,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    KernelIdentity,
-    OpaqueProviderRef,
 )
 
 _SOURCE_XML = """<domain xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">

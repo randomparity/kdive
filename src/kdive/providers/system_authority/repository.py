@@ -12,8 +12,8 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from kdive.domain.external_boot_values import RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.ports.external_boot import RootSpecV1
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemJournalPhase,
     AuthoritySystemJournalRecordV1,

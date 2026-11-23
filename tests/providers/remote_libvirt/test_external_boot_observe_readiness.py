@@ -13,7 +13,7 @@ from typing import Any, cast
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports.external_boot import OpaqueProviderRef
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.providers.remote_libvirt import external_boot_operations as operations_module
 from kdive.providers.remote_libvirt.external_boot_operations import (
     ConcreteRemoteExternalBootOperations,

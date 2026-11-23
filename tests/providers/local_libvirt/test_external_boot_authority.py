@@ -25,6 +25,19 @@ from pydantic import ValidationError
 
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import (
+    AbsentComponentState,
+    ComponentState,
+    ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    KernelIdentity,
+    OpaqueProviderRef,
+    PresentComponentState,
+    ProviderStateIdentity,
+    RecoveryObjectObservation,
+    RecoveryPoint,
+    RunningKernelObservation,
+)
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
@@ -91,19 +104,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalArtifactRoot,
     LocalOperationLane,
     LocalOperationLeaseScope,
-)
-from kdive.providers.ports.external_boot import (
-    AbsentComponentState,
-    ComponentState,
-    ExternalBootActivationBinding,
-    ExternalBootPreparationObservation,
-    KernelIdentity,
-    OpaqueProviderRef,
-    PresentComponentState,
-    ProviderStateIdentity,
-    RecoveryObjectObservation,
-    RecoveryPoint,
-    RunningKernelObservation,
 )
 
 # The authority service's own repository double. Reused rather than reimplemented here:

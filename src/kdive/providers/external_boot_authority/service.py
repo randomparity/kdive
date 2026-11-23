@@ -21,6 +21,11 @@ from kdive.db.external_boot_authority_journal import (
     PrestopHolders,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import (
+    ExternalBootPreparationObservation,
+    RecoveryObjectObservation,
+    RunningKernelObservation,
+)
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.module_protocol import (
@@ -78,11 +83,6 @@ from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownSnapshot,
     ProviderRecoveryRefusal,
     SystemTeardownSupersededError,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootPreparationObservation,
-    RecoveryObjectObservation,
-    RunningKernelObservation,
 )
 from kdive.providers.system_authority.service import AuthoritySystemService
 from kdive.security.secrets.redaction import REDACTION

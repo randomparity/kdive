@@ -19,6 +19,11 @@ from pydantic import SecretStr
 
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    OpaqueProviderRef,
+)
 from kdive.providers.external_boot_authority import protocol, transport
 from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityInodeV1,
@@ -41,11 +46,6 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    ExternalBootPreparationObservation,
-    OpaqueProviderRef,
 )
 from kdive.providers.remote_libvirt import composition
 from kdive.providers.remote_libvirt.config import (

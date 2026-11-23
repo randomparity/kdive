@@ -12,12 +12,14 @@ import pkgutil
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
-    ExternalBootPorts,
     OpaqueProviderRef,
+)
+from kdive.providers.ports.external_boot import (
+    ExternalBootPorts,
 )
 from tests.providers.contract import bindings
 

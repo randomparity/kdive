@@ -35,6 +35,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
@@ -56,7 +57,6 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
 from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.integration.external_boot_support import (
     CREDENTIAL,

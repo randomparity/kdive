@@ -27,6 +27,12 @@ import kdive.config as config
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, resolve_local_timing
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    OpaqueProviderRef,
+    RecoveryPoint,
+    RunningKernelObservation,
+)
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.providers.external_boot_authority import transport
 from kdive.providers.external_boot_authority.protocol import (
@@ -75,12 +81,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import Loca
 from kdive.providers.local_libvirt.settings import (
     LIBVIRT_BOOT_WINDOW_S,
     LIBVIRT_TCG_DEADLINE_MULTIPLIER,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    OpaqueProviderRef,
-    RecoveryPoint,
-    RunningKernelObservation,
 )
 from kdive.providers.shared.libvirt_external_boot import boot_projection_identity
 from tests.providers.external_boot_authority.service_support import _mutation, _takeover

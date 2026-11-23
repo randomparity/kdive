@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import TeardownPayload
@@ -32,7 +33,6 @@ from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
 )
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 from tests.db.external_boot_authority_support import (
     _PLAN,
     _allocate,

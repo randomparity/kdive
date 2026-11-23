@@ -22,6 +22,7 @@ from kdive.db.remote_module_attempt_obligations import (
     ModuleAttemptWorkerWriteContext,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import ExternalBootActivationBinding, ExternalBootPlan
 from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
@@ -46,7 +47,6 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTeardownMutationRequestV1,
 )
 from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
-from kdive.providers.ports.external_boot import ExternalBootActivationBinding, ExternalBootPlan
 from kdive.providers.remote_libvirt.authority_client import (
     RemoteModuleAuthorityAdapter,
     module_completion,

@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import RunningKernelObservation
 from kdive.jobs.models import ExternalBootAuthorityMarkerV1
 from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.external_boot_authority.protocol import (
@@ -18,7 +19,6 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTeardownResponseV1,
 )
 from kdive.providers.ports.authority import AuthorityRequestSender
-from kdive.providers.ports.external_boot import RunningKernelObservation
 from kdive.providers.ports.module_operation import (
     ModuleAuthority,
     ModuleBeginRequest,

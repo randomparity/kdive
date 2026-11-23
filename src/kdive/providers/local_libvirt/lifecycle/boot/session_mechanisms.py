@@ -32,6 +32,13 @@ from pydantic import ValidationError
 
 from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import (
+    ActivationOwnership,
+    Architecture,
+    ExternalBootActivationBinding,
+    OpaqueProviderRef,
+    RunningKernelObservation,
+)
 
 # The name the sink actually writes, imported rather than restated so the two cannot
 # drift: a second literal here would silently stop matching if the sink ever renamed it.
@@ -53,13 +60,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     PinnedOperationOwnership,
     RunningDomain,
     _Guest,
-)
-from kdive.providers.ports.external_boot import (
-    ActivationOwnership,
-    Architecture,
-    ExternalBootActivationBinding,
-    OpaqueProviderRef,
-    RunningKernelObservation,
 )
 from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.shared.guest_agent import (

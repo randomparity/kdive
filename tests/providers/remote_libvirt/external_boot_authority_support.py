@@ -6,6 +6,15 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+from kdive.domain.external_boot_values import (
+    AbsentComponentState,
+    ExternalBootActivationBinding,
+    ExternalBootPlan,
+    OpaqueProviderRef,
+    PresentComponentState,
+    ProviderStateIdentity,
+    RecoveryPoint,
+)
 from kdive.providers.external_boot_authority.module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV2,
@@ -18,15 +27,6 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityOperation,
-)
-from kdive.providers.ports.external_boot import (
-    AbsentComponentState,
-    ExternalBootActivationBinding,
-    ExternalBootPlan,
-    OpaqueProviderRef,
-    PresentComponentState,
-    ProviderStateIdentity,
-    RecoveryPoint,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootAuthorityAdapter,

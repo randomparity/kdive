@@ -14,17 +14,19 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    OpaqueProviderRef,
+    RecoveryObjectBinding,
+    RecoveryObjectObservation,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityServiceError,
 )
 from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
     ExternalBootRecoveryObjectPorts,
-    OpaqueProviderRef,
-    RecoveryObjectBinding,
-    RecoveryObjectObservation,
 )
 
 

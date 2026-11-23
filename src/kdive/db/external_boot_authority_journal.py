@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
+from kdive.domain.external_boot_values import ExternalBootPlan
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
@@ -20,7 +21,6 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
     canonical_record_bytes,
 )
-from kdive.providers.ports.external_boot import ExternalBootPlan
 from kdive.serialization import validate_stored
 
 type AdvanceStatus = Literal["advanced", "superseded", "conflict"]

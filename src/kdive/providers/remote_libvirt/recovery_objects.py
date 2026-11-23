@@ -8,12 +8,12 @@ from typing import Protocol
 
 import libvirt
 
-from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     OpaqueProviderRef,
     RecoveryObjectBinding,
     RecoveryObjectObservation,
 )
+from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
 from kdive.providers.remote_libvirt.external_boot_store import RemoteExternalBootStore
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
     parse_boot_artifact_name,

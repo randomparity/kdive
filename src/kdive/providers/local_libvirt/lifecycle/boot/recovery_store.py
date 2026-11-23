@@ -18,17 +18,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from kdive.providers.external_boot_authority.teardown import (
-    AuthorityTeardownReservationV1,
-)
-from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
-    _ARCHIVE_NAME,
-    ModuleArchiveCapture,
-    ModuleCapture,
-    RecoveryArchiveSink,
-    RecoveryArchiveSource,
-)
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ActivationOwnership,
     ComponentState,
     ExternalBootActivationBinding,
@@ -40,6 +30,16 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     ProviderStateIdentity,
     RecoveryPoint,
+)
+from kdive.providers.external_boot_authority.teardown import (
+    AuthorityTeardownReservationV1,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
+    _ARCHIVE_NAME,
+    ModuleArchiveCapture,
+    ModuleCapture,
+    RecoveryArchiveSink,
+    RecoveryArchiveSource,
 )
 from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.shared.libvirt_external_boot import (

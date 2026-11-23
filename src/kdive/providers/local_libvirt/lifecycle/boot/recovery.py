@@ -17,7 +17,7 @@ from typing import Annotated, BinaryIO, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     AbsentComponentState,
     ComponentState,
     ExternalBootActivationBinding,

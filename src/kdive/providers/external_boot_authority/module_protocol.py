@@ -8,6 +8,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from kdive.domain.external_boot_values import Digest, OpaqueProviderRef
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.module_documents import (
     RemoteModuleOperationV1,
@@ -22,7 +23,6 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTeardownMutationRequestV1,
 )
 from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
-from kdive.providers.ports.external_boot import Digest, OpaqueProviderRef
 from kdive.providers.shared.module_volume_names import render_module_volume_name
 
 

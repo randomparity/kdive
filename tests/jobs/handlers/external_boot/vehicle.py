@@ -39,8 +39,7 @@ import json
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     BundleSource,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
@@ -54,6 +53,7 @@ from kdive.providers.ports.external_boot import (
     RootSpecV1,
     RunningKernelObservation,
 )
+from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
 
 _SHA = "sha256:" + "11" * 32
 _INITRD_SHA = "sha256:" + "22" * 32

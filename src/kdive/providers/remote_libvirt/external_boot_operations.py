@@ -11,8 +11,7 @@ from uuid import UUID
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     AbsentComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
@@ -22,6 +21,7 @@ from kdive.providers.ports.external_boot import (
     ProviderStateIdentity,
     RunningKernelObservation,
 )
+from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
 from kdive.providers.ports.module_operation import RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootObservedState,

@@ -10,13 +10,13 @@ from kdive.db.remote_module_attempt_obligations import (
     ModuleAttemptRestoredEvidence,
     ModuleAttemptTerminalEvidence,
 )
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.providers.external_boot_authority.module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV2,
     RemoteModuleResultV1,
     identity_for,
 )
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 
 _PLAN = "sha256:" + "a" * 64
 _DIGEST = "sha256:" + "b" * 64

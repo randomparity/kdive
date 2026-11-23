@@ -17,6 +17,7 @@ from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import RootSpecV1
 from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.context import context_from_job as job_context_from_job
@@ -25,7 +26,6 @@ from kdive.jobs.payloads import InstallPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.kernel_config.gate import crash_capture_refusal
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports.external_boot import RootSpecV1
 from kdive.providers.ports.lifecycle import Installer, InstallRequest
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext

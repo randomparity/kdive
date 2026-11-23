@@ -27,9 +27,9 @@ from typing import NoReturn
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import Architecture, RootSource, RootSpecV1
 from kdive.images.planes import _build_common
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
-from kdive.providers.ports.external_boot import Architecture, RootSource, RootSpecV1
 from kdive.providers.remote_libvirt import rootfs_build
 from kdive.providers.remote_libvirt.rootfs_build import (
     RemoteLibvirtRootfsBuildPlane,

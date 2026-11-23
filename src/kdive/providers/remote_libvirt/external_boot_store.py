@@ -18,6 +18,19 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from kdive.domain.external_boot_values import (
+    Digest,
+    ExternalBootActivationBinding,
+    ExternalBootMaterialization,
+    ExternalBootPlan,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
+    OpaqueProviderRef,
+    ProviderStateIdentity,
+    RecoveryObjectBinding,
+    RecoveryObjectObservation,
+    RecoveryPoint,
+)
 from kdive.providers.external_boot_authority.module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV2,
@@ -40,19 +53,6 @@ from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownReservationV1,
     ProviderRecoveryRefusal,
     SystemTeardownSupersededError,
-)
-from kdive.providers.ports.external_boot import (
-    Digest,
-    ExternalBootActivationBinding,
-    ExternalBootMaterialization,
-    ExternalBootPlan,
-    ExternalBootPreparationObservation,
-    ExternalBootPreparationRequest,
-    OpaqueProviderRef,
-    ProviderStateIdentity,
-    RecoveryObjectBinding,
-    RecoveryObjectObservation,
-    RecoveryPoint,
 )
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     RemoteExternalBootDefinition,

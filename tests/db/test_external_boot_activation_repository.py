@@ -37,7 +37,7 @@ from kdive.domain.external_boot_activation import (
     ExternalBootTeardownEvidenceV1,
     ExternalBootTerminalEvidenceV1,
 )
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ExternalBootMaterialization,
     OpaqueProviderRef,
     RecoveryPoint,

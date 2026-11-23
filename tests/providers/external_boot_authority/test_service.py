@@ -14,6 +14,12 @@ import pytest
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer, AuthorityBinding
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    OpaqueProviderRef,
+    RecoveryObjectObservation,
+)
 from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
@@ -51,12 +57,6 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.providers.external_boot_authority.service import (
     AuthorityServiceMetrics,
     ExternalBootAuthorityService,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    ExternalBootPreparationObservation,
-    OpaqueProviderRef,
-    RecoveryObjectObservation,
 )
 from kdive.serialization import ServerFaultError
 from tests.providers.external_boot_authority.service_support import (

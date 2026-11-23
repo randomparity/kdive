@@ -13,10 +13,12 @@ import hashlib
 import os
 from typing import BinaryIO
 
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     DebuginfoSource,
-    ExternalBootArtifactStager,
     ExternalBootPlan,
+)
+from kdive.providers.ports.external_boot import (
+    ExternalBootArtifactStager,
 )
 from kdive.store.objectstore import ObjectStore
 

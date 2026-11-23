@@ -21,6 +21,7 @@ import pytest
 
 import kdive.providers.local_libvirt.lifecycle.boot.readiness as readiness_module
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import ExternalBootActivationBinding, OpaqueProviderRef
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     ModuleArchiveCapture,
     _cleanup_uncommitted_payloads,
@@ -62,7 +63,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalRunningObserver,
     open_libguestfs_guest,
 )
-from kdive.providers.ports.external_boot import ExternalBootActivationBinding, OpaqueProviderRef
 from kdive.providers.shared.runtime_paths import overlay_path
 from tests.providers.local_libvirt.external_boot_support import (
     _BINDING,

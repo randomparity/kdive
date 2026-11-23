@@ -30,6 +30,7 @@ from kdive.domain.external_boot_activation import (
     ExternalBootReleaseEvidenceV1,
 )
 from kdive.domain.external_boot_timing import timing_deadline
+from kdive.domain.external_boot_values import RecoveryPoint, RunningKernelObservation
 from kdive.domain.operations.jobs import Job
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.jobs.handlers.external_boot.evidence import (
@@ -66,7 +67,6 @@ from kdive.providers.external_boot_authority.protocol import (
     RecoveryObjectBindingV1,
     canonical_teardown_proof_bytes,
 )
-from kdive.providers.ports.external_boot import RecoveryPoint, RunningKernelObservation
 from kdive.providers.ports.module_operation import ModuleAuthority, ModuleCompletion
 
 __all__ = [

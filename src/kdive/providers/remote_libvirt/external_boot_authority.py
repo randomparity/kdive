@@ -14,6 +14,18 @@ from typing import Literal, NoReturn, Protocol, cast
 from uuid import UUID, uuid5
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    ExternalBootMaterialization,
+    ExternalBootPlan,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
+    OpaqueProviderRef,
+    RecoveryObjectBinding,
+    RecoveryObjectObservation,
+    RecoveryPoint,
+    RunningKernelObservation,
+)
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.module_documents import (
     RemoteModuleOperationV1,
@@ -49,18 +61,6 @@ from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
     ProviderRecoveryRefusal,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    ExternalBootMaterialization,
-    ExternalBootPlan,
-    ExternalBootPreparationObservation,
-    ExternalBootPreparationRequest,
-    OpaqueProviderRef,
-    RecoveryObjectBinding,
-    RecoveryObjectObservation,
-    RecoveryPoint,
-    RunningKernelObservation,
 )
 from kdive.providers.remote_libvirt.external_boot_store import (
     AdmittedRemoteModulePreparation,

@@ -19,6 +19,9 @@ from uuid import UUID
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import (
+    OpaqueProviderRef,
+)
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.module_documents import (
     RemoteModuleOperationV1,
@@ -40,7 +43,9 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityPreparationMutationRequestV1,
 )
 from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
-from kdive.providers.ports.external_boot import ExternalBootArtifactStager, OpaqueProviderRef
+from kdive.providers.ports.external_boot import (
+    ExternalBootArtifactStager,
+)
 from kdive.providers.ports.module_operation import RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.debuginfo_module_tree import STAGED_NAME
 from kdive.providers.remote_libvirt.external_boot_store import (

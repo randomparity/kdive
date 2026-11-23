@@ -5,13 +5,13 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from kdive.domain.external_boot_values import KernelIdentity, RunningKernelObservation
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityRunningObservationV1,
 )
 from kdive.providers.external_boot_authority.transport import _dispatch
-from kdive.providers.ports.external_boot import KernelIdentity, RunningKernelObservation
 from tests.providers.external_boot_authority.service_support import _mutation, _service
 
 

@@ -19,6 +19,28 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from kdive.build_artifacts import validation as build_validation
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
+from kdive.domain.external_boot_values import (
+    AbsentComponentState,
+    ActivationOwnership,
+    ArtifactSource,
+    ComponentState,
+    DebuginfoSource,
+    ExternalBootActivationBinding,
+    ExternalBootMaterialization,
+    ExternalBootPlan,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
+    InitrdSource,
+    KernelIdentity,
+    MaterializedArtifacts,
+    OpaqueProviderRef,
+    PresentComponentState,
+    ProviderStateIdentity,
+    RecoveryObjectBinding,
+    RecoveryObjectObservation,
+    RecoveryPoint,
+    RunningKernelObservation,
+)
 from kdive.providers.external_boot_authority.stranded import StrandedAuthorityFacts
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
@@ -85,27 +107,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     TreeCursor,
 )
 from kdive.providers.ports.external_boot import (
-    AbsentComponentState,
-    ActivationOwnership,
-    ArtifactSource,
-    ComponentState,
-    DebuginfoSource,
-    ExternalBootActivationBinding,
     ExternalBootArtifactStager,
-    ExternalBootMaterialization,
-    ExternalBootPlan,
-    ExternalBootPreparationObservation,
-    ExternalBootPreparationRequest,
-    InitrdSource,
-    KernelIdentity,
-    MaterializedArtifacts,
-    OpaqueProviderRef,
-    PresentComponentState,
-    ProviderStateIdentity,
-    RecoveryObjectBinding,
-    RecoveryObjectObservation,
-    RecoveryPoint,
-    RunningKernelObservation,
 )
 from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.shared.external_boot_bounds import materialization_reservation_bytes

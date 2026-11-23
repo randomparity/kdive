@@ -16,7 +16,7 @@ from xml.etree.ElementTree import ParseError
 from xml.etree.ElementTree import fromstring as _xml_fromstring  # noqa: S405  # nosec B405
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports.external_boot import Architecture, RootSource, RootSpecV1
+from kdive.domain.external_boot_values import Architecture, RootSource, RootSpecV1
 from kdive.providers.shared.build_timeouts import appliance_budget_s
 
 # The in-guest marker file a debug build writes ``makedumpfile --version`` into, read back into

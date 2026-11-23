@@ -19,6 +19,20 @@ from pydantic import SecretStr
 import kdive.config as runtime_config
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError
+from kdive.domain.external_boot_values import (
+    AbsentComponentState,
+    ExternalBootActivationBinding,
+    ExternalBootMaterialization,
+    ExternalBootPlan,
+    ExternalBootPreparationRequest,
+    KernelIdentity,
+    MaterializedArtifacts,
+    OpaqueProviderRef,
+    PresentComponentState,
+    ProviderStateIdentity,
+    RecoveryPoint,
+    RunningKernelObservation,
+)
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.providers.assembly import composition as provider_composition
 from kdive.providers.external_boot_authority import host, transport
@@ -50,20 +64,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
 from kdive.providers.local_libvirt.settings import (
     LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES,
     LIBVIRT_RECOVERY_ROOT,
-)
-from kdive.providers.ports.external_boot import (
-    AbsentComponentState,
-    ExternalBootActivationBinding,
-    ExternalBootMaterialization,
-    ExternalBootPlan,
-    ExternalBootPreparationRequest,
-    KernelIdentity,
-    MaterializedArtifacts,
-    OpaqueProviderRef,
-    PresentComponentState,
-    ProviderStateIdentity,
-    RecoveryPoint,
-    RunningKernelObservation,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend

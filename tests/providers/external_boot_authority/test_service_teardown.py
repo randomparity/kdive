@@ -12,6 +12,7 @@ import pytest
 
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.external_boot_activation import ExternalBootReleaseEvidenceV1
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
@@ -31,7 +32,6 @@ from kdive.providers.external_boot_authority.teardown import (
     ProviderRecoveryRefusal,
     SystemTeardownSupersededError,
 )
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootAuthorityAdapter,
     RemoteExternalBootCoordinator,

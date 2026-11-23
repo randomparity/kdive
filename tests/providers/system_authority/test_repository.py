@@ -8,8 +8,8 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.domain.external_boot_values import RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
-from kdive.providers.ports.external_boot import RootSpecV1
 from kdive.providers.system_authority.protocol import AuthoritySystemOperation
 from kdive.providers.system_authority.repository import AuthoritySystemBinding, _binding, _snapshot
 

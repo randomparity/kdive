@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import RootSource, RootSpecV1
 from kdive.images.rootfs import stage_volume as stage_volume_module
 from kdive.images.rootfs.stage_volume import (
     StageVolumeDeps,
@@ -20,7 +21,6 @@ from kdive.images.rootfs.stage_volume import (
     capture_kernel_config,
     stage_volume,
 )
-from kdive.providers.ports.external_boot import RootSource, RootSpecV1
 
 _ROW_ID = uuid4()
 _VOLUME = "fedora-44.qcow2"

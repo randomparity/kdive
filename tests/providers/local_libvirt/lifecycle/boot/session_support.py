@@ -12,7 +12,7 @@ from uuid import UUID
 
 import libvirt
 
-from kdive.providers.ports.external_boot import ExternalBootActivationBinding
+from kdive.domain.external_boot_values import ExternalBootActivationBinding
 
 SYSTEM_ID = UUID("11111111-1111-1111-1111-111111111111")
 BINDING = ExternalBootActivationBinding(

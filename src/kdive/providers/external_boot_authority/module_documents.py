@@ -22,7 +22,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, ValidationError, field_validator, model_validator
 
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     Digest,
     KernelRelease,
     OpaqueProviderRef,

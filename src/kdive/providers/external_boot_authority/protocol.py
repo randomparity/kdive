@@ -26,7 +26,7 @@ from kdive.domain.external_boot_activation import (
     ExternalBootTeardownEvidenceV1,
 )
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ExternalBootPlan,
     ExternalBootPreparationObservation,
     KernelIdentity,

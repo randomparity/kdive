@@ -12,8 +12,8 @@ from pydantic import ValidationError
 
 from kdive.components.references import CatalogComponentRef, LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.ports.external_boot import RootSpecV1
 
 
 @dataclass(frozen=True, slots=True)

@@ -27,6 +27,7 @@ from kdive.db.remote_module_attempt_obligations import (
 )
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import ExternalBootPlan
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.payloads import (
     ENQUEUEABLE_EXTERNAL_BOOT_OPERATIONS,
@@ -35,7 +36,6 @@ from kdive.jobs.payloads import (
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import Purpose
-from kdive.providers.ports.external_boot import ExternalBootPlan
 from kdive.services.external_boot.local_timing import local_external_boot_timing
 from kdive.services.external_boot.routing import server_authority_instance
 

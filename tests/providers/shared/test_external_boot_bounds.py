@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.build_artifacts import validation
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ArtifactSource,
     BundleSource,
     DebuginfoSource,

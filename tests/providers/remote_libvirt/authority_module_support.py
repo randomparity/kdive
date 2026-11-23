@@ -2,6 +2,7 @@
 
 from uuid import UUID, uuid4
 
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.providers.external_boot_authority.module_documents import (
     RemoteModuleRecoveryRefV2,
     RemoteModuleResultV1,
@@ -15,7 +16,6 @@ from kdive.providers.external_boot_authority.module_protocol import (
     RemoteModuleVolumePreparationResponseV1,
 )
 from kdive.providers.external_boot_authority.protocol import AuthorityPreparationMutationRequestV1
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.providers.remote_libvirt.external_boot_store import PriorPower
 from kdive.providers.shared.module_volume_names import (
     render_module_volume_name,

@@ -29,7 +29,7 @@ from pydantic import (
 
 from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     Architecture,
     Digest,
     ExternalBootActivationBinding,

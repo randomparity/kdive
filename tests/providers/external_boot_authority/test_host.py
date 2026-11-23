@@ -21,6 +21,11 @@ from uuid import UUID, uuid4
 import pytest
 
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer, JournalHead
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    ExternalBootPlan,
+    OpaqueProviderRef,
+)
 from kdive.providers.external_boot_authority import host, transport
 from kdive.providers.external_boot_authority import settings as authority_settings
 from kdive.providers.external_boot_authority.host import (
@@ -43,11 +48,6 @@ from kdive.providers.external_boot_authority.protocol import (
     record_digest,
 )
 from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    ExternalBootPlan,
-    OpaqueProviderRef,
-)
 from tests.providers.external_boot_authority.service_support import (
     _Adapter,
     _mutation,

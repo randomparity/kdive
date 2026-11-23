@@ -14,12 +14,12 @@ from typing import cast
 from uuid import uuid4
 
 from kdive.domain.external_boot_activation import ExternalBootActivation
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.jobs.handlers.external_boot.evidence import (
     known_object_refs,
     terminal_evidence,
 )
 from kdive.jobs.handlers.external_boot.runner import OperationContext
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
 
 DIGEST = "sha256:" + "c" * 64

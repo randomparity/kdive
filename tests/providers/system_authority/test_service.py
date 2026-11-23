@@ -11,8 +11,8 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from kdive.domain.external_boot_values import RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
-from kdive.providers.ports.external_boot import RootSpecV1
 from kdive.providers.system_authority import journal as journal_module
 from kdive.providers.system_authority import service as service_module
 from kdive.providers.system_authority.journal import (

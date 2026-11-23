@@ -13,8 +13,8 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from kdive.domain.external_boot_activation import UtcDateTime
+from kdive.domain.external_boot_values import RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
-from kdive.providers.ports.external_boot import RootSpecV1
 from kdive.security.ssh_authorized_key import validate_authorized_public_key
 
 MAX_MESSAGE_BYTES = 1_048_576

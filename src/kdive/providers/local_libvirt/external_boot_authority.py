@@ -22,6 +22,17 @@ from uuid import UUID, uuid5
 
 from pydantic import ValidationError
 
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
+    OpaqueProviderRef,
+    ProviderStateIdentity,
+    RecoveryObjectBinding,
+    RecoveryObjectObservation,
+    RecoveryPoint,
+    RunningKernelObservation,
+)
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityConflictResolutionRequestV1,
@@ -61,17 +72,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalOperationLeaseScope,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    ExternalBootPreparationObservation,
-    ExternalBootPreparationRequest,
-    OpaqueProviderRef,
-    ProviderStateIdentity,
-    RecoveryObjectBinding,
-    RecoveryObjectObservation,
-    RecoveryPoint,
-    RunningKernelObservation,
 )
 
 logger = logging.getLogger(__name__)

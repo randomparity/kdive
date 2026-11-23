@@ -28,6 +28,7 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.cmdline import cmdline_extra_error
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
+from kdive.domain.external_boot_values import ExternalBootPlan, RootSpecV1
 from kdive.domain.operations.jobs import (
     RETIRED_JOB_KINDS,
     Job,
@@ -42,7 +43,6 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     operation_is_permitted,
 )
-from kdive.providers.ports.external_boot import ExternalBootPlan, RootSpecV1
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemMarkerV1,
     AuthoritySystemOperation,

@@ -15,7 +15,7 @@ from uuid import UUID
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports.external_boot import ExternalBootPlan
+from kdive.domain.external_boot_values import ExternalBootPlan
 from kdive.providers.remote_libvirt.debuginfo_module_tree import (
     STAGED_NAME,
     DebuginfoModuleTreeStager,

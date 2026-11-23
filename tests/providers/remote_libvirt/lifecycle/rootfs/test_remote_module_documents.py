@@ -12,6 +12,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.providers.external_boot_authority.module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV1,
@@ -19,7 +20,6 @@ from kdive.providers.external_boot_authority.module_documents import (
     RemoteModuleResultV1,
     identity_for,
 )
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 from tests.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents_support import (  # noqa: F401
     APPLIANCE,
     DIGESTS,

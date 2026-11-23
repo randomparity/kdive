@@ -26,6 +26,25 @@ from pydantic import BaseModel, Field, ValidationError
 
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
+from kdive.domain.external_boot_values import (
+    AbsentComponentState,
+    ComponentState,
+    DebuginfoSource,
+    ExternalBootActivationBinding,
+    ExternalBootMaterialization,
+    ExternalBootPlan,
+    ExternalBootPreparationObservation,
+    ExternalBootPreparationRequest,
+    KernelIdentity,
+    MaterializedArtifacts,
+    OpaqueProviderRef,
+    PresentComponentState,
+    ProviderStateIdentity,
+    RecoveryObjectBinding,
+    RecoveryObjectObservation,
+    RecoveryPoint,
+    RunningKernelObservation,
+)
 from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownReservationV1,
     ProviderRecoveryRefusal,
@@ -93,25 +112,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalArtifactRoot,
     LocalOperationLane,
     LocalOperationLeaseScope,
-)
-from kdive.providers.ports.external_boot import (
-    AbsentComponentState,
-    ComponentState,
-    DebuginfoSource,
-    ExternalBootActivationBinding,
-    ExternalBootMaterialization,
-    ExternalBootPlan,
-    ExternalBootPreparationObservation,
-    ExternalBootPreparationRequest,
-    KernelIdentity,
-    MaterializedArtifacts,
-    OpaqueProviderRef,
-    PresentComponentState,
-    ProviderStateIdentity,
-    RecoveryObjectBinding,
-    RecoveryObjectObservation,
-    RecoveryPoint,
-    RunningKernelObservation,
 )
 from kdive.providers.shared.external_boot_bounds import materialization_reservation_bytes
 from kdive.providers.shared.runtime_paths import overlay_path

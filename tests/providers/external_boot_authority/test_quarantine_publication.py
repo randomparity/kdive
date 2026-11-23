@@ -14,6 +14,12 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer, AuthorityBinding
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    OpaqueProviderRef,
+    RecoveryObjectBinding,
+    RecoveryObjectObservation,
+)
 from kdive.providers.external_boot_authority.journal import record_digest
 from kdive.providers.external_boot_authority.orphan import _Selection
 from kdive.providers.external_boot_authority.protocol import (
@@ -23,12 +29,6 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    OpaqueProviderRef,
-    RecoveryObjectBinding,
-    RecoveryObjectObservation,
-)
 from tests.db.conftest import _migrated_db as _migrated_db  # noqa: F401
 from tests.db.conftest import migrated_url as migrated_url  # noqa: F401
 from tests.db.conftest import postgres_url as postgres_url  # noqa: F401

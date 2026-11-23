@@ -42,6 +42,11 @@ from kdive.domain.external_boot_activation import (
     ExternalBootReleaseEvidenceV1,
     ExternalBootTeardownEvidenceV1,
 )
+from kdive.domain.external_boot_values import (
+    OpaqueProviderRef,
+    RecoveryPoint,
+    RunningKernelObservation,
+)
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.jobs import queue
@@ -78,11 +83,6 @@ from kdive.providers.external_boot_authority.protocol import (
     teardown_proof_digest,
 )
 from kdive.providers.ports.authority import AuthorityCapability
-from kdive.providers.ports.external_boot import (
-    OpaqueProviderRef,
-    RecoveryPoint,
-    RunningKernelObservation,
-)
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.db.remote_module_attempt_obligations_support import _attempt as _module_attempt
