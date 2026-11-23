@@ -21,7 +21,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.repositories import JOBS, SYSTEM_DEVICES
+from kdive.db.repositories import SYSTEM_DEVICES
 from kdive.domain.capacity.state import SystemDeviceState, SystemState
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import SystemDevice
@@ -44,6 +44,7 @@ from tests.conftest import _RoleDsns
 from tests.mcp.lifecycle import runs_support
 from tests.mcp.systems_support import ctx as _ctx
 from tests.mcp.systems_support import provider_resolver, provisioning_profile
+from tests.support.worker_fence import dequeue_as_current_worker, incarnation_credential
 
 _ATTACHED, _FAILED, _LOST = (
     SystemDeviceState.ATTACHED,
@@ -174,10 +175,14 @@ class _Env:
 
     async def run_worker(self, job_id: str, port: object | None = None) -> None:
         async with self.owner.connection() as conn:
-            job = await JOBS.get(conn, UUID(job_id))
-        assert job is not None
+            job = await dequeue_as_current_worker(conn, "forced-device-worker")
+        assert job is not None and job.id == UUID(job_id)
         await unplug_device_handler(
-            self.worker, job, resolver=self.resolver(port), secret_registry=SecretRegistry()
+            self.worker,
+            job,
+            resolver=self.resolver(port),
+            secret_registry=SecretRegistry(),
+            incarnation_credential=incarnation_credential("forced-device-worker"),
         )
 
     def attach_on_port(self, port: FaultInjectHotplug, device_id: UUID, kind: str) -> str:

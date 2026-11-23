@@ -19,11 +19,13 @@ import psycopg
 import pytest
 
 from kdive.db.repositories import SYSTEM_DEVICES, SYSTEMS
-from kdive.domain.capacity.state import JobState, SystemDeviceState, SystemState
+from kdive.domain.capacity.state import SystemDeviceState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import SystemDevice
 from kdive.domain.operations.jobs import Job, JobKind
+from kdive.jobs import queue
 from kdive.jobs.handlers.devices import plug_device_handler, unplug_device_handler
+from kdive.jobs.payloads import Authorizing, PlugDevicePayload, UnplugDevicePayload
 from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
 from kdive.providers.fault_inject.lifecycle.faulted import FaultedHotplug
@@ -38,6 +40,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.conftest import _RoleDsns
 from tests.db.system_ledger_support import connect, seed_system
 from tests.mcp.systems_support import provider_resolver
+from tests.support.worker_fence import dequeue_as_current_worker, incarnation_credential
 
 _DT = datetime(2026, 11, 19, tzinfo=UTC)
 _WINDOW_S = 0.3
@@ -194,25 +197,32 @@ class _Env:
             "UPDATE systems SET state = %s WHERE id = %s", (state.value, self.system_id)
         )
 
-    def job(self, kind: JobKind, device_id: UUID, **payload: object) -> Job:
-        return Job(
-            id=uuid4(),
-            created_at=_DT,
-            updated_at=_DT,
-            kind=kind,
-            payload={"system_id": str(self.system_id), "device_id": str(device_id), **payload},
-            state=JobState.RUNNING,
-            max_attempts=1,
-            authorizing={"principal": "alice", "agent_session": None, "project": "proj"},
-            dedup_key=f"{kind.value}:{device_id}",
+    async def job(self, kind: JobKind, device_id: UUID, **payload: object) -> Job:
+        values = {"system_id": str(self.system_id), "device_id": str(device_id), **payload}
+        model = (
+            PlugDevicePayload.model_validate(values)
+            if kind is JobKind.PLUG_DEVICE
+            else UnplugDevicePayload.model_validate(values)
         )
+        queued = await queue.enqueue(
+            self.owner,
+            kind,
+            model,
+            Authorizing(principal="alice", agent_session=None, project="proj"),
+            f"{kind.value}:{device_id}:{uuid4()}",
+            max_attempts=1,
+        )
+        job = await dequeue_as_current_worker(self.owner, "device-handler-worker")
+        assert job is not None and job.id == queued.id
+        return job
 
     async def plug(self, port: object, device_id: UUID, **kw: Any) -> str | None:
         return await plug_device_handler(
             self.worker,
-            self.job(JobKind.PLUG_DEVICE, device_id),
+            await self.job(JobKind.PLUG_DEVICE, device_id),
             resolver=provider_resolver(hotplugger=port),
             secret_registry=self.secrets,
+            incarnation_credential=incarnation_credential("device-handler-worker"),
             window_s=_WINDOW_S,
             poll_interval_s=_POLL_S,
             **kw,
@@ -227,9 +237,10 @@ class _Env:
     ) -> str | None:
         return await unplug_device_handler(
             self.worker,
-            self.job(kind, device_id, from_state=from_state.value),
+            await self.job(kind, device_id, from_state=from_state.value),
             resolver=provider_resolver(hotplugger=port),
             secret_registry=self.secrets,
+            incarnation_credential=incarnation_credential("device-handler-worker"),
             window_s=_WINDOW_S,
             poll_interval_s=_POLL_S,
         )

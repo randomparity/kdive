@@ -408,8 +408,9 @@ class DeviceHotplugger(Protocol):
 
     A provider that advertises ``ProviderSupport.hotplug_devices`` wires a ``DeviceHotplugger``
     into ``ProviderRuntime.device_hotplug``. Every method refuses a kind outside the advertised
-    set with ``CONFIGURATION_ERROR``. Each call carries its own timeout bounded by the job's
-    remaining window. ``unplug`` never forces the guest: it issues the graceful request only;
+    set with ``CONFIGURATION_ERROR``. Started mutations run to completion under the worker's
+    System lock; the remaining window bounds observation rather than cancelling their threads
+    (ADR-0831). ``unplug`` never forces the guest: it issues the graceful request only;
     ``force_unplug`` (ADR-0828) is the separate admin-gated op for a provider that can force.
     """
 
@@ -489,7 +490,9 @@ class DeviceHotplugger(Protocol):
     ) -> bool:
         """Whether the device is present and settled; polled while a plug or un-plug settles.
 
-        The first absent look at a ``disk`` frees its backing volume; a ``nic`` has none.
+        The first absent look at a ``disk`` frees its backing volume, so the worker drains
+        that callback as a mutation. A ``nic`` observation is read-only and has no storage
+        to free; its waiter is bounded by the remaining observation window.
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a provider fault.

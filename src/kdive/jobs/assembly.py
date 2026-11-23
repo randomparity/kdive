@@ -246,6 +246,7 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
         registry,
         resolver=assembly.resolver,
         secret_registry=assembly.secret_registry,
+        incarnation_credential=assembly.incarnation_credential,
     )
     registry.register(
         JobKind.REMOTE_MODULE_VOLUME_REAP,
