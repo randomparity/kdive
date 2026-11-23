@@ -60,7 +60,7 @@ _DIGESTS: dict[str, dict[str, str]] = {
         "AuthorityCleanupEvidenceContextV1": "f5a9fb94dddc",  # pragma: allowlist secret
         "AuthorityRecoveryObservationContextV1": "9e84793bfe68",  # pragma: allowlist secret
     },
-    "kdive.providers.local_libvirt.lifecycle.boot.external_boot": {
+    "kdive.providers.local_libvirt.lifecycle.boot.recovery_store": {
         "_ClosedValue": "ab4cc0ed77f7",  # pragma: allowlist secret
         "LocalRecoveryMetadataV1": "29a42aa9881c",  # pragma: allowlist secret
         "LocalPreStopIntentV1": "bc7dc92cb997",  # pragma: allowlist secret
