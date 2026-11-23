@@ -18,6 +18,7 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.build_artifacts import validation
 from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
+from kdive.providers.local_libvirt.lifecycle.boot import kernel_bundle as kernel_bundle_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     RealLocalExternalBootMaterializer,
 )
@@ -347,7 +348,7 @@ def test_materialize_confines_and_closes_conversion_temporaries(
     session = _Session(tmp_path / "activation")
     opened: list[BinaryIO] = []
     directories: list[Path] = []
-    original = external_boot_module.tempfile.TemporaryFile
+    original = kernel_bundle_module.tempfile.TemporaryFile
 
     def observed_temporary_file(*, dir: str | None = None) -> BinaryIO:
         assert dir is not None
@@ -356,7 +357,7 @@ def test_materialize_confines_and_closes_conversion_temporaries(
         opened.append(handle)
         return handle
 
-    monkeypatch.setattr(external_boot_module.tempfile, "TemporaryFile", observed_temporary_file)
+    monkeypatch.setattr(kernel_bundle_module.tempfile, "TemporaryFile", observed_temporary_file)
     result = RealLocalExternalBootMaterializer(
         ObjectStore(_Client({("build/kernel", "kernel-v1"): bundle}), "bucket")
     ).materialize(plan, cast(LocalExternalBootSession, session))

@@ -44,13 +44,13 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     RealLocalExternalBootIO,
     advance_absence_publication,
     advance_module_publication,
-    convert_kernel_bundle_modules,
     render_target_xml,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import (
     VMLINUX_HEADROOM_BYTES,
     GuestFreeSpaceRefusal,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import convert_kernel_bundle_modules
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import ProbeFailure, ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     AbsentModuleCapture,

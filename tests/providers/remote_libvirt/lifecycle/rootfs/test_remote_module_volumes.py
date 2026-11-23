@@ -13,9 +13,7 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
-    convert_kernel_bundle_modules,
-)
+from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import convert_kernel_bundle_modules
 from kdive.providers.remote_libvirt.lifecycle.rootfs import remote_module_volumes as volumes
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     AttachmentInspection,
