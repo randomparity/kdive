@@ -1,9 +1,8 @@
-"""The six enqueueable external-boot operation handlers (spec §7).
+"""Enqueueable external-boot handlers (ADRs 0593, 0614, 0620 and 0832).
 
-Each is the shared runner parameterized by its row of the specification's §7 table: the activation
-states the **commit** admits, the evidence columns it reads, its footnoted prerequisites, its port
-call, and its result variant. Nothing here calls ``commit_external_boot_authority_result``; the
-handler returns its result and the worker commits it under ``_authority_binding_matches``.
+Ordinary handlers return bound results for the worker to commit. Derived release
+and teardown finalize their exact receipt transactions before returning a distinct
+completion marker; the worker checks its binding without committing it again.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any, Final, Literal, LiteralString, cast
+from typing import Any, Final, Literal, LiteralString
 from uuid import NAMESPACE_URL, uuid5
 
 from psycopg import AsyncConnection
@@ -46,6 +45,7 @@ from kdive.jobs.handlers.external_boot.runner import (
     OperationContext,
     _CommandLineMismatch,
     authority_ref,
+    run_derived_operation,
     run_operation,
     starts_fresh_readiness_budget,
 )
@@ -788,38 +788,6 @@ def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
     )
 
 
-def _recovering_handler(
-    ports: ExternalBootHandlerPorts,
-    *,
-    operation: str,
-    state: State,
-    attempt_state: str,
-) -> ExternalBootOperationHandler:
-    """``recover`` and ``resolve-conflict`` differ in three parameters, so they share a body."""
-
-    def build(
-        context: OperationContext, observation: AuthorityObservationV1
-    ) -> ExternalBootAuthoritySuccessV1:
-        return authority_result(
-            context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": operation,
-                "result_ref": None,
-                "evidence": terminal_evidence(context, "recovered"),
-            },
-        )
-
-    return _handler(
-        ports,
-        require_activation_state=frozenset({state}),
-        require_activation_evidence=_ACTIVATION_EVIDENCE,
-        require_preconditions=_require_attempt_state(attempt_state),
-        expected_observation="source",
-        build_result=build,
-    )
-
-
 def recover_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
     """Re-run the recovery point and confirm the kernel, under a ``recovering`` attempt row."""
 
@@ -983,35 +951,18 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     async def handler(
         conn: AsyncConnection, job: Job, marker: ExternalBootAuthorityMarkerV1
     ) -> ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1:
-        return cast(
-            ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1,
-            await run_operation(
-                conn,
-                job,
-                marker,
-                ports=ports,
-                require_activation_state=frozenset(
-                    {State.ACTIVE, State.RECOVERING, State.RECOVERED}
-                ),
-                require_activation_evidence=_ACTIVATION_EVIDENCE,
-                require_preconditions=_require_releasable,
-                call_port=_unreachable_release_port,
-                build_result=_unreachable_release_result,
-                before_port=complete,
-            ),
+        return await run_derived_operation(
+            conn,
+            job,
+            marker,
+            ports=ports,
+            require_activation_state=frozenset({State.ACTIVE, State.RECOVERING, State.RECOVERED}),
+            require_activation_evidence=_ACTIVATION_EVIDENCE,
+            require_preconditions=_require_releasable,
+            complete=complete,
         )
 
     return handler
-
-
-def _unreachable_release_port(_context: OperationContext) -> None:
-    raise AssertionError("derived release completion must run before a provider port")
-
-
-def _unreachable_release_result(
-    _context: OperationContext, _observation: object
-) -> ExternalBootDerivedReleaseCompletion:
-    raise AssertionError("derived release completion must run before result construction")
 
 
 def _cleanup_evidence(
@@ -1194,20 +1145,18 @@ def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
         }
         return ExternalBootDerivedTeardownCompletion.model_validate(carrier)
 
-    return _handler(
-        ports,
-        require_activation_state=frozenset(set(State) - {State.TORN_DOWN}),
-        require_activation_evidence=frozenset(),
-        require_preconditions=lambda conn, activation, marker: _teardown_prerequisites(
-            conn, activation, marker
-        ),
-        expected_observation="absent",
-        build_result=_unreachable_teardown_result,
-        before_port=complete,
-    )
+    async def handler(
+        conn: AsyncConnection, job: Job, marker: ExternalBootAuthorityMarkerV1
+    ) -> ExternalBootDerivedTeardownCompletion:
+        return await run_derived_operation(
+            conn,
+            job,
+            marker,
+            ports=ports,
+            require_activation_state=frozenset(set(State) - {State.TORN_DOWN}),
+            require_activation_evidence=frozenset(),
+            require_preconditions=_teardown_prerequisites,
+            complete=complete,
+        )
 
-
-def _unreachable_teardown_result(
-    _context: OperationContext, _observation: object
-) -> ExternalBootDerivedTeardownCompletion:
-    raise AssertionError("authority teardown completion must run before result construction")
+    return handler

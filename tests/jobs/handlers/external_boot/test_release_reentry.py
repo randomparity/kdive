@@ -284,6 +284,12 @@ def test_release_context_routes_later_phases(
                     with pytest.raises(ExternalBootAuthorityFailure) as raised:
                         await handler(worker, job, marker)
                     assert raised.value.category is ErrorCategory.STALE_HANDLE
+                    assert (
+                        raised.value.result.model_dump(mode="json")["result"]["failure_context"][
+                            "phase"
+                        ]
+                        == "commit"
+                    )
                 else:
                     result = await handler(worker, job, marker)
                     expected = (

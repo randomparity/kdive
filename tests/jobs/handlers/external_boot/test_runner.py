@@ -23,6 +23,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -41,6 +42,7 @@ from kdive.domain.capacity.state import ExternalBootActivationState, JobState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import ExternalBootActivation
+from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.domain.external_boot_values import (
     ExternalBootActivationBinding,
     ExternalBootPreparationObservation,
@@ -71,11 +73,13 @@ from kdive.providers.external_boot_authority.module_protocol import (
     RemoteModuleTerminalPreparationResponseV1,
 )
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityAcknowledgementV1,
     AuthorityInstallRefusalV1,
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
     AuthorityServiceError,
+    AuthorityTakeoverRequestV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
 from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
@@ -491,6 +495,7 @@ async def _run(
     *,
     ports: ExternalBootHandlerPorts,
     marker: ExternalBootAuthorityMarkerV1 | None = None,
+    job: Job | None = None,
     require_activation_state: frozenset[ExternalBootActivationState] = ACTIVATING,
     require_activation_evidence: frozenset[str] = NO_EVIDENCE,
     require_preconditions: Callable[..., Awaitable[Mapping[str, Any]]] = _no_preconditions,
@@ -512,7 +517,7 @@ async def _run(
 
     await run_operation(
         conn,
-        _job(case),
+        _job(case) if job is None else job,
         marker or _marker(case),
         ports=ports,
         require_activation_state=require_activation_state,
@@ -1493,5 +1498,96 @@ def test_every_provider_category_maps_to_a_committable_failure(
         )
         assert committed is not None
         assert (await _job_row(seed, case.job_id))["state"] == "failed"
+
+    _drive(migrated_url, body, authority_role_dsns("kdive_worker"))
+
+
+@pytest.mark.parametrize(
+    ("purpose", "state", "attempt", "activation_seconds", "request_seconds", "budget"),
+    [
+        ("activate", "activating", 1, 90, 180, 120),
+        ("activate", "prepared", 1, None, 180, 600),
+        ("release", "active", 1, None, 180, 180),
+        ("release", "active", 2, None, 180, 600),
+        ("release", "active", 1, None, -10, 0),
+    ],
+)
+def test_invocation_client_uses_the_effective_readiness_budget(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    purpose: str,
+    state: str,
+    attempt: int,
+    activation_seconds: int | None,
+    request_seconds: int,
+    budget: int,
+) -> None:
+    now = datetime(2027, 1, 1, tzinfo=UTC)
+    timing = LocalExternalBootTimingV1(console_window_s=60, deadline_budget_s=600, accel="kvm")
+    deadlines: list[float] = []
+
+    async def body(seed: AsyncConnection, worker: AsyncConnection) -> None:
+        vehicle = build_vehicle()
+        case = await seed_case(
+            seed, vehicle, purpose=purpose, activation_state=state, with_reservation=True
+        )
+        await seed.execute("UPDATE jobs SET attempt=%s WHERE id=%s", (attempt, case.job_id))
+        if purpose == "activate":
+            await seed.execute(
+                "UPDATE external_boot_activations SET activation_readiness_deadline=%s WHERE id=%s",
+                (
+                    now + timedelta(seconds=activation_seconds)
+                    if activation_seconds is not None
+                    else None,
+                    vehicle.activation_id,
+                ),
+            )
+        case = replace(case, attempt=attempt)
+        acknowledger = RecordingAcknowledger(authority_role_dsns("kdive_provider_authority"))
+
+        class Client:
+            async def acknowledge(
+                self, request: AuthorityTakeoverRequestV1
+            ) -> AuthorityAcknowledgementV1:
+                return await acknowledger.acknowledge(request)
+
+        client = Client()
+
+        def factory(_binding: object, _marker: object, deadline: float) -> Any:
+            deadlines.append(deadline)
+            return client
+
+        ports = replace(
+            _ports(case, resolver=resolver_for(vehicle)),
+            clock=lambda: now,
+            authority_client_factory=factory,
+        )
+        original_job = _job(case)
+        payload = dict(original_job.payload)
+        if purpose == "activate":
+            payload["local_timing"] = timing.model_dump(mode="json", by_alias=True)
+        else:
+            payload["recovery_request_v1"] = {
+                "request_identity": "sha256:" + "1" * 64,
+                "readiness_deadline": (now + timedelta(seconds=request_seconds)).isoformat(),
+                "local_timing": timing.model_dump(mode="json", by_alias=True),
+            }
+        job = original_job.model_copy(update={"payload": payload})
+        before = asyncio.get_running_loop().time()
+        context, _observation = await _run(
+            worker,
+            case,
+            ports=ports,
+            job=job,
+            require_activation_state=frozenset({ExternalBootActivationState(state)}),
+            call_port=lambda _context: None,
+        )
+        after = asyncio.get_running_loop().time()
+        assert len(deadlines) == 1
+        assert before + budget <= deadlines[0] <= after + budget
+        assert context.local_timing == timing
+        assert context.authority_executor is client
+        assert context.teardown_executor is client
+        assert context.module_authority is client
 
     _drive(migrated_url, body, authority_role_dsns("kdive_worker"))

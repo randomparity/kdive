@@ -1,4 +1,4 @@
-"""The seven steps every external-boot operation handler shares (spec §6)."""
+"""External-boot admission and ordinary or derived execution (ADR-0832)."""
 
 from __future__ import annotations
 
@@ -61,6 +61,7 @@ __all__ = [
     "COMMITTABLE_ERROR_CATEGORIES",
     "OperationContext",
     "authority_ref",
+    "run_derived_operation",
     "run_operation",
     "starts_fresh_readiness_budget",
 ]
@@ -629,61 +630,28 @@ def _recovery_deadline(
     return timing_deadline(ports.clock(), int(ports.recovery_readiness_timeout.total_seconds()))
 
 
-async def run_operation[R: ExternalBootAuthorityResultV1](
-    conn: AsyncConnection,
+type _Preconditions = Callable[
+    [AsyncConnection, ExternalBootActivation, ExternalBootAuthorityMarkerV1],
+    Awaitable[Mapping[str, Any]],
+]
+
+
+def _invocation_ports(
     job: Job,
     marker: ExternalBootAuthorityMarkerV1,
-    *,
+    binding: ProviderBinding,
+    activation: ExternalBootActivation,
     ports: ExternalBootHandlerPorts,
-    require_activation_state: frozenset[ExternalBootActivationState],
-    require_activation_evidence: frozenset[str],
-    require_preconditions: Callable[
-        [AsyncConnection, ExternalBootActivation, ExternalBootAuthorityMarkerV1],
-        Awaitable[Mapping[str, Any]],
-    ],
-    call_port: Callable[[OperationContext], Any],
-    build_result: Callable[[OperationContext, Any], R],
-    before_port: Callable[[OperationContext], R | None | Awaitable[R | None]] | None = None,
-) -> R:
-    """Run one authority-bound operation and return its result for the worker to commit.
-
-    Steps 1, 2, 2a, 2b and 2c all run **before** allocation, so every refusal happens while there
-    is still no authority.
-
-    **That does not avoid the wedge, and an earlier version of this docstring wrongly claimed it
-    did.** ``_finalize_handler`` short-circuits on marker **presence**, not on whether authority
-    was allocated, so a pre-allocation refusal writes no ``jobs`` row either and wedges exactly
-    like a post-allocation one. ADR-0593's consequences section enumerates every pre-allocation
-    refusal that reaches it, and the specification's §8 agrees; reaping is #2203's.
-
-    What refusing early actually buys is narrower and real: **no authority row, no generation
-    consumed, no acknowledgement, and no provider mutation.** A refusal after allocation has
-    already burned a generation and may have already mutated a live System.
-
-    The handler does **not** call the commit. It returns its result and the worker's
-    ``_finalize_handler`` commits it, gated on ``_authority_binding_matches`` — the one check
-    standing between a mismatched result and the authority tables.
-
-    Generic in the result type so the runner returns exactly what ``build_result`` produced. That
-    matters because ``_commit_external_result`` dispatches on ``isinstance``: collapsing an
-    ``ExternalBootAuthoritySuccessV1`` to the base class here would make a handler that commits
-    nothing type-check clean.
-    """
-    binding, port = await _resolve_port(conn, marker, ports)
-    activation = await _read_activation(
-        conn,
-        marker,
-        require_activation_state=require_activation_state,
-        require_activation_evidence=require_activation_evidence,
-    )
+) -> tuple[ExternalBootHandlerPorts, LocalExternalBootTimingV1 | None]:
+    """Bind the authority client to this operation's effective readiness budget."""
     local_timing = None
+    recovery_request: RecoveryRequestV1 | None = None
     if marker.provider_kind == "local-libvirt":
         if marker.purpose == "activate" and job.payload.get("local_timing") is not None:
             local_timing = LocalExternalBootTimingV1.model_validate(job.payload["local_timing"])
         elif job.payload.get("recovery_request_v1") is not None:
-            local_timing = RecoveryRequestV1.model_validate(
-                job.payload["recovery_request_v1"]
-            ).local_timing
+            recovery_request = RecoveryRequestV1.model_validate(job.payload["recovery_request_v1"])
+            local_timing = recovery_request.local_timing
     if local_timing is not None:
         timeout = timedelta(seconds=local_timing.deadline_budget_s)
         ports = replace(
@@ -703,11 +671,10 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
                 timeout = committed - ports.clock() + timedelta(seconds=30)
         elif (
             local_timing is not None
-            and job.payload.get("recovery_request_v1") is not None
+            and recovery_request is not None
             and not starts_fresh_readiness_budget(job, activation)
         ):
-            recorded = RecoveryRequestV1.model_validate(job.payload["recovery_request_v1"])
-            timeout = recorded.readiness_deadline - ports.clock()
+            timeout = recovery_request.readiness_deadline - ports.clock()
         client = ports.authority_client_factory(
             binding,
             marker,
@@ -721,6 +688,33 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
             teardown_executor=client,
             module_authority=client,
         )
+    return ports, local_timing
+
+
+async def _prepare_operation(
+    conn: AsyncConnection,
+    job: Job,
+    marker: ExternalBootAuthorityMarkerV1,
+    *,
+    ports: ExternalBootHandlerPorts,
+    require_activation_state: frozenset[ExternalBootActivationState],
+    require_activation_evidence: frozenset[str],
+    require_preconditions: _Preconditions,
+) -> tuple[OperationContext, ExternalBootHandlerPorts]:
+    """Admit and acknowledge once before either execution path.
+
+    Refuse preconditions before allocating authority. Without an acknowledgement,
+    failures propagate unbound; marked-job finalization remains the worker's concern.
+    Preparation failures retain their existing boundary outside execution wrapping.
+    """
+    binding, port = await _resolve_port(conn, marker, ports)
+    activation = await _read_activation(
+        conn,
+        marker,
+        require_activation_state=require_activation_state,
+        require_activation_evidence=require_activation_evidence,
+    )
+    ports, local_timing = _invocation_ports(job, marker, binding, activation, ports)
     prerequisites = await require_preconditions(conn, activation, marker)
     if _prepares(activation, marker) and ports.preparation_executor is None:
         raise _refuse("no external-boot authority preparation executor is configured")
@@ -761,6 +755,36 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
     context = replace(context, activation=await _debit_preparing(conn, context, ports))
     context = replace(context, activation=await _materialize_preparing(conn, context, ports))
     _require_evidence(context.activation, marker, require_activation_evidence)
+    return context, ports
+
+
+async def run_operation[R: ExternalBootAuthorityResultV1](
+    conn: AsyncConnection,
+    job: Job,
+    marker: ExternalBootAuthorityMarkerV1,
+    *,
+    ports: ExternalBootHandlerPorts,
+    require_activation_state: frozenset[ExternalBootActivationState],
+    require_activation_evidence: frozenset[str],
+    require_preconditions: _Preconditions,
+    call_port: Callable[[OperationContext], Any],
+    build_result: Callable[[OperationContext, Any], R],
+    before_port: Callable[[OperationContext], R | None | Awaitable[R | None]] | None = None,
+) -> R:
+    """Return an ordinary result for the worker to commit under its authority fence.
+
+    An early result can stamp a deadline or attempt while leaving the job running
+    for re-entry. Preserve its exact subtype, like the provider result builder's.
+    """
+    context, ports = await _prepare_operation(
+        conn,
+        job,
+        marker,
+        ports=ports,
+        require_activation_state=require_activation_state,
+        require_activation_evidence=require_activation_evidence,
+        require_preconditions=require_preconditions,
+    )
     try:
         intermediate = before_port(context) if before_port is not None else None
         if inspect.isawaitable(intermediate):
@@ -787,6 +811,38 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
         ) from None
     try:
         return build_result(context, observation)
+    except Exception as exc:
+        raise _bound_failure(
+            context,
+            exc,
+            phase=_COMMIT,
+            recovery_readiness_deadline=_recovery_deadline(ports, exc, context),
+        ) from None
+
+
+async def run_derived_operation[R: ExternalBootAuthorityResultV1](
+    conn: AsyncConnection,
+    job: Job,
+    marker: ExternalBootAuthorityMarkerV1,
+    *,
+    ports: ExternalBootHandlerPorts,
+    require_activation_state: frozenset[ExternalBootActivationState],
+    require_activation_evidence: frozenset[str],
+    require_preconditions: _Preconditions,
+    complete: Callable[[OperationContext], Awaitable[R]],
+) -> R:
+    """Complete a derived receipt workflow and preserve its exact result subtype."""
+    context, ports = await _prepare_operation(
+        conn,
+        job,
+        marker,
+        ports=ports,
+        require_activation_state=require_activation_state,
+        require_activation_evidence=require_activation_evidence,
+        require_preconditions=require_preconditions,
+    )
+    try:
+        return await complete(context)
     except Exception as exc:
         raise _bound_failure(
             context,

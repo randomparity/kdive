@@ -60,6 +60,7 @@ from kdive.jobs.models import (
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthorityResultV1,
     ExternalBootAuthoritySuccessV1,
+    ExternalBootDerivedTeardownCompletion,
     _ActivateResult,
     _FailureResult,
     _RecoveryAttemptResult,
@@ -1146,6 +1147,7 @@ def test_teardown_consumes_the_typed_authority_response_and_terminal_head(
     async def body(seed: AsyncConnection, case: SeededCase) -> None:
         await _seed_core_owned_teardown_rows(seed, case)
         result = await _run_operation(authority_role_dsns, seed, case, "teardown")
+        assert isinstance(result, ExternalBootDerivedTeardownCompletion)
         assert result.result.operation == "teardown"
         response = result.result.response
 
