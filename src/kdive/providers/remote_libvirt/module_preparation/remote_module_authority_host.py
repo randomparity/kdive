@@ -38,36 +38,36 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleTerminalRecord,
     RemoteModuleVolumePreparationResponseV1,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance import (
     ApplianceOutcome,
     ApplianceRequest,
     run_or_adopt_appliance,
     teardown_remote_module_appliance,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
     ExpectedAppliance,
     ExpectedAttachmentState,
     inspect_module_attachments,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV2,
     RemoteModuleResultV1,
     identity_for,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_operation import (
     RemoteModuleApplianceExecution,
     RemoteModuleVolumePreparation,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
     CompletionDeadlineExecutor,
     RemoteModulePreparationExecutor,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_result_reader import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_result_reader import (
     SparseRemoteModuleResultReader,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
     Ext4SourceFilesystemWriter,
     PreparedModuleVolumes,
     PreparedVolume,

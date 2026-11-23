@@ -20,10 +20,10 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
     parse_boot_artifact_name,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volume_names import (
     parse_module_volume_name,
 )
 

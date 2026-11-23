@@ -25,7 +25,7 @@ from kdive.build_artifacts.validation import (
     validate_external_artifacts,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
     _source_tree_manifest,  # noqa: PLC2701
 )
 from kdive.serialization import JsonValue

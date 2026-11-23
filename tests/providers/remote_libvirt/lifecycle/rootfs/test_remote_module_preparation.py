@@ -9,7 +9,7 @@ from typing import Any, cast
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
     CompletionDeadlineExecutor,
     RemoteModulePreparationExecutor,
 )

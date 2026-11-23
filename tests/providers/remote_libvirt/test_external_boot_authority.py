@@ -119,24 +119,24 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes impor
     MaterializedBootArtifacts,
     artifact_volume_name,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-    AttachmentInspection,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
-    RemoteModuleOperationV1,
-    RemoteModuleRecoveryRefV2,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
-    RemoteModulePreparationExecutor,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
-    PreparedModuleVolumes,
-    PreparedVolume,
-    render_module_volume_name,
-)
 from kdive.providers.remote_libvirt.lifecycle.xml import (
     overlay_volume_name,
     supplied_base_volume_name,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
+    AttachmentInspection,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
+    RemoteModuleOperationV1,
+    RemoteModuleRecoveryRefV2,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
+    RemoteModulePreparationExecutor,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
+    PreparedModuleVolumes,
+    PreparedVolume,
+    render_module_volume_name,
 )
 from kdive.providers.remote_libvirt.recovery_objects import RemoteExternalBootRecoveryObjects
 from kdive.providers.shared.directory_listing import list_directory_descriptor
@@ -5919,7 +5919,7 @@ def test_remote_refusal_reasons_are_never_raised_as_plain_value_errors() -> None
     )
     plain = [
         f"{name}:{line}: {text}"
-        for name in (*adapter_modules, "remote_module_authority_host.py")
+        for name in (*adapter_modules, "module_preparation/remote_module_authority_host.py")
         for line, text, in_validator in _plain_literal_value_errors(package / name)
         if text in reasons or (name in adapter_modules and not in_validator)
     ]

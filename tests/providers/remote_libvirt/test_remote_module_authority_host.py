@@ -47,35 +47,35 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationRequestV1,
     RemoteModuleVolumePreparationStore,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
+from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
-    RemoteModuleOperationV1,
-    RemoteModuleResultV1,
-    identity_for,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation import (
-    RemoteModuleApplianceExecution,
-    RemoteModuleVolumePreparation,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
-    RemoteModulePreparationExecutor,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
-    BuiltSourceImage,
-    ModuleTreeEntry,
-    PreparedVolume,
-    SourceFilesystemEvidence,
-    render_module_volume_name,
-)
-from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
-from kdive.providers.remote_libvirt.remote_module_authority_host import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_authority_host import (
     ConcreteRemoteModuleAuthorityHost,
     FactoryRemoteModuleAuthorityHost,
     RemoteModuleAuthorityHostConfiguration,
     RemoteModuleAuthorityHostFactory,
     load_installed_remote_module_appliance,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
+    RemoteModuleOperationV1,
+    RemoteModuleResultV1,
+    identity_for,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_operation import (
+    RemoteModuleApplianceExecution,
+    RemoteModuleVolumePreparation,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
+    RemoteModulePreparationExecutor,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
+    BuiltSourceImage,
+    ModuleTreeEntry,
+    PreparedVolume,
+    SourceFilesystemEvidence,
+    render_module_volume_name,
 )
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -1380,7 +1380,9 @@ class _PowerAwareInspection:
 async def _restored_stack_with_a_running_system(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[_Quiesce, _SystemDomain, _PowerAwareInspection]:
-    from kdive.providers.remote_libvirt import remote_module_authority_host as host_module
+    from kdive.providers.remote_libvirt.module_preparation import (
+        remote_module_authority_host as host_module,
+    )
 
     system = _SystemDomain(active=False)
     stack = _Quiesce(tmp_path, system, fixed_inspection=True)
@@ -1654,8 +1656,10 @@ async def test_unrestorable_power_keeps_the_failure_latched(tmp_path: Path) -> N
 async def test_missing_result_logs_the_bounded_console_tail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from kdive.providers.remote_libvirt import remote_module_authority_host as host_module
-    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+    from kdive.providers.remote_libvirt.module_preparation import (
+        remote_module_authority_host as host_module,
+    )
+    from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance import (
         ApplianceOutcome,
     )
 

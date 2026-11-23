@@ -1497,7 +1497,7 @@ def _open_remote_module_connection(config: AuthorityHostConfig) -> Any:
     """Open and verify the one private pool and every selected installed appliance."""
     import libvirt
 
-    from kdive.providers.remote_libvirt.remote_module_authority_host import (
+    from kdive.providers.remote_libvirt.module_preparation.remote_module_authority_host import (
         load_installed_remote_module_appliance,
     )
 
@@ -1750,15 +1750,15 @@ def _build_mutation_service(
         ConcreteRemoteExternalBootOperations,
     )
     from kdive.providers.remote_libvirt.lifecycle.external_boot import OBSERVATION_PROGRAMS
-    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+    from kdive.providers.remote_libvirt.module_preparation.remote_module_authority_host import (
+        FactoryRemoteModuleAuthorityHost,
+        RemoteModuleAuthorityHostFactory,
+    )
+    from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
         RemoteModulePreparationExecutor,
     )
     from kdive.providers.remote_libvirt.reaping.module_volume_sweep import (
         ModuleVolumeSweepService,
-    )
-    from kdive.providers.remote_libvirt.remote_module_authority_host import (
-        FactoryRemoteModuleAuthorityHost,
-        RemoteModuleAuthorityHostFactory,
     )
     from kdive.providers.shared.guest_agent import GuestAgentExec, qemu_agent_command
     from kdive.providers.shared.libvirt_attachments import HostStatDeviceIdentity

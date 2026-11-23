@@ -1,6 +1,6 @@
 import pytest
 
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volume_names import (
     MODULE_VOLUME_KINDS,
     MODULE_VOLUME_NAME_MAX_BYTES,
     ModuleVolumeOwner,

@@ -23,14 +23,14 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.ports.external_boot import RootSource, RootSpecV1
 from kdive.providers.ports.module_operation import RemoteDeviceIdentity
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
-    RemoteModulePreparationExecutor,
-)
 from kdive.providers.remote_libvirt.lifecycle.xml import (
     overlay_volume_name,
     render_domain_xml,
     render_volume_xml,
     supplied_base_volume_name,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
+    RemoteModulePreparationExecutor,
 )
 from kdive.providers.remote_libvirt.system_authority import (
     RemoteAuthoritySystemManifestEntry,

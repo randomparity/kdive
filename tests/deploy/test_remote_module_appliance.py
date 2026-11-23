@@ -1567,7 +1567,7 @@ def test_announce_writes_one_line_to_the_console_and_tolerates_its_absence(
 
 
 def test_every_announced_console_line_survives_the_host_console_filter() -> None:
-    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+    from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance import (
         _filter_console,
     )
 
@@ -1725,7 +1725,7 @@ def test_long_work_keeps_the_accepted_process_visible(
 
 
 def test_advisory_is_constant_and_throttled(monkeypatch: pytest.MonkeyPatch) -> None:
-    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+    from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance import (
         _filter_console,
     )
 

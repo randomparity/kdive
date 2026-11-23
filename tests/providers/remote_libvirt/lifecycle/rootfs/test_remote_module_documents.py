@@ -13,7 +13,7 @@ from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from kdive.providers.ports.external_boot import OpaqueProviderRef
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV1,
     RemoteModuleRecoveryRefV2,

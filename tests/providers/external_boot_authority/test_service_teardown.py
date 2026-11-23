@@ -40,7 +40,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationStore,
     RemoteSystemTeardownInspection,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )
 from tests.providers.external_boot_authority.service_support import _Adapter, _Repository, _takeover

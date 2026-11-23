@@ -23,20 +23,20 @@ import libvirt
 from defusedxml.common import DefusedXmlException
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
     RemoteModuleOperationV1,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_scratch import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_scratch import (
     ScratchState,
     StreamIo,
     classify_head,
     format_scratch_volume,
     read_head,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volume_names import (
     ModuleVolumeOwner,
     parse_module_volume_name,
     render_module_volume_name,

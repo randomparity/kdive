@@ -17,25 +17,25 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.lifecycle.rootfs import remote_module_result_reader
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+from kdive.providers.remote_libvirt.module_preparation import remote_module_result_reader
+from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV1,
     RemoteModuleRecoveryRefV2,
     RemoteModuleResultV1,
     identity_for,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
     CompletionDeadlineExecutor,
     RemoteModulePreparationExecutor,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_result_reader import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_result_reader import (
     SparseRemoteModuleResultReader,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volume_names import (
     render_module_volume_name,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
     SCRATCH_CAPACITY_BYTES,
     PreparedVolume,
     StorageConn,

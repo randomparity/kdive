@@ -39,9 +39,6 @@ from kdive.providers.remote_libvirt.lifecycle.port_allocation import (
     used_ssh_ports,
 )
 from kdive.providers.remote_libvirt.lifecycle.readiness import wait_for_agent
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
-    RemoteModulePreparationExecutor,
-)
 from kdive.providers.remote_libvirt.lifecycle.storage import ensure_named_overlay
 from kdive.providers.remote_libvirt.lifecycle.xml import (
     QEMU_NS,
@@ -50,6 +47,9 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     render_domain_xml,
     supplied_base_volume_name,
     volume_backing_path,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
+    RemoteModulePreparationExecutor,
 )
 from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.shared.libvirt_attachments import (

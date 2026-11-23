@@ -28,7 +28,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModulePreparationBeginResponseV1,
     RemoteModuleVolumePreparationRequestV1,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
     RemoteModuleOperationV1,
 )
 from tests.providers.external_boot_authority.service_support import (

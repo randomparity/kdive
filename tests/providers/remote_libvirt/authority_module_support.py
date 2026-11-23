@@ -10,15 +10,15 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleVolumePreparationRequestV1,
     RemoteModuleVolumePreparationResponseV1,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
     RemoteModuleRecoveryRefV2,
     RemoteModuleResultV1,
     identity_for,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volume_names import (
     render_module_volume_name,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
     PreparedModuleVolumes,
     PreparedVolume,
 )

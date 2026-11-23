@@ -55,7 +55,7 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleTerminalPreparationResponseV1,
     RemoteModuleVolumePreparationRequestV1,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
     RemoteModuleOperationV1,
 )
 from kdive.serialization import ServerFaultError

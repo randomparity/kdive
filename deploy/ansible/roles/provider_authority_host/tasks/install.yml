@@ -612,7 +612,7 @@
       - |
         import sys
         from kdive.providers.external_boot_authority.host import _REMOTE_MODULE_APPLIANCE_ROOT
-        from kdive.providers.remote_libvirt.remote_module_authority_host import load_installed_remote_module_appliance
+        from kdive.providers.remote_libvirt.module_preparation.remote_module_authority_host import load_installed_remote_module_appliance
         load_installed_remote_module_appliance(_REMOTE_MODULE_APPLIANCE_ROOT, sys.argv[1])
       - "{{ item }}"
   become: true

@@ -9,17 +9,17 @@ from typing import Protocol
 
 from kdive.providers.ports.external_boot import ExternalBootArtifactStager
 from kdive.providers.ports.module_operation import RemoteDeviceIdentityPort
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance import (
     ApplianceConn,
     DeadlineExecutor,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
     RemoteModuleOperationV1,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
     FilesystemImageWriter,
     ModuleTreeEntry,
     PreparedVolume,

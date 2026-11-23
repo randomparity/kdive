@@ -13,7 +13,7 @@ from typing import Protocol, TypeVar
 import libvirt
 
 from kdive.domain.errors import CategorizedError
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     APPLIANCE_KERNEL_CMDLINE,
     AttachmentInspection,
     ExpectedAppliance,
@@ -21,12 +21,12 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments i
     normalized_appliance_devices,
     validate_appliance_xml,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleResultV1,
     validate_volume_key,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import PreparedVolume
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import PreparedVolume
 from kdive.providers.shared.libvirt_xml import append_qcow2_backing_store
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry

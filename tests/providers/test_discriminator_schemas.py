@@ -99,7 +99,7 @@ _DIGESTS: dict[str, dict[str, str]] = {
         "RemoteExternalBootRecoveryRecord": "bd592c0909a6",  # pragma: allowlist secret
         "RemoteExternalBootMaterializationRecord": "97fa3a7540eb",  # pragma: allowlist secret
     },
-    "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents": {
+    "kdive.providers.remote_libvirt.module_preparation.remote_module_documents": {
         "_RemoteModuleDocument": "72c56660e4d7",  # pragma: allowlist secret
         "_RootVolumeV1": "26dd8d35da05",  # pragma: allowlist secret
         "RemoteModuleOperationV1": "0ae5f41d469c",  # pragma: allowlist secret

@@ -16,14 +16,14 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.module_operation import RemoteDeviceIdentity
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.remote_libvirt.lifecycle.storage import render_volume_xml
+from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     ExpectedAppliance,
     ExpectedAttachmentState,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     inspect_module_attachments as _inspect_module_attachments,
 )
-from kdive.providers.remote_libvirt.lifecycle.storage import render_volume_xml
 from kdive.providers.shared.libvirt_attachments import (
     HostStatDeviceIdentity,
     prove_no_foreign_path_references,

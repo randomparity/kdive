@@ -14,11 +14,11 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import convert_kernel_bundle_modules
-from kdive.providers.remote_libvirt.lifecycle.rootfs import remote_module_volumes as volumes
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.remote_libvirt.module_preparation import remote_module_volumes as volumes
+from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
     MAX_ENTRIES,
     MAX_SOURCE_CAPACITY_BYTES,
     SCRATCH_CAPACITY_BYTES,
@@ -183,7 +183,7 @@ def test_invalid_or_over_limit_tree_is_rejected_before_creation(
 def test_content_byte_limit_rejects_before_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from kdive.providers.remote_libvirt.lifecycle.rootfs import remote_module_volumes
+    from kdive.providers.remote_libvirt.module_preparation import remote_module_volumes
 
     monkeypatch.setattr(remote_module_volumes, "MAX_CONTENT_BYTES", 2)
     conn = Conn()
@@ -415,7 +415,7 @@ def test_readback_stream_creation_failure_closes_local_descriptor(
     prepared = prepare_attempt_volumes(conn, wanted)
     descriptor = os.open("/dev/null", os.O_WRONLY)
     monkeypatch.setattr(
-        "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes.tempfile.mkstemp",
+        "kdive.providers.remote_libvirt.module_preparation.remote_module_volumes.tempfile.mkstemp",
         lambda **_kwargs: (descriptor, str(tmp_path / "readback.ext4")),
     )
     conn.fail_new_stream = True
@@ -842,7 +842,7 @@ def test_archive_writer_enforces_every_source_bound(
 ) -> None:
     import subprocess
 
-    from kdive.providers.remote_libvirt.lifecycle.rootfs import remote_module_volumes
+    from kdive.providers.remote_libvirt.module_preparation import remote_module_volumes
 
     archive_path = _canonical_module_archive(tmp_path)
     monkeypatch.setattr(remote_module_volumes, limit, value)
@@ -942,7 +942,7 @@ def test_ext4_writer_removes_image_when_staging_cleanup_fails(
         lambda _path: SourceFilesystemEvidence(b"operation", "sha256:" + "0" * 64, 0, 0),
     )
     monkeypatch.setattr(
-        "kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes.shutil.rmtree",
+        "kdive.providers.remote_libvirt.module_preparation.remote_module_volumes.shutil.rmtree",
         lambda _path: (_ for _ in ()).throw(OSError("cleanup failed")),
     )
 

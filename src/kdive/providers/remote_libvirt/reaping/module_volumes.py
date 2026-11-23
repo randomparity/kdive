@@ -30,7 +30,7 @@ from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
     all_remote_configs,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volume_names import (
     ModuleVolumeOwner,
     parse_module_volume_name,
 )

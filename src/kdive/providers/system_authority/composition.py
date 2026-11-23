@@ -43,7 +43,7 @@ from kdive.providers.local_libvirt.system_authority import (
     LocalAuthoritySystemProvider,
     LocalAuthoritySystemTopology,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )
 from kdive.providers.remote_libvirt.system_authority import RemoteAuthoritySystemProvider

@@ -166,7 +166,8 @@ def check_appliance_consumer(root):
     wrapper = (
         "import os, pwd\nfrom pathlib import Path\n"
         "from kdive.providers.external_boot_authority import host\n"
-        "from kdive.providers.remote_libvirt import remote_module_authority_host\n"
+        "from kdive.providers.remote_libvirt.module_preparation "
+        "import remote_module_authority_host\n"
         f"host._REMOTE_MODULE_APPLIANCE_ROOT = Path({str(appliance)!r})\n"
         "if os.geteuid() == 0:\n"
         "    account = pwd.getpwnam('nobody')\n"

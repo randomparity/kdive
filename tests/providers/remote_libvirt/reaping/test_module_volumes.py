@@ -10,7 +10,7 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.module_operation import RemoteDeviceIdentity
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volume_names import (
     ModuleVolumeOwner,
     render_module_volume_name,
 )

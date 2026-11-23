@@ -51,12 +51,12 @@ from kdive.providers.remote_libvirt.lifecycle.external_boot import (
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
     parse_boot_artifact_name,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
-    render_module_volume_name,
-)
 from kdive.providers.remote_libvirt.lifecycle.xml import (
     overlay_volume_name,
     supplied_base_volume_name,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
+    render_module_volume_name,
 )
 from kdive.providers.shared.guest_agent import GuestDomain
 from kdive.providers.shared.libvirt_attachments import (
