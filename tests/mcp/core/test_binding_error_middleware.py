@@ -1,14 +1,7 @@
-"""Boundary binding middleware: re-envelope a binding ValidationError (ADR-0124, ADR-0132).
+"""Curated caller errors require explicit framework provenance (ADR-0844).
 
-``BindingErrorMiddleware`` wraps the whole tool call, so it catches a ``pydantic.ValidationError``
-whether FastMCP raises it at argument binding (the three typed-profile tools — where
-``ProvisioningProfile`` is ``extra="forbid"`` and FastMCP validates the typed param *before* the
-tool body) or the tool body raises it while reconstructing its payload. Since ADR-0372 flattened
-``allocations.request`` to top-level params, its shape-XOR-custom rule (ADR-0132) is enforced
-in-body when the wrapper rebuilds ``AllocationRequestPayload``; the middleware still converts it to
-the standard ``configuration_error`` envelope (reusing ADR-0123's ``detail`` surfacing) rather than
-letting a raw FastMCP ``ToolError`` reach the caller. Any other tool, any non-recognised binding
-error (a field-level error on the same payload), or any other exception passes through unchanged.
+Typed-profile binding and the explicit flat allocation caller reconstruction keep their
+established envelopes; unrelated bare body validation propagates unchanged.
 """
 
 from __future__ import annotations
@@ -33,6 +26,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
+from tests.mcp.middleware.test_binding_provenance import wrap_validation_error
 
 
 def _envelope(result: ToolResult) -> dict[str, Any]:
@@ -64,7 +58,7 @@ class _CallModel(BaseModel):
 def _profile_validation_error() -> ValidationError:
     """A raw pydantic ``ValidationError`` whose locations are under ``profile``.
 
-    This is exactly the shape FastMCP raises at argument binding for a malformed typed profile —
+    FastMCP chains this cause under its own wrapper for malformed typed-profile arguments;
     every error ``loc`` starts with ``"profile"``.
     """
     try:
@@ -105,8 +99,8 @@ class _BuildCallModel(BaseModel):
 def _build_profile_validation_error() -> ValidationError:
     """A raw pydantic ``ValidationError`` whose locations are under ``build_profile``.
 
-    Exactly the shape FastMCP raises at argument binding for a malformed ``runs.create``
-    ``build_profile`` — every error ``loc`` starts with ``"build_profile"`` (then the field).
+    FastMCP chains this cause under its own wrapper for a malformed ``runs.create``
+    ``build_profile``; every ``loc`` starts with ``"build_profile"`` (then the field).
     """
     try:
         _BuildCallModel.model_validate({"build_profile": {"schema_version": 1, "bogus": 1}})
@@ -146,7 +140,7 @@ def test_binding_error_on_typed_profile_tool_becomes_configuration_error() -> No
         _drive(
             "systems.provision",
             {"allocation_id": "alloc-1", "profile": {"bogus": 1}},
-            _profile_validation_error(),
+            wrap_validation_error(_profile_validation_error()),
         )
     )
     assert envelope["status"] == "error"
@@ -163,7 +157,7 @@ def test_pairing_binding_error_exposes_actionable_boot_method() -> None:
         _drive(
             "systems.provision",
             {"allocation_id": "alloc-1", "profile": {"boot_method": "disk-image"}},
-            _profile_pairing_validation_error(),
+            wrap_validation_error(_profile_pairing_validation_error()),
         )
     )
     errors = envelope["data"].get("errors")
@@ -179,7 +173,7 @@ def test_runs_create_build_profile_binding_becomes_configuration_error() -> None
         _drive(
             "runs.create",
             {"system_id": "sys-1", "build_profile": {"schema_version": 1}},
-            _build_profile_validation_error(),
+            wrap_validation_error(_build_profile_validation_error()),
         )
     )
     assert envelope["status"] == "error"
@@ -204,7 +198,7 @@ def test_reprovision_uses_system_id_as_object_id() -> None:
         _drive(
             "systems.reprovision",
             {"system_id": "sys-9", "profile": {"bogus": 1}},
-            _profile_validation_error(),
+            wrap_validation_error(_profile_validation_error()),
         )
     )
     assert envelope["object_id"] == "sys-9"
@@ -212,7 +206,11 @@ def test_reprovision_uses_system_id_as_object_id() -> None:
 
 def test_missing_id_argument_falls_back_to_tool_name() -> None:
     envelope = _envelope(
-        _drive("systems.provision", {"profile": {"bogus": 1}}, _profile_validation_error())
+        _drive(
+            "systems.provision",
+            {"profile": {"bogus": 1}},
+            wrap_validation_error(_profile_validation_error()),
+        )
     )
     assert envelope["object_id"] == "systems.provision"
 
@@ -250,7 +248,7 @@ def test_valid_call_passes_through_unchanged() -> None:
 
 
 def _shape_xor_validation_error(payload: dict[str, object]) -> ValidationError:
-    """The shape-XOR ``ValidationError`` FastMCP raises binding ``AllocationRequestPayload``."""
+    """The Pydantic cause from validating an allocation sizing request."""
     try:
         AllocationRequestPayload.model_validate(payload)
     except ValidationError as exc:
@@ -263,8 +261,10 @@ def test_shape_and_custom_together_becomes_configuration_error_naming_both() -> 
         _drive(
             "allocations.request",
             {"project": "demo"},
-            _shape_xor_validation_error(
-                {"shape": "medium", "vcpus": 2, "memory_gb": 4, "disk_gb": 20}
+            wrap_validation_error(
+                _shape_xor_validation_error(
+                    {"shape": "medium", "vcpus": 2, "memory_gb": 4, "disk_gb": 20}
+                )
             ),
         )
     )
@@ -277,7 +277,11 @@ def test_shape_and_custom_together_becomes_configuration_error_naming_both() -> 
 
 def test_neither_shape_nor_custom_becomes_configuration_error_naming_neither() -> None:
     envelope = _envelope(
-        _drive("allocations.request", {"project": "demo"}, _shape_xor_validation_error({}))
+        _drive(
+            "allocations.request",
+            {"project": "demo"},
+            wrap_validation_error(_shape_xor_validation_error({})),
+        )
     )
     assert envelope["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
     assert "neither" in envelope["detail"]
@@ -390,9 +394,9 @@ def _flat_shape_xor_envelope(
 
     ADR-0372 moved the shape-XOR-custom check from FastMCP argument binding (the old nested
     ``request`` payload) into the wrapper body, which rebuilds ``AllocationRequestPayload`` from
-    flat params. This proves the in-body ``ValidationError`` still reaches
-    ``BindingErrorMiddleware`` and is re-enveloped as ``configuration_error`` — the shape-XOR error
-    path a black-box caller hits when it supplies both/neither sizing source.
+    flat params. This proves the explicit caller-validation wrapper reaches
+    ``BindingErrorMiddleware`` and retains its ``configuration_error`` envelope — the shape-XOR
+    error path a black-box caller hits when it supplies both/neither sizing source.
     """
     from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
 

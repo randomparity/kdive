@@ -21,6 +21,7 @@ from kdive.mcp.middleware.binding_errors import (
     _shape_xor_envelope,
 )
 from kdive.mcp.schema.tool_payloads import ShapeXorCustomError
+from tests.mcp.middleware.test_binding_provenance import wrap_validation_error
 
 
 class _Errs(Exception):
@@ -172,7 +173,7 @@ def test_on_call_tool_envelopes_matching_binding_error() -> None:
     mw = BindingErrorMiddleware()
 
     async def call_next(_ctx: Any) -> Any:
-        raise _profile_range_error()
+        raise wrap_validation_error(_profile_range_error())
 
     result = asyncio.run(
         mw.on_call_tool(_ctx("systems.provision", {"allocation_id": "a-1"}), call_next)

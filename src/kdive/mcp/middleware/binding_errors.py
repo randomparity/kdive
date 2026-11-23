@@ -16,6 +16,12 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema.tool_payloads import ShapeXorCustomError
 
 
+def binding_validation_error(exc: Exception) -> ValidationError | None:
+    """Recognize only explicit caller validation, using its immediate cause (ADR-0844)."""
+    cause = exc.__cause__ if isinstance(exc, FastMCPValidationError) else None
+    return cause if isinstance(cause, ValidationError) else None
+
+
 def _loc_under(param: str) -> Callable[[ValidationError], bool]:
     """Predicate for FastMCP binding failures under one typed parameter."""
 
@@ -139,11 +145,9 @@ class BindingErrorMiddleware(Middleware):
     ) -> Any:
         """Dispatch one call; re-envelope a recognised binding ``ValidationError``.
 
-        FastMCP raises the binding failure two ways: a tool body that rebuilds its
-        payload lets a raw ``pydantic.ValidationError`` escape, while argument binding
-        of a typed parameter wraps it in ``fastmcp.exceptions.ValidationError`` (with the
-        pydantic error as ``__cause__``). Handle both so the envelope is produced
-        regardless of which path FastMCP took.
+        FastMCP wraps genuine argument validation with its Pydantic cause. A body that
+        validates caller input must explicitly annotate that boundary; a bare body error
+        cannot acquire caller provenance from matching field names (ADR-0844).
         """
         conversion = _BINDING_CONVERSIONS.get(context.message.name)
         if conversion is None:
@@ -151,15 +155,10 @@ class BindingErrorMiddleware(Middleware):
         try:
             return await call_next(context)
         except FastMCPValidationError as exc:
-            cause = exc.__cause__
-            if not isinstance(cause, ValidationError):
+            cause = binding_validation_error(exc)
+            if cause is None:
                 raise
             envelope = self._enveloped(context, conversion, cause)
-            if envelope is None:
-                raise
-            return envelope
-        except ValidationError as exc:
-            envelope = self._enveloped(context, conversion, exc)
             if envelope is None:
                 raise
             return envelope

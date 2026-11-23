@@ -20,6 +20,7 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import current_context
 from kdive.mcp.exposure import required_scopes, tool_visible
+from kdive.mcp.middleware.binding_errors import binding_validation_error
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema.schema_advertising import registered_tools
 from kdive.mcp.schema.tool_index import TOOL_KEYWORDS, retired_names_for
@@ -472,22 +473,11 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
             )
             return ToolResult(structured_content=envelope.model_dump(mode="json"))
         except (ValidationError, FastMCPValidationError) as exc:
-            # fastmcp.exceptions.ValidationError is the genuine argument-binding failure:
-            # fastmcp always wraps it there, chaining the original pydantic error as
-            # __cause__ (fastmcp's function_tool.py). A *bare* pydantic.ValidationError
-            # reaching this branch is NOT an argument problem — fastmcp raises that shape
-            # only when a tool's own body re-validates data it read (e.g. from the
-            # database) and lets the error escape (function_tool.py's _ToolBodyError
-            # unwrap; fastmcp.server.server.call_tool draws the identical distinction).
-            # Only the genuine binding case gets the per-field detail below; the bare case
-            # keeps this branch's pre-existing generic envelope so a server-side data
-            # defect is never mislabeled as the caller's bad arguments.
+            # Bare body errors retain the generic response; only explicit caller provenance
+            # permits field detail and discovery guidance (ADR-0844).
             data: dict[str, JsonValue] = {}
-            binding_cause = exc.__cause__ if isinstance(exc, FastMCPValidationError) else None
-            # Both operands define "genuine binding failure" for this branch;
-            # suggested_next_actions below reuses the same flag so it can never drift
-            # from what actually populated data (gauntlet finding, branch review).
-            is_binding_failure = isinstance(binding_cause, ValidationError)
+            binding_cause = binding_validation_error(exc)
+            is_binding_failure = binding_cause is not None
             if is_binding_failure:
                 field_errors = [
                     cast(
