@@ -1715,8 +1715,10 @@ def test_remote_module_lifecycle_steps_per_operation(
     from types import SimpleNamespace
 
     actions: list[tuple[str, AuthorityOperation]] = []
+    modules = object()
 
     async def record(**values: Any) -> None:
+        assert values["sender"] is modules
         actions.append((values["action"], values["authority"].operation))
 
     monkeypatch.setattr(
@@ -1725,7 +1727,7 @@ def test_remote_module_lifecycle_steps_per_operation(
     attempt = _module_attempt(uuid4(), uuid4())
     context = SimpleNamespace(
         binding=SimpleNamespace(
-            runtime=SimpleNamespace(authority=SimpleNamespace(modules=object()))
+            runtime=SimpleNamespace(authority=SimpleNamespace(modules=modules))
         ),
         job=SimpleNamespace(
             id=uuid4(), attempt=1, payload={"remote_module_attempt_v1": _receipt(attempt)}
@@ -1736,12 +1738,62 @@ def test_remote_module_lifecycle_steps_per_operation(
     request = SimpleNamespace(operation=operation)
 
     asyncio.run(
-        lifecycle_module._execute_remote_module_lifecycle(
-            cast(Any, context), cast(Any, request), cast(Any, object())
-        )
+        lifecycle_module._execute_remote_module_lifecycle(cast(Any, context), cast(Any, request))
     )
 
     assert actions == [(action, operation) for action in expected]
+
+
+@pytest.mark.parametrize("guard", ["no-authority", "no-modules", "unsupported-operation"])
+def test_remote_module_lifecycle_skips_without_supported_capability(
+    guard: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    async def unexpected(**values: Any) -> None:
+        pytest.fail("a missing or unsupported module capability must not dispatch")
+
+    monkeypatch.setattr(
+        lifecycle_module, "execute_remote_module_lifecycle_on_authority_host", unexpected
+    )
+    authority = (
+        None
+        if guard == "no-authority"
+        else SimpleNamespace(modules=None if guard == "no-modules" else object())
+    )
+    context = SimpleNamespace(binding=SimpleNamespace(runtime=SimpleNamespace(authority=authority)))
+    request = SimpleNamespace(
+        operation=AuthorityOperation.ACTIVATE
+        if guard == "unsupported-operation"
+        else AuthorityOperation.RECOVER
+    )
+    asyncio.run(
+        lifecycle_module._execute_remote_module_lifecycle(cast(Any, context), cast(Any, request))
+    )
+
+
+def test_remote_module_lifecycle_refuses_missing_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    async def unexpected(**values: Any) -> None:
+        pytest.fail("module lifecycle must refuse before dispatch without its receipt")
+
+    monkeypatch.setattr(
+        lifecycle_module, "execute_remote_module_lifecycle_on_authority_host", unexpected
+    )
+    context = SimpleNamespace(
+        binding=SimpleNamespace(
+            runtime=SimpleNamespace(authority=SimpleNamespace(modules=object()))
+        ),
+        job=SimpleNamespace(payload={}),
+    )
+    request = SimpleNamespace(operation=AuthorityOperation.RECOVER)
+    with pytest.raises(CategorizedError, match="authority inputs are incomplete"):
+        asyncio.run(
+            lifecycle_module._execute_remote_module_lifecycle(
+                cast(Any, context), cast(Any, request)
+            )
+        )
 
 
 # Recover / resolve-conflict re-entry takes a fresh deadline (#3465)

@@ -20,6 +20,10 @@ from uuid import NAMESPACE_URL, uuid5
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.db.remote_module_attempt_obligations import (
+    ModuleAttemptWorkerWriteContext,
+    RemoteModuleAttemptObligationRepository,
+)
 from kdive.domain.capacity.state import ExternalBootActivationState as State
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import (
@@ -28,6 +32,7 @@ from kdive.domain.external_boot_activation import (
 )
 from kdive.domain.external_boot_timing import timing_deadline
 from kdive.domain.operations.jobs import Job
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.jobs.handlers.external_boot.evidence import (
     authority_result,
     conflict_result,
@@ -64,6 +69,7 @@ from kdive.providers.external_boot_authority.protocol import (
     canonical_teardown_proof_bytes,
 )
 from kdive.providers.ports.external_boot import RecoveryPoint, RunningKernelObservation
+from kdive.providers.ports.module_operation import ModuleAuthority, ModuleCompletion
 
 __all__ = [
     "activate_handler",
@@ -105,19 +111,37 @@ _ORDINARY_CLEANUP_STATES: Final = frozenset({State.RECOVERED, State.ABANDONED})
 _CONFLICT_CATEGORIES: Final = frozenset({"conflict", "mixed"})
 
 
-async def execute_remote_module_lifecycle_on_authority_host(**values: Any) -> Any:
-    """Load the remote provider only for a remote lifecycle operation."""
+async def execute_remote_module_lifecycle_on_authority_host(
+    *,
+    connection: AsyncConnection,
+    repository: RemoteModuleAttemptObligationRepository,
+    sender: ModuleAuthority,
+    authority: AuthorityMutationRequestV1,
+    preparation: ModuleAttemptPreparationRequestV1,
+    worker_context: ModuleAttemptWorkerWriteContext,
+    action: Literal["restore", "reap"],
+    deadline: float,
+) -> ModuleCompletion:
+    """Lazily dispatch a module lifecycle operation through its declared capability."""
     from kdive.services.remote_module_authority_preparation import (
         execute_remote_module_lifecycle_on_authority_host as execute,
     )
 
-    return await execute(**values)
+    return await execute(
+        connection=connection,
+        repository=repository,
+        sender=sender,
+        authority=authority,
+        preparation=preparation,
+        worker_context=worker_context,
+        action=action,
+        deadline=deadline,
+    )
 
 
 async def _execute_remote_module_lifecycle(
     context: OperationContext,
     request: AuthorityMutationRequestV1,
-    executor: ExternalBootAuthorityExecutor,
 ) -> None:
     authority = context.binding.runtime.authority
     if (
@@ -131,12 +155,6 @@ async def _execute_remote_module_lifecycle(
         }
     ):
         return
-    from kdive.db.remote_module_attempt_obligations import (
-        ModuleAttemptWorkerWriteContext,
-        RemoteModuleAttemptObligationRepository,
-    )
-    from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
-
     raw_preparation = context.job.payload.get("remote_module_attempt_v1")
     if raw_preparation is None:
         raise _refuse("remote module lifecycle authority inputs are incomplete")
@@ -151,7 +169,7 @@ async def _execute_remote_module_lifecycle(
         await execute_remote_module_lifecycle_on_authority_host(
             connection=context.connection,
             repository=RemoteModuleAttemptObligationRepository(),
-            sender=cast(Any, executor),
+            sender=authority.modules,
             authority=request,
             preparation=preparation,
             worker_context=ModuleAttemptWorkerWriteContext(
@@ -263,9 +281,7 @@ async def _run_active_release(
             raise CategorizedError(
                 "derived release recovery was superseded", category=ErrorCategory.STALE_HANDLE
             )
-        await _execute_remote_module_lifecycle(
-            context, recover, cast(ExternalBootAuthorityExecutor, executor)
-        )
+        await _execute_remote_module_lifecycle(context, recover)
         observed = await cast(ExternalBootAuthorityExecutor, executor).execute(recover)
         if observed.category in _CONFLICT_CATEGORIES:
             return conflict_result(context, observed)
@@ -292,9 +308,7 @@ async def _run_active_release(
                 category=ErrorCategory.STALE_HANDLE,
             )
     cleanup = _derived_request(context, "cleanup")
-    await _execute_remote_module_lifecycle(
-        context, cleanup, cast(ExternalBootAuthorityExecutor, executor)
-    )
+    await _execute_remote_module_lifecycle(context, cleanup)
     observed = await cast(ExternalBootAuthorityExecutor, executor).execute(cleanup)
     _require_category(context, observed, "absent")
     status = await _derived_release_status(
@@ -493,7 +507,7 @@ async def _execute(
     if executor is None:
         raise _refuse("no external-boot authority executor is configured")
     request = _mutation_request(context)
-    await _execute_remote_module_lifecycle(context, request, executor)
+    await _execute_remote_module_lifecycle(context, request)
     if isinstance(request, AuthorityConflictResolutionRequestV1):
         authority_observation = await executor.execute_conflict_resolution(request)
     else:

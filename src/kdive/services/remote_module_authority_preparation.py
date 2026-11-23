@@ -310,7 +310,7 @@ async def execute_remote_module_lifecycle_on_authority_host(
     *,
     connection: AsyncConnection,
     repository: RemoteModuleAttemptObligationRepository,
-    sender: RemoteModulePreparationAuthority,
+    sender: ModuleAuthority,
     authority: AuthorityMutationRequestV1,
     preparation: ModuleAttemptPreparationRequestV1,
     worker_context: ModuleAttemptWorkerWriteContext,
