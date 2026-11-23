@@ -2083,19 +2083,20 @@ class ExternalBootAuthorityService:
                         self._record(request, records, JournalPhase.PROVIDER_RETURNED),
                     )
                 try:
-                    observation = (
-                        self._teardown_observation(
+                    if (
+                        isinstance(request, AuthorityTeardownMutationRequestV1)
+                        and teardown_snapshot is not None
+                    ):
+                        observation = self._teardown_observation(
                             teardown_proof(
                                 request,
                                 await self._system_teardown_facts(request, context),
                             )
                         )
-                        if isinstance(request, AuthorityTeardownMutationRequestV1)
-                        and teardown_snapshot is not None
-                        else adopted_release_phase
-                        if adopted_release_phase is not None
-                        else await self._adapter.observe(request)
-                    )
+                    elif adopted_release_phase is not None:
+                        observation = adopted_release_phase
+                    else:
+                        observation = await self._adapter.observe(request)
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.
