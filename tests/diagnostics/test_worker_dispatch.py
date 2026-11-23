@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterable
 
 import pytest
@@ -14,6 +15,7 @@ from kdive.diagnostics.checks import (
     CheckStatus,
 )
 from kdive.diagnostics.result_codec import serialize_results
+from kdive.diagnostics.service import DiagnosticsService, WorkerVantageDispatchMode
 from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
@@ -196,3 +198,70 @@ def test_pending_sleep_is_clamped_to_remaining_budget() -> None:
 
     assert sleeps == [pytest.approx(0.1)]
     assert all(r.status is CheckStatus.ERROR for r in results)
+
+
+@pytest.mark.parametrize(
+    "present", [(), (GDBSTUB_ACL_ID,), (PROVIDER_TLS_ID,), (PROVIDER_TLS_ID, GDBSTUB_ACL_ID)]
+)
+def test_succeeded_reports_missing_checks_in_configured_order(present: tuple[str, ...]) -> None:
+    returned = [
+        CheckResult(cid, CheckStatus.PASS, "checked", provider="remote-libvirt") for cid in present
+    ]
+    queue = _FakeQueue([_FakeJob(JobState.SUCCEEDED, serialize_results(returned))])
+    results = asyncio.run(_dispatcher(queue, clock_ticks=[0.0]).run_worker_checks())
+    missing = [cid for cid in (PROVIDER_TLS_ID, GDBSTUB_ACL_ID) if cid not in present]
+    assert results[: len(returned)] == returned
+    assert [r.check_id for r in results[len(returned) :]] == missing
+    for result in results[len(returned) :]:
+        assert result.status is CheckStatus.ERROR
+        assert result.failure_category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        assert result.provider == "remote-libvirt"
+        assert result.fix is None
+        assert "omitted" in result.detail and result.check_id in result.detail
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"check_id": PROVIDER_TLS_ID, "status": "invalid", "detail": "broken"},
+        {"check_id": "unregistered", "status": "pass", "detail": "unexpected"},
+        None,
+    ],
+)
+def test_succeeded_keeps_item_errors_and_adds_only_absent_checks(item: object) -> None:
+    valid = CheckResult(GDBSTUB_ACL_ID, CheckStatus.PASS, "checked", provider="remote-libvirt")
+    items = json.loads(serialize_results([valid]))["results"]
+    queue = _FakeQueue([_FakeJob(JobState.SUCCEEDED, json.dumps({"results": [item, *items]}))])
+    results = asyncio.run(_dispatcher(queue, clock_ticks=[0.0]).run_worker_checks())
+    assert results[0].status is CheckStatus.ERROR
+    assert results[1] == valid
+    if isinstance(item, dict) and item["check_id"] == PROVIDER_TLS_ID:
+        assert len(results) == 2
+        assert results[0].check_id == PROVIDER_TLS_ID
+        assert "invalid diagnostics result item" in results[0].detail
+    else:
+        assert len(results) == 3
+        assert results[-1].check_id == PROVIDER_TLS_ID
+        assert results[-1].provider == "remote-libvirt"
+        assert results[-1].failure_category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_partial_worker_report_keeps_server_and_worker_verdicts() -> None:
+    from tests.diagnostics.test_service import _Fixed
+
+    server = CheckResult("server_check", CheckStatus.PASS, "server checked")
+    worker = CheckResult(
+        PROVIDER_TLS_ID, CheckStatus.PASS, "worker checked", provider="remote-libvirt"
+    )
+    queue = _FakeQueue([_FakeJob(JobState.SUCCEEDED, serialize_results([worker]))])
+    service = DiagnosticsService(
+        checks=[_Fixed(server)],
+        per_check_timeout=1.0,
+        worker_mode=WorkerVantageDispatchMode(_dispatcher(queue, clock_ticks=[0.0])),
+    )
+    report = asyncio.run(service.run())
+    assert report.has_error is True
+    assert report.has_failure is False
+    assert report.results[:2] == [server, worker]
+    assert report.results[2].check_id == GDBSTUB_ACL_ID
+    assert report.results[2].status is CheckStatus.ERROR

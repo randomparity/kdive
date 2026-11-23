@@ -166,6 +166,17 @@ class JobWorkerCheckDispatcher:
                     provider=self._provider,
                     check_ids=self._worker_check_ids,
                 )
+            present = {result.check_id for result in results}
+            for check_id in self._worker_check_ids:
+                if check_id not in present:
+                    results.extend(
+                        _unavailable(
+                            f"diagnostics worker omitted expected check {check_id!r}",
+                            _INFRASTRUCTURE_FAILURE,
+                            provider=self._provider,
+                            check_ids=(check_id,),
+                        )
+                    )
             _log.info("diagnostics job %s succeeded", job.id)
             return results
         category = job.error_category or _INFRASTRUCTURE_FAILURE
