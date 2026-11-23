@@ -327,17 +327,18 @@ def _validated_artifact_versions(
 
 
 async def _drain_through_cancellation(task: asyncio.Task[object]) -> bool:
-    """Drain a task, retaining cancellation without consuming its result."""
+    """Drain a task while preserving its outcome for ordered cleanup."""
+    if task.done():
+        return False
+    # Python 3.14 reports failures of cancelled shield waiters; drain a non-raising future.
+    drain = asyncio.gather(task, return_exceptions=True)
     cancelled = False
-    while not task.done():
+    while not drain.done():
         try:
-            await asyncio.shield(task)
+            await asyncio.shield(drain)
         except asyncio.CancelledError:
             if not task.cancelled():
                 cancelled = True
-        except Exception:
-            # The caller reads task.result() after any ordered cleanup it requires.
-            pass
     return cancelled
 
 

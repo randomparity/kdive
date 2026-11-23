@@ -353,7 +353,8 @@ def test_cancelled_install_keeps_build_use_until_provider_thread_exits(
     assert order == ["provider-exit", "abandon", "release"]
 
 
-def test_cancelled_install_provider_failure_reraises_cancellation_after_cleanup(
+@pytest.mark.anyio
+async def test_cancelled_install_provider_failure_reraises_cancellation_after_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     entered = threading.Event()
@@ -428,7 +429,7 @@ def test_cancelled_install_provider_failure_reraises_cancellation_after_cleanup(
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    asyncio.run(exercise())
+    await exercise()
     assert not active_uses
     assert order == ["provider-failed", "abandon", "release"]
 
@@ -714,3 +715,51 @@ def test_acquire_cancellation_waits_for_claim_abandonment_without_provider(
     asyncio.run(exercise())
     assert not claimed_steps
     assert not provider_invoked
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("already_done", [False, True])
+@pytest.mark.parametrize("outcome", ["result", "error", "cancelled"])
+async def test_install_drain_preserves_task_outcome_without_caller_cancellation(
+    already_done: bool,
+    outcome: str,
+) -> None:
+    release = asyncio.Event()
+    draining = asyncio.Event()
+    provider_error = ValueError("install provider error")
+
+    async def provider() -> object:
+        await release.wait()
+        if outcome == "error":
+            raise provider_error
+        if outcome == "cancelled":
+            raise asyncio.CancelledError("provider cancelled")
+        return "installed"
+
+    task = asyncio.create_task(provider())
+    if already_done:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def drain() -> bool:
+        draining.set()
+        return await runs_install._drain_through_cancellation(task)
+
+    drainer = asyncio.create_task(drain())
+    try:
+        await asyncio.wait_for(draining.wait(), 5)
+        release.set()
+        assert await asyncio.wait_for(drainer, 5) is False
+        if outcome == "error":
+            with pytest.raises(ValueError) as raised:
+                task.result()
+            assert raised.value is provider_error
+        elif outcome == "cancelled":
+            with pytest.raises(asyncio.CancelledError) as raised:
+                task.result()
+            assert raised.value.args == ("provider cancelled",)
+        else:
+            assert task.result() == "installed"
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(drainer, task, return_exceptions=True), 5)

@@ -110,21 +110,21 @@ async def _run_fenced_power[T](
             provider_kind = take_provider_kind()
 
     task = asyncio.create_task(fenced())
+    # Python 3.14 reports failures of cancelled shield waiters; drain a non-raising future.
+    drain = asyncio.gather(task, return_exceptions=True)
     try:
         try:
-            return await asyncio.shield(task)
+            await asyncio.shield(drain)
         except asyncio.CancelledError:
             # to_thread survives cancellation. Keep the whole operation, including unlock and
             # connection-mode restoration, alive before propagating cancellation.
-            while not task.done():
+            while not drain.done():
                 try:
-                    await asyncio.shield(task)
+                    await asyncio.shield(drain)
                 except asyncio.CancelledError:
                     continue
-                except Exception:
-                    break
-            task.exception()  # consume a provider fault; cancellation remains primary
             raise
+        return task.result()
     finally:
         if provider_kind is not None:
             set_provider_kind(provider_kind)
