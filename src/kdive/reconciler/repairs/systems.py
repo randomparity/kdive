@@ -14,7 +14,6 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
 from kdive.db.repositories import (
     SNAPSHOTS,
-    SYSTEM_DEVICES,
     SYSTEMS,
     mark_attached_devices_lost,
     record_system_failure_category,
@@ -749,6 +748,16 @@ _STALLED_DEVICE_DETAIL = (
     "guest. Retry systems.unplug_device or systems.force_unplug_device, or plug again."
 )
 
+_STALLED_DEVICE_PREDICATE = (
+    "d.state = %s "
+    "AND NOT EXISTS ( "
+    "  SELECT 1 FROM jobs j "
+    "  WHERE j.kind = ANY(%s) "
+    "    AND j.payload->>'device_id' = d.id::text "
+    "    AND j.state = ANY(%s) "
+    ")"
+)
+
 
 async def repair_stalled_device_ops(conn: AsyncConnection) -> int:
     """Fail a `plugging`/`unplugging` device row whose job can never finish (ADR-0823).
@@ -760,23 +769,27 @@ async def repair_stalled_device_ops(conn: AsyncConnection) -> int:
     """
     recovered = 0
     for state, kinds in _DEVICE_OP_KINDS:
+        parameters = (state.value, [kind.value for kind in kinds], list(_ACTIVE_JOB_STATE_VALUES))
         async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "SELECT d.id FROM system_devices d "
-                "WHERE d.state = %s "
-                "  AND NOT EXISTS ( "
-                "    SELECT 1 FROM jobs j "
-                "    WHERE j.kind = ANY(%s) "
-                "      AND j.payload->>'device_id' = d.id::text "
-                "      AND j.state = ANY(%s) "
-                "  )",
-                (state.value, [kind.value for kind in kinds], list(_ACTIVE_JOB_STATE_VALUES)),
+                "SELECT d.id, d.system_id FROM system_devices d WHERE " + _STALLED_DEVICE_PREDICATE,
+                parameters,
             )
-            candidates = [row["id"] for row in await cur.fetchall()]
-        for device_id in candidates:
-            async with conn.transaction():
-                device = await SYSTEM_DEVICES.get(conn, device_id)
-                if device is None or device.state is not state:
+            candidates = await cur.fetchall()
+        for candidate in candidates:
+            device_id, system_id = candidate["id"], candidate["system_id"]
+            async with (
+                conn.transaction(),
+                advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
+                conn.cursor() as cur,
+            ):
+                await cur.execute(
+                    "SELECT d.id FROM system_devices d WHERE "
+                    + _STALLED_DEVICE_PREDICATE
+                    + " AND d.id = %s AND d.system_id = %s",
+                    (*parameters, device_id, system_id),
+                )
+                if await cur.fetchone() is None:
                     continue
                 await settle_device(
                     conn, device_id, SystemDeviceState.FAILED, detail=_STALLED_DEVICE_DETAIL
