@@ -1011,3 +1011,69 @@ def test_host_dump_expected_cleanup_failures_are_independent(
         native_unlink(directory / host_dump_volume_name(_SID), missing_ok=True)
         if directory.exists():
             native_rmdir(directory)
+
+
+@pytest.mark.parametrize("fault", ["refresh", "mkdtemp", "stat"])
+def test_host_dump_preparation_io_failure_is_categorized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host_dump_spools: list[Path],
+    fault: str,
+) -> None:
+    from kdive.providers.remote_libvirt.retrieve import host_dump_capture
+
+    volume = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = _FailingStaleLookupPool(
+        xml=_DIR_POOL_XML, fresh=volume, error=libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL)
+    )
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+    error = (
+        libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR) if fault == "refresh" else PermissionError()
+    )
+    native_mkdtemp, native_stat = host_dump_capture.tempfile.mkdtemp, Path.stat
+
+    def refresh(flags: int = 0) -> int:
+        raise error
+
+    def mkdtemp(*args: Any, **kwargs: Any) -> str:
+        if kwargs.get("prefix") == "kdive-host-dump-":
+            raise error
+        return native_mkdtemp(*args, **kwargs)
+
+    def stat(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+        if path.parent in host_dump_spools and path.name == host_dump_volume_name(_SID):
+            raise error
+        return native_stat(path, *args, **kwargs)
+
+    if fault == "refresh":
+        monkeypatch.setattr(pool, "refresh", refresh)
+    elif fault == "mkdtemp":
+        monkeypatch.setattr(host_dump_capture.tempfile, "mkdtemp", mkdtemp)
+    else:
+        monkeypatch.setattr(Path, "stat", stat)
+    with pytest.raises(CategorizedError) as caught:
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.__cause__ is error
+    assert caught.value.details["system_id"] == str(_SID)
+    operation = {
+        "refresh": "refreshing host_dump storage pool",
+        "mkdtemp": "creating host_dump spool",
+        "stat": "reading host_dump spool size",
+    }[fault]
+    assert caught.value.details["operation"] == operation
+    if fault == "stat":
+        assert caught.value.details["path"] == str(
+            host_dump_spools[0] / host_dump_volume_name(_SID)
+        )
+        assert not host_dump_spools[0].exists()
+    else:
+        assert caught.value.details["volume"] == host_dump_volume_name(_SID)
+        assert not host_dump_spools
+    assert volume.delete_calls == (0 if fault == "refresh" else 1)
+    if fault == "refresh":
+        assert pool.looked_up == [host_dump_volume_name(_SID)]
+    assert not store.stream_requests

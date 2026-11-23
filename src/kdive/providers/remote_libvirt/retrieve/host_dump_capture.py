@@ -1,6 +1,6 @@
 """Remote-libvirt host-side vmcore capture workflow.
 
-Error propagation follows ADR-0848.
+Error propagation follows ADR-0848 and ADR-0850.
 """
 
 from __future__ import annotations
@@ -168,12 +168,34 @@ class _HostDumpSpooler:
     def _downloaded_spool(
         self, conn: Any, pool: Any, vol_name: str, system_id: UUID
     ) -> Generator[Path]:
-        pool.refresh(0)
+        try:
+            pool.refresh(0)
+        except libvirt.libvirtError as exc:
+            raise CategorizedError(
+                "host_dump storage-pool refresh failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "operation": "refreshing host_dump storage pool",
+                    "system_id": str(system_id),
+                    "volume": vol_name,
+                },
+            ) from exc
         volume = self._resolve_volume(pool, vol_name, system_id)
         spool: Path | None = None
         try:
             self._enforce_ceiling(volume, vol_name, system_id)
-            spool = Path(tempfile.mkdtemp(prefix="kdive-host-dump-")) / vol_name
+            try:
+                spool = Path(tempfile.mkdtemp(prefix="kdive-host-dump-")) / vol_name
+            except OSError as exc:
+                raise CategorizedError(
+                    "host_dump spool creation failed",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={
+                        "operation": "creating host_dump spool",
+                        "system_id": str(system_id),
+                        "volume": vol_name,
+                    },
+                ) from exc
             self._download_to_file(conn, volume, spool, system_id)
             yield spool
         finally:
@@ -380,7 +402,18 @@ class _HostDumpPersister:
                     "error": type(exc).__name__,
                 },
             ) from exc
-        raw_size_bytes = spool.stat().st_size
+        try:
+            raw_size_bytes = spool.stat().st_size
+        except OSError as exc:
+            raise CategorizedError(
+                "host_dump spool size lookup failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "operation": "reading host_dump spool size",
+                    "system_id": str(system_id),
+                    "path": str(spool),
+                },
+            ) from exc
         raw = self._stream_put(run_id, spool, sha256_b64, execution_id=execution_id)
         self._verify_stored(raw.key, sha256_b64, system_id)
         redacted = persist_redacted(
