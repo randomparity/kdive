@@ -387,7 +387,9 @@ async def _terminate(
 
 
 def _credential_path(project: str) -> Path:
-    return Path(f"/tmp/kdive-compose-worker-{project}.credential")
+    return Path(
+        f"/tmp/kdive-compose-worker-{project}.credential"  # nosec B108: validated descriptor
+    )
 
 
 def _remove_managed_worker_volumes(project: str) -> None:
@@ -570,7 +572,9 @@ def _parser() -> argparse.ArgumentParser:
 def _lifecycle_lock(project: str):
     if not _PROJECT.fullmatch(project):
         raise RuntimeError("Compose project name is invalid for the lifecycle lock")
-    path = Path(f"/tmp/kdive-compose-worker-{project}.lock")
+    path = Path(
+        f"/tmp/kdive-compose-worker-{project}.lock"  # nosec B108: validated descriptor
+    )
     descriptor = _open_supervisor_file(
         path,
         os.O_RDWR | os.O_CREAT | os.O_NONBLOCK,
