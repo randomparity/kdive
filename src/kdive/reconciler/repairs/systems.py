@@ -188,6 +188,13 @@ class TeardownWarningHistory:
     stalled: dict[UUID, str] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class StalledTeardownProgress:
+    """Last ordinarily inspected System for one runner's bounded scan (ADR-0842)."""
+
+    after: UUID | None = None
+
+
 async def repair_orphaned_systems(conn: AsyncConnection) -> int:
     """Enqueue an idempotent GC teardown for each System whose Allocation is gone."""
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
@@ -394,24 +401,10 @@ def _warn_marked_stalled_teardown(
     )
 
 
-async def repair_stalled_tearing_down_systems(
-    conn: AsyncConnection, *, warnings: TeardownWarningHistory | None = None
-) -> int:
-    """Requeue ordinary teardown when its durable fence outlives its retryable job.
-
-    The `tearing_down` marker stays put until the worker proves provider absence, discharges
-    mutation obligations, and commits `torn_down` in one transaction. A failed or missing job
-    would otherwise strand that marker on a live Allocation. Recycle only terminal jobs; a canceled
-    job is an operator stop, and queued/running jobs remain owned by the normal worker retry path.
-
-    A System with external-boot activation history is skipped: the ordinary worker refuses its
-    unmarked teardown as a terminal conflict, so a recycle only writes a failed attempt each pass,
-    and an authority-marked prior row is never overwritten (#3015, ADR-0620). Each skip, including a
-    non-active authority-marked prior row, logs one WARNING per System and cause; the warned map is
-    pruned to each pass's candidates (#3026). Repeated standalone callers supply their own
-    warning history; omitting it makes this a one-shot observation.
-    """
-    history = TeardownWarningHistory() if warnings is None else warnings
+async def _stalled_teardown_candidates(
+    conn: AsyncConnection, *, after: UUID | None = None
+) -> list[UUID]:
+    """Read one bounded System-ID page without changing its durable eligibility."""
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT s.id FROM systems s "
@@ -421,73 +414,117 @@ async def repair_stalled_tearing_down_systems(
             "    WHERE j.dedup_key = s.id::text || ':teardown' "
             "      AND j.state = ANY(%s) "
             "  ) "
+            "AND (%s::uuid IS NULL OR s.id > %s) "
             "ORDER BY s.id "
             "LIMIT %s",
             (
                 SystemState.TEARING_DOWN.value,
                 list(_STALLED_TEARING_DOWN_BLOCKING_JOB_STATE_VALUES),
+                after,
+                after,
                 _STALLED_TEARING_DOWN_REPAIR_LIMIT,
             ),
         )
         candidates: list[UUID] = [row["id"] for row in await cur.fetchall()]
+    return candidates
+
+
+async def _repair_stalled_teardown_candidate(
+    conn: AsyncConnection, system_id: UUID, history: TeardownWarningHistory
+) -> bool:
+    """Inspect one System, returning admission after its transaction context exits."""
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        system = await SYSTEMS.get(conn, system_id)
+        if system is None or system.state is not SystemState.TEARING_DOWN:
+            return False
+        existing = await queue.get_by_dedup_key(conn, f"{system_id}:teardown")
+        if existing is not None and existing.state in {
+            JobState.QUEUED,
+            JobState.RUNNING,
+            JobState.CANCELED,
+        }:
+            return False
+        if existing is not None and _AUTHORITY_TEARDOWN_PAYLOAD_KEYS & existing.payload.keys():
+            _warn_marked_stalled_teardown(history, system_id, existing)
+            return False
+        activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, system_id)
+        # A settled activation's ordinary teardown is the worker's (ADR-0816, #3551).
+        if activation is not None and not await _EXTERNAL_BOOT_ACTIVATIONS.is_settled(
+            conn, activation.id
+        ):
+            _warn_stalled_teardown_once(
+                history,
+                system_id,
+                "external_boot_history",
+                "reconciler: system %s is stuck in tearing_down with external-boot "
+                "activation %s; the ordinary teardown is refused "
+                "(external_boot_teardown_not_supported), so no job is requeued; run "
+                "systems.teardown (%s)",
+                activation.id,
+                _STUCK_TEARING_DOWN_RUNBOOK,
+            )
+            return False
+        _, admitted = await queue.enqueue_with_status(
+            conn,
+            JobKind.TEARDOWN,
+            TeardownPayload(system_id=str(system_id)),
+            Authorizing(
+                principal=SYSTEM_RECONCILER_PRINCIPAL,
+                agent_session=None,
+                project=system.project,
+            ),
+            f"{system_id}:teardown",
+            recycle=queue.JobRecyclePolicy.TERMINAL,
+        )
+    return admitted
+
+
+async def repair_stalled_tearing_down_systems(
+    conn: AsyncConnection,
+    *,
+    warnings: TeardownWarningHistory | None = None,
+    progress: StalledTeardownProgress | None = None,
+) -> int:
+    """Requeue ordinary teardown when its durable fence outlives its retryable job.
+
+    The `tearing_down` marker stays put until the worker proves provider absence, discharges
+    mutation obligations, and commits `torn_down` in one transaction. A failed or missing job
+    would otherwise strand that marker on a live Allocation. Recycle only terminal jobs; a canceled
+    job is an operator stop, and queued/running jobs remain owned by the normal worker retry path.
+
+    A System with an unsettled external-boot activation is skipped: the worker refuses its
+    unmarked teardown as a terminal conflict, so recycling it would only produce another failed
+    attempt. An authority-marked prior row is never overwritten (#3015, ADR-0620).
+    Each skip, including a non-active authority-marked prior row, logs one WARNING per System
+    and cause. The stalled warning map is pruned to the selected page (#3026), so page eviction
+    can allow another warning after wrap.
+    Repeated standalone callers supply warning history and progress; omitted state is one-shot.
+    Each pass inspects at most 100 candidates, advancing after ordinary results or handled errors;
+    cancellation retries the interrupted candidate (ADR-0842).
+    """
+    history = TeardownWarningHistory() if warnings is None else warnings
+    if progress is None:
+        progress = StalledTeardownProgress()
+    candidates = await _stalled_teardown_candidates(conn, after=progress.after)
+    if not candidates and progress.after is not None:
+        candidates = await _stalled_teardown_candidates(conn)
+    if not candidates:
+        progress.after = None
     for gone in history.stalled.keys() - set(candidates):
         del history.stalled[gone]
     requeued = 0
     for system_id in candidates:
         try:
-            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-                system = await SYSTEMS.get(conn, system_id)
-                if system is None or system.state is not SystemState.TEARING_DOWN:
-                    continue
-                existing = await queue.get_by_dedup_key(conn, f"{system_id}:teardown")
-                if existing is not None and existing.state in {
-                    JobState.QUEUED,
-                    JobState.RUNNING,
-                    JobState.CANCELED,
-                }:
-                    continue
-                if (
-                    existing is not None
-                    and _AUTHORITY_TEARDOWN_PAYLOAD_KEYS & existing.payload.keys()
-                ):
-                    _warn_marked_stalled_teardown(history, system_id, existing)
-                    continue
-                activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, system_id)
-                # A settled activation's ordinary teardown is the worker's (ADR-0816, #3551).
-                if activation is not None and not await _EXTERNAL_BOOT_ACTIVATIONS.is_settled(
-                    conn, activation.id
-                ):
-                    _warn_stalled_teardown_once(
-                        history,
-                        system_id,
-                        "external_boot_history",
-                        "reconciler: system %s is stuck in tearing_down with external-boot "
-                        "activation %s; the ordinary teardown is refused "
-                        "(external_boot_teardown_not_supported), so no job is requeued; run "
-                        "systems.teardown (%s)",
-                        activation.id,
-                        _STUCK_TEARING_DOWN_RUNBOOK,
-                    )
-                    continue
-                _, admitted = await queue.enqueue_with_status(
-                    conn,
-                    JobKind.TEARDOWN,
-                    TeardownPayload(system_id=str(system_id)),
-                    Authorizing(
-                        principal=SYSTEM_RECONCILER_PRINCIPAL,
-                        agent_session=None,
-                        project=system.project,
-                    ),
-                    f"{system_id}:teardown",
-                    recycle=queue.JobRecyclePolicy.TERMINAL,
-                )
+            admitted = await _repair_stalled_teardown_candidate(conn, system_id, history)
         except Exception:  # noqa: BLE001 - one stuck System must not starve the repair lane
             _log.warning(
-                "reconciler: stalled teardown replay failed for system %s; retrying next pass",
+                "reconciler: stalled teardown replay failed for system %s; "
+                "retrying on a later pass",
                 system_id,
                 exc_info=True,
             )
-            continue
+            admitted = False
+        progress.after = system_id
         if admitted:
             requeued += 1
             _log.info(

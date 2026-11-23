@@ -146,7 +146,7 @@ def test_canceled_job_does_not_starve_bounded_replay(
 
 
 async def _seed_completed_activation(conn: psycopg.AsyncConnection, system_id: UUID) -> UUID:
-    """An abandoned activation whose cleanup completed: history that no longer restricts."""
+    """Cleanup-complete abandoned history without a settlement record; it still restricts."""
     run_id = await seed_run(conn, system_id)
     activation_id = uuid4()
     ids = {"activation_id": str(activation_id), "system_id": str(system_id)}

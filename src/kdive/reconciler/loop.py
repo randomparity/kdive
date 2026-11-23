@@ -251,6 +251,7 @@ class _RepairState:
 
     external_boot_cursors: external_boot_repairs.RepairCursors
     teardown_warnings: system_repairs.TeardownWarningHistory
+    stalled_teardown_progress: system_repairs.StalledTeardownProgress
 
 
 @dataclass(frozen=True, slots=True)
@@ -690,12 +691,14 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         lambda _r, _c, _g, _state: _repair_leaked_mutation_obligations,
     ),
     # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted teardown job.
-    # A fenced System then gets one bounded replay while preserving operator cancellation.
+    # Replays stranded ordinary teardowns while preserving operator cancellation.
     _RepairCatalogEntry(
         "stalled_tearing_down_systems",
         lambda _r, _c, _g, state: (
             lambda conn: _repair_stalled_tearing_down_systems(
-                conn, warnings=state.teardown_warnings
+                conn,
+                warnings=state.teardown_warnings,
+                progress=state.stalled_teardown_progress,
             )
         ),
     ),
@@ -902,12 +905,18 @@ def _repair_plan(
     image_publish_grace: timedelta,
     external_boot_cursors: external_boot_repairs.RepairCursors | None = None,
     teardown_warnings: system_repairs.TeardownWarningHistory | None = None,
+    stalled_teardown_progress: system_repairs.StalledTeardownProgress | None = None,
 ) -> tuple[_RepairSpec, ...]:
     cursors = {} if external_boot_cursors is None else external_boot_cursors
     warnings = (
         system_repairs.TeardownWarningHistory() if teardown_warnings is None else teardown_warnings
     )
-    state = _RepairState(cursors, warnings)
+    progress = (
+        system_repairs.StalledTeardownProgress()
+        if stalled_teardown_progress is None
+        else stalled_teardown_progress
+    )
+    state = _RepairState(cursors, warnings, progress)
     repairs: list[_RepairSpec] = []
     for entry in _REPAIR_CATALOG:
         repair = entry.factory(reaper, config, image_publish_grace, state)
@@ -948,14 +957,15 @@ async def reconcile_once(
     config: ReconcileConfig,
     external_boot_cursors: external_boot_repairs.RepairCursors | None = None,
     teardown_warnings: system_repairs.TeardownWarningHistory | None = None,
+    stalled_teardown_progress: system_repairs.StalledTeardownProgress | None = None,
 ) -> ReconcileReport:
     """Run the repairs once, each isolated, each on a fresh pooled connection.
 
     A repair that raises is logged, its name recorded in ``failures``, and the pass
     continues — one repair never starves the others. Returns the partial counts.
-    Repeat standalone callers may supply external-boot cursors and teardown warning history;
+    Repeat standalone callers may supply cursor/progress state and teardown warning history;
     omitted state is one-shot. Reconciler owns and supplies independent observations
-    (ADR-0839, ADR-0841).
+    (ADR-0839, ADR-0841, ADR-0842).
 
     The ``→expired`` allocation sweep runs **first** so that the allocations it moves to
     ``expired`` are seen as orphaning their System by :func:`_repair_orphaned_systems` in
@@ -978,6 +988,7 @@ async def reconcile_once(
             image_publish_grace=_image_publish_grace(),
             external_boot_cursors=external_boot_cursors,
             teardown_warnings=teardown_warnings,
+            stalled_teardown_progress=stalled_teardown_progress,
         ),
     )
 
@@ -1072,6 +1083,7 @@ class Reconciler:
         self._config = config
         self._external_boot_cursors: external_boot_repairs.RepairCursors = {}
         self._teardown_warnings = system_repairs.TeardownWarningHistory()
+        self._stalled_teardown_progress = system_repairs.StalledTeardownProgress()
         self._heartbeat_tick = config.heartbeat_tick.total_seconds()
         self._telemetry = config.telemetry or ReconcilerTelemetry.disabled()
         self._fleet_telemetry = config.fleet_telemetry or FleetTelemetry.disabled()
@@ -1084,6 +1096,7 @@ class Reconciler:
             config=self._config,
             external_boot_cursors=self._external_boot_cursors,
             teardown_warnings=self._teardown_warnings,
+            stalled_teardown_progress=self._stalled_teardown_progress,
         )
 
     async def run(self, stop: asyncio.Event) -> None:
