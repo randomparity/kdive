@@ -191,7 +191,7 @@ def test_external_boot_history_is_not_requeued_and_warns_once(
     migrated_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.WARNING, logger=system_repairs.__name__)
-    system_repairs._warned_stalled_teardowns.clear()
+    history = system_repairs.TeardownWarningHistory()
 
     async def _run() -> None:
         conn = await connect(migrated_url)
@@ -201,7 +201,13 @@ def test_external_boot_history_is_not_requeued_and_warns_once(
         async with AsyncConnectionPool(migrated_url, min_size=1, open=False) as pool:
             await pool.open()
             for _ in range(2):
-                assert await run_repair(pool, repair_stalled_tearing_down_systems) == 0
+                assert (
+                    await run_repair(
+                        pool,
+                        lambda conn: repair_stalled_tearing_down_systems(conn, warnings=history),
+                    )
+                    == 0
+                )
         assert await _teardown_job(conn, system_id) == (JobState.FAILED.value, 3)
         warnings = [
             r
@@ -225,7 +231,7 @@ def test_authority_marked_row_is_not_overwritten_and_warns_once(
     migrated_url: str, key: str, remedy: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.WARNING, logger=system_repairs.__name__)
-    system_repairs._warned_stalled_teardowns.clear()
+    history = system_repairs.TeardownWarningHistory()
 
     async def _run() -> None:
         conn = await connect(migrated_url)
@@ -238,7 +244,13 @@ def test_authority_marked_row_is_not_overwritten_and_warns_once(
         async with AsyncConnectionPool(migrated_url, min_size=1, open=False) as pool:
             await pool.open()
             for _ in range(2):
-                assert await run_repair(pool, repair_stalled_tearing_down_systems) == 0
+                assert (
+                    await run_repair(
+                        pool,
+                        lambda conn: repair_stalled_tearing_down_systems(conn, warnings=history),
+                    )
+                    == 0
+                )
         assert await _teardown_job(conn, system_id) == (JobState.FAILED.value, 3)
         warnings = [r.message for r in caplog.records if str(system_id) in r.message]
         assert len(warnings) == 1
@@ -252,7 +264,7 @@ def test_warned_map_drops_a_system_that_leaves_tearing_down(
     migrated_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.WARNING, logger=system_repairs.__name__)
-    system_repairs._warned_stalled_teardowns.clear()
+    history = system_repairs.TeardownWarningHistory()
 
     async def _run() -> None:
         conn = await connect(migrated_url)
@@ -262,13 +274,19 @@ def test_warned_map_drops_a_system_that_leaves_tearing_down(
         set_state = "UPDATE systems SET state = %s WHERE id = %s"
         async with AsyncConnectionPool(migrated_url, min_size=1, open=False) as pool:
             await pool.open()
-            await run_repair(pool, repair_stalled_tearing_down_systems)
-            assert system_id in system_repairs._warned_stalled_teardowns
+            await run_repair(
+                pool, lambda conn: repair_stalled_tearing_down_systems(conn, warnings=history)
+            )
+            assert system_id in history.stalled
             await conn.execute(set_state, (SystemState.TORN_DOWN.value, system_id))
-            await run_repair(pool, repair_stalled_tearing_down_systems)
-            assert system_id not in system_repairs._warned_stalled_teardowns
+            await run_repair(
+                pool, lambda conn: repair_stalled_tearing_down_systems(conn, warnings=history)
+            )
+            assert system_id not in history.stalled
             await conn.execute(set_state, (SystemState.TEARING_DOWN.value, system_id))
-            await run_repair(pool, repair_stalled_tearing_down_systems)
+            await run_repair(
+                pool, lambda conn: repair_stalled_tearing_down_systems(conn, warnings=history)
+            )
         warnings = [r for r in caplog.records if str(system_id) in r.message]
         assert len(warnings) == 2
         await conn.close()

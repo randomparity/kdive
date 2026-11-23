@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterator
 from uuid import UUID
 
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import AllocationState, SystemState
-from kdive.reconciler.loop import reconcile_once
+from kdive.reconciler.loop import Reconciler
 from kdive.reconciler.repairs import systems as system_repairs
 from kdive.reconciler.repairs.systems import (
     repair_orphaned_systems,
@@ -22,13 +21,6 @@ from tests.reconciler.conftest import FakeReaper, connect, run_repair, seed_syst
 
 _KIND = "stranded_orphan_teardowns"
 _ROW = "SELECT state, attempt, updated_at FROM jobs WHERE dedup_key = %s"
-
-
-@pytest.fixture(autouse=True)
-def _fresh_dedupe() -> Iterator[None]:
-    system_repairs._warned_stranded_teardowns.clear()
-    yield
-    system_repairs._warned_stranded_teardowns.clear()
 
 
 async def _orphan_with_failed_teardown(url: str, pool: AsyncConnectionPool) -> UUID:
@@ -81,6 +73,7 @@ def test_stranded_teardown_warns_once_per_failure(
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             system_id = await _orphan_with_failed_teardown(migrated_url, pool)
+            runner = Reconciler(pool, FakeReaper(), config=make_reconcile_config())
             counts = []
             warned = []
             for bump in (False, False, True):
@@ -92,7 +85,7 @@ def test_stranded_teardown_warns_once_per_failure(
                             (f"{system_id}:teardown",),
                         )
                 caplog.clear()
-                report = await reconcile_once(pool, FakeReaper(), config=make_reconcile_config())
+                report = await runner.run_once()
                 counts.append(report.repair_counts[_KIND])
                 warned.append(_warnings(caplog, system_id))
             row = await _row(migrated_url, system_id)
@@ -159,7 +152,13 @@ def test_stranded_teardown_warns_for_canceled_row(
                     (f"{system_id}:teardown",),
                 )
             before = await _row(migrated_url, system_id)
-            counts = [await run_repair(pool, report_stranded_orphan_teardowns) for _ in range(2)]
+            history = system_repairs.TeardownWarningHistory()
+            counts = [
+                await run_repair(
+                    pool, lambda conn: report_stranded_orphan_teardowns(conn, warnings=history)
+                )
+                for _ in range(2)
+            ]
             assert await run_repair(pool, repair_orphaned_systems) == 0
             assert await _row(migrated_url, system_id) == before
         (line,) = _warnings(caplog, system_id)

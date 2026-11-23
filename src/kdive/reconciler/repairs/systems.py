@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -78,12 +79,6 @@ _STRANDED_TEARDOWN_SQL = (
     "JOIN jobs j ON j.dedup_key = s.id::text || ':teardown' "
     "WHERE s.state <> ALL(%s) AND a.state = ANY(%s) AND j.state = ANY(%s)"
 )
-# System id -> the failed or canceled row's `updated_at` last warned about, so each stop warns once
-# per process. Replaced every pass by the current stranded set, so it never outgrows that set.
-_warned_stranded_teardowns: dict[UUID, datetime] = {}
-# System id -> the cause last warned about for a skipped stalled `tearing_down` (#3015, #3026).
-# Pruned every pass to that pass's candidates, so a System that leaves `tearing_down` is dropped.
-_warned_stalled_teardowns: dict[UUID, str] = {}
 _STUCK_TEARING_DOWN_RUNBOOK = "docs/operating/runbooks/stuck-tearing-down-system.md"
 _EXTERNAL_BOOT_ACTIVATIONS = ExternalBootActivationRepository()
 _AUTHORITY_TEARDOWN_PAYLOAD_KEYS = frozenset(
@@ -185,6 +180,14 @@ _LEAKED_MUTATION_CANDIDATE_RECHECK_SQL = (
 )
 
 
+@dataclass(slots=True)
+class TeardownWarningHistory:
+    """One runner's current warning observations, pruned by each repair (ADR-0841)."""
+
+    stranded: dict[UUID, datetime] = field(default_factory=dict)
+    stalled: dict[UUID, str] = field(default_factory=dict)
+
+
 async def repair_orphaned_systems(conn: AsyncConnection) -> int:
     """Enqueue an idempotent GC teardown for each System whose Allocation is gone."""
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
@@ -235,15 +238,19 @@ async def repair_orphaned_systems(conn: AsyncConnection) -> int:
     return enqueued
 
 
-async def report_stranded_orphan_teardowns(conn: AsyncConnection) -> int:
+async def report_stranded_orphan_teardowns(
+    conn: AsyncConnection, *, warnings: TeardownWarningHistory | None = None
+) -> int:
     """Warn once per stop about an orphaned System whose teardown failed or was canceled (#2978).
 
     `repair_orphaned_systems` never recycles a failed or canceled `{uid}:teardown` row, so without
     this the System would sit with its Allocation gone and no log line. Read-only: the remedy is the
     operator's `systems.teardown` (or `systems.get` for an authority-marked row, whose re-run
     belongs to the authority path). Returns the number of new warnings, which the loop feeds to
-    the repairs counter.
+    the repairs counter. Repeated standalone callers supply their own warning history;
+    omitting it makes this a one-shot observation.
     """
+    history = TeardownWarningHistory() if warnings is None else warnings
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             _STRANDED_TEARDOWN_SQL,
@@ -255,9 +262,9 @@ async def report_stranded_orphan_teardowns(conn: AsyncConnection) -> int:
             ),
         )
         rows = await cur.fetchall()
-    new = [row for row in rows if _warned_stranded_teardowns.get(row["id"]) != row["updated_at"]]
-    _warned_stranded_teardowns.clear()
-    _warned_stranded_teardowns.update({row["id"]: row["updated_at"] for row in rows})
+    new = [row for row in rows if history.stranded.get(row["id"]) != row["updated_at"]]
+    history.stranded.clear()
+    history.stranded.update({row["id"]: row["updated_at"] for row in rows})
     for row in new:
         _log.warning(
             "reconciler: orphaned system %s has a %s teardown job %s (%s); it needs an operator %s",
@@ -355,14 +362,18 @@ def gone_system_state_values() -> tuple[str, ...]:
     return _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES
 
 
-def _warn_stalled_teardown_once(system_id: UUID, cause: str, message: str, *args: object) -> None:
-    if _warned_stalled_teardowns.get(system_id) == cause:
+def _warn_stalled_teardown_once(
+    history: TeardownWarningHistory, system_id: UUID, cause: str, message: str, *args: object
+) -> None:
+    if history.stalled.get(system_id) == cause:
         return
-    _warned_stalled_teardowns[system_id] = cause
+    history.stalled[system_id] = cause
     _log.warning(message, system_id, *args)
 
 
-def _warn_marked_stalled_teardown(system_id: UUID, existing: Job) -> None:
+def _warn_marked_stalled_teardown(
+    history: TeardownWarningHistory, system_id: UUID, existing: Job
+) -> None:
     if EXTERNAL_BOOT_AUTHORITY_MARKER_KEY in existing.payload:
         cause, remedy = (
             "authority_marked",
@@ -371,6 +382,7 @@ def _warn_marked_stalled_teardown(system_id: UUID, existing: Job) -> None:
     else:
         cause, remedy = "authority_system_marked", "no supported exit exists for it"
     _warn_stalled_teardown_once(
+        history,
         system_id,
         cause,
         "reconciler: system %s is stuck in tearing_down behind authority-marked teardown job %s "
@@ -382,7 +394,9 @@ def _warn_marked_stalled_teardown(system_id: UUID, existing: Job) -> None:
     )
 
 
-async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
+async def repair_stalled_tearing_down_systems(
+    conn: AsyncConnection, *, warnings: TeardownWarningHistory | None = None
+) -> int:
     """Requeue ordinary teardown when its durable fence outlives its retryable job.
 
     The `tearing_down` marker stays put until the worker proves provider absence, discharges
@@ -394,8 +408,10 @@ async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
     unmarked teardown as a terminal conflict, so a recycle only writes a failed attempt each pass,
     and an authority-marked prior row is never overwritten (#3015, ADR-0620). Each skip, including a
     non-active authority-marked prior row, logs one WARNING per System and cause; the warned map is
-    pruned to each pass's candidates (#3026).
+    pruned to each pass's candidates (#3026). Repeated standalone callers supply their own
+    warning history; omitting it makes this a one-shot observation.
     """
+    history = TeardownWarningHistory() if warnings is None else warnings
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT s.id FROM systems s "
@@ -414,8 +430,8 @@ async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
             ),
         )
         candidates: list[UUID] = [row["id"] for row in await cur.fetchall()]
-    for gone in _warned_stalled_teardowns.keys() - set(candidates):
-        del _warned_stalled_teardowns[gone]
+    for gone in history.stalled.keys() - set(candidates):
+        del history.stalled[gone]
     requeued = 0
     for system_id in candidates:
         try:
@@ -434,7 +450,7 @@ async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
                     existing is not None
                     and _AUTHORITY_TEARDOWN_PAYLOAD_KEYS & existing.payload.keys()
                 ):
-                    _warn_marked_stalled_teardown(system_id, existing)
+                    _warn_marked_stalled_teardown(history, system_id, existing)
                     continue
                 activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, system_id)
                 # A settled activation's ordinary teardown is the worker's (ADR-0816, #3551).
@@ -442,6 +458,7 @@ async def repair_stalled_tearing_down_systems(conn: AsyncConnection) -> int:
                     conn, activation.id
                 ):
                     _warn_stalled_teardown_once(
+                        history,
                         system_id,
                         "external_boot_history",
                         "reconciler: system %s is stuck in tearing_down with external-boot "
