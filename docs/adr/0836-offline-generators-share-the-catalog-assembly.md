@@ -16,12 +16,15 @@ Move the recipe to `scripts/generate/offline_catalog.py` as `registry_tools`.
 All three generators call it directly. Retain the unopened pool, generated verifier,
 inert object store, provider composition and catalog lifecycle witness.
 Renderers keep their own transformations; production assembly remains unchanged.
+Run the CLI and reference recipes as modules, matching the constants recipe, so
+the repository root resolves the shared generator package without path bootstrapping.
 
 ## Consequences
 
 Catalog construction has one generator-side owner. Private renderer helpers disappear
-without compatibility aliases. These internal scripts retain their configured invocation
-paths and generated output. Extraction still needs the normal developer environment.
+without compatibility aliases. The `docs`, `cli-verbs` and `cli-verbs-check` commands
+retain their names and generated output; their internal Python calls become module
+invocations. Extraction still needs the normal developer environment.
 
 ## Considered & rejected
 
@@ -29,3 +32,5 @@ paths and generated output. Extraction still needs the normal developer environm
 - **Import the reference renderer from other generators.** judgment: catalog construction
   does not belong to one output format.
 - **Reuse the test registry fixture.** judgment: generation should not import test support.
+- **Keep direct-file recipe calls with import fallbacks.** judgment: the existing module
+  entry convention avoids dual import paths or custom sys.path manipulation.
