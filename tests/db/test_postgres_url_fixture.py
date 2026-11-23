@@ -192,7 +192,7 @@ def test_stop_postgres_leaves_no_dangling_volume_behind(tmp_path: Path) -> None:
 
 def test_provision_and_drop_roundtrip_against_real_server() -> None:
     xdist_backend.skip_without_docker()
-    from testcontainers.postgres import PostgresContainer
+    from testcontainers.community.postgres import PostgresContainer
 
     with PostgresContainer(db_conftest._POSTGRES_IMAGE) as container:
         server = container.get_connection_url(driver=None)  # includes the password
