@@ -11,10 +11,14 @@ transaction runs at READ COMMITTED (psycopg's default).
 distinct connections both `SELECT`-miss before either `INSERT` commits, so both run
 `fn`; the unique `(run_id, step)` row then de-dupes the stored *result*, but `fn`'s
 side effect has already happened twice. Bare `run_step` therefore guarantees a single
-*stored result*, not a single *fn execution*. Use `claim_run_step` for provider side effects:
-it commits a narrow `state='running'` ledger claim, lets the provider call run without a DB
-transaction or advisory lock, and then records the successful JSON result with
-`complete_run_step` (or removes the claim with `abandon_run_step` on failure). See
+*stored result*, not a single *fn execution*. `claim_run_step` commits a narrow
+`state='running'` ledger claim, allowing work outside a DB transaction or advisory lock,
+then `complete_run_step` records success or `abandon_run_step` removes a failed claim.
+Claims are per `(run_id, step)`: another claimant deletes a running row once `updated_at`
+is more than 30 minutes behind PostgreSQL `now()` and can replace it. This neither stops
+the original operation nor fences its later completion/abandonment. Callers must prevent
+those operations from overlapping a replacement before relying on side-effect exclusivity;
+use separate lifetime serialization or provider-side idempotency when they cannot. See
 `tests/adversarial/test_idempotency_concurrency.py` for the bare `run_step` boundary.
 """
 
@@ -104,9 +108,21 @@ async def run_step(
 async def claim_run_step(conn: AsyncConnection, run_id: UUID, step: str) -> StepClaim:
     """Claim ``step`` for side-effect work without holding the DB lock while it runs.
 
-    A caller that receives ``claimed=True`` owns the provider side effect and must later call
-    ``complete_run_step`` or ``abandon_run_step``. Concurrent callers wait for a running claim
-    to finish, then replay the stored result or claim the step if the owner abandoned it.
+    ``claimed=True`` means this caller inserted the running row, not that it holds an
+    unconditional execution lock. Complete successful work with ``complete_run_step`` or
+    remove a failed claim with ``abandon_run_step``. Other claimants normally poll until
+    completion or abandonment, then replay the result or insert a new running claim.
+
+    A competing call deletes a running row whose ``updated_at`` is strictly more than
+    30 minutes before PostgreSQL ``now()`` and may claim the same ``(run_id, step)``.
+    Expiration is checked during claiming; it does not cancel the original operation.
+    There is no heartbeat or owner token here. Completion and abandonment match only the
+    run, step and running state, so an old caller can change or remove a replacement.
+
+    Callers must prevent the original side effect and its completion/abandonment from
+    overlapping any replacement, including after timeout or cancellation. If that cannot
+    be guaranteed, use separate lifetime serialization or provider-side idempotency;
+    this helper does not enforce that prerequisite.
     """
     while True:
         async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
@@ -141,7 +157,11 @@ async def claim_run_step(conn: AsyncConnection, run_id: UUID, step: str) -> Step
 async def complete_run_step(
     conn: AsyncConnection, run_id: UUID, step: str, result: JsonValue
 ) -> JsonValue:
-    """Mark a claimed run step succeeded and return the JSONB-round-tripped result."""
+    """Mark a running step succeeded and return the JSONB-round-tripped result.
+
+    No owner token is checked: an expired caller can complete a replacement running row.
+    The caller must prevent that overlap as described by ``claim_run_step``.
+    """
     result = _step_result(result, run_id=run_id, step=step)
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -162,7 +182,11 @@ async def complete_run_step(
 
 
 async def abandon_run_step(conn: AsyncConnection, run_id: UUID, step: str) -> None:
-    """Drop a running claim so a retry can attempt the side effect again."""
+    """Drop a running claim so a retry can attempt the side effect again.
+
+    No owner token is checked: an expired caller can delete a replacement running row.
+    The caller must prevent that overlap as described by ``claim_run_step``.
+    """
     async with conn.transaction():
         await conn.execute(
             "DELETE FROM run_steps WHERE run_id = %s AND step = %s AND state = %s",
