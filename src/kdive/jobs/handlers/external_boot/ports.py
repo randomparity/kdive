@@ -23,6 +23,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTeardownMutationRequestV1,
     AuthorityTeardownResponseV1,
 )
+from kdive.providers.ports.module_operation import ModuleAuthority
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.external_boot.routing import AuthorityReservationGeometry
 
@@ -114,3 +115,4 @@ class ExternalBootHandlerPorts:
     activation_readiness_timeout: timedelta = timedelta(minutes=5)
     recovery_readiness_timeout: timedelta = timedelta(minutes=5)
     reservation_geometry: Callable[[ProviderBinding], AuthorityReservationGeometry] | None = None
+    module_authority: ModuleAuthority | None = None

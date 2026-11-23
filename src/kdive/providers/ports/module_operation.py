@@ -1,6 +1,5 @@
 """Provider-neutral module requests and validated evidence used by service orchestration."""
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -88,10 +87,6 @@ class ModuleAuthority(Protocol):
     async def execute_remote_module_lifecycle(
         self, request: ModuleLifecycleRequest, *, deadline: float
     ) -> ModuleCompletion: ...
-
-
-class PreparationExecutor(Protocol):
-    async def run[ResultT](self, operation: Callable[[], ResultT]) -> ResultT: ...
 
 
 @dataclass(frozen=True, slots=True)

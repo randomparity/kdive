@@ -933,6 +933,48 @@ def test_the_request_binds_a_staged_plan_to_the_combined_manifest() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("remaining", "budget"),
+    [(1000.75, 900), (899.75, 899), (0.999, None), (0.0, None), (-1.0, None)],
+)
+async def test_worker_module_opening_uses_capped_whole_second_budget(
+    monkeypatch: pytest.MonkeyPatch, remaining: float, budget: int | None
+) -> None:
+    from kdive.services import remote_module_authority_preparation as preparation
+
+    opened: list[int] = []
+
+    class Opened(Exception):
+        pass
+
+    class Sender:
+        async def open_remote_module_attempt(self, request: Any, *, deadline: float) -> Any:
+            assert deadline == 100.0 + remaining
+            opened.append(request.budget_seconds)
+            raise Opened
+
+    monkeypatch.setattr(
+        preparation,
+        "asyncio",
+        SimpleNamespace(get_running_loop=lambda: SimpleNamespace(time=lambda: 100.0)),
+    )
+    authority = _request().authority
+    expected_error = Opened if budget is not None else TimeoutError
+    with pytest.raises(expected_error):
+        await prepare_remote_module_on_authority_host(
+            pool=cast(Any, None),
+            repository=cast(Any, None),
+            sender=cast(Any, Sender()),
+            inputs=preparation.RemoteModulePreparationInputs(authority=authority),
+            job_id=uuid4(),
+            job_attempt=1,
+            incarnation_credential=SecretStr("worker-credential"),
+            deadline=100.0 + remaining,
+        )
+    assert opened == ([] if budget is None else [budget])
+
+
+@pytest.mark.anyio
 async def test_worker_refuses_a_module_only_operation_for_a_staged_plan() -> None:
     staged = _request(staged=True)
     module_only = staged.operation.model_copy(
@@ -957,7 +999,6 @@ async def test_worker_refuses_a_module_only_operation_for_a_staged_plan() -> Non
             repository=cast(Any, None),
             sender=cast(Any, _Sender()),
             inputs=cast(Any, SimpleNamespace(authority=staged.authority)),
-            executor=None,
             job_id=uuid4(),
             job_attempt=1,
             incarnation_credential=cast(Any, None),

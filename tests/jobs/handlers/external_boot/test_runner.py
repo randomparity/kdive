@@ -709,6 +709,8 @@ def test_remote_preparing_calls_typed_module_authority_before_phase_commit(
 
     async def prepare_modules(**values: Any) -> RemoteModuleTerminalPreparationResponseV1:
         inputs = values["inputs"]
+        assert values["sender"] is authority
+        assert "executor" not in values
         module_calls.append(inputs.authority)
         assert values["pool"] is not None
         assert values["deadline"] > asyncio.get_running_loop().time()
@@ -729,7 +731,7 @@ def test_remote_preparing_calls_typed_module_authority_before_phase_commit(
         return "applied"
 
     monkeypatch.setattr(
-        "kdive.jobs.handlers.external_boot.runner.prepare_remote_module_on_authority_host",
+        "kdive.services.remote_module_authority_preparation.prepare_remote_module_on_authority_host",
         prepare_modules,
     )
     monkeypatch.setattr(

@@ -1298,7 +1298,6 @@ def test_lost_prep_reply_keeps_real_verifier_lock_until_matching_completion(
                     )
                 return response
 
-        executor = RemoteModulePreparationExecutor()
         worker = AsyncConnectionPool(
             authority_role_dsns("kdive_worker"), min_size=1, max_size=1, open=False
         )
@@ -1310,7 +1309,6 @@ def test_lost_prep_reply_keeps_real_verifier_lock_until_matching_completion(
                     repository=cast(Any, Repository()),
                     sender=cast(Any, Sender()),
                     inputs=RemoteModulePreparationInputs(authority=request.authority),
-                    executor=executor,
                     job_id=uuid4(),
                     job_attempt=1,
                     incarnation_credential=SecretStr("worker-credential"),
@@ -1345,7 +1343,6 @@ def test_lost_prep_reply_keeps_real_verifier_lock_until_matching_completion(
         finally:
             host_release.set()
             await worker.close()
-            executor.shutdown()
 
     asyncio.run(run())
 
@@ -1430,8 +1427,6 @@ def test_asyncio_run_shutdown_waits_for_late_prep_completion(
             release_failures.append("asyncio.run returned before authority completion")
         host_release.set()
 
-    executor = RemoteModulePreparationExecutor()
-
     async def scenario() -> None:
         asyncio.create_task(
             prepare_remote_module_on_authority_host(
@@ -1439,7 +1434,6 @@ def test_asyncio_run_shutdown_waits_for_late_prep_completion(
                 repository=cast(Any, object()),
                 sender=cast(Any, Sender()),
                 inputs=RemoteModulePreparationInputs(authority=request.authority),
-                executor=executor,
                 job_id=uuid4(),
                 job_attempt=1,
                 incarnation_credential=SecretStr("worker-credential"),
@@ -1456,7 +1450,6 @@ def test_asyncio_run_shutdown_waits_for_late_prep_completion(
     finally:
         host_release.set()
         releaser.join()
-        executor.shutdown()
 
     assert release_failures == []
     assert host_completed.is_set()

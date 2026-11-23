@@ -80,15 +80,6 @@ _MODULE_ATTEMPTS = RemoteModuleAttemptObligationRepository()
 _LOGGER = logging.getLogger(__name__)
 
 
-async def prepare_remote_module_on_authority_host(**values: Any) -> Any:
-    """Load the remote provider only when a remote job actually reaches the boundary."""
-    from kdive.services.remote_module_authority_preparation import (
-        prepare_remote_module_on_authority_host as execute,
-    )
-
-    return await execute(**values)
-
-
 # The phase a raise is attributed to. `_FailureContext.phase` admits a closed Literal and the
 # commit re-checks it, so a name invented here is refused at SQL rather than stored.
 #
@@ -291,16 +282,16 @@ async def _materialize_preparing(
     if authority is not None and authority.modules is not None:
         from kdive.services.remote_module_authority_preparation import (
             RemoteModulePreparationInputs,
+            prepare_remote_module_on_authority_host,
         )
 
-        if context.authority_executor is None or ports.pool is None:
+        if ports.module_authority is None or ports.pool is None:
             raise _refuse("remote module authority preparation is not configured")
         await prepare_remote_module_on_authority_host(
             pool=ports.pool,
             repository=_MODULE_ATTEMPTS,
-            sender=cast(Any, context.authority_executor),
+            sender=ports.module_authority,
             inputs=RemoteModulePreparationInputs(authority=prepare),
-            executor=None,
             job_id=context.job.id,
             job_attempt=context.job.attempt,
             incarnation_credential=context.incarnation_credential,
@@ -724,6 +715,7 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
             authority_executor=client,
             preparation_executor=client,
             teardown_executor=client,
+            module_authority=client,
         )
     prerequisites = await require_preconditions(conn, activation, marker)
     if _prepares(activation, marker) and ports.preparation_executor is None:
