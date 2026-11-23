@@ -47,6 +47,7 @@ from kdive.jobs.worker import Worker
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
@@ -115,6 +116,14 @@ class _VehicleExecutor:
         return AuthorityObservationV1(
             observation_id=uuid4(), category=category, composite_state="sha256:" + "8" * 64
         )
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        raise AssertionError("the claim-to-commit vehicle only activates or tears down")
+
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        raise AssertionError("the claim-to-commit vehicle does not re-enter recovery")
 
 
 def _registry(
@@ -295,6 +304,14 @@ class _PublicBootAuthority:
 
     async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         return await self._service.execute_mutation(self._peer, request)
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        return await self._service.execute_conflict_resolution(self._peer, request)
+
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return await self._service.observe_authority(self._peer, request)
 
 
 def _public_boot_registry(resolver: Any, authority: _PublicBootAuthority) -> HandlerRegistry:

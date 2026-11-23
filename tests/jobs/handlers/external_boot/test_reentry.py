@@ -29,6 +29,7 @@ from kdive.jobs.models import (
 from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityTakeoverRequestV1,
@@ -69,6 +70,14 @@ class _SenderExecutor:
 
     async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         return await self._sender.execute_mutation(request, deadline=123.0)
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        return await self._sender.execute_conflict_resolution(request, deadline=123.0)
+
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return await self._sender.observe_authority(request, deadline=123.0)
 
 
 @pytest.mark.parametrize(

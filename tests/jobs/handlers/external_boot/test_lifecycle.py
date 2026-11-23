@@ -214,7 +214,7 @@ class _VehicleExecutor:
             observation_id=uuid4(), category=category, composite_state="sha256:" + "8" * 64
         )
 
-    async def observe(self, _request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         return AuthorityObservationV1(
             observation_id=uuid4(),
             category="source",

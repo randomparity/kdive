@@ -20,6 +20,7 @@ from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.handlers.external_boot.runner import OperationContext
 from kdive.jobs.models import ExternalBootAuthorityFailure, ExternalBootAuthorityMarkerV1
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
 )
@@ -37,6 +38,14 @@ _REQUEST_DEADLINE = _NOW + timedelta(hours=1)
 class _NeverExecuted:
     async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         raise AssertionError("the begin step stops the handler before any mutation")
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        raise AssertionError("the begin step stops the handler before conflict resolution")
+
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        raise AssertionError("the begin step stops the handler before observation")
 
 
 class _Stop(Exception):

@@ -495,7 +495,7 @@ async def _execute(
     request = _mutation_request(context)
     await _execute_remote_module_lifecycle(context, request, executor)
     if isinstance(request, AuthorityConflictResolutionRequestV1):
-        authority_observation = await cast(Any, executor).execute_conflict_resolution(request)
+        authority_observation = await executor.execute_conflict_resolution(request)
     else:
         authority_observation = await executor.execute(request)
     kernel_observation = None
@@ -902,7 +902,7 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
         expected = context.marker.expected_observed_composite
         if expected is None:
             raise _refuse("resolve-conflict has no observed composite binding")
-        observation = await cast(Any, executor).observe(_mutation_request(context))
+        observation = await executor.observe(_mutation_request(context))
         if observation.category == "unreadable" or observation.composite_state != expected:
             raise CategorizedError(
                 "authority observation no longer matches the conflict binding",
