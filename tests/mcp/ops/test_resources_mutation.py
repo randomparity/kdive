@@ -1183,10 +1183,13 @@ def test_probe_protocol_is_satisfied_by_fakes() -> None:
     [
         ("qemu+tls://198.51.100.5:1234/system", ("198.51.100.5", 1234)),
         ("qemu+tls://198.51.100.5/system", ("198.51.100.5", 16514)),
+        ("qemu+tls://[2001:db8::1]:1234/system", ("2001:db8::1", 1234)),
+        ("qemu+tls://[2001:db8::1]/system", ("2001:db8::1", 16514)),
         ("qemu+tls:///system", None),
         ("not-a-uri-at-all", None),
         ("qemu+tls://example.invalid:abc/system", None),
         ("qemu+tls://example.invalid:65536/system", None),
+        ("qemu+tls://example.invalid:-1/system", None),
         ("qemu+tls://[::1/system", None),
         ("qemu+tls://[invalid]/system", None),
     ],
@@ -1261,7 +1264,11 @@ def test_tcp_probe_hostless_uri_returns_false() -> None:
         "qemu+tls://[invalid]/system",
     ],
 )
-def test_tcp_probe_malformed_uri_returns_false(uri: str) -> None:
+def test_tcp_probe_malformed_uri_returns_false(uri: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected_connection(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a malformed target must not reach the socket boundary")
+
+    monkeypatch.setattr(asyncio, "open_connection", unexpected_connection)
     assert asyncio.run(TcpResourceProbe().probe(uri)) is False
 
 
