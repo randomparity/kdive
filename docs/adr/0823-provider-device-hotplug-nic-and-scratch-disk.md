@@ -2,6 +2,8 @@
 
 ## Status
 
+> **Superseded by [0831](0831-device-mutations-drain-under-the-owning-attempt.md)** (2026-11-23)
+
 Accepted (2026-11-18)
 
 Implementation is tracked by #3686 (port, tools, fault-inject), #3687 (libvirt) and #3688
