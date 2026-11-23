@@ -81,5 +81,5 @@ Fault acceptance includes allowing bare errors, searching deeper causes, droppin
 wrapping and changing the visibility gate. Require named test failures and restore exact bytes.
 Compare original conversion tables/builders/ID extraction and gateway construction/visibility AST,
 allocation construction/handler body, middleware order and all136tool metadata/CLI/reference bytes.
-Run lint/whole-tree types, relevant docs/records/hooks, actual wheel import/source proof and fresh
-scoped code/security reviews. Final campaign CI/reviews remain required beyond this Cast unit.
+Run lint/whole-tree types, relevant documentation checks, record checks and hooks, actual
+wheel import/source proof and fresh scoped code/security reviews. Final campaign CI/reviews remain required beyond this Cast unit.

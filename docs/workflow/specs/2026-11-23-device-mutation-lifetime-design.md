@@ -130,6 +130,6 @@ public wire schemas and provider signatures preserved; local commits only.
    UndefinedFunction before migration and then pass.
 6. Mode: focused-test. Controlled faults remove drain, disk cleanup classification,
    initial claim validation and per-write fences; require named regression reds.
-   Restore, run focused tests, lint, whole-tree type, docs/schema checks and hooks.
+   Restore, run focused tests, lint, whole-tree type, documentation and schema checks and hooks.
    A focused native libvirt proof should exercise changed paths when available;
    report exact arms and revisions without claiming remote or real POWER proof.

@@ -39,6 +39,6 @@ System-authority, activation readiness and derived-release behavior covered by e
 Use controlled predicate, state and bound faults and restore exact source bytes before gates.
 
 Run relevant worker/model/handler/queue/release tests with Docker required, lint and whole-tree
-types, docs/records and hooks. Compare worker AST outside the predicate/warning and preserve all
-migration digests. Build the actual wheel and exercise its continuation predicate. Fresh scoped
+types, documentation checks, record checks and hooks. Compare worker AST outside the
+predicate/warning and preserve all migration digests. Build the actual wheel and exercise its continuation predicate. Fresh scoped
 code/security reviews precede queue closure; final campaign CI and review remain required.
