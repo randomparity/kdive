@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (2026-11-23)
 
 ## Context
 
@@ -18,6 +18,7 @@ Add forward migration0206 to the existing depth function. Reuse the claim-side c
 validation, clocks, capture gates, retry-proof eligibility, security attributes and grants.
 Guard the expected function source before replacing it. Do not modify applied migrations or
 claiming. No new query helper, privilege, table or public interface is needed.
+Implemented in `0206_worker_claimable_receipt_fence.sql`.
 
 ## Consequences
 
