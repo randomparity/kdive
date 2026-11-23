@@ -1062,9 +1062,3 @@ def _tls_fingerprints(config: AuthorityHostConfig) -> dict[Path, tuple[int, int,
             config.health_client_key,
         )
     }
-
-    async def open_remote_module_attempt(
-        self,
-        peer: AuthenticatedPeer,
-        request: RemoteModulePreparationBeginRequestV1,
-    ) -> RemoteModulePreparationBeginResponseV1: ...
