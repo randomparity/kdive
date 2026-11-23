@@ -14,7 +14,12 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead, PrestopHolders
+from kdive.db.external_boot_authority_journal import (
+    AuthenticatedPeer,
+    AuthorityBinding,
+    JournalHead,
+    PrestopHolders,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
@@ -103,13 +108,6 @@ _CLEANUP_EVIDENCE_COMMITS = frozenset(
         ("teardown", AuthorityOperation.TEARDOWN),
     }
 )
-
-
-@dataclass(frozen=True, slots=True)
-class AuthenticatedPeer:
-    """Identity established by the hosting authentication boundary."""
-
-    incarnation_id: UUID | str
 
 
 class AuthorityMutationAdapter(Protocol):

@@ -16,6 +16,7 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.db.repositories import JOBS
 from kdive.domain.errors import CategorizedError
 from kdive.domain.operations.jobs import Job
@@ -26,10 +27,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityStrandedObservationRequestV1,
     AuthorityStrandedObservationResponseV1,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.external_boot_authority.stranded import (
     StrandedAuthorityFacts,
     StrandedObservationRepository,

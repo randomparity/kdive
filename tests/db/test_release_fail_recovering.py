@@ -14,15 +14,13 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from pydantic import SecretStr
 
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.operations.jobs import Job
 from kdive.jobs import queue
 from kdive.jobs.models import ExternalBootAuthorityFailureV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from tests.db.release_phase_support import (
     SourceAuthorityAdapter,
     begin_release_recovery,

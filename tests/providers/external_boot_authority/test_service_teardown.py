@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.external_boot_activation import ExternalBootReleaseEvidenceV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
@@ -22,7 +23,6 @@ from kdive.providers.external_boot_authority.protocol import (
     teardown_proof_digest,
 )
 from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
     AuthorityServiceError,
     ExternalBootAuthorityService,
 )

@@ -22,6 +22,7 @@ import pytest
 from pydantic import SecretStr
 
 import kdive.config as config
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, resolve_local_timing
 from kdive.jobs.authority_sender import AuthorityRequestSender
@@ -32,7 +33,6 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityOperation,
 )
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
 from kdive.providers.local_libvirt.lifecycle.boot import session as session_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (

@@ -23,6 +23,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
@@ -42,7 +43,6 @@ from kdive.providers.external_boot_authority.protocol import (
     record_digest,
 )
 from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
     AuthorityMutationAdapter,
     AuthorityServiceError,
     ExternalBootAuthorityService,

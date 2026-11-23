@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -23,11 +23,15 @@ from kdive.providers.external_boot_authority.protocol import (
 from kdive.providers.ports.external_boot import ExternalBootPlan
 from kdive.serialization import validate_stored
 
-if TYPE_CHECKING:
-    from kdive.providers.external_boot_authority.service import AuthenticatedPeer
-
 type AdvanceStatus = Literal["advanced", "superseded", "conflict"]
 type PreparationCommitStatus = Literal["applied", "superseded", "conflict"]
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedPeer:
+    """Identity established by the hosting authentication boundary."""
+
+    incarnation_id: UUID | str
 
 
 def _uuid(value: object) -> UUID:
@@ -415,8 +419,6 @@ async def authenticate_authority_peer(
         raise AuthorityPeerAuthenticationError(
             "worker credential does not identify an active fence-protocol-4 incarnation"
         )
-    from kdive.providers.external_boot_authority.service import AuthenticatedPeer
-
     return AuthenticatedPeer(incarnation_id=_bounded(row[0], 512))
 
 

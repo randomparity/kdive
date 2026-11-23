@@ -13,7 +13,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from kdive.db.external_boot_authority_journal import AuthorityBinding
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer, AuthorityBinding
 from kdive.providers.external_boot_authority.journal import record_digest
 from kdive.providers.external_boot_authority.orphan import _Selection
 from kdive.providers.external_boot_authority.protocol import (
@@ -23,7 +23,6 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     OpaqueProviderRef,

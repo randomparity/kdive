@@ -18,6 +18,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.external_boot_activation import ExternalBootReservationRelease
 from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, Job, JobKind
 from kdive.jobs.authority_sender import AuthorityRequestSender
@@ -38,10 +39,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTeardownMutationRequestV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.external_boot_authority.teardown import AuthorityTeardownSnapshot
 from kdive.providers.external_boot_authority.transport import _dispatch
 from kdive.providers.ports.external_boot import OpaqueProviderRef

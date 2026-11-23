@@ -15,6 +15,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
@@ -27,10 +28,7 @@ from kdive.mcp.tools.external_boot.recovery_requests import request_release
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.external_boot_authority.transport import _dispatch
 from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
 from kdive.security.secrets.secret_registry import SecretRegistry

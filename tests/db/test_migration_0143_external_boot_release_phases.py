@@ -16,6 +16,7 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
@@ -24,10 +25,7 @@ from kdive.providers.external_boot_authority.protocol import (
     RecoveryObjectBindingV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from tests.db.release_phase_support import (
     SourceAuthorityAdapter,
     acknowledge_release_root,

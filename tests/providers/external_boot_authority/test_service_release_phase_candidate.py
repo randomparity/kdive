@@ -9,14 +9,13 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.db.external_boot_authority_journal import AuthorityBinding
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer, AuthorityBinding
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityOperation,
 )
 from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
     AuthorityServiceError,
     ExternalBootAuthorityService,
 )

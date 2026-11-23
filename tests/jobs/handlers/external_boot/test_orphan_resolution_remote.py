@@ -21,7 +21,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from kdive.db.external_boot_authority_journal import AuthorityBinding
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer, AuthorityBinding
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.mcp.tools.external_boot.recovery_requests import resolve_recovery_orphan
 from kdive.providers.external_boot_authority.journal import record_digest
@@ -37,10 +37,7 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    AuthorityServiceError,
-)
+from kdive.providers.external_boot_authority.service import AuthorityServiceError
 from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
 from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.security.authz.context import RequestContext

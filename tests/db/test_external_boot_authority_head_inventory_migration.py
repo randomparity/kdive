@@ -13,9 +13,9 @@ from pydantic import SecretStr
 
 from kdive.db import external_boot_authority_journal as journal_repository
 from kdive.db import migrate
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.providers.external_boot_authority.host import HostReadinessError, check_database_role
 from kdive.providers.external_boot_authority.protocol import JournalPhase
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from tests.db.external_boot_authority_support import _RoleDsns
 
 _DIGEST = "sha256:" + "d" * 64

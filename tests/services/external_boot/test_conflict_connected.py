@@ -13,6 +13,7 @@ import psycopg
 from psycopg import AsyncConnection
 from pydantic import SecretStr
 
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.operations.jobs import Job
 from kdive.jobs import queue
 from kdive.jobs.authority_sender import AuthorityRequestSender
@@ -29,10 +30,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.external_boot_authority.transport import _dispatch
 from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.security.authz.context import RequestContext

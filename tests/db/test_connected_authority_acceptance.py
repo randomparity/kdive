@@ -17,6 +17,7 @@ import pytest
 from pydantic import SecretStr
 
 import kdive.config as runtime_config
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.providers.assembly import composition as provider_composition
@@ -36,7 +37,7 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
     canonical_record_bytes,
 )
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer, AuthorityServiceError
+from kdive.providers.external_boot_authority.service import AuthorityServiceError
 from kdive.providers.local_libvirt import composition as local_composition
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalObservedState,

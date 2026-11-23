@@ -11,6 +11,7 @@ from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from kdive.db.external_boot_authority_journal import (
+    AuthenticatedPeer,
     AuthorityBinding,
     JournalHead,
     PendingTakeover,
@@ -33,7 +34,6 @@ from kdive.providers.external_boot_authority.protocol import (
     record_digest,
 )
 from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
     AuthorityServiceError,
     ExternalBootAuthorityService,
 )

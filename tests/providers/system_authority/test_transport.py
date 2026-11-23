@@ -9,10 +9,10 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import SecretStr
 
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.providers.external_boot_authority import transport
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemAcknowledgementV1,
     AuthoritySystemExecutionV1,

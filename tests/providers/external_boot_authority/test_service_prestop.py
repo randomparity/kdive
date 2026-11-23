@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.db.external_boot_authority_journal import PrestopHolders
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer, PrestopHolders
 from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
@@ -20,7 +20,6 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalPhase,
 )
 from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
     AuthorityServiceError,
     ExternalBootAuthorityService,
 )

@@ -13,6 +13,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import TeardownPayload
@@ -26,7 +27,6 @@ from kdive.providers.external_boot_authority.protocol import (
     record_digest,
 )
 from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
     AuthorityServiceError,
     ExternalBootAuthorityService,
 )

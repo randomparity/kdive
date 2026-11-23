@@ -75,10 +75,8 @@ from kdive.providers.remote_libvirt.settings import REMOTE_LIBVIRT_STORAGE_POOL
 from kdive.providers.shared.directory_listing import list_directory_descriptor
 
 if TYPE_CHECKING:
-    from kdive.providers.external_boot_authority.service import (
-        AuthenticatedPeer,
-        ExternalBootAuthorityService,
-    )
+    from kdive.db.external_boot_authority_journal import AuthenticatedPeer
+    from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
     from kdive.providers.system_authority.composition import AuthoritySystemBaseFile
     from kdive.providers.system_authority.manifest import (
         AuthoritySystemManifestFile,

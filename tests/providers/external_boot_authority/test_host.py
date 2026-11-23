@@ -20,7 +20,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from kdive.db.external_boot_authority_journal import JournalHead
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer, JournalHead
 from kdive.providers.external_boot_authority import host, transport
 from kdive.providers.external_boot_authority import settings as authority_settings
 from kdive.providers.external_boot_authority.host import (
@@ -42,7 +42,6 @@ from kdive.providers.external_boot_authority.protocol import (
     record_digest,
 )
 from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
     AuthorityServiceError,
     ExternalBootAuthorityService,
 )

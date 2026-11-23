@@ -24,6 +24,7 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr, ValidationError
 
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.db.remote_module_attempt_obligations import (
     ModuleAttempt,
     ModuleAttemptRestoredEvidence,
@@ -51,7 +52,6 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
 )
 from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
     AuthorityServiceError,
     ExternalBootAuthorityService,
     ProofBarrierAbort,

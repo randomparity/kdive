@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from kdive.db.external_boot_authority_journal import AuthorityBinding
+from kdive.db.external_boot_authority_journal import AuthenticatedPeer, AuthorityBinding
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.domain.remote_module_attempt_preparation import (
@@ -37,7 +37,6 @@ from kdive.providers.external_boot_authority.protocol import (
     record_digest,
 )
 from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
     AuthorityServiceError,
     AuthorityServiceMetrics,
     ExternalBootAuthorityService,
