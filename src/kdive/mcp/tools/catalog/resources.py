@@ -140,7 +140,8 @@ async def list_resources(
     """
     capped = _clamp_list_limit(request.limit)
     after = None
-    if request.cursor is not None:
+    # ADR-0192 treats None and empty text as the first page.
+    if request.cursor:
         try:
             after = _decode_ts_uuid_cursor(_RESOURCES_LIST_TAG, request.cursor)
         except InvalidCursor:

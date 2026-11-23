@@ -941,15 +941,21 @@ def test_list_jobs_empty_pagination_fields(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_list_jobs_drains_every_row_following_cursor(migrated_url: str) -> None:
+@pytest.mark.parametrize(
+    "first_cursor", [pytest.param(None, id="none"), pytest.param("", id="empty")]
+)
+def test_list_jobs_drains_every_row_following_cursor(
+    migrated_url: str, first_cursor: str | None
+) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             for i in range(5):
                 await _enqueue(pool, f"d{i}")
             seen: list[str] = []
-            cursor: str | None = None
+            cursor: str | None = first_cursor
             for _ in range(10):  # bound the loop defensively
                 resp = await _list_jobs(pool, VIEWER_CTX, limit=2, cursor=cursor)
+                assert resp.status == "ok"
                 seen.extend(item.object_id for item in resp.items)
                 if not resp.data["truncated"]:
                     break
@@ -965,7 +971,6 @@ def test_list_jobs_drains_every_row_following_cursor(migrated_url: str) -> None:
 @pytest.mark.parametrize(
     "cursor",
     [
-        pytest.param("", id="empty"),
         pytest.param("!!!", id="malformed"),
         pytest.param(
             encode_ts_uuid_cursor("resources.list", STORE_MTIME, UUID(int=1)), id="wrong-tool"

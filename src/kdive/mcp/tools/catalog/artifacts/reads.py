@@ -210,11 +210,12 @@ async def artifacts_list(
     **not** naturally bounded (#1238): it is keyset-paginated over ``(created_at, id) DESC`` like
     ``runs.list``. ``limit`` is clamped to the shared cap; ``data.truncated`` reports whether a
     further page exists and ``data.next_cursor`` (present iff truncated) is passed back as
-    ``cursor`` to page. A ``cursor`` not minted by this tool is an ``invalid_cursor``
+    ``cursor`` to page. A nonempty ``cursor`` not minted by this tool is an ``invalid_cursor``
     ``configuration_error``, never a silent first page.
     """
     after = None
-    if request.cursor is not None:
+    # ADR-0192 treats None and empty text as the first page.
+    if request.cursor:
         try:
             after = _decode_ts_uuid_cursor(_ARTIFACTS_LIST_TAG, request.cursor)
         except _InvalidCursor:

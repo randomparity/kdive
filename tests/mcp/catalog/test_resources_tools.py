@@ -1552,15 +1552,19 @@ def test_drain_unknown_mode_rejected(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_list_paginates_with_cursor(migrated_url: str) -> None:
+@pytest.mark.parametrize(
+    "first_cursor", [pytest.param(None, id="none"), pytest.param("", id="empty")]
+)
+def test_list_paginates_with_cursor(migrated_url: str, first_cursor: str | None) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             for i in range(5):
                 await _register(pool, host_uri=f"qemu:///h{i}")
             seen: list[str] = []
-            cursor: str | None = None
+            cursor: str | None = first_cursor
             for _ in range(10):
                 page = await _list_resources(pool, CTX, kind=None, limit=2, cursor=cursor)
+                assert page.status == "ok"
                 seen.extend(item.object_id for item in page.items)
                 if not page.data["truncated"]:
                     break
@@ -1602,7 +1606,6 @@ def test_list_truncated_count_is_over_visible_rows(migrated_url: str) -> None:
 @pytest.mark.parametrize(
     "cursor",
     [
-        pytest.param("", id="empty"),
         pytest.param("!!!", id="malformed"),
         pytest.param(encode_ts_uuid_cursor("jobs.list", STORE_MTIME, UUID(int=1)), id="wrong-tool"),
     ],

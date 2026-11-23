@@ -310,12 +310,11 @@ def test_jobs_list_pages_without_hiding_overflow(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_jobs_list_rejects_invalid_cursor(migrated_url: str) -> None:
+@pytest.mark.parametrize("cursor", ["", "not-a-cursor"])
+def test_jobs_list_rejects_invalid_cursor(migrated_url: str, cursor: str) -> None:
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
-            return await ops_queue.jobs_list(
-                pool, _ctx(platform_roles=_OPERATOR), cursor="not-a-cursor"
-            )
+            return await ops_queue.jobs_list(pool, _ctx(platform_roles=_OPERATOR), cursor=cursor)
 
     response = asyncio.run(_run())
     assert response.status == "error"
