@@ -8,6 +8,7 @@ from collections.abc import Callable
 import pytest
 
 from kdive.providers.shared.libvirt_external_boot import (
+    LibvirtDefinitionError,
     boot_projection_identity,
     preserved_definition_identity,
     render_target_xml,
@@ -112,14 +113,17 @@ def test_projection_rejects_a_noncanonical_initrd_path() -> None:
         )
 
 
-def test_projection_rejects_an_unrepresentable_command_line() -> None:
-    with pytest.raises(ValueError, match="command line"):
+@pytest.mark.parametrize("character", ["\x00", "\x01", "\r", "\ud800", "\ufffe", "\uffff"])
+def test_projection_rejects_an_unrepresentable_command_line(character: str) -> None:
+    with pytest.raises(LibvirtDefinitionError) as caught:
         render_target_xml(
             _GOLDEN_SOURCE,
             kernel="/var/lib/kdive/kernel",
             initrd=None,
-            cmdline="root=/dev/vda1\x01",
+            cmdline=f"root=/dev/vda1{character}",
         )
+    assert str(caught.value) == "command line must be text representable in XML"
+    assert caught.value.retryable is False
 
 
 def test_projection_preserves_a_decomposed_command_line_without_normalizing() -> None:
@@ -147,7 +151,7 @@ def test_identity_rejects_non_nfc_text_outside_the_command_line(
 
 
 def test_projection_preserves_the_accepted_command_line_scalar_exactly() -> None:
-    cmdline = "  root=/dev/vda1   console=ttyS0 café  "
+    cmdline = "  root=/dev/vda1\t   console=ttyS0\n café \U0001f600  "
     projected = render_target_xml(
         _GOLDEN_SOURCE,
         kernel="/var/lib/kdive/kernel",
