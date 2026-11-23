@@ -841,7 +841,10 @@ class ExternalBootAuthorityService:
         )
 
     @staticmethod
-    def _operation_matches(record: JournalRecordV1, request: AuthorityMutationRequestV1) -> bool:
+    def _operation_matches(
+        record: JournalRecordV1,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+    ) -> bool:
         """Match immutable operation facts while allowing a successor authority generation."""
         return (
             record.system_id == request.system_id
@@ -1735,6 +1738,86 @@ class ExternalBootAuthorityService:
                 raise AuthorityServiceError("superseded")
             return projected
 
+    def _preparation_predecessor(
+        self,
+        request: AuthorityPreparationMutationRequestV1,
+        records: list[JournalRecordV1],
+    ) -> tuple[AuthorityPreparationMutationRequestV1 | None, str | None]:
+        predecessor: AuthorityPreparationMutationRequestV1 | None = None
+        predecessor_receipt_identity: str | None = None
+        predecessor_record = next(
+            (
+                record
+                for record in reversed(records)
+                if record.phase is JournalPhase.TERMINAL
+                and record.operation == request.operation
+                and record.activation_id == request.activation_id
+                and record.generation < request.generation
+            ),
+            None,
+        )
+        if predecessor_record is not None:
+            if (
+                predecessor_record.outcome != "target"
+                or predecessor_record.observation is None
+                or predecessor_record.observation.category != "target"
+            ):
+                raise AuthorityServiceError("journal_conflict", reason="predecessor_not_target")
+            predecessor_receipt_identity = predecessor_record.observation.composite_state
+            predecessor = request.model_copy(
+                update={
+                    "authority_id": predecessor_record.authority_id,
+                    "generation": predecessor_record.generation,
+                    "attempt_id": predecessor_record.attempt_id,
+                    "operation_identity": predecessor_record.operation_identity,
+                    "operation_digest": predecessor_record.operation_digest,
+                    "expected_source_identity": predecessor_record.expected_source_identity,
+                    "intended_target_identity": predecessor_record.intended_target_identity,
+                    "recovery_objects": predecessor_record.recovery_objects,
+                }
+            )
+            if not self._operation_matches(predecessor_record, predecessor):
+                raise AuthorityServiceError(
+                    "journal_conflict", reason="predecessor_operation_mismatch"
+                )
+        return predecessor, predecessor_receipt_identity
+
+    def _adopted_release_phase(
+        self, request: AuthorityMutationRequestV1, records: list[JournalRecordV1]
+    ) -> AuthorityObservationV1 | None:
+        adopted_release_phase: AuthorityObservationV1 | None = None
+        if request.purpose == "release" and request.operation in {
+            AuthorityOperation.RECOVER,
+            AuthorityOperation.CLEANUP,
+        }:
+            prior_release_terminals = self._prior_release_terminals(records, request)
+            prior_release_phase = prior_release_terminals[-1] if prior_release_terminals else None
+            if prior_release_phase is not None:
+                candidate = request.model_copy(
+                    update={
+                        "authority_id": prior_release_phase.authority_id,
+                        "generation": prior_release_phase.generation,
+                        "attempt_id": prior_release_phase.attempt_id,
+                        "operation_identity": prior_release_phase.operation_identity,
+                        "operation_digest": prior_release_phase.operation_digest,
+                        "expected_source_identity": prior_release_phase.expected_source_identity,
+                        "intended_target_identity": prior_release_phase.intended_target_identity,
+                        "recovery_objects": prior_release_phase.recovery_objects,
+                    }
+                )
+                expected_outcome = (
+                    "source" if request.operation is AuthorityOperation.RECOVER else "absent"
+                )
+                if (
+                    prior_release_phase.outcome != expected_outcome
+                    or prior_release_phase.observation is None
+                    or prior_release_phase.observation.category != expected_outcome
+                    or not self._operation_matches(prior_release_phase, candidate)
+                ):
+                    raise AuthorityServiceError("journal_conflict", reason="release_phase_mismatch")
+                adopted_release_phase = prior_release_phase.observation
+        return adopted_release_phase
+
     async def execute_mutation(
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
     ) -> AuthorityObservationV1:
@@ -1796,91 +1879,11 @@ class ExternalBootAuthorityService:
                         return prior.observation
                     predecessor: AuthorityPreparationMutationRequestV1 | None = None
                     predecessor_receipt_identity: str | None = None
-                    adopted_release_phase: AuthorityObservationV1 | None = None
                     if isinstance(request, AuthorityPreparationMutationRequestV1):
-                        predecessor_record = next(
-                            (
-                                record
-                                for record in reversed(records)
-                                if record.phase is JournalPhase.TERMINAL
-                                and record.operation == request.operation
-                                and record.activation_id == request.activation_id
-                                and record.generation < request.generation
-                            ),
-                            None,
+                        predecessor, predecessor_receipt_identity = self._preparation_predecessor(
+                            request, records
                         )
-                        if predecessor_record is not None:
-                            if (
-                                predecessor_record.outcome != "target"
-                                or predecessor_record.observation is None
-                                or predecessor_record.observation.category != "target"
-                            ):
-                                raise AuthorityServiceError(
-                                    "journal_conflict", reason="predecessor_not_target"
-                                )
-                            predecessor_receipt_identity = (
-                                predecessor_record.observation.composite_state
-                            )
-                            predecessor = request.model_copy(
-                                update={
-                                    "authority_id": predecessor_record.authority_id,
-                                    "generation": predecessor_record.generation,
-                                    "attempt_id": predecessor_record.attempt_id,
-                                    "operation_identity": predecessor_record.operation_identity,
-                                    "operation_digest": predecessor_record.operation_digest,
-                                    "expected_source_identity": (
-                                        predecessor_record.expected_source_identity
-                                    ),
-                                    "intended_target_identity": (
-                                        predecessor_record.intended_target_identity
-                                    ),
-                                    "recovery_objects": predecessor_record.recovery_objects,
-                                }
-                            )
-                            if not self._operation_matches(predecessor_record, predecessor):
-                                raise AuthorityServiceError(
-                                    "journal_conflict", reason="predecessor_operation_mismatch"
-                                )
-                    if request.purpose == "release" and request.operation in {
-                        AuthorityOperation.RECOVER,
-                        AuthorityOperation.CLEANUP,
-                    }:
-                        prior_release_terminals = self._prior_release_terminals(records, request)
-                        prior_release_phase = (
-                            prior_release_terminals[-1] if prior_release_terminals else None
-                        )
-                        if prior_release_phase is not None:
-                            candidate = request.model_copy(
-                                update={
-                                    "authority_id": prior_release_phase.authority_id,
-                                    "generation": prior_release_phase.generation,
-                                    "attempt_id": prior_release_phase.attempt_id,
-                                    "operation_identity": prior_release_phase.operation_identity,
-                                    "operation_digest": prior_release_phase.operation_digest,
-                                    "expected_source_identity": (
-                                        prior_release_phase.expected_source_identity
-                                    ),
-                                    "intended_target_identity": (
-                                        prior_release_phase.intended_target_identity
-                                    ),
-                                    "recovery_objects": prior_release_phase.recovery_objects,
-                                }
-                            )
-                            expected_outcome = (
-                                "source"
-                                if request.operation is AuthorityOperation.RECOVER
-                                else "absent"
-                            )
-                            if (
-                                prior_release_phase.outcome != expected_outcome
-                                or prior_release_phase.observation is None
-                                or prior_release_phase.observation.category != expected_outcome
-                                or not self._operation_matches(prior_release_phase, candidate)
-                            ):
-                                raise AuthorityServiceError(
-                                    "journal_conflict", reason="release_phase_mismatch"
-                                )
-                            adopted_release_phase = prior_release_phase.observation
+                    adopted_release_phase = self._adopted_release_phase(request, records)
                     unresolved = next(
                         (
                             record
