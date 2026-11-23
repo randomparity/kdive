@@ -22,6 +22,8 @@ the handler's ``finally``; :meth:`prepare` additionally pre-deletes *this job's 
 (concurrency-safe, unlike a whole-System sweep), so an at-least-once retry of a job that died
 mid-capture starts clean. A pcap orphaned by a job that exhausts its retries is reclaimed by the
 reconciler's capture reaper (ADR-0556).
+
+Error propagation follows ADR-0847.
 """
 
 from __future__ import annotations
@@ -311,7 +313,11 @@ class RemoteLibvirtTrafficCapture:
                     },
                 )
             except BaseException:
-                _delete_volume(volume)
+                vol_name = PurePosixPath(dest_path).name
+                try:
+                    _delete_volume(volume, vol_name)
+                except CategorizedError:
+                    _log.warning("remote pcap rollback failed for %s; volume may linger", vol_name)
                 raise
 
     def detach(self, domain_name: str, *, qom_id: str) -> None:
@@ -351,7 +357,7 @@ class RemoteLibvirtTrafficCapture:
                 pool = self._lookup_pool(conn)
                 volume = self._lookup_volume_optional(pool, vol_name)
                 if volume is not None:
-                    _delete_volume(volume)
+                    _delete_volume(volume, vol_name)
         except CategorizedError:
             _log.warning("remote pcap reclaim failed for %s; volume may linger", vol_name)
 
@@ -414,7 +420,7 @@ class RemoteLibvirtTrafficCapture:
         volume = self._lookup_volume_optional(pool, vol_name)
         if volume is not None:
             _log.info("reclaiming stale pcap volume %s before capture", vol_name)
-            _delete_volume(volume)
+            _delete_volume(volume, vol_name)
 
     def _lookup_pool(self, conn: _CaptureConn) -> _CapturePool:
         pool_name = self._config_factory().pcap_pool
@@ -665,9 +671,15 @@ def _refused(reply: QmpReply, operation: str, domain_name: str) -> CategorizedEr
     )
 
 
-def _delete_volume(volume: _CaptureVolume) -> None:
-    with contextlib.suppress(Exception):
+def _delete_volume(volume: _CaptureVolume, vol_name: str) -> None:
+    try:
         volume.delete(0)
+    except libvirt.libvirtError as exc:
+        raise CategorizedError(
+            "remote pcap volume deletion failed",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"volume": vol_name},
+        ) from exc
 
 
 def _pool_type_and_target(pool_xml: str) -> tuple[str | None, str | None]:

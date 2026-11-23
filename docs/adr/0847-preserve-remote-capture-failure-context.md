@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (2026-11-23)
 
 ## Context
 
@@ -17,6 +17,7 @@ cause. Required pre-delete propagates; reclaim warns; attach rollback warns abou
 categorized deletion failure and re-raises its original failure. Catch expected XML parser and
 defusedxml rejection exceptions explicitly in DAC discovery, retaining their cause under a
 configuration error with reason `dac_xml_parse_failed`. Keep parsed-label checks unchanged.
+Implemented in `src/kdive/providers/remote_libvirt/lifecycle/traffic_capture.py`.
 
 ## Consequences
 

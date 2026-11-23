@@ -708,3 +708,102 @@ def test_reclaim_deletes_the_volume_and_tolerates_absent(tmp_path: Path) -> None
 
 def test_write_remediation_is_the_remote_pool_remedy(tmp_path: Path) -> None:
     assert _capturer(_FakeConn(), tmp_path).write_remediation == REMOTE_PCAP_WRITE_REMEDIATION
+
+
+@pytest.mark.parametrize("operation", ["prepare", "attach"])
+def test_required_capture_predelete_propagates_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    system, job = uuid4(), uuid4()
+    name = pcap_volume_name(system, job) if operation == "prepare" else "cap.pcap"
+    stale = _FakeVolume(name)
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    def fail_delete(flags: int = 0) -> int:
+        raise error
+
+    monkeypatch.setattr(stale, "delete", fail_delete)
+    pool, domain = _FakePool(volumes={name: stale}), _FakeDomain()
+    conn = _FakeConn(pool=pool, domain=domain)
+    capturer = _capturer(conn, tmp_path)
+    with pytest.raises(CategorizedError) as caught:
+        if operation == "prepare":
+            capturer.prepare(system, job)
+        else:
+            capturer.attach(_DOMAIN, qom_id="q", dest_path=_DEST, snaplen=128)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"volume": name}
+    assert caught.value.__cause__ is error
+    assert pool.created == []
+    assert not any(command["execute"] == "object-add" for command in domain.commands)
+    assert conn.closed
+
+
+def test_reclaim_warns_about_volume_delete_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    def fail_delete(self: _FakeVolume, flags: int = 0) -> int:
+        raise error
+
+    monkeypatch.setattr(_FakeVolume, "delete", fail_delete)
+    volume = _FakeVolume("cap.pcap")
+    capturer = _capturer(_FakeConn(pool=_FakePool(volumes={"cap.pcap": volume})), tmp_path)
+    capturer.reclaim(_DEST)
+    assert "remote pcap reclaim failed" in caplog.text and "cap.pcap" in caplog.text
+    assert not volume.deleted
+
+
+@pytest.mark.parametrize(
+    "primary",
+    [
+        CategorizedError(
+            "attach refused",
+            category=ErrorCategory.CONTROL_FAILURE,
+            details={"reason": "capture_filter_rejected"},
+        ),
+        KeyboardInterrupt("operator interruption"),
+        None,
+    ],
+)
+def test_rollback_delete_failure_keeps_original_attach_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    primary: BaseException | None,
+) -> None:
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    def fail_delete(self: _FakeVolume, flags: int = 0) -> int:
+        raise error
+
+    monkeypatch.setattr(_FakeVolume, "delete", fail_delete)
+    pool, domain = _FakePool(), _FakeDomain()
+    capturer = _capturer(_FakeConn(pool=pool, domain=domain), tmp_path)
+    original_cause = libvirt_error(libvirt.VIR_ERR_SYSTEM_ERROR)
+    if primary is not None:
+        primary.__cause__ = original_cause
+    domain.replies["object-add"] = _error_reply("GenericError", "some other refusal")
+    monitor = domain.monitor
+
+    def fail_monitor(command: str, flags: int) -> str:
+        if primary is not None and json.loads(command)["execute"] == "object-add":
+            raise primary
+        return monitor(command, flags)
+
+    monkeypatch.setattr(domain, "monitor", fail_monitor)
+    with pytest.raises(type(primary) if primary is not None else CategorizedError) as caught:
+        capturer.attach(_DOMAIN, qom_id="q", dest_path=_DEST, snaplen=128)
+    if primary is not None:
+        assert caught.value is primary and caught.value.__cause__ is original_cause
+    else:
+        assert isinstance(caught.value, CategorizedError)
+        assert caught.value.category is ErrorCategory.CONTROL_FAILURE
+        assert caught.value.details["reason"] == "capture_filter_rejected"
+    assert len(pool.created) == 1 and not pool.volumes["cap.pcap"].deleted
+    assert "remote pcap rollback failed" in caplog.text and "cap.pcap" in caplog.text
