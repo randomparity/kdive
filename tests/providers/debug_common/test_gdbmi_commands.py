@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -13,9 +14,12 @@ from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.shared.debug_common.gdbmi.commands.breakpoints import (
     GdbMiBreakpointCommands,
 )
+from kdive.providers.shared.debug_common.gdbmi.commands.disassembly import GdbMiDisassemblyCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.modules import GdbMiModuleCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.registers import GdbMiRegisterCommands
+from kdive.providers.shared.debug_common.gdbmi.commands.stack import GdbMiStackCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.symbols import GdbMiSymbolCommands
+from kdive.providers.shared.debug_common.gdbmi.commands.threads import GdbMiThreadCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.watchpoints import (
     GdbMiWatchpointCommands,
 )
@@ -72,12 +76,14 @@ class _CommandHost(
     GdbMiModuleCommands,
     GdbMiSymbolCommands,
     GdbMiRegisterCommands,
+    GdbMiStackCommands,
+    GdbMiThreadCommands,
+    GdbMiDisassemblyCommands,
 ):
     def __init__(self) -> None:
         self.commands: list[str] = []
         self.responses: dict[str, list[MiRecord]] = {}
         self.errors: dict[str, CategorizedError] = {}
-        self.module_rows: list[tuple[str, int, int]] = []
         self._redactor_value = Redactor(registry=SecretRegistry())
         self._module_resolver: Callable[[GdbMiAttachment, str], ModuleDebuginfo] = (
             self._resolve_module
@@ -94,26 +100,6 @@ class _CommandHost(
     def _redactor(self) -> Redactor:
         return self._redactor_value
 
-    def _resolve_target(
-        self, attachment: GdbMiAttachment, *, symbol: str | None, address: int | None
-    ) -> int:
-        del attachment
-        if address is not None:
-            return address
-        if symbol == "watched_value":
-            return 0x1234
-        raise CategorizedError(
-            "target missing",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"code": "bad_target"},
-        )
-
-    def _module_walk(
-        self, attachment: GdbMiAttachment, *, limit: int
-    ) -> tuple[list[tuple[str, int, int]], bool, int]:
-        del attachment
-        return self.module_rows[:limit], len(self.module_rows) > limit, 0
-
     def read_memory(self, attachment: GdbMiAttachment, *, address: int, byte_count: int) -> bytes:
         del attachment, address
         return b"\0" * byte_count
@@ -123,6 +109,32 @@ class _CommandHost(
 
     def _resolve_module(self, _attachment: GdbMiAttachment, module: str) -> ModuleDebuginfo:
         return ModuleDebuginfo(path=Path(f"/symbols/{module}.ko"), srcversion="SRC", build_id=None)
+
+
+def _script_module_list(host: _CommandHost, module: str | None) -> None:
+    host.responses.update(
+        {
+            '-data-evaluate-expression "&((struct module *)0)->list"': _done({"value": "0x8"}),
+            '-data-evaluate-expression "&modules"': _done({"value": "0x1000"}),
+            '-data-evaluate-expression "modules.next"': _done(
+                {"value": "0x3008" if module is not None else "0x1000"}
+            ),
+        }
+    )
+    if module is not None:
+        host.responses.update(
+            {
+                '-data-evaluate-expression "((struct module *)0x3000)->name"': _done(
+                    {"value": f'"{module}"'}
+                ),
+                '-data-evaluate-expression "((struct module *)0x3000)->mem[0].base"': _done(
+                    {"value": "0x2000"}
+                ),
+                '-data-evaluate-expression "((struct list_head *)0x3008)->next"': _done(
+                    {"value": "0x1000"}
+                ),
+            }
+        )
 
 
 def test_breakpoint_commands_build_expected_mi_strings() -> None:
@@ -197,6 +209,7 @@ def test_breakpoint_insert_missing_record_is_debug_attach_failure() -> None:
 def test_watchpoint_commands_build_expected_mi_strings_and_filter_list() -> None:
     host = _CommandHost()
     attachment = _attachment()
+    host.responses["-data-evaluate-expression &watched_value"] = _done({"value": "0x1234"})
     watch_command = "-break-watch *(char(*)[4])0x1234"
     host.responses[watch_command] = _done(
         {"wpt": {"number": "2", "type": "hw watchpoint", "exp": "*(char(*)[4])0x1234"}}
@@ -218,7 +231,12 @@ def test_watchpoint_commands_build_expected_mi_strings_and_filter_list() -> None
 
     assert ref.number == "2"
     assert [item.number for item in refs] == ["2"]
-    assert host.commands == [watch_command, "-break-list", "-break-delete 2"]
+    assert host.commands == [
+        "-data-evaluate-expression &watched_value",
+        watch_command,
+        "-break-list",
+        "-break-delete 2",
+    ]
 
 
 @pytest.mark.parametrize(("byte_count", "code"), [(3, "bad_byte_count"), ("8", "bad_byte_count")])
@@ -267,6 +285,7 @@ def test_watchpoint_unsupported_error_is_remapped() -> None:
 
 def test_module_not_loaded_is_classified() -> None:
     host = _CommandHost()
+    _script_module_list(host, None)
 
     with pytest.raises(CategorizedError) as exc:
         host.load_module_symbols(_attachment(), module="nf_conntrack")
@@ -277,7 +296,7 @@ def test_module_not_loaded_is_classified() -> None:
 
 def test_stale_module_base_is_classified() -> None:
     host = _CommandHost()
-    host.module_rows = [("nf_conntrack", 0x2000, 0x3000)]
+    _script_module_list(host, "nf_conntrack")
 
     with pytest.raises(CategorizedError) as exc:
         host.load_module_symbols(_attachment(), module="nf_conntrack", expected_base=0x1000)
@@ -293,7 +312,7 @@ def test_stale_module_base_is_classified() -> None:
 def test_load_module_symbols_adds_symbol_file_and_marks_loaded() -> None:
     host = _CommandHost()
     attachment = _attachment()
-    host.module_rows = [("nf_conntrack", 0x2000, 0x3000)]
+    _script_module_list(host, "nf_conntrack")
     host.responses['-data-evaluate-expression "((struct module *)0x3000)->srcversion"'] = _done(
         {"value": '"SRC"'}
     )
@@ -306,6 +325,12 @@ def test_load_module_symbols_adds_symbol_file_and_marks_loaded() -> None:
     assert module.identity_verified is True
     assert attachment.loaded_modules == {"nf_conntrack"}
     assert host.commands == [
+        '-data-evaluate-expression "&((struct module *)0)->list"',
+        '-data-evaluate-expression "&modules"',
+        '-data-evaluate-expression "modules.next"',
+        '-data-evaluate-expression "((struct module *)0x3000)->name"',
+        '-data-evaluate-expression "((struct module *)0x3000)->mem[0].base"',
+        '-data-evaluate-expression "((struct list_head *)0x3008)->next"',
         '-data-evaluate-expression "((struct module *)0x3000)->srcversion"',
         '-interpreter-exec console "add-symbol-file /symbols/nf_conntrack.ko 0x2000"',
     ]
@@ -415,3 +440,98 @@ def test_read_registers_reports_missing_requested_values() -> None:
         "requested": ["rip", "rax"],
         "missing": ["rip"],
     }
+
+
+def _bare_host(host: _CommandHost) -> Any:
+    return SimpleNamespace(
+        execute_mi_command=host.execute_mi_command,
+        _redactor=host._redactor,
+        _module_resolver=host._module_resolver,
+        read_memory=host.read_memory,
+        _mi_path=host._mi_path,
+        read_thread_id=host.read_thread_id,
+        resolve_symbol=host.resolve_symbol,
+    )
+
+
+def test_breakpoint_runs_without_inherited_helpers() -> None:
+    host = _CommandHost()
+    host.responses["-break-insert panic"] = _done({"bkpt": {"number": "1"}})
+
+    result = GdbMiBreakpointCommands.set_breakpoint(_bare_host(host), _attachment(), "panic")
+
+    assert result.number == "1"
+    assert host.commands == ["-break-insert panic"]
+
+
+def test_symbol_lookup_runs_without_inherited_helpers() -> None:
+    host = _CommandHost()
+    host.responses["-data-evaluate-expression &panic"] = _done({"value": "0x1234"})
+
+    assert GdbMiSymbolCommands.resolve_symbol(_bare_host(host), _attachment(), "panic") == 0x1234
+    assert host.commands == ["-data-evaluate-expression &panic"]
+
+
+def test_module_listing_runs_without_inherited_helpers() -> None:
+    host = _CommandHost()
+    _script_module_list(host, None)
+
+    result = GdbMiModuleCommands.list_modules(_bare_host(host), _attachment())
+
+    assert result.modules == []
+    assert not result.truncated
+    assert result.decode_errors == 0
+    assert host.commands == [
+        '-data-evaluate-expression "&((struct module *)0)->list"',
+        '-data-evaluate-expression "&modules"',
+        '-data-evaluate-expression "modules.next"',
+    ]
+
+
+def test_stack_walk_runs_without_inherited_helpers() -> None:
+    host = _CommandHost()
+    host.responses["-stack-list-frames"] = _done(
+        {"stack": [{"level": "0", "func": "panic", "addr": "0x1000"}]}
+    )
+
+    result = GdbMiStackCommands.backtrace(_bare_host(host), _attachment())
+
+    assert len(result.frames) == 1
+    assert result.frames[0].func == "panic"
+    assert host.commands == ["-stack-list-frames"]
+
+
+def test_disassembly_runs_without_inherited_helpers() -> None:
+    host = _CommandHost()
+    command = "-data-disassemble -s 0x0 -e 0x10 -- 0"
+    host.responses[command] = _done({"asm_insns": [{"address": "0x0", "inst": "nop"}]})
+
+    result = GdbMiDisassemblyCommands.disassemble(
+        _bare_host(host), _attachment(), address=0, instruction_count=1
+    )
+
+    assert len(result.instructions) == 1
+    assert result.instructions[0].inst == "nop"
+    assert host.commands == [command]
+
+
+def test_watchpoint_runs_without_inherited_helpers() -> None:
+    host = _CommandHost()
+    command = "-break-watch *(char(*)[8])0x0"
+    host.responses[command] = _done({"wpt": {"number": "2", "type": "hw watchpoint"}})
+
+    result = GdbMiWatchpointCommands.set_watchpoint(_bare_host(host), _attachment(), address=0)
+
+    assert result.number == "2"
+    assert host.commands == [command]
+
+
+def test_module_listing_redacts_registered_name() -> None:
+    host = _CommandHost()
+    host._redactor_value = Redactor(secret_values=["secret_module"], registry=SecretRegistry())
+    _script_module_list(host, "secret_module")
+
+    result = host.list_modules(_attachment())
+
+    assert len(result.modules) == 1
+    assert result.modules[0].name == REDACTION

@@ -24,10 +24,6 @@ class _BreakpointHost(Protocol):
 
     def _redactor(self) -> Redactor: ...
 
-    def _breakpoint_ref(self, records: list[MiRecord], *, key: str) -> GdbBreakpointRef: ...
-
-    def _breakpoint_ref_from(self, entry: dict[str, Any]) -> GdbBreakpointRef: ...
-
 
 class GdbMiBreakpointCommands:
     """Software breakpoint GDB/MI commands."""
@@ -44,8 +40,8 @@ class GdbMiBreakpointCommands:
         # Software breakpoint (no -h): QEMU's gdbstub honors a software breakpoint's 0xCC write
         # on a running guest, but does not reliably trap on hardware (debug-register) breakpoints,
         # so a `-break-insert -h` at a hot symbol could go `^running` and never `*stopped` (#711).
-        return self._breakpoint_ref(
-            self.execute_mi_command(attachment, f"-break-insert {location}"), key="bkpt"
+        return _breakpoint_ref(
+            self, self.execute_mi_command(attachment, f"-break-insert {location}"), key="bkpt"
         )
 
     def clear_breakpoint(self: _BreakpointHost, attachment: GdbMiAttachment, number: str) -> None:
@@ -61,32 +57,34 @@ class GdbMiBreakpointCommands:
         self: _BreakpointHost, attachment: GdbMiAttachment
     ) -> list[GdbBreakpointRef]:
         return [
-            self._breakpoint_ref_from(entry)
+            _breakpoint_ref_from(self, entry)
             for entry in breakpoint_rows(self.execute_mi_command(attachment, "-break-list"))
         ]
 
-    def _breakpoint_ref(
-        self: _BreakpointHost, records: list[MiRecord], *, key: str
-    ) -> GdbBreakpointRef:
-        payload = result_payload_dict(records)
-        entry = payload.get(key)
-        if not isinstance(entry, dict):
-            raise CategorizedError(
-                f"gdb/MI {key} response had no breakpoint record",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"command_key": key},
-            )
-        return self._breakpoint_ref_from(entry)
 
-    def _breakpoint_ref_from(self: _BreakpointHost, entry: dict[str, Any]) -> GdbBreakpointRef:
-        return GdbBreakpointRef.model_validate(
-            self._redactor().redact_value(
-                {
-                    "number": str(entry.get("number")),
-                    "type": entry.get("type") if isinstance(entry.get("type"), str) else None,
-                    "addr": entry.get("addr") if isinstance(entry.get("addr"), str) else None,
-                    "func": entry.get("func") if isinstance(entry.get("func"), str) else None,
-                    "what": entry.get("what") if isinstance(entry.get("what"), str) else None,
-                }
-            )
+def _breakpoint_ref(
+    host: _BreakpointHost, records: list[MiRecord], *, key: str
+) -> GdbBreakpointRef:
+    payload = result_payload_dict(records)
+    entry = payload.get(key)
+    if not isinstance(entry, dict):
+        raise CategorizedError(
+            f"gdb/MI {key} response had no breakpoint record",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details={"command_key": key},
         )
+    return _breakpoint_ref_from(host, entry)
+
+
+def _breakpoint_ref_from(host: _BreakpointHost, entry: dict[str, Any]) -> GdbBreakpointRef:
+    return GdbBreakpointRef.model_validate(
+        host._redactor().redact_value(
+            {
+                "number": str(entry.get("number")),
+                "type": entry.get("type") if isinstance(entry.get("type"), str) else None,
+                "addr": entry.get("addr") if isinstance(entry.get("addr"), str) else None,
+                "func": entry.get("func") if isinstance(entry.get("func"), str) else None,
+                "what": entry.get("what") if isinstance(entry.get("what"), str) else None,
+            }
+        )
+    )

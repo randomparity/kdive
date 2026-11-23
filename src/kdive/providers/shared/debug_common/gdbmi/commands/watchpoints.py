@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.debug import GdbMiAttachment, GdbWatchpointRef
 from kdive.providers.shared.debug_common.gdbmi._errors import config_error
+from kdive.providers.shared.debug_common.gdbmi.commands.symbols import _resolve_target
 from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
     MiRecord,
     breakpoint_rows,
@@ -30,15 +31,7 @@ class _WatchpointHost(Protocol):
 
     def _redactor(self) -> Redactor: ...
 
-    def _resolve_target(
-        self, attachment: GdbMiAttachment, *, symbol: str | None, address: int | None
-    ) -> int: ...
-
-    def _watchpoint_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]: ...
-
-    def _watchpoint_ref(self, records: list[MiRecord]) -> GdbWatchpointRef: ...
-
-    def _watchpoint_ref_from(self, entry: dict[str, Any]) -> GdbWatchpointRef: ...
+    def resolve_symbol(self, attachment: GdbMiAttachment, name: str) -> int: ...
 
 
 class GdbMiWatchpointCommands:
@@ -59,17 +52,17 @@ class GdbMiWatchpointCommands:
                 code="bad_byte_count",
                 details={"byte_count": byte_count, "supported": list(WATCH_BYTE_SIZES)},
             )
-        start = self._resolve_target(attachment, symbol=symbol, address=address)
+        start = _resolve_target(attachment, self.resolve_symbol, symbol=symbol, address=address)
         expression = f"*(char(*)[{byte_count}])0x{start:x}"
-        records = self._watchpoint_command(attachment, f"-break-watch {expression}")
-        return self._watchpoint_ref(records)
+        records = _watchpoint_command(self, attachment, f"-break-watch {expression}")
+        return _watchpoint_ref(self, records)
 
     def list_watchpoints(
         self: _WatchpointHost, attachment: GdbMiAttachment
     ) -> list[GdbWatchpointRef]:
         """List watchpoints only (filtering out breakpoints) from ``-break-list`` (ADR-0277)."""
         return [
-            self._watchpoint_ref_from(entry)
+            _watchpoint_ref_from(self, entry)
             for entry in breakpoint_rows(self.execute_mi_command(attachment, "-break-list"))
             if _is_watchpoint_row(entry)
         ]
@@ -84,58 +77,61 @@ class GdbMiWatchpointCommands:
             )
         self.execute_mi_command(attachment, f"-break-delete {number}")
 
-    def _watchpoint_command(
-        self: _WatchpointHost, attachment: GdbMiAttachment, command: str
-    ) -> list[MiRecord]:
-        """Issue a watch command, classifying running-target then unsupported gdb ``^error``s."""
-        try:
-            return self.execute_mi_command(attachment, command)
-        except CategorizedError as exc:
-            if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
-                payload = exc.details.get("payload")
-                msg = payload.get("msg") if isinstance(payload, dict) else None
-                if isinstance(msg, str):
-                    if _RUNNING_RE.search(msg):
-                        raise CategorizedError(
-                            "gdb/MI cannot set the watchpoint while the inferior is running",
-                            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                            details={"code": "inferior_running", "command": command},
-                        ) from exc
-                    if _NO_WATCHPOINT_RE.search(msg):
-                        raise CategorizedError(
-                            "gdb/MI target cannot support the requested watchpoint",
-                            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                            details={"code": "watchpoint_unsupported", "command": command},
-                        ) from exc
-            raise
 
-    def _watchpoint_ref(self: _WatchpointHost, records: list[MiRecord]) -> GdbWatchpointRef:
-        entry = result_payload_dict(records).get("wpt")
-        if not isinstance(entry, dict):
-            raise CategorizedError(
-                "gdb/MI -break-watch returned no watchpoint record",
-                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"code": "no_watchpoint_record"},
-            )
-        return self._watchpoint_ref_from(entry)
+def _watchpoint_command(
+    host: _WatchpointHost, attachment: GdbMiAttachment, command: str
+) -> list[MiRecord]:
+    """Issue a watch command, classifying running-target then unsupported gdb ``^error``s."""
+    try:
+        return host.execute_mi_command(attachment, command)
+    except CategorizedError as exc:
+        if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
+            payload = exc.details.get("payload")
+            msg = payload.get("msg") if isinstance(payload, dict) else None
+            if isinstance(msg, str):
+                if _RUNNING_RE.search(msg):
+                    raise CategorizedError(
+                        "gdb/MI cannot set the watchpoint while the inferior is running",
+                        category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                        details={"code": "inferior_running", "command": command},
+                    ) from exc
+                if _NO_WATCHPOINT_RE.search(msg):
+                    raise CategorizedError(
+                        "gdb/MI target cannot support the requested watchpoint",
+                        category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                        details={"code": "watchpoint_unsupported", "command": command},
+                    ) from exc
+        raise
 
-    def _watchpoint_ref_from(self: _WatchpointHost, entry: dict[str, Any]) -> GdbWatchpointRef:
-        expression = entry.get("exp") if isinstance(entry.get("exp"), str) else None
-        if expression is None and isinstance(entry.get("what"), str):
-            expression = entry.get("what")
-        enabled_raw = entry.get("enabled")
-        enabled = enabled_raw == "y" if isinstance(enabled_raw, str) else None
-        return GdbWatchpointRef.model_validate(
-            self._redactor().redact_value(
-                {
-                    "number": str(entry.get("number")),
-                    "type": entry.get("type") if isinstance(entry.get("type"), str) else None,
-                    "expr": expression,
-                    "addr": entry.get("addr") if isinstance(entry.get("addr"), str) else None,
-                    "enabled": enabled,
-                }
-            )
+
+def _watchpoint_ref(host: _WatchpointHost, records: list[MiRecord]) -> GdbWatchpointRef:
+    entry = result_payload_dict(records).get("wpt")
+    if not isinstance(entry, dict):
+        raise CategorizedError(
+            "gdb/MI -break-watch returned no watchpoint record",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details={"code": "no_watchpoint_record"},
         )
+    return _watchpoint_ref_from(host, entry)
+
+
+def _watchpoint_ref_from(host: _WatchpointHost, entry: dict[str, Any]) -> GdbWatchpointRef:
+    expression = entry.get("exp") if isinstance(entry.get("exp"), str) else None
+    if expression is None and isinstance(entry.get("what"), str):
+        expression = entry.get("what")
+    enabled_raw = entry.get("enabled")
+    enabled = enabled_raw == "y" if isinstance(enabled_raw, str) else None
+    return GdbWatchpointRef.model_validate(
+        host._redactor().redact_value(
+            {
+                "number": str(entry.get("number")),
+                "type": entry.get("type") if isinstance(entry.get("type"), str) else None,
+                "expr": expression,
+                "addr": entry.get("addr") if isinstance(entry.get("addr"), str) else None,
+                "enabled": enabled,
+            }
+        )
+    )
 
 
 def _is_watchpoint_row(entry: dict[str, Any]) -> bool:

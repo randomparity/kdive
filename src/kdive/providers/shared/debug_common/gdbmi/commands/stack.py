@@ -38,14 +38,6 @@ class _StackHost(Protocol):
 
     def _redactor(self) -> Redactor: ...
 
-    def _frame_from(self, payload: dict[str, Any]) -> GdbFrame: ...
-
-    def _stack_command(
-        self, attachment: GdbMiAttachment, command: str, *, missing: CategorizedError
-    ) -> list[MiRecord]: ...
-
-    def _redact_frame(self, frame: GdbFrame) -> GdbFrame: ...
-
     def read_thread_id(self, attachment: GdbMiAttachment) -> str: ...
 
 
@@ -71,15 +63,18 @@ class GdbMiStackCommands:
             details={"code": "no_frames"},
         )
         rows = stack_frames(
-            self._stack_command(
-                attachment, f"-stack-list-frames{thread_option(attachment)}", missing=no_frames
+            _stack_command(
+                self,
+                attachment,
+                f"-stack-list-frames{thread_option(attachment)}",
+                missing=no_frames,
             )
         )
         if not rows:
             raise no_frames
-        parsed = [self._frame_from(row) for row in rows]
+        parsed = [_frame_from(row) for row in rows]
         truncated = len(parsed) > max_frames
-        frames = [self._redact_frame(frame) for frame in parsed[:max_frames]]
+        frames = [_redact_frame(self, frame) for frame in parsed[:max_frames]]
         return GdbBacktrace(frames=frames, truncated=truncated)
 
     def read_frame(self: _StackHost, attachment: GdbMiAttachment, *, level: int) -> GdbFrameDetail:
@@ -96,7 +91,8 @@ class GdbMiStackCommands:
             details={"code": "no_frame_at_level", "level": level},
         )
         rows = stack_frames(
-            self._stack_command(
+            _stack_command(
+                self,
                 attachment,
                 f"-stack-list-frames{thread_option(attachment)} {level} {level}",
                 missing=no_frame,
@@ -105,7 +101,8 @@ class GdbMiStackCommands:
         if not rows:
             raise no_frame
         thread = self.read_thread_id(attachment)
-        records = self._stack_command(
+        records = _stack_command(
+            self,
             attachment,
             f"-stack-list-variables --thread {thread} --frame {level} --simple-values",
             missing=no_frame,
@@ -119,52 +116,55 @@ class GdbMiStackCommands:
             )
         named = [row for row in variables if isinstance(row.get("name"), str)]
         detail = GdbFrameDetail(
-            **self._frame_from(rows[0]).model_dump(),
+            **_frame_from(rows[0]).model_dump(),
             args=[_variable(row) for row in named if row.get("arg") == "1"],
             locals=[_variable(row) for row in named if row.get("arg") != "1"],
         )
         redacted = self._redactor().redact_value(detail.model_dump(mode="json"))
         return _bounded(GdbFrameDetail.model_validate(redacted))
 
-    def _stack_command(
-        self: _StackHost,
-        attachment: GdbMiAttachment,
-        command: str,
-        *,
-        missing: CategorizedError,
-    ) -> list[MiRecord]:
-        """Run a stack MI command, mapping gdb ``^error`` to precise debug codes."""
-        try:
-            return self.execute_mi_command(attachment, command)
-        except CategorizedError as exc:
-            stale = stale_thread_error(exc, attachment)
-            if stale is not None:
-                raise stale from exc
-            if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
-                payload = exc.details.get("payload")
-                msg = payload.get("msg") if isinstance(payload, dict) else None
-                if isinstance(msg, str):
-                    if _RUNNING_RE.search(msg):
-                        raise CategorizedError(
-                            "gdb/MI cannot walk the stack while the inferior is running",
-                            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                            details={"code": "inferior_running", "command": command},
-                        ) from exc
-                    if _NO_STACK_RE.search(msg):
-                        raise missing from exc
-            raise
 
-    def _redact_frame(self: _StackHost, frame: GdbFrame) -> GdbFrame:
-        return GdbFrame.model_validate(self._redactor().redact_value(frame.model_dump(mode="json")))
+def _stack_command(
+    host: _StackHost,
+    attachment: GdbMiAttachment,
+    command: str,
+    *,
+    missing: CategorizedError,
+) -> list[MiRecord]:
+    """Run a stack MI command, mapping gdb ``^error`` to precise debug codes."""
+    try:
+        return host.execute_mi_command(attachment, command)
+    except CategorizedError as exc:
+        stale = stale_thread_error(exc, attachment)
+        if stale is not None:
+            raise stale from exc
+        if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
+            payload = exc.details.get("payload")
+            msg = payload.get("msg") if isinstance(payload, dict) else None
+            if isinstance(msg, str):
+                if _RUNNING_RE.search(msg):
+                    raise CategorizedError(
+                        "gdb/MI cannot walk the stack while the inferior is running",
+                        category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                        details={"code": "inferior_running", "command": command},
+                    ) from exc
+                if _NO_STACK_RE.search(msg):
+                    raise missing from exc
+        raise
 
-    def _frame_from(self, payload: dict[str, Any]) -> GdbFrame:
-        return GdbFrame(
-            level=mi_int(payload.get("level")),
-            func=payload.get("func") if isinstance(payload.get("func"), str) else None,
-            addr=payload.get("addr") if isinstance(payload.get("addr"), str) else None,
-            file=payload.get("file") if isinstance(payload.get("file"), str) else None,
-            line=mi_int(payload.get("line")),
-        )
+
+def _redact_frame(host: _StackHost, frame: GdbFrame) -> GdbFrame:
+    return GdbFrame.model_validate(host._redactor().redact_value(frame.model_dump(mode="json")))
+
+
+def _frame_from(payload: dict[str, Any]) -> GdbFrame:
+    return GdbFrame(
+        level=mi_int(payload.get("level")),
+        func=payload.get("func") if isinstance(payload.get("func"), str) else None,
+        addr=payload.get("addr") if isinstance(payload.get("addr"), str) else None,
+        file=payload.get("file") if isinstance(payload.get("file"), str) else None,
+        line=mi_int(payload.get("line")),
+    )
 
 
 def _text(value: object) -> str | None:
