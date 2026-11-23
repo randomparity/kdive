@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import libvirt
 import pytest
 
 from kdive.domain.capacity.state import ResourceStatus
@@ -14,7 +15,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.discovery import RemoteLibvirtDiscovery
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.providers.remote_libvirt.conftest import FakeConn, RecordingBackend
+from tests.providers.remote_libvirt.conftest import FakeConn, RecordingBackend, libvirt_error
 
 _REFS = TlsCertRefs(
     client_cert_ref="remote/clientcert.pem",
@@ -276,3 +277,40 @@ def test_host_cpu_disable_guard_omits_level_end_to_end(tmp_path: Path) -> None:
         "vendor": "Intel",
         "arch": "x86_64",
     }
+
+
+@pytest.mark.parametrize("rpc", ["getInfo", "getCapabilities"])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_mandatory_rpc_failure_is_categorized_and_cleans_up(
+    tmp_path: Path, rpc: str, close_fails: bool
+) -> None:
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+    close_error = libvirt_error(libvirt.VIR_ERR_SYSTEM_ERROR)
+
+    class BrokenConn(FakeConn):
+        def getInfo(self) -> list[object]:  # noqa: N802 - libvirt binding name
+            if rpc == "getInfo":
+                raise error
+            return super().getInfo()
+
+        def getCapabilities(self) -> str:  # noqa: N802 - libvirt binding name
+            if rpc == "getCapabilities":
+                raise error
+            return super().getCapabilities()
+
+        def close(self) -> None:
+            super().close()
+            if close_fails:
+                raise close_error
+
+    conn = BrokenConn()
+    with pytest.raises(CategorizedError) as raised:
+        _discovery(conn, tmp_path).list_resources()
+
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "RemoteLibvirtDiscovery.list_resources" in str(raised.value)
+    assert rpc in str(raised.value)
+    assert raised.value.__cause__ is error
+    assert conn.closed
+    assert conn.domcaps_call is None
+    assert list(tmp_path.iterdir()) == []

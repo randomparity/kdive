@@ -24,6 +24,7 @@ from kdive.domain.capacity.state import ResourceStatus
 from kdive.domain.catalog.discovery import ResourceRecord
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY, HOST_CPU_KEY
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.platform.cpu_baseline import baseline_level
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_for_resource
 from kdive.providers.remote_libvirt.connection.transport import (
@@ -80,7 +81,8 @@ class RemoteLibvirtDiscovery:
         """Return one ``ResourceRecord`` for the remote host (resource id = the URI).
 
         Raises:
-            CategorizedError: ``TRANSPORT_FAILURE`` when the TLS connect fails, or
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` when mandatory inventory RPCs fail,
+                ``TRANSPORT_FAILURE`` when TLS connect or successful-operation close fails, or
                 ``CONFIGURATION_ERROR`` for unresolvable cert refs or an unsafe URI.
         """
         with remote_connection(
@@ -89,8 +91,23 @@ class RemoteLibvirtDiscovery:
             open_connection=self._open_connection,
             pki_base_dir=self._pki_base_dir,
         ) as conn:
-            info = conn.getInfo()
-            arch = parse_capabilities_arch(conn.getCapabilities())
+            try:
+                info = conn.getInfo()
+            except libvirt.libvirtError as exc:
+                raise CategorizedError(
+                    "RemoteLibvirtDiscovery.list_resources getInfo failed; "
+                    "check remote host availability and permissions, then retry discovery",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                ) from exc
+            try:
+                capabilities_xml = conn.getCapabilities()
+            except libvirt.libvirtError as exc:
+                raise CategorizedError(
+                    "RemoteLibvirtDiscovery.list_resources getCapabilities failed; "
+                    "check remote host availability and permissions, then retry discovery",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                ) from exc
+            arch = parse_capabilities_arch(capabilities_xml)
             host_cpu = _discover_host_cpu(conn, arch, self._config.machine)
         refs = self._config.cert_refs
         capabilities: dict[str, Any] = {
