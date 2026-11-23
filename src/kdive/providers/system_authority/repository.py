@@ -18,6 +18,7 @@ from kdive.providers.system_authority.protocol import (
     AuthoritySystemJournalPhase,
     AuthoritySystemJournalRecordV1,
     AuthoritySystemMutationRequestV1,
+    AuthoritySystemOperation,
     AuthoritySystemProofV1,
     AuthoritySystemProvisionSnapshot,
     AuthoritySystemTakeoverRequestV1,
@@ -47,7 +48,7 @@ class AuthoritySystemBinding:
     profile_identity: str
     root_identity: str
     bootstrap_identity: str
-    operation: Literal["provision", "preactivation-teardown"]
+    operation: AuthoritySystemOperation
     operation_identity: str
     operation_digest: str
     state: Literal["allocating", "current", "terminal"]
@@ -106,8 +107,10 @@ def _binding(row: dict[str, Any]) -> AuthoritySystemBinding:
     operation = _bounded(row["operation"])
     if provider not in {"local-libvirt", "remote-libvirt"}:
         raise ValueError("authority System provider kind is invalid")
-    if operation not in {"provision", "preactivation-teardown"}:
-        raise ValueError("authority System operation is invalid")
+    try:
+        operation_value = AuthoritySystemOperation(operation)
+    except ValueError as exc:
+        raise ValueError("authority System operation is invalid") from exc
     if state not in {"allocating", "current", "terminal"}:
         raise ValueError("authority System attempt state is invalid")
     return AuthoritySystemBinding(
@@ -122,7 +125,7 @@ def _binding(row: dict[str, Any]) -> AuthoritySystemBinding:
         profile_identity=_bounded(row["profile_identity"]),
         root_identity=_bounded(row["root_identity"]),
         bootstrap_identity=bootstrap,
-        operation=operation,  # type: ignore[arg-type]
+        operation=operation_value,
         operation_identity=_bounded(row["operation_identity"]),
         operation_digest=_bounded(row["operation_digest"]),
         state=state,  # type: ignore[arg-type]
@@ -178,7 +181,7 @@ def _request_matches(
         and binding.profile_identity == request.profile_identity
         and binding.root_identity == request.root_identity
         and binding.bootstrap_identity == request.bootstrap_identity
-        and binding.operation == request.operation.value
+        and binding.operation == request.operation
         and binding.operation_identity == request.operation_identity
         and binding.operation_digest == request.operation_digest
     )

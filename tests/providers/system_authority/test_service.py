@@ -165,7 +165,7 @@ class _Repository:
                 profile_identity=request.profile_identity,
                 root_identity=request.root_identity,
                 bootstrap_identity=request.bootstrap_identity,
-                operation=request.operation.value,
+                operation=request.operation,
                 operation_identity=request.operation_identity,
                 operation_digest=request.operation_digest,
                 state=state,
