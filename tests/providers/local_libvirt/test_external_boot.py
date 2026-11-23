@@ -22,7 +22,7 @@ from typing import Any, BinaryIO, Literal, cast
 from uuid import UUID
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
@@ -131,6 +131,18 @@ _TEARDOWN_RESERVATION = AuthorityTeardownReservationV1(
     owner_key=OpaqueProviderRef(ref="owners/private"),
     reserved_bytes=4096,
 )
+
+
+def test_recovery_record_encoding_preserves_canonical_bytes() -> None:
+    class Record(BaseModel):
+        schema_: str = Field(alias="schema")
+        z: list[int]
+        a: str
+
+    record = Record(schema="test-record", z=[2, 1], a="café")
+    assert external_boot_module._canonical_record_bytes(record) == (
+        '{"a":"café","schema":"test-record","z":[2,1]}'.encode()
+    )
 
 
 def test_render_target_xml_changes_only_owned_boot_projection() -> None:
@@ -5894,7 +5906,7 @@ def test_system_teardown_drops_residue_beside_an_adopted_receipt(tmp_path: Path)
     point, receipt = _quarantined(root)
     directory = root / recovery_directory_name(point.recovery_ref, point.binding)
     residue = directory / "intent.json"
-    residue.write_bytes(external_boot_module._metadata_bytes(_metadata("recovered")))
+    residue.write_bytes(external_boot_module._canonical_record_bytes(_metadata("recovered")))
     residue.chmod(0o600)
     with RecoveryMetadataStore(root) as store:
         store.adopt_cleanup_quarantine(receipt)
@@ -5927,7 +5939,7 @@ def test_system_teardown_absence_refuses_a_tombstone_the_adopted_receipt_does_no
         point_digest=LocalLibvirtExternalBoot.point_digest(moved),
     )
     directory = root / recovery_directory_name(point.recovery_ref, point.binding)
-    (directory / "tombstone.json").write_bytes(external_boot_module._tombstone_bytes(other))
+    (directory / "tombstone.json").write_bytes(external_boot_module._canonical_record_bytes(other))
 
     with RecoveryMetadataStore(root) as store:
         assert not store.exact_recovery_absence(point.binding, adopted_receipt_absent=True)
@@ -6064,7 +6076,7 @@ def test_receipt_decisions_wait_for_the_activation_directory_lock(
         worker.join(timeout=0.5)
         assert worker.is_alive()
         assert (directory / "cleanup-quarantine.json").read_bytes() == (
-            external_boot_module._cleanup_quarantine_bytes(receipt)
+            external_boot_module._canonical_record_bytes(receipt)
         )
     finally:
         os.close(held)
@@ -6655,7 +6667,7 @@ def test_finalization_continues_a_matching_recovery_record_left_by_publication(
         store.publish_tombstone(reference, metadata.binding, metadata, digest)
         # Restore the record `publish_tombstone` unlinked, reproducing the interrupted state.
         record = root / name / "intent.json"
-        record.write_bytes(external_boot_module._metadata_bytes(metadata))
+        record.write_bytes(external_boot_module._canonical_record_bytes(metadata))
         record.chmod(0o600)
 
         assert sorted(path.name for path in (root / name).iterdir()) == [
@@ -6804,7 +6816,7 @@ def test_finalization_refuses_untrusted_tombstone_residue(
         intent.write_bytes(b'{"schema":')
     elif corruption == "changed":
         changed = _metadata("recovered").model_copy(update={"plan_identity": "sha256:" + "e" * 64})
-        intent.write_bytes(external_boot_module._metadata_bytes(changed))
+        intent.write_bytes(external_boot_module._canonical_record_bytes(changed))
     elif corruption == "changed-preparation":
         intent.unlink()
         preparation = directory / "preparation-result.json"

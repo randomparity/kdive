@@ -256,7 +256,7 @@ class _LocalSystemTeardownFields(_ClosedValue):
 
     @property
     def identity(self) -> str:
-        return "sha256:" + hashlib.sha256(_system_teardown_anchor_bytes(self)).hexdigest()
+        return "sha256:" + hashlib.sha256(_canonical_record_bytes(self)).hexdigest()
 
 
 class LocalSystemTeardownAnchorV1(_LocalSystemTeardownFields):
@@ -277,7 +277,7 @@ class LocalSystemTeardownIntentV1(_LocalSystemTeardownFields):
 
     @property
     def identity(self) -> str:
-        return "sha256:" + hashlib.sha256(_system_teardown_intent_bytes(self)).hexdigest()
+        return "sha256:" + hashlib.sha256(_canonical_record_bytes(self)).hexdigest()
 
     def matches_anchor(self, anchor: _LocalSystemTeardownFields) -> bool:
         return (
@@ -430,12 +430,7 @@ class TargetProjectionV1(_ClosedValue):
     )
 
     def canonical_bytes(self) -> bytes:
-        return json.dumps(
-            self.model_dump(mode="json", by_alias=True),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode()
+        return _canonical_record_bytes(self)
 
     @property
     def digest(self) -> str:
@@ -3389,7 +3384,7 @@ class LocalLibvirtExternalBoot:
             "sha256:"
             + hashlib.sha256(
                 b"kdive-local-cleanup-quarantine-observation-v1\0"
-                + _cleanup_quarantine_bytes(receipt)
+                + _canonical_record_bytes(receipt)
             ).hexdigest()
         )
         return RecoveryObjectObservation(
@@ -3704,70 +3699,7 @@ class LocalPreparationReceiptsV1(BaseModel):
         return self
 
 
-def _metadata_bytes(metadata: LocalRecoveryMetadataV1) -> bytes:
-    return json.dumps(
-        metadata.model_dump(mode="json", by_alias=True),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-
-
-def _cleanup_quarantine_bytes(receipt: CleanupQuarantineReceiptV1) -> bytes:
-    return json.dumps(
-        receipt.model_dump(mode="json", by_alias=True),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-
-
-def _pre_stop_bytes(intent: LocalPreStopIntentV1) -> bytes:
-    return json.dumps(
-        intent.model_dump(mode="json", by_alias=True),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-
-
-def _tombstone_bytes(tombstone: CleanupTombstoneV1) -> bytes:
-    return json.dumps(
-        tombstone.model_dump(mode="json", by_alias=True),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-
-
-def _preparation_bytes(receipts: LocalPreparationReceiptsV1) -> bytes:
-    return json.dumps(
-        receipts.model_dump(mode="json", by_alias=True),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-
-
-def _system_teardown_intent_bytes(intent: LocalSystemTeardownIntentV1) -> bytes:
-    return json.dumps(
-        intent.model_dump(mode="json", by_alias=True),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-
-
-def _system_teardown_anchor_bytes(intent: _LocalSystemTeardownFields) -> bytes:
-    return json.dumps(
-        intent.model_dump(mode="json", by_alias=True),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-
-
-def _system_teardown_record_bytes(record: LocalSystemTeardownRecordV1) -> bytes:
+def _canonical_record_bytes(record: BaseModel) -> bytes:
     return json.dumps(
         record.model_dump(mode="json", by_alias=True),
         sort_keys=True,
@@ -3884,7 +3816,7 @@ class RecoveryMetadataStore:
             self._root_fd,
             f"{_system_teardown_name(intent.binding)}.next",
             _system_teardown_name(intent.binding),
-            _system_teardown_record_bytes(record),
+            _canonical_record_bytes(record),
         )
         os.fsync(self._root_fd)
         reopened = self.read_system_teardown(intent.binding)
@@ -3901,7 +3833,7 @@ class RecoveryMetadataStore:
         except FileNotFoundError:
             return None
         record = LocalSystemTeardownRecordV1.model_validate_json(data)
-        if record.intent.binding != binding or _system_teardown_record_bytes(record) != data:
+        if record.intent.binding != binding or _canonical_record_bytes(record) != data:
             raise ValueError("System teardown record is not canonical or owner-bound")
         return record
 
@@ -3926,7 +3858,7 @@ class RecoveryMetadataStore:
             self._root_fd,
             f"{_system_teardown_name(expected.intent.binding)}.next",
             _system_teardown_name(expected.intent.binding),
-            _system_teardown_record_bytes(updated),
+            _canonical_record_bytes(updated),
         )
         os.fsync(self._root_fd)
         return updated
@@ -4003,7 +3935,7 @@ class RecoveryMetadataStore:
                 directory_fd,
                 ".preparation.next",
                 _PREPARATION_NAME,
-                _preparation_bytes(updated),
+                _canonical_record_bytes(updated),
             )
             os.fsync(directory_fd)
         finally:
@@ -4046,7 +3978,7 @@ class RecoveryMetadataStore:
                 directory_fd,
                 ".preparation.next",
                 _PREPARATION_NAME,
-                _preparation_bytes(updated),
+                _canonical_record_bytes(updated),
             )
             os.fsync(directory_fd)
         finally:
@@ -4071,7 +4003,7 @@ class RecoveryMetadataStore:
         try:
             _publish_initial_intent(
                 directory_fd,
-                _metadata_bytes(metadata),
+                _canonical_record_bytes(metadata),
                 conflict="recovery partial is not the exact owned intent",
             )
         finally:
@@ -4095,7 +4027,7 @@ class RecoveryMetadataStore:
         try:
             _publish_initial_intent(
                 directory_fd,
-                _pre_stop_bytes(intent),
+                _canonical_record_bytes(intent),
                 conflict="recovery partial is not the exact pre-stop intent",
             )
         finally:
@@ -4182,7 +4114,7 @@ class RecoveryMetadataStore:
                 directory_fd,
                 temporary,
                 _INTENT_NAME,
-                _metadata_bytes(metadata),
+                _canonical_record_bytes(metadata),
             )
             os.fsync(directory_fd)
         finally:
@@ -4224,7 +4156,7 @@ class RecoveryMetadataStore:
                 directory_fd,
                 temporary,
                 _INTENT_NAME,
-                _metadata_bytes(updated),
+                _canonical_record_bytes(updated),
             )
             os.fsync(directory_fd)
             return updated
@@ -4271,7 +4203,7 @@ class RecoveryMetadataStore:
                 directory_fd,
                 temporary,
                 _TOMBSTONE_NAME,
-                _tombstone_bytes(tombstone),
+                _canonical_record_bytes(tombstone),
             )
             os.unlink(_INTENT_NAME, dir_fd=directory_fd)
             with suppress(FileNotFoundError):
@@ -4408,7 +4340,7 @@ class RecoveryMetadataStore:
                 directory_fd,
                 temporary,
                 _QUARANTINE_NAME,
-                _cleanup_quarantine_bytes(receipt),
+                _canonical_record_bytes(receipt),
             )
             os.fsync(directory_fd)
             if self._read_cleanup_quarantine_at(directory_fd, recovery.binding) != receipt:
@@ -4439,7 +4371,7 @@ class RecoveryMetadataStore:
         except FileNotFoundError:
             return None
         receipt = CleanupQuarantineReceiptV1.model_validate_json(data)
-        if _cleanup_quarantine_bytes(receipt) != data:
+        if _canonical_record_bytes(receipt) != data:
             raise ValueError("cleanup quarantine receipt is not canonical JSON")
         if receipt.tombstone.binding != binding:
             raise ValueError("cleanup quarantine receipt ownership changed")
@@ -4465,7 +4397,7 @@ class RecoveryMetadataStore:
                 directory_fd,
                 ".cleanup-quarantine.next",
                 _QUARANTINE_NAME,
-                _cleanup_quarantine_bytes(adopted),
+                _canonical_record_bytes(adopted),
             )
             os.fsync(directory_fd)
         finally:
@@ -4862,7 +4794,7 @@ class RecoveryMetadataStore:
     def _read_preparation(directory_fd: int) -> LocalPreparationReceiptsV1:
         data = _read_private_file(directory_fd, _PREPARATION_NAME)
         receipts = LocalPreparationReceiptsV1.model_validate_json(data)
-        if _preparation_bytes(receipts) != data:
+        if _canonical_record_bytes(receipts) != data:
             raise ValueError("preparation result is not canonical JSON")
         return receipts
 
@@ -4900,7 +4832,7 @@ class RecoveryMetadataStore:
     def _read_tombstone(directory_fd: int) -> CleanupTombstoneV1:
         data = _read_private_file(directory_fd, _TOMBSTONE_NAME)
         tombstone = CleanupTombstoneV1.model_validate_json(data)
-        if _tombstone_bytes(tombstone) != data:
+        if _canonical_record_bytes(tombstone) != data:
             raise ValueError("cleanup tombstone is not canonical JSON")
         return tombstone
 
@@ -4911,7 +4843,7 @@ class RecoveryMetadataStore:
         except FileNotFoundError as error:
             raise RecoveryIntentAbsentError(_INTENT_NAME) from error
         metadata = LocalRecoveryMetadataV1.model_validate_json(data)
-        if _metadata_bytes(metadata) != data:
+        if _canonical_record_bytes(metadata) != data:
             raise ValueError("recovery intent is not canonical JSON")
         return metadata
 
@@ -4919,7 +4851,7 @@ class RecoveryMetadataStore:
     def _read_pre_stop(directory_fd: int) -> LocalPreStopIntentV1:
         data = _read_private_file(directory_fd, _INTENT_NAME)
         intent = LocalPreStopIntentV1.model_validate_json(data)
-        if _pre_stop_bytes(intent) != data:
+        if _canonical_record_bytes(intent) != data:
             raise ValueError("pre-stop intent is not canonical JSON")
         return intent
 
