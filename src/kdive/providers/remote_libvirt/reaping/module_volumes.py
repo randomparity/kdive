@@ -24,22 +24,18 @@ from kdive.providers.external_boot_authority.module_volume_sweep import (
 )
 from kdive.providers.infra.reaping import ModuleVolumeKey
 from kdive.providers.ports.authority import AuthorityRequestSender
+from kdive.providers.ports.module_operation import RemoteDeviceIdentity, RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.config import (
     RemoteAuthorityBinding,
     RemoteLibvirtConfig,
     all_remote_configs,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-    RemoteDeviceIdentity,
-    RemoteDeviceIdentityPort,
-    path_references,
-    volume_references,
-)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
     ModuleVolumeOwner,
     parse_module_volume_name,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import XmlEnumerationBudget
+from kdive.providers.shared.libvirt_attachments import path_references, volume_references
+from kdive.providers.shared.libvirt_xml_bounds import XmlEnumerationBudget
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _MAX_STORAGE_PATH_BYTES = 4096

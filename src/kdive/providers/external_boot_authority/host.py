@@ -1750,9 +1750,6 @@ def _build_mutation_service(
         ConcreteRemoteExternalBootOperations,
     )
     from kdive.providers.remote_libvirt.lifecycle.external_boot import OBSERVATION_PROGRAMS
-    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-        HostStatDeviceIdentity,
-    )
     from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
         RemoteModulePreparationExecutor,
     )
@@ -1764,6 +1761,7 @@ def _build_mutation_service(
         RemoteModuleAuthorityHostFactory,
     )
     from kdive.providers.shared.guest_agent import GuestAgentExec, qemu_agent_command
+    from kdive.providers.shared.libvirt_attachments import HostStatDeviceIdentity
     from kdive.security.secrets.secret_registry import SecretRegistry
 
     try:

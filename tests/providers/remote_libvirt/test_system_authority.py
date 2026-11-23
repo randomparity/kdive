@@ -22,9 +22,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.ports.external_boot import RootSource, RootSpecV1
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-    RemoteDeviceIdentity,
-)
+from kdive.providers.ports.module_operation import RemoteDeviceIdentity
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )

@@ -41,7 +41,6 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names 
     parse_module_volume_name,
     render_module_volume_name,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import parse_libvirt_xml
 from kdive.providers.shared.external_boot_bounds import (
     MAX_MODULE_ARCHIVE_BYTES as MAX_ARCHIVE_BYTES,
 )
@@ -51,6 +50,7 @@ from kdive.providers.shared.external_boot_bounds import (
 from kdive.providers.shared.external_boot_bounds import (
     MAX_MODULE_REGULAR_BYTES as MAX_CONTENT_BYTES,
 )
+from kdive.providers.shared.libvirt_xml_bounds import parse_libvirt_xml
 
 SCRATCH_CAPACITY_BYTES = 10 * 1024**3
 _DEBUGINFO_TREE_NAME = "vmlinux"

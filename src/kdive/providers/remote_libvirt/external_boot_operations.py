@@ -22,6 +22,7 @@ from kdive.providers.ports.external_boot import (
     ProviderStateIdentity,
     RunningKernelObservation,
 )
+from kdive.providers.ports.module_operation import RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootObservedState,
     RemoteExternalBootRecoveryRecord,
@@ -50,11 +51,6 @@ from kdive.providers.remote_libvirt.lifecycle.external_boot import (
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
     parse_boot_artifact_name,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-    HostStatDeviceIdentity,
-    RemoteDeviceIdentityPort,
-    prove_no_foreign_storage_references,
-)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
     render_module_volume_name,
 )
@@ -63,6 +59,10 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     supplied_base_volume_name,
 )
 from kdive.providers.shared.guest_agent import GuestDomain
+from kdive.providers.shared.libvirt_attachments import (
+    HostStatDeviceIdentity,
+    prove_no_foreign_storage_references,
+)
 from kdive.providers.shared.runtime_paths import domain_name_for
 
 # Pause between identity reads while the guest agent is not yet answering, and the most one

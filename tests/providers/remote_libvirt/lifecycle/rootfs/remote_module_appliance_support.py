@@ -5,6 +5,7 @@ from collections.abc import Callable, Sequence
 
 import libvirt
 
+from kdive.providers.ports.module_operation import RemoteDeviceIdentity
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
     ApplianceRequest,
     ApplianceStream,
@@ -12,7 +13,6 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance imp
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     AttachmentInspection,
-    RemoteDeviceIdentity,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,

@@ -18,9 +18,7 @@ from kdive.providers.external_boot_authority.device_identity import (
     decode_device_identity_request,
     decode_device_identity_response,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-    RemoteDeviceIdentity,
-)
+from kdive.providers.ports.module_operation import RemoteDeviceIdentity
 
 
 def _wire(value: object) -> bytes:

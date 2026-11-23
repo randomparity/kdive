@@ -26,6 +26,7 @@ from kdive.providers.external_boot_authority.protocol import (
 )
 from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
 from kdive.providers.ports.external_boot import ExternalBootArtifactStager, OpaqueProviderRef
+from kdive.providers.ports.module_operation import RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.debuginfo_module_tree import STAGED_NAME
 from kdive.providers.remote_libvirt.external_boot_authority import (
     AdmittedRemoteModulePreparation,
@@ -44,12 +45,9 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance imp
     teardown_remote_module_appliance,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-    AttachmentConn,
     AttachmentInspection,
     ExpectedAppliance,
     ExpectedAttachmentState,
-    HostStatDeviceIdentity,
-    RemoteDeviceIdentityPort,
     inspect_module_attachments,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
@@ -79,7 +77,8 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes impor
     recovery_attempt_volumes,
     render_module_volume_name,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import parse_libvirt_xml
+from kdive.providers.shared.libvirt_attachments import AttachmentConn, HostStatDeviceIdentity
+from kdive.providers.shared.libvirt_xml_bounds import parse_libvirt_xml
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 

@@ -15,9 +15,7 @@ from kdive.providers.external_boot_authority.module_volume_sweep import (
     ModuleVolumeSweepRequestV1,
     ModuleVolumeSweepResponseV1,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-    RemoteDeviceIdentityPort,
-)
+from kdive.providers.ports.module_operation import RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )

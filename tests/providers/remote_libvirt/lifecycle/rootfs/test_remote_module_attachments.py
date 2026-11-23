@@ -15,18 +15,20 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.ports.module_operation import RemoteDeviceIdentity
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     ExpectedAppliance,
     ExpectedAttachmentState,
-    HostStatDeviceIdentity,
-    RemoteDeviceIdentity,
-    prove_no_foreign_path_references,
-    prove_no_foreign_storage_references,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     inspect_module_attachments as _inspect_module_attachments,
 )
 from kdive.providers.remote_libvirt.lifecycle.storage import render_volume_xml
+from kdive.providers.shared.libvirt_attachments import (
+    HostStatDeviceIdentity,
+    prove_no_foreign_path_references,
+    prove_no_foreign_storage_references,
+)
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
 from tests.providers.remote_libvirt.fakes import FakeStoragePool, libvirt_error
 
@@ -684,8 +686,8 @@ def test_real_host_bind_alias_has_protected_device_identity(tmp_path: Path) -> N
     if probe.returncode != 0:
         pytest.skip("unprivileged mount namespaces are unavailable on this host")
     script = (
-        "import sys; from kdive.providers.remote_libvirt.lifecycle.rootfs."
-        "remote_module_attachments import HostStatDeviceIdentity; "
+        "import sys; from kdive.providers.shared.libvirt_attachments "
+        "import HostStatDeviceIdentity; "
         "p=HostStatDeviceIdentity(); assert p.identity(sys.argv[1]) == p.identity(sys.argv[2])"
     )
     subprocess.run(  # noqa: S603

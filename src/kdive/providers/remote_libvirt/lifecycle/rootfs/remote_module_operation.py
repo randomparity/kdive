@@ -8,13 +8,13 @@ from pathlib import Path
 from typing import Protocol
 
 from kdive.providers.ports.external_boot import ExternalBootArtifactStager
+from kdive.providers.ports.module_operation import RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
     ApplianceConn,
     DeadlineExecutor,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     AttachmentInspection,
-    RemoteDeviceIdentityPort,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,

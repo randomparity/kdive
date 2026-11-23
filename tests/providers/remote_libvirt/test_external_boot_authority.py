@@ -78,6 +78,7 @@ from kdive.providers.ports.module_operation import (
     ModuleBeginResponse,
     ModuleCompletion,
     ModulePreparationRequest,
+    RemoteDeviceIdentity,
 )
 from kdive.providers.remote_libvirt import external_boot_authority
 from kdive.providers.remote_libvirt import external_boot_materialization as materialization_module
@@ -120,7 +121,6 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes impor
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
     AttachmentInspection,
-    RemoteDeviceIdentity,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
     RemoteModuleOperationV1,

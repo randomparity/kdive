@@ -2,40 +2,38 @@
 
 from __future__ import annotations
 
-import os
-import posixpath
 import re
-import stat
 import xml.etree.ElementTree as ET
 from collections import Counter
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
-from uuid import UUID
 
 import libvirt
 from defusedxml.common import DefusedXmlException
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.module_operation import RemoteDeviceIdentity, RemoteDeviceIdentityPort
-from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import (
-    MAX_LIBVIRT_XML_DOCUMENTS,
+from kdive.providers.shared.libvirt_attachments import (
+    MAX_PATH_IDENTITIES,
+    AttachmentConn,
+    attachment_conflict,
+    attachment_infrastructure,
+    device_identity,
+    path_reference_list,
+    path_references,
+    system_ownership,
+    volume_path,
+    volume_references,
+)
+from kdive.providers.shared.libvirt_xml import (
+    backing_store_projection,
+)
+from kdive.providers.shared.libvirt_xml_bounds import (
     XmlEnumerationBudget,
     parse_libvirt_xml,
 )
-from kdive.providers.shared.libvirt_xml import (
-    KDIVE_METADATA_NS,
-    backing_store_projection,
-    remote_metadata_system_id,
-)
-from kdive.providers.shared.runtime_paths import domain_name_for
 
 _DOMAIN_UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
-_MAX_STORAGE_PATH_BYTES = 4096
-_MAX_IDENTITY_COMPONENT = (1 << 64) - 1
-_MAX_PATH_IDENTITIES = 4096
 
 # Kernel command line of the direct-boot appliance; domain-v1-<arch>.xml carries the same value.
 # PYTHONHASHSEED reaches /init as an environment variable: the default qemu64 guest has no RDRAND,
@@ -116,55 +114,6 @@ class AttachmentInspection:
         return self.exclusive and (pool, volume) in self.detached_volumes
 
 
-class Domain(Protocol):
-    def XMLDesc(self, flags: int = 0) -> str: ...  # noqa: N802
-    def isActive(self) -> int: ...  # noqa: N802
-    def isPersistent(self) -> int: ...  # noqa: N802
-
-
-class StorageVolume(Protocol):
-    def path(self) -> str: ...
-
-
-class StoragePool(Protocol):
-    def storageVolLookupByName(self, name: str) -> StorageVolume: ...  # noqa: N802
-
-
-class AttachmentConn(Protocol):
-    def listAllDomains(self, flags: int = 0) -> Sequence[Domain]: ...  # noqa: N802
-    def storagePoolLookupByName(self, name: str) -> StoragePool: ...  # noqa: N802
-
-
-class HostStatDeviceIdentity:
-    """Server-side ADR-0603 adapter backed by a following ``stat(2)`` lookup."""
-
-    def __init__(self, stat_path: Callable[..., os.stat_result] = os.stat) -> None:
-        self._stat_path = stat_path
-
-    def identity(self, path: str) -> RemoteDeviceIdentity | None:
-        normalized = _normalize_storage_path(path)
-        try:
-            result = self._stat_path(normalized, follow_symlinks=True)
-        except FileNotFoundError:
-            return None
-        except OSError:
-            raise CategorizedError(
-                "remote device identity lookup failed",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            ) from None
-        if stat.S_ISBLK(result.st_mode):
-            return RemoteDeviceIdentity(kind="block", primary=result.st_rdev, secondary=0)
-        return RemoteDeviceIdentity(kind="inode", primary=result.st_dev, secondary=result.st_ino)
-
-
-def _conflict(message: str, **details: object) -> CategorizedError:
-    return CategorizedError(message, category=ErrorCategory.CONFLICT, details=details)
-
-
-def _infrastructure(message: str) -> CategorizedError:
-    return CategorizedError(message, category=ErrorCategory.INFRASTRUCTURE_FAILURE)
-
-
 def inspect_module_attachments(
     conn: AttachmentConn,
     identity_port: RemoteDeviceIdentityPort,
@@ -190,7 +139,7 @@ def inspect_module_attachments(
     try:
         domains = conn.listAllDomains(0)
     except libvirt.libvirtError as exc:
-        raise _infrastructure("could not enumerate remote module attachments") from exc
+        raise attachment_infrastructure("could not enumerate remote module attachments") from exc
     owner_domains: set[int] = set()
     system_active = False
     xml_budget = XmlEnumerationBudget()
@@ -203,17 +152,17 @@ def inspect_module_attachments(
             if active and domain.isPersistent():
                 documents.append((domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE), False, active))
         except libvirt.libvirtError as exc:
-            raise _infrastructure("could not read a remote module attachment") from exc
+            raise attachment_infrastructure("could not read a remote module attachment") from exc
         for document, definition_active, domain_active in documents:
             try:
                 root = xml_budget.parse(document)
             except (ET.ParseError, DefusedXmlException, ValueError) as exc:
-                raise _conflict("could not inspect a remote module attachment") from exc
+                raise attachment_conflict("could not inspect a remote module attachment") from exc
             name = root.findtext("name")
             if not name:
-                raise _conflict("duplicate or unnamed remote module domain", domain=name)
+                raise attachment_conflict("duplicate or unnamed remote module domain", domain=name)
             if name in seen_names and seen_names[name] != domain_index:
-                raise _conflict("duplicate or unnamed remote module domain", domain=name)
+                raise attachment_conflict("duplicate or unnamed remote module domain", domain=name)
             seen_names[name] = domain_index
             if _inspect_definition(
                 conn,
@@ -230,7 +179,9 @@ def inspect_module_attachments(
             if name == expected.appliance.name:
                 appliance_present = True
     if len(owner_domains) != 1:
-        raise _conflict("expected exactly one owning System definition", count=len(owner_domains))
+        raise attachment_conflict(
+            "expected exactly one owning System definition", count=len(owner_domains)
+        )
     detached = frozenset(
         {
             (expected.pool, expected.source_volume),
@@ -240,18 +191,6 @@ def inspect_module_attachments(
         else set()
     )
     return AttachmentInspection(not system_active, True, appliance_present, detached)
-
-
-def volume_references(root: ET.Element) -> list[tuple[str, str]]:
-    """Return pool/volume pairs from every storage source in each disk graph."""
-    references = []
-    for disk in root.findall("./devices/disk"):
-        for source in disk.iter("source"):
-            pool = source.get("pool")
-            volume = source.get("volume")
-            if pool is not None and volume is not None:
-                references.append((pool, volume))
-    return references
 
 
 def _top_level_volume_references(root: ET.Element) -> list[tuple[str, str]]:
@@ -270,227 +209,6 @@ def _top_level_path_references(root: ET.Element) -> list[str]:
         source.get("file") or source.get("dev") for source in root.findall("./devices/disk/source")
     )
     return [path for path in paths if path is not None]
-
-
-def path_references(root: ET.Element) -> set[str]:
-    """Return host paths from every source and legacy mirror in each disk graph."""
-    return set(_path_reference_list(root))
-
-
-def _path_reference_list(root: ET.Element) -> list[str]:
-    """Every path in each disk graph, repeats kept so a duplicate reference stays countable."""
-    paths = []
-    for disk in root.findall("./devices/disk"):
-        for source in disk.iter("source"):
-            path = source.get("file") or source.get("dev")
-            if path is not None:
-                paths.append(path)
-        for mirror in disk.iter("mirror"):
-            path = mirror.get("file") or mirror.get("dev")
-            if path is not None:
-                paths.append(path)
-    return paths
-
-
-def _system_ownership(root: ET.Element, *, domain: str | None) -> str | None:
-    tags = [
-        *root.findall(f"./metadata/{{{KDIVE_METADATA_NS}}}system"),
-        *root.findall(f"./metadata/{{{KDIVE_METADATA_NS}}}domain/{{{KDIVE_METADATA_NS}}}system"),
-    ]
-    if len(tags) > 1:
-        raise _conflict("duplicate System ownership metadata", domain=domain)
-    if not tags:
-        return None
-    grouped = remote_metadata_system_id(root)
-    direct = (tags[0].text or "").strip()
-    return grouped or direct or None
-
-
-def prove_no_foreign_storage_references(
-    conn: AttachmentConn,
-    identity_port: RemoteDeviceIdentityPort,
-    owner_system_id: str,
-    protected: frozenset[tuple[str, str]],
-) -> None:
-    """Reject any foreign domain graph that aliases a volume about to be destroyed."""
-    _prove_no_foreign_references(
-        conn,
-        identity_port,
-        owner_system_id,
-        protected_volumes=protected,
-        protected_paths=frozenset(),
-    )
-
-
-def prove_no_foreign_path_references(
-    conn: AttachmentConn,
-    identity_port: RemoteDeviceIdentityPort,
-    owner_system_id: str,
-    protected_paths: frozenset[str],
-) -> None:
-    """Reject foreign disk-graph aliases of exact host paths about to be removed.
-
-    This is the filesystem-path counterpart of :func:`prove_no_foreign_storage_references`.
-    Both use the same bounded traversal of every live and inactive definition, recursive
-    ``source``/``mirror`` graph references, and following device identity comparison.
-    """
-    _prove_no_foreign_references(
-        conn,
-        identity_port,
-        owner_system_id,
-        protected_volumes=frozenset(),
-        protected_paths=protected_paths,
-    )
-
-
-def _prove_no_foreign_references(
-    conn: AttachmentConn,
-    identity_port: RemoteDeviceIdentityPort,
-    owner_system_id: str,
-    *,
-    protected_volumes: frozenset[tuple[str, str]],
-    protected_paths: frozenset[str],
-) -> None:
-    """Traverse all defined disk graphs once against protected volumes and host paths."""
-    identities: dict[str, RemoteDeviceIdentity] = {}
-
-    def resolve(path: str) -> RemoteDeviceIdentity:
-        normalized = _normalize_storage_path(path)
-        if normalized not in identities:
-            if len(identities) >= _MAX_PATH_IDENTITIES:
-                raise _infrastructure("remote device identity lookup budget exceeded")
-            identities[normalized] = _device_identity(identity_port, normalized)
-        return identities[normalized]
-
-    protected_identities = {
-        resolve(path) for path in sorted(_normalize_storage_path(path) for path in protected_paths)
-    }
-    for pool, volume in sorted(protected_volumes):
-        try:
-            path = _volume_path(conn, pool, volume)
-        except CategorizedError as error:
-            cause = error.__cause__
-            if isinstance(cause, libvirt.libvirtError) and (
-                cause.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL
-            ):
-                continue
-            raise
-        protected_identities.add(resolve(path))
-    try:
-        domains = conn.listAllDomains(0)
-    except libvirt.libvirtError as exc:
-        raise _infrastructure("could not enumerate remote teardown attachments") from exc
-    if len(domains) > MAX_LIBVIRT_XML_DOCUMENTS:
-        error = _infrastructure("remote teardown domain enumeration exceeds provider limit")
-        for cleanup_error in _release_domains(domains, set()):
-            error.add_note(f"cleanup failed: {cleanup_error!r}")
-        raise error
-    budget = XmlEnumerationBudget()
-    seen_names: set[str] = set()
-    released: set[int] = set()
-    cleanup_errors: list[Exception] = []
-    try:
-        for domain in domains:
-            try:
-                try:
-                    active = bool(domain.isActive())
-                    documents = [domain.XMLDesc(0)]
-                    if active and domain.isPersistent():
-                        documents.append(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
-                except libvirt.libvirtError as exc:
-                    raise _infrastructure("could not read a remote teardown attachment") from exc
-                for index, document in enumerate(documents):
-                    try:
-                        root = budget.parse(document)
-                    except (ET.ParseError, DefusedXmlException, ValueError) as exc:
-                        raise _conflict("could not inspect a remote teardown attachment") from exc
-                    name = root.findtext("name")
-                    if index == 0:
-                        if not name or name in seen_names:
-                            raise _conflict("duplicate or unnamed remote teardown domain")
-                        seen_names.add(name)
-                    owner = _system_ownership(root, domain=name)
-                    references = volume_references(root)
-                    paths = path_references(root)
-                    paths.update(
-                        value
-                        for value in (root.findtext("./os/kernel"), root.findtext("./os/initrd"))
-                        if value is not None
-                    )
-                    document_identities = {resolve(path) for path in paths}
-                    document_identities.update(
-                        resolve(_volume_path(conn, pool, volume)) for pool, volume in references
-                    )
-                    direct = set(references) & set(protected_volumes)
-                    aliases = document_identities & protected_identities
-                    exact_owner = owner == owner_system_id and name == domain_name_for(
-                        UUID(owner_system_id)
-                    )
-                    if (direct or aliases) and not exact_owner:
-                        raise _conflict(
-                            "another domain references remote teardown storage", domain=name
-                        )
-            finally:
-                cleanup_errors.extend(_release_domains((domain,), released))
-    except BaseException as error:
-        cleanup_errors.extend(_release_domains(domains, released))
-        for cleanup_error in cleanup_errors:
-            error.add_note(f"cleanup failed: {cleanup_error!r}")
-        raise
-    if cleanup_errors:
-        raise ExceptionGroup("remote teardown domain cleanup failed", cleanup_errors)
-
-
-def _release_domains(domains: Sequence[Domain], released: set[int]) -> list[Exception]:
-    errors: list[Exception] = []
-    for domain in domains:
-        identifier = id(domain)
-        if identifier in released:
-            continue
-        released.add(identifier)
-        closer = getattr(domain, "free", None)
-        if callable(closer):
-            try:
-                closer()
-            except Exception as error:
-                errors.append(error)
-    return errors
-
-
-def _volume_path(conn: AttachmentConn, pool_name: str, volume_name: str) -> str:
-    try:
-        pool = conn.storagePoolLookupByName(pool_name)
-        path = pool.storageVolLookupByName(volume_name).path()
-    except libvirt.libvirtError as exc:
-        raise _infrastructure("could not resolve remote module volume path") from exc
-    return _normalize_storage_path(path, pool=pool_name, volume=volume_name)
-
-
-def _normalize_storage_path(path: str, **details: object) -> str:
-    if not path.startswith("/") or "\x00" in path or len(path.encode()) > _MAX_STORAGE_PATH_BYTES:
-        raise _conflict("remote module storage path is invalid", **details)
-    return posixpath.normpath("/" + path.lstrip("/"))
-
-
-def _device_identity(identity_port: RemoteDeviceIdentityPort, path: str) -> RemoteDeviceIdentity:
-    normalized = _normalize_storage_path(path)
-    try:
-        identity = identity_port.identity(normalized)
-    except Exception:
-        raise _infrastructure("remote device identity lookup failed") from None
-    if identity is None:
-        raise _conflict("remote device identity is unavailable")
-    if (
-        type(identity) is not RemoteDeviceIdentity
-        or identity.kind not in {"inode", "block"}
-        or type(identity.primary) is not int
-        or type(identity.secondary) is not int
-        or not 0 <= identity.primary <= _MAX_IDENTITY_COMPONENT
-        or not 0 <= identity.secondary <= _MAX_IDENTITY_COMPONENT
-        or (identity.kind == "block" and identity.secondary != 0)
-    ):
-        raise _conflict("remote device identity is invalid")
-    return identity
 
 
 def _protected_volume_identities(
@@ -513,13 +231,13 @@ def _protected_volume_identities(
     if allow_cleanup_partial:
         allowed.add(frozenset({expected.scratch_volume}))
     if attempt_volumes not in allowed:
-        raise _conflict("remote module partial volume state is invalid")
+        raise attachment_conflict("remote module partial volume state is invalid")
     identities = {
-        volume: _device_identity(identity_port, _volume_path(conn, expected.pool, volume))
+        volume: device_identity(identity_port, volume_path(conn, expected.pool, volume))
         for volume in (expected.root_volume, *sorted(attempt_volumes))
     }
     if len(set(identities.values())) != len(identities):
-        raise _conflict("protected remote module identities are not distinct")
+        raise attachment_conflict("protected remote module identities are not distinct")
     return identities
 
 
@@ -542,33 +260,35 @@ def _inspect_definition(
     # fail every operation on the host closed.
     sources = volume_references(root)
     if len(sources) != len(set(sources)):
-        raise _conflict("duplicate volume reference in domain", domain=name)
+        raise attachment_conflict("duplicate volume reference in domain", domain=name)
     referenced = {volume for pool, volume in sources if pool == expected.pool}
     paths = path_references(root)
-    if len(paths) > _MAX_PATH_IDENTITIES:
-        raise _infrastructure("remote device identity lookup budget exceeded")
-    direct_identities = {_device_identity(identity_port, path) for path in paths}
-    system_tag = _system_ownership(root, domain=name)
+    if len(paths) > MAX_PATH_IDENTITIES:
+        raise attachment_infrastructure("remote device identity lookup budget exceeded")
+    direct_identities = {device_identity(identity_port, path) for path in paths}
+    system_tag = system_ownership(root, domain=name)
     if system_tag == expected.system_id:
         resolved_identities = [
-            _device_identity(identity_port, _volume_path(conn, pool, volume))
+            device_identity(identity_port, volume_path(conn, pool, volume))
             for pool, volume in sources
         ]
         protected_references = (set(resolved_identities) | direct_identities) & set(
             protected_identities.values()
         )
         if domain_active and not allow_active_system:
-            raise _conflict("owning System is active", domain=name)
+            raise attachment_conflict("owning System is active", domain=name)
         owning_root = (expected.pool, expected.root_volume)
         root_identity = protected_identities[expected.root_volume]
         # A provisioned System's root is a file-backed overlay with no pool/volume source, so
         # it counts by device identity; the same root named any other way still counts twice.
         root_references = _top_level_volume_references(root).count(owning_root) + sum(
-            _device_identity(identity_port, path) == root_identity
+            device_identity(identity_port, path) == root_identity
             for path in _top_level_path_references(root)
         )
         if root_references != 1:
-            raise _conflict("owning System definition has a different root volume", domain=name)
+            raise attachment_conflict(
+                "owning System definition has a different root volume", domain=name
+            )
         attempt_identities = {
             identity
             for volume, identity in protected_identities.items()
@@ -577,28 +297,33 @@ def _inspect_definition(
         if referenced & {expected.source_volume, expected.scratch_volume} or (
             protected_references & attempt_identities
         ):
-            raise _conflict("System references attempt-scoped appliance storage", domain=name)
+            raise attachment_conflict(
+                "System references attempt-scoped appliance storage", domain=name
+            )
         root_count = resolved_identities.count(root_identity) + sum(
-            _device_identity(identity_port, path) == root_identity
-            for path in _path_reference_list(root)
+            device_identity(identity_port, path) == root_identity
+            for path in path_reference_list(root)
         )
         if root_count != 1:
-            raise _conflict("owning System has duplicate root volume references", domain=name)
+            raise attachment_conflict(
+                "owning System has duplicate root volume references", domain=name
+            )
         return True
     if name == expected.appliance.name:
         _validate_appliance(root, definition_active, expected)
         return False
     resolved_identities = [
-        _device_identity(identity_port, _volume_path(conn, pool, volume))
-        for pool, volume in sources
+        device_identity(identity_port, volume_path(conn, pool, volume)) for pool, volume in sources
     ]
     protected_references = (set(resolved_identities) | direct_identities) & set(
         protected_identities.values()
     )
     if referenced & protected:
-        raise _conflict("another domain references remote module storage", domain=name)
+        raise attachment_conflict("another domain references remote module storage", domain=name)
     if protected_references:
-        raise _conflict("another domain references remote module storage by path", domain=name)
+        raise attachment_conflict(
+            "another domain references remote module storage by path", domain=name
+        )
     return False
 
 
@@ -607,13 +332,13 @@ def _validate_features(root: ET.Element, architecture: str) -> None:
     nodes = root.findall("features")
     if architecture != "x86_64":
         if nodes:
-            raise _conflict("resumed appliance features mismatched")
+            raise attachment_conflict("resumed appliance features mismatched")
         return
     if len(nodes) != 1 or nodes[0].attrib or nodes[0].text and nodes[0].text.strip():
-        raise _conflict("resumed appliance features mismatched")
+        raise attachment_conflict("resumed appliance features mismatched")
     children = list(nodes[0])
     if len(children) != 1 or children[0].tag != "acpi" or children[0].attrib or list(children[0]):
-        raise _conflict("resumed appliance features mismatched")
+        raise attachment_conflict("resumed appliance features mismatched")
 
 
 def _validate_disk_backing(
@@ -630,16 +355,16 @@ def _validate_disk_backing(
     wanted = expected.appliance.root_backing_path if expected.appliance.volume is None else None
     is_root = dev == "vda"
     if len(backings) > 1 or (not backings and is_root and wanted is not None):
-        raise _conflict("resumed appliance volume set mismatched")
+        raise attachment_conflict("resumed appliance volume set mismatched")
     if not backings:
         return
     backing = backings[0]
     if not backing.attrib and not list(backing):
         if is_root and wanted is not None:
-            raise _conflict("resumed appliance volume set mismatched")
+            raise attachment_conflict("resumed appliance volume set mismatched")
         return
     if not is_root or wanted is None or not _is_staged_base_backing(backing, disk, wanted):
-        raise _conflict("resumed appliance volume set mismatched")
+        raise attachment_conflict("resumed appliance volume set mismatched")
 
 
 def _is_staged_base_backing(backing: ET.Element, disk: ET.Element, path: str) -> bool:
@@ -706,20 +431,20 @@ def _validate_appliance(
         }
     )
     if len(metadata_nodes) != 1 or type_node is None:
-        raise _conflict("resumed appliance metadata is absent")
+        raise attachment_conflict("resumed appliance metadata is absent")
     metadata = metadata_nodes[0]
     if metadata.attrib != {
         "system": expected.system_id,
         "image-digest": expected.appliance.image_digest,
         "nonce": expected.appliance.operation_nonce,
     }:
-        raise _conflict("resumed appliance metadata mismatched")
+        raise attachment_conflict("resumed appliance metadata mismatched")
     if type_node.get("arch") != expected.appliance.architecture:
-        raise _conflict("resumed appliance architecture mismatched")
+        raise attachment_conflict("resumed appliance architecture mismatched")
     disks = []
     for disk in root.findall("./devices/disk"):
         if disk.attrib != {"type": "volume", "device": "disk"}:
-            raise _conflict("resumed appliance volume set mismatched")
+            raise attachment_conflict("resumed appliance volume set mismatched")
         children = list(disk)
         allowed_tags = {
             "driver",
@@ -731,34 +456,34 @@ def _validate_appliance(
             "address",
         }
         if any(child.tag not in allowed_tags for child in children):
-            raise _conflict("resumed appliance volume set mismatched")
+            raise attachment_conflict("resumed appliance volume set mismatched")
         source_nodes = disk.findall("source")
         target_nodes = disk.findall("target")
         if len(source_nodes) != 1 or len(target_nodes) != 1:
-            raise _conflict("resumed appliance volume set mismatched")
+            raise attachment_conflict("resumed appliance volume set mismatched")
         source = source_nodes[0]
         target = target_nodes[0]
         source_extra = set(source.attrib) - {"pool", "volume", "index", "startupPolicy"}
         if not {"pool", "volume"}.issubset(source.attrib) or source_extra or list(source):
-            raise _conflict("resumed appliance volume set mismatched")
+            raise attachment_conflict("resumed appliance volume set mismatched")
         target_extra = set(target.attrib) - {"dev", "bus", "tray"}
         if target.get("bus") != "virtio" or target_extra or list(target):
-            raise _conflict("resumed appliance volume set mismatched")
+            raise attachment_conflict("resumed appliance volume set mismatched")
         readonly = disk.find("readonly")
         if readonly is not None and (readonly.attrib or list(readonly)):
-            raise _conflict("resumed appliance volume set mismatched")
+            raise attachment_conflict("resumed appliance volume set mismatched")
         driver = disk.find("driver")
         driver_attrs = {"name", "type", "cache", "io", "discard"}
         if driver is not None and (set(driver.attrib) - driver_attrs or list(driver)):
-            raise _conflict("resumed appliance volume set mismatched")
+            raise attachment_conflict("resumed appliance volume set mismatched")
         if expected.appliance.volume is None and not _has_reference_driver(
             target.get("dev"), driver
         ):
-            raise _conflict("resumed appliance volume set mismatched")
+            raise attachment_conflict("resumed appliance volume set mismatched")
         _validate_disk_backing(disk, target.get("dev"), expected)
         alias = disk.find("alias")
         if alias is not None and (set(alias.attrib) - {"name"} or list(alias)):
-            raise _conflict("resumed appliance volume set mismatched")
+            raise attachment_conflict("resumed appliance volume set mismatched")
         address = disk.find("address")
         address_attrs = {
             "type",
@@ -771,7 +496,7 @@ def _validate_appliance(
             "unit",
         }
         if address is not None and (set(address.attrib) - address_attrs or list(address)):
-            raise _conflict("resumed appliance volume set mismatched")
+            raise attachment_conflict("resumed appliance volume set mismatched")
         disks.append(
             (
                 source.get("pool"),
@@ -781,10 +506,10 @@ def _validate_appliance(
             )
         )
     if set(disks) != required_disks or len(disks) != len(required_disks):
-        raise _conflict("resumed appliance volume set mismatched")
+        raise attachment_conflict("resumed appliance volume set mismatched")
     _validate_appliance_devices(root, expected)
     if not active:
-        raise _conflict("same-name resumed appliance is not active")
+        raise attachment_conflict("same-name resumed appliance is not active")
 
 
 def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachmentState) -> None:
@@ -795,22 +520,22 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
     ):
         return
     if root.get("type") != "kvm" or set(root.attrib) - {"type", "id"}:
-        raise _conflict("resumed appliance domain type mismatched")
+        raise attachment_conflict("resumed appliance domain type mismatched")
     lifecycle = ("on_poweroff", "on_reboot", "on_crash")
     top_level = {"name", "uuid", "memory", "vcpu", "os", "metadata", "devices", "features"}
     top_level.update(lifecycle)
     if any(child.tag not in top_level for child in root):
-        raise _conflict("resumed appliance top-level shape mismatched")
+        raise attachment_conflict("resumed appliance top-level shape mismatched")
     _validate_features(root, expected.appliance.architecture)
     for tag in lifecycle:
         nodes = root.findall(tag)
         if len(nodes) != 1 or any(
             node.attrib or list(node) or (node.text or "").strip() != "destroy" for node in nodes
         ):
-            raise _conflict("resumed appliance lifecycle action mismatched")
+            raise attachment_conflict("resumed appliance lifecycle action mismatched")
     required_once = {"name", "memory", "vcpu", "os", "metadata", "devices"}
     if any(len(root.findall(tag)) != 1 for tag in required_once):
-        raise _conflict("resumed appliance top-level shape mismatched")
+        raise attachment_conflict("resumed appliance top-level shape mismatched")
     name = root.find("name")
     if (
         name is None
@@ -818,13 +543,13 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
         or list(name)
         or (name.text or "").strip() != expected.appliance.name
     ):
-        raise _conflict("resumed appliance name mismatched")
+        raise attachment_conflict("resumed appliance name mismatched")
     uuid_nodes = root.findall("uuid")
     if len(uuid_nodes) > 1 or any(
         node.attrib or list(node) or _DOMAIN_UUID.fullmatch((node.text or "").strip()) is None
         for node in uuid_nodes
     ):
-        raise _conflict("resumed appliance UUID normalization mismatched")
+        raise attachment_conflict("resumed appliance UUID normalization mismatched")
     os_nodes = root.findall("os")
     expected_os_children = (
         ["type"]
@@ -832,18 +557,18 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
         else ["type", "kernel", "initrd", "cmdline"]
     )
     if os_nodes[0].attrib or [child.tag for child in os_nodes[0]] != expected_os_children:
-        raise _conflict("resumed appliance OS shape mismatched")
+        raise attachment_conflict("resumed appliance OS shape mismatched")
     type_nodes = root.findall("./os/type")
     if len(type_nodes) != 1:
-        raise _conflict("resumed appliance OS type mismatched")
+        raise attachment_conflict("resumed appliance OS type mismatched")
     type_node = type_nodes[0]
     if (type_node.text or "").strip() != "hvm":
-        raise _conflict("resumed appliance OS type mismatched")
+        raise attachment_conflict("resumed appliance OS type mismatched")
     expected_type = {"arch": expected.appliance.architecture}
     if expected.appliance.machine is not None:
         expected_type["machine"] = expected.appliance.machine
     if type_node.attrib != expected_type:
-        raise _conflict("resumed appliance OS type mismatched")
+        raise attachment_conflict("resumed appliance OS type mismatched")
     if expected.appliance.volume is None:
         kernel = root.find("./os/kernel")
         initrd = root.find("./os/initrd")
@@ -857,7 +582,7 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
             or (kernel.text or "") != expected.appliance.kernel
             or (initrd.text or "") != expected.appliance.initrd
         ):
-            raise _conflict("resumed appliance direct kernel mismatched")
+            raise attachment_conflict("resumed appliance direct kernel mismatched")
         cmdline = root.find("./os/cmdline")
         if (
             cmdline is None
@@ -865,7 +590,7 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
             or list(cmdline)
             or (cmdline.text or "") != APPLIANCE_KERNEL_CMDLINE
         ):
-            raise _conflict("resumed appliance kernel command line mismatched")
+            raise attachment_conflict("resumed appliance kernel command line mismatched")
     if expected.appliance.memory_kib is not None:
         memory_nodes = root.findall("./memory")
         if (
@@ -874,27 +599,27 @@ def _validate_appliance_resources(root: ET.Element, expected: ExpectedAttachment
             or list(memory_nodes[0])
             or (memory_nodes[0].text or "").strip() != str(expected.appliance.memory_kib)
         ):
-            raise _conflict("resumed appliance memory mismatched")
+            raise attachment_conflict("resumed appliance memory mismatched")
     if expected.appliance.vcpus is not None:
         vcpu_nodes = root.findall("./vcpu")
         if len(vcpu_nodes) != 1:
-            raise _conflict("resumed appliance vCPU count mismatched")
+            raise attachment_conflict("resumed appliance vCPU count mismatched")
         vcpu = vcpu_nodes[0]
         if set(vcpu.attrib) - {"placement", "current"} or list(vcpu):
-            raise _conflict("resumed appliance vCPU count mismatched")
+            raise attachment_conflict("resumed appliance vCPU count mismatched")
         if (vcpu.text or "").strip() != str(expected.appliance.vcpus):
-            raise _conflict("resumed appliance vCPU count mismatched")
+            raise attachment_conflict("resumed appliance vCPU count mismatched")
         if vcpu.get("current") not in {None, str(expected.appliance.vcpus)}:
-            raise _conflict("resumed appliance vCPU count mismatched")
+            raise attachment_conflict("resumed appliance vCPU count mismatched")
 
 
 def _validate_appliance_devices(root: ET.Element, expected: ExpectedAttachmentState) -> None:
     devices = root.find("./devices")
     if devices is None:
-        raise _conflict("resumed appliance devices are absent")
+        raise attachment_conflict("resumed appliance devices are absent")
     allowed = {"disk", "console", "controller", "input", "memballoon", "emulator", "rng"}
     if any(device.tag not in allowed for device in devices):
-        raise _conflict("resumed appliance unexpectedly has a forbidden device")
+        raise attachment_conflict("resumed appliance unexpectedly has a forbidden device")
     _validate_rng(devices)
     for device in devices:
         if device.tag not in {"disk", "console", "rng"}:
@@ -908,7 +633,7 @@ def _validate_appliance_devices(root: ET.Element, expected: ExpectedAttachmentSt
         ]
         inputs = [(device.get("type"), device.get("bus")) for device in devices.findall("input")]
         if len(controllers) != len(set(controllers)) or len(inputs) != len(set(inputs)):
-            raise _conflict("resumed appliance normalized device duplicated")
+            raise attachment_conflict("resumed appliance normalized device duplicated")
     else:
         actual_identities = Counter(
             (device.tag, tuple(sorted(device.attrib.items()))) for device in normalized
@@ -918,46 +643,46 @@ def _validate_appliance_devices(root: ET.Element, expected: ExpectedAttachmentSt
             for tag, attributes in normalized_appliance_devices(expected.appliance.architecture)
         )
         if actual_identities != expected_identities:
-            raise _conflict("resumed appliance normalized device set mismatched")
+            raise attachment_conflict("resumed appliance normalized device set mismatched")
         emulators = devices.findall("emulator")
         if len(emulators) != 1:
-            raise _conflict("resumed appliance emulator mismatched")
+            raise attachment_conflict("resumed appliance emulator mismatched")
         if (emulators[0].text or "").strip() != expected.appliance.emulator_path:
-            raise _conflict("resumed appliance emulator mismatched")
+            raise attachment_conflict("resumed appliance emulator mismatched")
     consoles = devices.findall("console")
     if len(consoles) != 1:
-        raise _conflict("resumed appliance console set mismatched")
+        raise attachment_conflict("resumed appliance console set mismatched")
     console = consoles[0]
     if console.attrib != {"type": "pty"}:
-        raise _conflict("resumed appliance console transport mismatched")
+        raise attachment_conflict("resumed appliance console transport mismatched")
     child_allowlist = {"source", "target", "alias", "address"}
     if any(child.tag not in child_allowlist or list(child) for child in console):
-        raise _conflict("resumed appliance console set mismatched")
+        raise attachment_conflict("resumed appliance console set mismatched")
     sources = console.findall("source")
     if len(sources) > 1 or any(set(source.attrib) - {"path"} for source in sources):
-        raise _conflict("resumed appliance console set mismatched")
+        raise attachment_conflict("resumed appliance console set mismatched")
     targets = console.findall("target")
     if len(targets) != 1 or (
         set(targets[0].attrib) - {"type", "port"} or targets[0].get("type") != "virtio"
     ):
-        raise _conflict("resumed appliance console set mismatched")
+        raise attachment_conflict("resumed appliance console set mismatched")
     for alias in console.findall("alias"):
         if set(alias.attrib) - {"name"}:
-            raise _conflict("resumed appliance console set mismatched")
+            raise attachment_conflict("resumed appliance console set mismatched")
     address_attrs = {"type", "controller", "bus", "port"}
     for address in console.findall("address"):
         if set(address.attrib) - address_attrs:
-            raise _conflict("resumed appliance console set mismatched")
+            raise attachment_conflict("resumed appliance console set mismatched")
 
 
 def _validate_rng(devices: ET.Element) -> None:
     """Require exactly the reference ``<rng model="virtio">`` backed by ``/dev/urandom``."""
     nodes = devices.findall("rng")
     if len(nodes) != 1 or nodes[0].attrib != {"model": "virtio"}:
-        raise _conflict("resumed appliance entropy device mismatched")
+        raise attachment_conflict("resumed appliance entropy device mismatched")
     rng = nodes[0]
     if nodes[0].text and nodes[0].text.strip():
-        raise _conflict("resumed appliance entropy device mismatched")
+        raise attachment_conflict("resumed appliance entropy device mismatched")
     backends = rng.findall("backend")
     if (
         len(backends) != 1
@@ -965,15 +690,15 @@ def _validate_rng(devices: ET.Element) -> None:
         or list(backends[0])
         or (backends[0].text or "").strip() != "/dev/urandom"
     ):
-        raise _conflict("resumed appliance entropy device mismatched")
+        raise attachment_conflict("resumed appliance entropy device mismatched")
     for tag, attributes in _RNG_CHILD_ATTRS.items():
         nodes_by_tag = rng.findall(tag)
         if len(nodes_by_tag) > 1 or any(
             list(node) or set(node.attrib) - attributes for node in nodes_by_tag
         ):
-            raise _conflict("resumed appliance entropy device mismatched")
+            raise attachment_conflict("resumed appliance entropy device mismatched")
     if any(child.tag not in {"backend", *_RNG_CHILD_ATTRS} for child in rng):
-        raise _conflict("resumed appliance entropy device mismatched")
+        raise attachment_conflict("resumed appliance entropy device mismatched")
 
 
 _RNG_CHILD_ATTRS = {
@@ -996,9 +721,9 @@ def _validate_normalized_device(device: ET.Element) -> None:
         "emulator": set(),
     }
     if set(device.attrib) - attribute_allowlists[device.tag]:
-        raise _conflict("resumed appliance normalized device mismatched")
+        raise attachment_conflict("resumed appliance normalized device mismatched")
     if any(child.tag not in child_allowlists[device.tag] or list(child) for child in device):
-        raise _conflict("resumed appliance normalized device mismatched")
+        raise attachment_conflict("resumed appliance normalized device mismatched")
     child_attributes = {
         "alias": {"name"},
         "address": {
@@ -1015,26 +740,26 @@ def _validate_normalized_device(device: ET.Element) -> None:
         "stats": {"period"},
     }
     if any(set(child.attrib) - child_attributes[child.tag] for child in device):
-        raise _conflict("resumed appliance normalized device mismatched")
+        raise attachment_conflict("resumed appliance normalized device mismatched")
     child_counts = {tag: len(device.findall(tag)) for tag in child_allowlists[device.tag]}
     if any(count > 1 for count in child_counts.values()):
-        raise _conflict("resumed appliance normalized device mismatched")
+        raise attachment_conflict("resumed appliance normalized device mismatched")
     if device.tag == "controller" and device.get("type") not in {
         "pci",
         "usb",
         "sata",
         "virtio-serial",
     }:
-        raise _conflict("resumed appliance normalized device mismatched")
+        raise attachment_conflict("resumed appliance normalized device mismatched")
     if device.tag == "input" and (
         device.get("type") not in {"mouse", "keyboard", "tablet"}
         or device.get("bus") not in {"ps2", "usb", "virtio"}
     ):
-        raise _conflict("resumed appliance normalized device mismatched")
+        raise attachment_conflict("resumed appliance normalized device mismatched")
     if device.tag == "memballoon" and device.get("model") not in {"virtio", "none"}:
-        raise _conflict("resumed appliance normalized device mismatched")
+        raise attachment_conflict("resumed appliance normalized device mismatched")
     if device.tag == "emulator" and (device.text or "").strip() == "":
-        raise _conflict("resumed appliance emulator mismatched")
+        raise attachment_conflict("resumed appliance emulator mismatched")
 
 
 def validate_appliance_xml(xml: str, expected: ExpectedAttachmentState) -> None:
@@ -1042,7 +767,7 @@ def validate_appliance_xml(xml: str, expected: ExpectedAttachmentState) -> None:
     try:
         root = parse_libvirt_xml(xml)
     except (ET.ParseError, DefusedXmlException, ValueError) as exc:
-        raise _conflict("could not parse resumed appliance definition") from exc
+        raise attachment_conflict("could not parse resumed appliance definition") from exc
     if root.findtext("name") != expected.appliance.name:
-        raise _conflict("resumed appliance name mismatched")
+        raise attachment_conflict("resumed appliance name mismatched")
     _validate_appliance(root, True, expected)

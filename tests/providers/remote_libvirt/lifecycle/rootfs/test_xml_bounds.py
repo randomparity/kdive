@@ -1,6 +1,6 @@
 import pytest
 
-from kdive.providers.remote_libvirt.lifecycle.rootfs.xml_bounds import (
+from kdive.providers.shared.libvirt_xml_bounds import (
     MAX_LIBVIRT_XML_AGGREGATE_BYTES,
     MAX_LIBVIRT_XML_BYTES,
     MAX_LIBVIRT_XML_DOCUMENTS,

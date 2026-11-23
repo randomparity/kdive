@@ -1,4 +1,4 @@
-"""Provider-private bounds for libvirt-controlled XML documents."""
+"""Shared bounds for libvirt-controlled XML documents."""
 
 import xml.etree.ElementTree as ET
 

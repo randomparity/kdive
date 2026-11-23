@@ -47,11 +47,11 @@ from kdive.providers.ports.external_boot import (
     OpaqueProviderRef,
     RunningKernelObservation,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.shared.directory_listing import list_directory_descriptor
+from kdive.providers.shared.libvirt_attachments import (
     HostStatDeviceIdentity,
     prove_no_foreign_path_references,
 )
-from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.shared.libvirt_external_boot import (
     boot_projection_element_identity,
     parse_domain_xml,

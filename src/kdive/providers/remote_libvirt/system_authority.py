@@ -26,6 +26,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import UtcDateTime
 from kdive.domain.platform.arch_traits import rendered_machine_alias
 from kdive.profiles.provisioning import require_concrete_sizing
+from kdive.providers.ports.module_operation import RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.guest.bootstrap_key import RemoteBootstrapKeyInjector
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     parse_domain_xml,
@@ -38,11 +39,6 @@ from kdive.providers.remote_libvirt.lifecycle.port_allocation import (
     used_ssh_ports,
 )
 from kdive.providers.remote_libvirt.lifecycle.readiness import wait_for_agent
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-    HostStatDeviceIdentity,
-    RemoteDeviceIdentityPort,
-    prove_no_foreign_storage_references,
-)
 from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )
@@ -56,6 +52,10 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     volume_backing_path,
 )
 from kdive.providers.shared.directory_listing import list_directory_descriptor
+from kdive.providers.shared.libvirt_attachments import (
+    HostStatDeviceIdentity,
+    prove_no_foreign_storage_references,
+)
 from kdive.providers.shared.libvirt_xml import (
     backing_store_projection,
     remote_metadata_storage_identity,
