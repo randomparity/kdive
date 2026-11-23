@@ -720,7 +720,10 @@ class ObjectStore:
     def get_range(
         self, key: str, *, start: int, length: int, version_id: str | None = None
     ) -> bytes:
-        """Return ``length`` bytes of ``key`` starting at ``start`` (an HTTP ranged GET).
+        """Request ``length`` bytes of ``key`` from byte offset ``start`` (a ranged GET).
+
+        Return the backend response body as received; it may be shorter than requested.
+        Callers must validate any length required by their input format.
 
         Raises:
             CategorizedError: the ranged read fails
