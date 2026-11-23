@@ -28,3 +28,18 @@ def test_services_never_import_mcp() -> None:
     }
     bad = {p: ms for p, ms in offenders.items() if ms}
     assert not bad, f"services must not import kdive.mcp (layering inversion): {bad}"
+
+
+def test_shared_system_teardown_policy_has_a_service_owner() -> None:
+    path = _SERVICES / "systems/teardown.py"
+    assert path.is_file(), "shared teardown routing belongs in a concrete service"
+    from kdive.services.systems.teardown import route_external_boot_teardown
+
+    assert route_external_boot_teardown.__module__ == "kdive.services.systems.teardown"
+
+
+def test_breakglass_teardown_imports_policy_from_services() -> None:
+    path = _SERVICES.parent / "mcp/tools/ops/security/breakglass.py"
+    imports = _imported_modules(path)
+    assert "kdive.mcp.tools.lifecycle.systems.admin" not in imports
+    assert "kdive.services.systems.teardown" in imports

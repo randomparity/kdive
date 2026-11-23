@@ -42,7 +42,7 @@ from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import config_error as _config_error
-from kdive.mcp.tools._common import job_envelope
+from kdive.mcp.tools._common import job_envelope, teardown_routing_failure
 from kdive.mcp.tools.external_boot.recovery_idempotency import MAX_RECOVERY_IDEMPOTENCY_KEY_BYTES
 from kdive.mcp.tools.external_boot.recovery_requests import (
     MAX_OBJECT_IDENTITIES as _MAX_OBJECT_IDENTITIES,
@@ -54,10 +54,6 @@ from kdive.mcp.tools.external_boot.recovery_requests import (
     resolve_recovery_orphan as _resolve_recovery_orphan,
 )
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import release_failure
-from kdive.mcp.tools.lifecycle.systems.admin import (
-    ordinary_teardown_denial,
-    route_external_boot_teardown,
-)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -66,6 +62,11 @@ from kdive.services.allocation.release import (
     BreakglassReleaseAudit,
     ReleaseOutcome,
     breakglass_release_allocation,
+)
+from kdive.services.external_boot import (
+    ExternalBootDenied,
+    ExternalBootOperation,
+    check_external_boot_admission,
 )
 from kdive.services.external_boot.settlement import (
     SETTLEMENT_REASON_MAX_BYTES,
@@ -76,6 +77,10 @@ from kdive.services.external_boot.settlement import (
 from kdive.services.systems.authority_owned import (
     enqueue_control_teardown,
     ordinary_mutation_is_fenced,
+)
+from kdive.services.systems.teardown import (
+    TeardownRoutingDenied,
+    route_external_boot_teardown,
 )
 
 _log = logging.getLogger(__name__)
@@ -285,19 +290,25 @@ async def _teardown_locked(
             )
         # External-boot history takes `systems.teardown`'s authority route: the worker refuses an
         # ordinary job for it (#2966, #3007). No idempotency key: break-glass takes none.
-        routed = await route_external_boot_teardown(
-            conn, ctx, system, str(uid), None, resolver, audit_recycle=False
-        )
+        try:
+            routed = await route_external_boot_teardown(
+                conn, system, job_authorizing(ctx, system.project), resolver
+            )
+        except TeardownRoutingDenied as exc:
+            return teardown_routing_failure(str(uid), exc.error, ctx)
         if routed is not None:
-            return routed
+            return job_envelope(routed, "system_id", system.id)
         # The matrix refuses SYSTEM_TEARDOWN before an authority System's first activation, so a
         # preactivation System skips it, as in `systems.teardown`. Unlike there, the matrix runs
         # before the dedup replay inside `enqueue_control_teardown`; it admits every ordinary
         # teardown today, so the order changes no outcome.
         if not await ordinary_mutation_is_fenced(conn, uid):
-            denial = await ordinary_teardown_denial(conn, ctx, system, str(uid))
-            if denial is not None:
-                return denial
+            try:
+                await check_external_boot_admission(
+                    conn, system.id, ExternalBootOperation.SYSTEM_TEARDOWN, project=system.project
+                )
+            except ExternalBootDenied as exc:
+                return teardown_routing_failure(str(uid), exc, ctx)
         # A dead-lettered ordinary teardown is re-run, matching `systems.teardown` (#2978).
         job = await enqueue_control_teardown(
             conn,
