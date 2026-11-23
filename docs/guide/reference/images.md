@@ -13,6 +13,9 @@ asynchronously by the leaked-object sweep, not at delete time. Returns ``conflic
 publication is in progress or the row changes before deletion. A shared reference guard
 rejects deletion while the image is still referenced by a live system.
 
+Requires ``operator`` on the owning project. Private IDs outside the caller's projects
+receive the same ``configuration_error`` as unknown IDs.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `image_id` | string | yes | The private catalog image to delete. |

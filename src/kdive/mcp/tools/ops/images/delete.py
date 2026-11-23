@@ -24,7 +24,7 @@ from kdive.mcp.tools.ops.images._common import (
 )
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
-from kdive.security.authz.rbac import AuthorizationError, Role, RoleDenied, require_role
+from kdive.security.authz.rbac import Role, RoleDenied, require_role
 
 _log = logging.getLogger(__name__)
 
@@ -32,9 +32,8 @@ _log = logging.getLogger(__name__)
 async def delete(pool: AsyncConnectionPool, ctx: RequestContext, *, image_id: str) -> ToolResponse:
     """Delete a project-private catalog image. Requires ``operator`` on the image's project.
 
-    Resolves the image's owning project from the row, then gates ``operator`` on it. A
-    member-over-reach or cross-project caller is denied and audited before the row is touched; the
-    catalog row survives. Cross-project force-delete is deliberately not exposed here.
+    Foreign private and unknown IDs share the existing configuration-error response.
+    Members without ``operator`` are denied and audited before any row mutation.
     """
     uid = _as_uuid(image_id)
     if uid is None:
@@ -44,7 +43,11 @@ async def delete(pool: AsyncConnectionPool, ctx: RequestContext, *, image_id: st
             entry = await IMAGE_CATALOG.get(conn, uid)
         if entry is None:
             return _config_error(image_id)
-        if entry.visibility is not ImageVisibility.PRIVATE or entry.owner is None:
+        if (
+            entry.visibility is not ImageVisibility.PRIVATE
+            or entry.owner is None
+            or entry.owner not in ctx.projects
+        ):
             return _config_error(image_id)
         try:
             require_role(ctx, entry.owner, Role.OPERATOR)
@@ -53,9 +56,6 @@ async def delete(pool: AsyncConnectionPool, ctx: RequestContext, *, image_id: st
                 pool, ctx, tool=DELETE_TOOL, project=entry.owner, args={"image_id": image_id}
             )
             return denied(image_id, exc.required)
-        except AuthorizationError:
-            # Non-member: no role would have helped, and naming one would confirm the project.
-            return denied(image_id, None)
         return await _delete_owned(pool, ctx, uid, project=entry.owner)
 
 

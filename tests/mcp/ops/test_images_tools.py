@@ -139,13 +139,13 @@ def _operator_ctx(*, principal: str = "ops-operator") -> RequestContext:
 
 
 def _member_ctx(
-    *, project: str = _TARGET_PROJECT, role: Role = Role.OPERATOR, principal: str = "dev-1"
+    *, project: str = _TARGET_PROJECT, role: Role | None = Role.OPERATOR, principal: str = "dev-1"
 ) -> RequestContext:
     return RequestContext(
         principal=principal,
         agent_session="sess-dev",
         projects=(project,),
-        roles={project: role},
+        roles={} if role is None else {project: role},
         platform_roles=frozenset(),
     )
 
@@ -513,14 +513,13 @@ def test_delete_owned_is_idempotent_when_locked_row_is_gone(migrated_url: str) -
     asyncio.run(_run())
 
 
-def test_delete_member_overreach_denied_and_audited(migrated_url: str) -> None:
-    # A viewer on the image's project lacks operator: denied, audited, row survives.
+@pytest.mark.parametrize("role", [None, Role.VIEWER])
+def test_delete_member_overreach_denied_and_audited(migrated_url: str, role: Role | None) -> None:
+    # Membership alone or a viewer role cannot authorize a deletion.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             image_id = await _insert_private_image(pool)
-            resp = await image_delete.delete(
-                pool, _member_ctx(role=Role.VIEWER), image_id=str(image_id)
-            )
+            resp = await image_delete.delete(pool, _member_ctx(role=role), image_id=str(image_id))
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
         # A member over-reaching is told the project role they need (ADR-0490).
         assert resp.data["missing_roles"] == ["operator"]
@@ -531,25 +530,40 @@ def test_delete_member_overreach_denied_and_audited(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_delete_cross_project_denied_without_project_audit(migrated_url: str) -> None:
-    # A caller who is not a member of the image's owning project is denied, but must not
-    # create an audit_log row under a project absent from ctx.projects.
-    async def _run() -> None:
+@pytest.mark.parametrize(
+    "caller",
+    [
+        pytest.param(_member_ctx(project="tenant-y"), id="foreign-project-operator"),
+        pytest.param(
+            RequestContext(
+                principal="dev-1",
+                agent_session="sess-dev",
+                projects=(),
+                roles={},
+                platform_roles=frozenset(),
+            ),
+            id="no-project",
+        ),
+        pytest.param(_admin_ctx(), id="platform-admin-without-project"),
+    ],
+)
+def test_delete_cross_project_is_indistinguishable_from_absence(
+    migrated_url: str, caller: RequestContext
+) -> None:
+    async def run() -> None:
         async with _pool(migrated_url) as pool:
             image_id = await _insert_private_image(pool, owner="tenant-x")
-            resp = await image_delete.delete(
-                pool,
-                _member_ctx(project="tenant-y", role=Role.OPERATOR),
-                image_id=str(image_id),
-            )
-        assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
-        # A non-member gets no role named: doing so would confirm the owning project exists
-        # and that membership, not rank, is the blocker (ADR-0490).
-        assert "missing_roles" not in resp.data
+            missing = await image_delete.delete(pool, caller, image_id=str(UUID(int=1)))
+            hidden = await image_delete.delete(pool, caller, image_id=str(image_id))
+        expected = missing.model_copy(update={"object_id": str(image_id)})
+        assert hidden.model_dump(mode="json", by_alias=True) == expected.model_dump(
+            mode="json", by_alias=True
+        )
+        assert hidden.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert await _image_exists(migrated_url, image_id) is True
         assert await _audit_log_rows(migrated_url) == []
 
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 async def _reference_image(url: str, *, provider: str, name: str) -> None:
