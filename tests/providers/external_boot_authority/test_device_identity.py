@@ -3,6 +3,7 @@
 import asyncio
 import json
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future
 
 import pytest
@@ -112,6 +113,42 @@ def test_identity_service_rejects_exact_capacity_and_recovers_on_completion() ->
             DeviceIdentityAbsentV1()
         )
         service.close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("error", [RuntimeError("submission failed"), SystemExit("stop")])
+def test_failed_submission_preserves_exception_and_releases_admission(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException
+) -> None:
+    def absent(path: str) -> RemoteDeviceIdentity | None:
+        del path
+        return None
+
+    async def exercise() -> None:
+        service = RemoteDeviceIdentityService(identity=absent, capacity=1)
+        original_submit = service._executor.submit
+        submitted = False
+
+        def submit(
+            lookup: Callable[[str], RemoteDeviceIdentity | None], path: str
+        ) -> Future[RemoteDeviceIdentity | None]:
+            nonlocal submitted
+            if not submitted:
+                submitted = True
+                raise error
+            return original_submit(lookup, path)
+
+        monkeypatch.setattr(service._executor, "submit", submit)
+        try:
+            with pytest.raises(type(error)) as caught:
+                await service.resolve(DeviceIdentityRequestV1(path="/first"))
+            assert caught.value is error
+            assert await service.resolve(DeviceIdentityRequestV1(path="/second")) == (
+                DeviceIdentityAbsentV1()
+            )
+        finally:
+            service.close()
 
     asyncio.run(exercise())
 

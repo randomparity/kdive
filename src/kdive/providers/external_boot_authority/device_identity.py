@@ -234,7 +234,7 @@ class RemoteDeviceIdentityService:
                 future = self._executor.submit(self._identity, request.path)
             except BaseException:
                 self._admission.release()
-                raise RuntimeError("provider-failure") from None
+                raise
         future.add_done_callback(lambda _future: self._admission.release())
         try:
             result = await asyncio.shield(asyncio.wrap_future(future))
