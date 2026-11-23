@@ -39,6 +39,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 import libvirt
+from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -138,15 +139,20 @@ def discover_dac_identity(domain_xml: str) -> tuple[int, int]:
     """The ``(uid, gid)`` the running domain's QEMU process runs as, from its DAC seclabel.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` (``reason=dac_seclabel_unusable``) when the XML
-            is malformed or carries no ``+uid:+gid`` DAC label for a non-root user. The owner is
-            never guessed: a wrong one leaves QEMU unable to write or lets another account in.
+        CategorizedError: ``CONFIGURATION_ERROR`` with ``reason=dac_xml_parse_failed`` when
+            parsing fails, or ``reason=dac_seclabel_unusable`` when parsed XML carries no
+            ``+uid:+gid`` DAC label for a non-root user. The owner is never guessed: a wrong one
+            leaves QEMU unable to write or lets another account in.
     """
     try:
         root = _safe_fromstring(domain_xml)
-    except Exception:  # noqa: BLE001 - host-emitted XML; a parse failure reads as unusable
-        root = None
-    label = None if root is None else root.findtext("./seclabel[@model='dac']/label")
+    except (ET.ParseError, DefusedXmlException) as exc:
+        raise CategorizedError(
+            "remote domain XML could not be parsed for capture DAC discovery",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "dac_xml_parse_failed"},
+        ) from exc
+    label = root.findtext("./seclabel[@model='dac']/label")
     match = _DAC_LABEL.fullmatch(label.strip()) if label else None
     if match is None or int(match.group(1)) == 0:
         raise CategorizedError(

@@ -18,6 +18,7 @@ from xml.etree import ElementTree as ET  # noqa: S405 - parses XML this test bui
 
 import libvirt
 import pytest
+from defusedxml.common import EntitiesForbidden
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.traffic import pcap_volume_name
@@ -28,6 +29,7 @@ from kdive.providers.remote_libvirt.lifecycle.traffic_capture import (
     REMOTE_PCAP_VHOST_REMEDIATION,
     REMOTE_PCAP_WRITE_REMEDIATION,
     RemoteLibvirtTrafficCapture,
+    discover_dac_identity,
     discover_netdev_id,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -230,6 +232,36 @@ def test_discover_netdev_on_malformed_xml_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as exc:
         discover_netdev_id("<domain><devices>")  # unclosed
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+@pytest.mark.parametrize(
+    "xml, cause",
+    [
+        ("<domain>", ET.ParseError),
+        ('<!DOCTYPE domain [<!ENTITY uid "107">]><domain>&uid;</domain>', EntitiesForbidden),
+    ],
+)
+def test_dac_parser_failure_preserves_cause(xml: str, cause: type[Exception]) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        discover_dac_identity(xml)
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details == {"reason": "dac_xml_parse_failed"}
+    assert isinstance(caught.value.__cause__, cause)
+    assert "XML" in str(caught.value) and "DAC" in str(caught.value)
+
+
+def test_dac_discovery_does_not_swallow_programming_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    from kdive.providers.remote_libvirt.lifecycle import traffic_capture
+
+    error = RuntimeError("parser implementation defect")
+
+    def fail_parse(xml: str) -> ET.Element:
+        raise error
+
+    monkeypatch.setattr(traffic_capture, "_safe_fromstring", fail_parse)
+    with pytest.raises(RuntimeError) as caught:
+        discover_dac_identity(_IFACE_XML)
+    assert caught.value is error
 
 
 # --- attach / detach --------------------------------------------------------------------------
