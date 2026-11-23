@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
+from uuid import UUID
 
 import pytest
 from fastmcp.server.auth.providers.jwt import JWTVerifier
@@ -17,6 +18,7 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.tools._common import encode_ts_uuid_cursor
 from kdive.mcp.tools.catalog.artifacts.reads import (
     _MAX_WINDOWED_FETCH_BYTES,
     ARTIFACT_GET_WINDOW_DEFAULT_BYTES,
@@ -221,14 +223,22 @@ def test_artifacts_list_keyset_paginates_over_limit(migrated_url: str) -> None:
     assert set(collected) == seeded
 
 
-def test_artifacts_list_rejects_foreign_cursor(migrated_url: str) -> None:
-    """A cursor minted by a different tool is an invalid_cursor error, not a silent first page."""
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("not-a-valid-cursor", id="malformed"),
+        pytest.param(encode_ts_uuid_cursor("jobs.list", STORE_MTIME, UUID(int=1)), id="wrong-tool"),
+    ],
+)
+def test_artifacts_list_rejects_foreign_cursor(migrated_url: str, cursor: str) -> None:
+    """Supplied empty, malformed and wrong-tool cursors cannot restart pagination."""
 
     async def _run() -> Any:
         async with _pool(migrated_url) as pool:
             sys_id, _, _ = await _seed_system_with_artifacts(pool)
             return await artifacts_list(
-                pool, _ctx(), ArtifactsListRequest(system_id=sys_id, cursor="not-a-valid-cursor")
+                pool, _ctx(), ArtifactsListRequest(system_id=sys_id, cursor=cursor)
             )
 
     resp = asyncio.run(_run())

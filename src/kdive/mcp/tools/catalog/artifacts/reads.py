@@ -214,7 +214,7 @@ async def artifacts_list(
     ``configuration_error``, never a silent first page.
     """
     after = None
-    if request.cursor:
+    if request.cursor is not None:
         try:
             after = _decode_ts_uuid_cursor(_ARTIFACTS_LIST_TAG, request.cursor)
         except _InvalidCursor:

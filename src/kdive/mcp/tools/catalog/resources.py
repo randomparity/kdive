@@ -140,7 +140,7 @@ async def list_resources(
     """
     capped = _clamp_list_limit(request.limit)
     after = None
-    if request.cursor:
+    if request.cursor is not None:
         try:
             after = _decode_ts_uuid_cursor(_RESOURCES_LIST_TAG, request.cursor)
         except InvalidCursor:

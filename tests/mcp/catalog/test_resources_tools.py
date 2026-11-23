@@ -26,6 +26,7 @@ from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.middleware.server_fault import SERVER_FAULT_DETAIL, ServerFaultMiddleware
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools._common import encode_ts_uuid_cursor
 from kdive.mcp.tools.catalog import resources as catalog_resources_tools
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import release_failure
 from kdive.mcp.tools.ops.resources import host_ops as resources_tools
@@ -44,6 +45,7 @@ from kdive.providers.remote_libvirt.resource_details import (
 )
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.allocation.release import ReleaseOutcome
+from tests.clock import STORE_MTIME
 from tests.mcp.json_data import data_sequence, json_mapping
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
@@ -1597,11 +1599,20 @@ def test_list_truncated_count_is_over_visible_rows(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("!!!", id="malformed"),
+        pytest.param(encode_ts_uuid_cursor("jobs.list", STORE_MTIME, UUID(int=1)), id="wrong-tool"),
+    ],
+)
+def test_list_malformed_cursor_is_config_error(migrated_url: str, cursor: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await _list_resources(pool, CTX, kind=None, cursor="!!!")
+            resp = await _list_resources(pool, CTX, kind=None, cursor=cursor)
         assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert resp.object_id == "resources"
         assert resp.data["reason"] == "invalid_cursor"
 
