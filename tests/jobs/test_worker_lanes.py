@@ -349,10 +349,22 @@ def test_both_loops_stop_on_the_shared_stop_event(migrated_url: str) -> None:
                 ),
             )
             stop = asyncio.Event()
+            entered = {lane: asyncio.Event() for lane in _BOTH_LANES}
+            original_run_once = worker.run_once
+
+            async def observed_run_once(lane: str) -> Job | None:
+                entered[lane].set()
+                return await original_run_once(lane)
+
+            worker.run_once = observed_run_once
             task = asyncio.create_task(worker.run(stop))
-            await asyncio.sleep(0.2)
-            stop.set()
-            await asyncio.wait_for(task, timeout=10)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(event.wait() for event in entered.values())), timeout=10
+                )
+            finally:
+                stop.set()
+                await asyncio.wait_for(task, timeout=10)
 
     asyncio.run(_run())
 
