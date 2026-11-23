@@ -17,16 +17,16 @@ from pydantic import SecretStr
 from kdive.domain.capacity.state import ExternalBootActivationState as State
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import JobKind
-from kdive.jobs.handlers.external_boot import lifecycle
-from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
-from kdive.jobs.handlers.external_boot.registrar import build_operations
-from kdive.jobs.handlers.external_boot.runner import OperationContext
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
     ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityMarkerV1,
     ExternalBootDerivedReleaseCompletion,
 )
+from kdive.jobs.handlers.external_boot import lifecycle
+from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
+from kdive.jobs.handlers.external_boot.registrar import build_operations
+from kdive.jobs.handlers.external_boot.runner import OperationContext
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,

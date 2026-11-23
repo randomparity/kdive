@@ -52,6 +52,12 @@ from kdive.domain.external_boot_values import (
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.authority_sender import _failure, _install_failure
+from kdive.jobs.external_boot_models import (
+    ExternalBootAuthorityFailure,
+    ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthorityResultV1,
+    _FailureResult,
+)
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.runner import (
     COMMITTABLE_ERROR_CATEGORIES,
@@ -59,12 +65,6 @@ from kdive.jobs.handlers.external_boot.runner import (
     _render_cmdline,
     authority_ref,
     run_operation,
-)
-from kdive.jobs.models import (
-    ExternalBootAuthorityFailure,
-    ExternalBootAuthorityMarkerV1,
-    ExternalBootAuthorityResultV1,
-    _FailureResult,
 )
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.providers.core.resolver import ProviderResolver

@@ -34,7 +34,7 @@ from kdive.domain.operations.jobs import (
     JobKind,
     dispatch_lane_for_kind,
 )
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
     ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthorityResultV1,

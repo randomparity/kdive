@@ -17,15 +17,15 @@ from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.authority_sender import AuthorityRequestSender
-from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
-from kdive.jobs.handlers.external_boot.registrar import build_operations
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,
     _FailureResult,
     _RecoveryAttemptResult,
 )
+from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
+from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,

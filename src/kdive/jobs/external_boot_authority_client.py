@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_values import RunningKernelObservation
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
 from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,

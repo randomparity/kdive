@@ -30,17 +30,17 @@ from kdive.domain.external_boot_values import (
     OpaqueProviderRef,
 )
 from kdive.domain.operations.jobs import Job
+from kdive.jobs.external_boot_models import (
+    ExternalBootAuthorityFailure,
+    ExternalBootAuthorityFailureV1,
+    ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthorityResultV1,
+)
 from kdive.jobs.handlers.external_boot.authority import AllocatedAuthority, allocate_authority
 from kdive.jobs.handlers.external_boot.ports import (
     ExternalBootAuthorityExecutor,
     ExternalBootAuthorityTeardownExecutor,
     ExternalBootHandlerPorts,
-)
-from kdive.jobs.models import (
-    ExternalBootAuthorityFailure,
-    ExternalBootAuthorityFailureV1,
-    ExternalBootAuthorityMarkerV1,
-    ExternalBootAuthorityResultV1,
 )
 from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.providers.core.resolver import ProviderBinding

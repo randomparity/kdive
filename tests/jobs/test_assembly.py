@@ -31,7 +31,7 @@ async def test_worker_routes_borrow_their_assembly_and_process_routes_remain_emp
     from kdive.assembly import ProcessAssembly
     from kdive.domain.catalog.resources import ResourceKind
     from kdive.jobs.assembly import build_worker_handler_assembly
-    from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+    from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
     from kdive.providers.assembly import authority as authority_sender
     from kdive.providers.assembly import composition as providers
     from kdive.providers.core.resolver import ProviderBinding

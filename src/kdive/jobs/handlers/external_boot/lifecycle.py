@@ -32,6 +32,13 @@ from kdive.domain.external_boot_timing import timing_deadline
 from kdive.domain.external_boot_values import RecoveryPoint, RunningKernelObservation
 from kdive.domain.operations.jobs import Job
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+from kdive.jobs.external_boot_models import (
+    ExternalBootAuthorityConflictV1,
+    ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthoritySuccessV1,
+    ExternalBootDerivedReleaseCompletion,
+    ExternalBootDerivedTeardownCompletion,
+)
 from kdive.jobs.handlers.external_boot.evidence import (
     authority_result,
     conflict_result,
@@ -50,13 +57,6 @@ from kdive.jobs.handlers.external_boot.runner import (
     starts_fresh_readiness_budget,
 )
 from kdive.jobs.handlers.system_reclaim import reclaim_system_core_after_provider_teardown
-from kdive.jobs.models import (
-    ExternalBootAuthorityConflictV1,
-    ExternalBootAuthorityMarkerV1,
-    ExternalBootAuthoritySuccessV1,
-    ExternalBootDerivedReleaseCompletion,
-    ExternalBootDerivedTeardownCompletion,
-)
 from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityConflictResolutionRequestV1,

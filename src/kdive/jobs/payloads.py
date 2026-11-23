@@ -38,7 +38,7 @@ from kdive.domain.operations.jobs import (
 )
 from kdive.domain.operations.sysrq import SysRqCommand
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     operation_is_permitted,

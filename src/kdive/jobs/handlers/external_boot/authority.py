@@ -10,7 +10,7 @@ from psycopg.rows import dict_row
 from pydantic import SecretStr
 
 from kdive.domain.operations.jobs import Job
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
 
 __all__ = ["AllocatedAuthority", "allocate_authority"]
 

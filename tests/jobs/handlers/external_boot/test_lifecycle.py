@@ -50,10 +50,7 @@ from kdive.domain.external_boot_values import (
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.jobs import queue
-from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
-from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
-from kdive.jobs.handlers.external_boot.registrar import build_operations
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
     ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureV1,
@@ -66,6 +63,9 @@ from kdive.jobs.models import (
     _RecoveryAttemptResult,
     _TeardownResult,
 )
+from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
+from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
+from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system

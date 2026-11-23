@@ -10,7 +10,7 @@ from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
 from kdive.providers.external_boot_authority import protocol, transport
 
 

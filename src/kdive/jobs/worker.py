@@ -53,7 +53,7 @@ from kdive.domain.operations.jobs import (
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
 from kdive.jobs.capture_operations.supervisor import capture_authority_scope
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
     ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureV1,
@@ -63,10 +63,8 @@ from kdive.jobs.models import (
     ExternalBootAuthoritySuccessV1,
     ExternalBootDerivedReleaseCompletion,
     ExternalBootDerivedTeardownCompletion,
-    HandlerRegistry,
-    JobHandler,
-    JobHandlerResult,
 )
+from kdive.jobs.models import HandlerRegistry, JobHandler, JobHandlerResult
 from kdive.jobs.payloads import PayloadValidationError, run_id_from_payload
 from kdive.jobs.worker_telemetry import JobSpan, WorkerTelemetry
 from kdive.providers.system_authority.protocol import (

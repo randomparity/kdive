@@ -14,8 +14,8 @@ from pydantic import ValidationError
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
+from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
 from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1
 from kdive.jobs.payloads import (
     Authorizing,
     BootPayload,

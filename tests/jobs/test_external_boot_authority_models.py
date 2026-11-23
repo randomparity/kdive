@@ -1,6 +1,8 @@
 """Typed worker-boundary contracts for external boot authority results."""
 
 import asyncio
+import subprocess
+import sys
 from contextlib import AbstractAsyncContextManager
 from types import SimpleNamespace
 from typing import Any, cast, get_type_hints
@@ -13,14 +15,14 @@ from pydantic import SecretStr, TypeAdapter, ValidationError
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.external_boot.ports import ExternalBootAuthorityExecutor
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureContext,
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthoritySuccessV1,
     ExternalBootDerivedTeardownCompletion,
 )
+from kdive.jobs.handlers.external_boot.ports import ExternalBootAuthorityExecutor
 from kdive.jobs.worker import Worker
 from kdive.jobs.worker_telemetry import JobSpan
 from kdive.providers.external_boot_authority.protocol import (
@@ -927,3 +929,22 @@ def test_worker_survives_an_unreadable_attempt_state(monkeypatch, caplog) -> Non
         f"external boot job {job.id} commit superseded; attempt state unreadable; result dropped"
     ) in caplog.messages
     assert not any("was reclaimed" in message for message in caplog.messages)
+
+
+def test_authority_models_import_without_loading_generic_registry() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys\n"
+            "import kdive.jobs.external_boot_models\n"
+            "if 'kdive.jobs.models' in sys.modules:\n"
+            "    raise SystemExit('authority data import loaded the generic job registry')\n",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -27,6 +27,10 @@ from kdive.jobs.assembly import (
     register_all_handlers,
 )
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
+from kdive.jobs.external_boot_models import (
+    ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthoritySuccessV1,
+)
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.handlers.external_boot.operations import (
     DuplicateExternalBootHandler,
@@ -36,12 +40,7 @@ from kdive.jobs.handlers.external_boot.operations import (
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.handlers.runs import registrar as runs_registrar
-from kdive.jobs.models import (
-    DuplicateHandler,
-    ExternalBootAuthorityMarkerV1,
-    ExternalBootAuthoritySuccessV1,
-    HandlerRegistry,
-)
+from kdive.jobs.models import DuplicateHandler, HandlerRegistry
 from kdive.jobs.payloads import ENQUEUEABLE_EXTERNAL_BOOT_OPERATIONS
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.infra.reaping import NullModuleVolumeReaper

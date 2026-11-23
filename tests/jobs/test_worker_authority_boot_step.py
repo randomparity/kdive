@@ -17,7 +17,8 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.lifecycle.records import System
 from kdive.jobs import queue
 from kdive.jobs import worker as worker_module
-from kdive.jobs.models import ExternalBootAuthoritySuccessV1, HandlerRegistry
+from kdive.jobs.external_boot_models import ExternalBootAuthoritySuccessV1
+from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.worker import Worker
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug.sessions.lifecycle import _attach_preconditions, _succeeded_boot_result

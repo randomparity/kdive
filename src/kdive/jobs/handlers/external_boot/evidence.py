@@ -24,8 +24,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from kdive.domain.external_boot_activation import ExternalBootActivation
+from kdive.jobs.external_boot_models import (
+    ExternalBootAuthorityConflictV1,
+    ExternalBootAuthoritySuccessV1,
+)
 from kdive.jobs.handlers.external_boot.runner import OperationContext
-from kdive.jobs.models import ExternalBootAuthorityConflictV1, ExternalBootAuthoritySuccessV1
 from kdive.providers.external_boot_authority.protocol import AuthorityObservationV1
 
 __all__ = [

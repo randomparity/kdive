@@ -14,7 +14,7 @@ from kdive.domain.errors import CategorizedError
 from kdive.jobs import external_boot_authority_client as clients
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
 from kdive.providers.core.resolver import ProviderBinding
 from kdive.providers.external_boot_authority.transport import _dispatch
 from kdive.providers.ports.authority import AuthorityCapability

@@ -24,11 +24,11 @@ from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, Job, JobKind
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
 from kdive.jobs import worker as worker_module
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthoritySuccessV1,
-    HandlerRegistry,
 )
+from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import (
     Authorizing,
     BootPayload,

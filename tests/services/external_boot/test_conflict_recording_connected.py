@@ -21,15 +21,15 @@ from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
-from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
-from kdive.jobs.handlers.external_boot.registrar import build_operations
-from kdive.jobs.handlers.external_boot.router import route_marked
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
     ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,
-    HandlerRegistry,
 )
+from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
+from kdive.jobs.handlers.external_boot.registrar import build_operations
+from kdive.jobs.handlers.external_boot.router import route_marked
+from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.worker import Worker
 from kdive.mcp.tools.external_boot.recovery_requests import request_release, resolve_conflict
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
