@@ -32,7 +32,11 @@ from pydantic import ValidationError
 
 from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+
+# The name the sink actually writes, imported rather than restated so the two cannot
+# drift: a second literal here would silently stop matching if the sink ever renamed it.
+from kdive.providers.local_libvirt.lifecycle.boot.recovery import _ARCHIVE_NAME
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
     _OWNED_TEMPORARY_NAMES,
     _PROJECTION_NAME,
     LocalRecoveryMetadataV1,
@@ -43,10 +47,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     _read_private_file,
     _require_private_owned_directory,
 )
-
-# The name the sink actually writes, imported rather than restated so the two cannot
-# drift: a second literal here would silently stop matching if the sink ever renamed it.
-from kdive.providers.local_libvirt.lifecycle.boot.recovery import _ARCHIVE_NAME
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootOperationLease,
     OperationOwnership,

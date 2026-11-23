@@ -48,11 +48,14 @@ from kdive.providers.local_libvirt.external_boot_authority import (
     LocalExternalBootAuthorityAdapter,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
-    FinalizeCleanupProof,
     LocalLibvirtExternalBoot,
     RealLocalExternalBootIO,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
+    FinalizeCleanupProof,
     RecoveryMetadataStore,
     recovery_directory_name,
+    recovery_point_digest,
 )
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
@@ -281,7 +284,7 @@ async def _publish_local_quarantine(
     )
     point = _local_point(metadata)
     proof = FinalizeCleanupProof(
-        point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        point_digest=recovery_point_digest(point),
         binding=binding,
         operation_id=cleanup_identity,
         attempt_id=str(attempt_id),

@@ -67,7 +67,7 @@ from kdive.providers.shared.libvirt_xml import (
 from kdive.providers.shared.runtime_paths import domain_name_for
 
 if TYPE_CHECKING:
-    from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
         LocalRecoveryMetadataV1,
         TargetProjectionV1,
     )
@@ -965,7 +965,7 @@ class _ConcreteSession:
 
     def reopen_projection(self, artifact: OpaqueProviderRef) -> TargetProjectionV1:
         """Read an exact projection selected by an owner-checked local artifact reference."""
-        from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (  # noqa: PLC0415
+        from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
             TargetProjectionStore,
             TargetProjectionV1,
             _artifact_ref_parts,
@@ -1054,9 +1054,7 @@ class _ConcreteSession:
 
     def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int:
         """Open one payload inside its owner-checked projection digest directory."""
-        from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (  # noqa: PLC0415
-            _artifact_ref_parts,
-        )
+        from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import _artifact_ref_parts
         from kdive.providers.ports.external_boot import ActivationOwnership  # noqa: PLC0415
 
         self._require_open_domain()

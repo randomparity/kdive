@@ -41,8 +41,10 @@ from kdive.providers.external_boot_authority.service import AuthorityServiceErro
 from kdive.providers.local_libvirt import composition as local_composition
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalObservedState,
-    LocalRecoveryMetadataV1,
     RealLocalExternalBootIO,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
+    LocalRecoveryMetadataV1,
     RecoveryPhase,
 )
 from kdive.providers.local_libvirt.settings import (

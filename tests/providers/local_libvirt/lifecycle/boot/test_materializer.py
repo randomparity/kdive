@@ -20,6 +20,8 @@ from kdive.build_artifacts import validation
 from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     RealLocalExternalBootMaterializer,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
     TargetProjectionStore,
     TargetProjectionV1,
 )

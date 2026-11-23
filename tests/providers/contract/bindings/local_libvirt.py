@@ -15,6 +15,8 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
     LocalObservedState,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
     LocalRecoveryMetadataV1,
     RecoveryPhase,
 )

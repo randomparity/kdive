@@ -45,14 +45,17 @@ from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownReservationV1,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
-    FinalizeCleanupProof,
     LocalLibvirtExternalBoot,
     LocalObservedState,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import GuestFreeSpaceRefusal
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
+    FinalizeCleanupProof,
     LocalSystemTeardownAnchorV1,
     LocalSystemTeardownIntentV1,
     RecoveryIntentAbsentError,
+    recovery_point_digest,
 )
-from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import GuestFreeSpaceRefusal
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootTimingConfigurationError,
 )
@@ -995,7 +998,7 @@ def _cleanup_proof(context: AuthorityCommitContextV1, point: RecoveryPoint) -> F
     anchored record, so they identify the operation but authenticate nothing.
     """
     return FinalizeCleanupProof(
-        point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        point_digest=recovery_point_digest(point),
         binding=point.binding,
         operation_id=context.operation_identity,
         attempt_id=str(context.attempt_id),

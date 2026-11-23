@@ -38,8 +38,6 @@ from kdive.providers.local_libvirt.lifecycle.boot import session as session_modu
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LibguestfsAuthenticatedGuestTree,
     LocalLibvirtExternalBoot,
-    TargetProjectionStore,
-    TargetProjectionV1,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
@@ -49,6 +47,10 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     ModuleArchiveCapture,
     RealGuestRecoveryWriter,
     RecoveryArchiveSink,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
+    TargetProjectionStore,
+    TargetProjectionV1,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ExpectedOperationOwnership,

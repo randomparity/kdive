@@ -22,11 +22,7 @@ import pytest
 import kdive.providers.local_libvirt.lifecycle.boot.readiness as readiness_module
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
-    FinalizeCleanupProof,
-    LocalLibvirtExternalBoot,
     ModuleArchiveCapture,
-    RecoveryMetadataStore,
-    TargetProjectionV1,
     _cleanup_uncommitted_payloads,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
@@ -36,6 +32,12 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ReadinessResult,
     _DomainExitProbe,
     prepare_console_readiness_window,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
+    FinalizeCleanupProof,
+    RecoveryMetadataStore,
+    TargetProjectionV1,
+    recovery_point_digest,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ExpectedOperationOwnership,
@@ -1220,7 +1222,7 @@ def _archived_activation(
 
 def _finalize(store: RecoveryMetadataStore, reference, recovered) -> None:
     point = _point(recovered)
-    digest = LocalLibvirtExternalBoot.point_digest(point)
+    digest = recovery_point_digest(point)
     store.publish_tombstone(reference, _BINDING, recovered, digest)
     proof = FinalizeCleanupProof(
         point_digest=digest,
