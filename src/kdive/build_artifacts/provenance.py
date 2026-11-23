@@ -63,21 +63,8 @@ def working_tree_dirty(tree: str, *, timeout: float = DEFAULT_GIT_READ_TIMEOUT) 
     reported by ``git status`` (see ADR-0265): ``False`` means "no tracked changes", not
     "byte-identical to a clean ``HEAD`` checkout".
     """
-    if not tree:
-        return None
-    try:
-        proc = subprocess.run(  # noqa: S603 - fixed git argv, no shell  # nosec
-            ["git", "-C", tree, "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as _exc:
-        return None
-    if proc.returncode != 0:
-        return None
-    return bool(proc.stdout.strip())
+    out = _git_run(tree, "status", "--porcelain", timeout=timeout)
+    return None if out is None else bool(out.strip())
 
 
 def staged_tree_sha(tree: str, *, timeout: float = DEFAULT_GIT_READ_TIMEOUT) -> str | None:
