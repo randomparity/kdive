@@ -101,6 +101,7 @@ from kdive.providers.remote_libvirt.authority_client import module_completion
 from kdive.providers.remote_libvirt.authority_client import module_operation as operation_view
 from kdive.providers.remote_libvirt.external_boot_authority import (
     DurableRemoteModuleVolumePreparationHost,
+    RemoteCoordinatorOperations,
     RemoteExternalBootAuthorityAdapter,
     RemoteExternalBootCoordinator,
     RemoteExternalBootOperations,
@@ -2769,6 +2770,7 @@ finally:
     assert result.stdout == ""
 
 
+# These path-isolated doubles intentionally omit unexercised coordinator operations.
 @pytest.mark.parametrize("phase", ["materialize", "prepare"])
 def test_preparation_receipt_survives_core_commit_loss_without_repeating_provider(
     tmp_path: Path, phase: Literal["materialize", "prepare"]
@@ -2807,7 +2809,7 @@ def test_preparation_receipt_survives_core_commit_loss_without_repeating_provide
 
     store = RemoteExternalBootStore(tmp_path)
     coordinator = RemoteExternalBootCoordinator(
-        cast(RemoteExternalBootOperations, Operations()), store, lambda: 123.0
+        cast(RemoteCoordinatorOperations, Operations()), store, lambda: 123.0
     )
     if phase == "prepare":
         coordinator.execute_preparation(_preparation_request(record, "materialize"))
@@ -2820,7 +2822,7 @@ def test_preparation_receipt_survives_core_commit_loss_without_repeating_provide
 
     reopened_store = RemoteExternalBootStore(tmp_path)
     reopened = RemoteExternalBootCoordinator(
-        cast(RemoteExternalBootOperations, Operations()), reopened_store, lambda: 456.0
+        cast(RemoteCoordinatorOperations, Operations()), reopened_store, lambda: 456.0
     )
     assert reopened.observe_preparation(request) == expected
     assert reopened.execute_preparation(request) == expected
@@ -2837,7 +2839,7 @@ def test_materialization_requires_explicit_matching_activation_binding(tmp_path:
 
     store = RemoteExternalBootStore(tmp_path)
     coordinator = RemoteExternalBootCoordinator(
-        cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
+        cast(RemoteCoordinatorOperations, Operations()), store, lambda: 1.0
     )
     assert list(inspect.signature(RemoteExternalBootCoordinator.materialize).parameters) == [
         "self",
@@ -2956,7 +2958,7 @@ def test_preparation_takeover_adopts_only_authenticated_same_phase_receipt(
 
     store = RemoteExternalBootStore(tmp_path)
     coordinator = RemoteExternalBootCoordinator(
-        cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
+        cast(RemoteCoordinatorOperations, Operations()), store, lambda: 1.0
     )
     predecessor = _preparation_request(record, "materialize")
     receipt = coordinator.execute_preparation(predecessor)
@@ -3044,7 +3046,7 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
 
     store = RemoteExternalBootStore(tmp_path)
     coordinator = RemoteExternalBootCoordinator(
-        cast(RemoteExternalBootOperations, Operations()), store, lambda: 123.0
+        cast(RemoteCoordinatorOperations, Operations()), store, lambda: 123.0
     )
     expected_plan = _plan_for_record(record)
     assert (
@@ -3061,7 +3063,7 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
 
     restarted_store = RemoteExternalBootStore(tmp_path)
     restarted = RemoteExternalBootCoordinator(
-        cast(RemoteExternalBootOperations, Operations()),
+        cast(RemoteCoordinatorOperations, Operations()),
         restarted_store,
         lambda: 456.0,
     )
@@ -3094,7 +3096,7 @@ def test_coordinator_rejects_changed_recovery_before_provider_contact(tmp_path: 
     store.publish_materialization(_plan_for_record(record), record.materialization)
     _publish_terminal(store, record)
     coordinator = RemoteExternalBootCoordinator(
-        cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
+        cast(RemoteCoordinatorOperations, Operations()), store, lambda: 1.0
     )
     point = coordinator.prepare(
         record.materialization, record.binding, OpaqueProviderRef(ref="authority/remote-a")
@@ -3149,7 +3151,7 @@ def test_running_observation_reopens_exact_recovery_after_restart(tmp_path: Path
 
     restarted = RemoteExternalBootStore(tmp_path)
     coordinator = RemoteExternalBootCoordinator(
-        cast(RemoteExternalBootOperations, Operations()), restarted, lambda: 123.0
+        cast(RemoteCoordinatorOperations, Operations()), restarted, lambda: 123.0
     )
     executor = RemoteModulePreparationExecutor()
     adapter = RemoteExternalBootAuthorityAdapter(coordinator, executor)
@@ -3194,7 +3196,7 @@ def test_running_observation_rejects_changed_request_before_provider(tmp_path: P
     executor = RemoteModulePreparationExecutor()
     adapter = RemoteExternalBootAuthorityAdapter(
         RemoteExternalBootCoordinator(
-            cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
+            cast(RemoteCoordinatorOperations, Operations()), store, lambda: 1.0
         ),
         executor,
     )

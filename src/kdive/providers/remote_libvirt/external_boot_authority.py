@@ -487,7 +487,7 @@ class DurableRemoteModuleVolumePreparationHost:
 
 
 class RemoteExternalBootOperations(Protocol):
-    """The six closed operations available to the remote coordinator."""
+    """The six external-boot lifecycle operations within the coordinator contract."""
 
     def materialize(
         self,
@@ -578,12 +578,22 @@ class RemoteExternalBootObservationOperations(Protocol):
     ) -> RemoteExternalBootObservedState: ...
 
 
+class RemoteCoordinatorOperations(
+    RemoteExternalBootOperations,
+    RemoteExternalBootConflictOperations,
+    RemoteExternalBootObservationOperations,
+    RemoteSystemTeardownOperations,
+    Protocol,
+):
+    """The complete operation requirements of remote boot and System teardown coordination."""
+
+
 class RemoteExternalBootCoordinator:
-    """Six-operation public adapter over exact durable provider-host recovery."""
+    """Coordinate external boot and System teardown over exact durable provider-host recovery."""
 
     def __init__(
         self,
-        operations: RemoteExternalBootOperations,
+        operations: RemoteCoordinatorOperations,
         store: RemoteExternalBootStore,
         deadline: Callable[[], float],
     ) -> None:
@@ -751,9 +761,7 @@ class RemoteExternalBootCoordinator:
         if acknowledged is None:
             self._operations.recover(record, authority, self._deadline())
             return
-        cast(RemoteExternalBootConflictOperations, self._operations).recover_acknowledged(
-            record, authority, acknowledged, self._deadline()
-        )
+        self._operations.recover_acknowledged(record, authority, acknowledged, self._deadline())
 
     def cleanup(self, recovery: RecoveryPoint) -> None:
         """Delete owned boot artifacts, fencing the record by its own PREPARE authority.
@@ -766,8 +774,9 @@ class RemoteExternalBootCoordinator:
         self._operations.cleanup(record, authority, self._deadline())
 
     def observe_state(self, recovery: RecoveryPoint) -> RemoteExternalBootObservedState:
-        operations = cast(RemoteExternalBootObservationOperations, self._operations)
-        return operations.observe_state(self._store.reopen_recovery(recovery), self._deadline())
+        return self._operations.observe_state(
+            self._store.reopen_recovery(recovery), self._deadline()
+        )
 
     def modules_restored(self, binding: ExternalBootActivationBinding, plan_identity: str) -> bool:
         """Whether durable restore evidence exists for this activation's module tree."""
@@ -865,7 +874,6 @@ class RemoteExternalBootCoordinator:
     ]:
         """Other activations proven safe to collect, and the plans a kept one still uses."""
         named = (record.intent.binding, record.intent.plan_identity)
-        operations = cast(RemoteSystemTeardownOperations, self._operations)
         proven: list[
             tuple[ExternalBootActivationBinding, str, RemoteFinalizedTeardownRefsV1 | None]
         ] = []
@@ -875,7 +883,9 @@ class RemoteExternalBootCoordinator:
                 continue
             try:
                 claims = self._store.activation_claims(binding, plan_identity)
-                absent = claims is None or operations.activation_volumes_absent(binding, claims)
+                absent = claims is None or self._operations.activation_volumes_absent(
+                    binding, claims
+                )
             except Exception:  # noqa: BLE001 - an unprovable activation is kept, not collected
                 logger.warning("remote store cannot prove an activation's volumes", exc_info=True)
                 claims, absent = None, False
@@ -894,25 +904,22 @@ class RemoteExternalBootCoordinator:
     def inspect_system_teardown(
         self, state: RemoteSystemTeardownState, *, domain_validated: bool
     ) -> RemoteSystemTeardownInspection:
-        operations = cast(RemoteSystemTeardownOperations, self._operations)
-        return operations.inspect_system_teardown(state, domain_validated=domain_validated)
+        return self._operations.inspect_system_teardown(state, domain_validated=domain_validated)
 
     def validate_system_teardown(self, state: RemoteSystemTeardownState) -> None:
-        cast(RemoteSystemTeardownOperations, self._operations).validate_system_teardown(state)
+        self._operations.validate_system_teardown(state)
 
     def destroy_system_domain(self, state: RemoteSystemTeardownState) -> None:
-        cast(RemoteSystemTeardownOperations, self._operations).destroy_system_domain(state)
+        self._operations.destroy_system_domain(state)
 
     def undefine_system_domain(self, state: RemoteSystemTeardownState) -> None:
-        cast(RemoteSystemTeardownOperations, self._operations).undefine_system_domain(state)
+        self._operations.undefine_system_domain(state)
 
     def remove_system_artifacts(self, state: RemoteSystemTeardownState) -> None:
-        cast(RemoteSystemTeardownOperations, self._operations).remove_system_artifacts(state)
+        self._operations.remove_system_artifacts(state)
 
     def unfinished_preparation_absent(self, state: RemoteSystemTeardownState) -> bool:
-        return cast(RemoteSystemTeardownOperations, self._operations).unfinished_preparation_absent(
-            state
-        )
+        return self._operations.unfinished_preparation_absent(state)
 
 
 class RemoteExternalBootAuthorityAdapter:
