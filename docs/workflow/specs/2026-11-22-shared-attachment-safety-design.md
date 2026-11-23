@@ -32,7 +32,8 @@ changes are needed. Existing ADR-0585 and ADR-0603 decisions remain unchanged.
 
 ## Success
 
-1. Shared safety loads without importing either concrete provider.
+1. Shared safety loads without provider implementations; existing configuration
+   settings declarations loaded by shared runtime paths remain permitted.
 2. Local teardown and authority identity use shared ownership directly.
 3. Existing safety behavior is unchanged and appliance policy remains remote.
 
