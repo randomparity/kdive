@@ -95,24 +95,17 @@ from kdive.providers.ports.module_operation import (
     ModulePreparationRequest,
     RemoteDeviceIdentity,
 )
-from kdive.providers.remote_libvirt import external_boot_authority
+from kdive.providers.remote_libvirt import external_boot_authority, external_boot_store
 from kdive.providers.remote_libvirt import external_boot_materialization as materialization_module
 from kdive.providers.remote_libvirt.authority_client import module_completion
 from kdive.providers.remote_libvirt.authority_client import module_operation as operation_view
 from kdive.providers.remote_libvirt.external_boot_authority import (
-    AdmittedRemoteModulePreparation,
     DurableRemoteModuleVolumePreparationHost,
-    RemoteCleanupQuarantineV1,
     RemoteExternalBootAuthorityAdapter,
     RemoteExternalBootCoordinator,
     RemoteExternalBootOperations,
-    RemoteExternalBootRecoveryRecord,
-    RemoteFinalizedBootArtifactV1,
-    RemoteFinalizedTeardownRefsV1,
     RemoteModuleVolumePreparationHost,
-    RemoteModuleVolumePreparationStore,
     RemoteSystemTeardownInspection,
-    RemoteSystemTeardownIntentV1,
     RemoteSystemTeardownState,
 )
 from kdive.providers.remote_libvirt.external_boot_materialization import (
@@ -120,6 +113,17 @@ from kdive.providers.remote_libvirt.external_boot_materialization import (
 )
 from kdive.providers.remote_libvirt.external_boot_operations import (
     ConcreteRemoteExternalBootOperations,
+)
+from kdive.providers.remote_libvirt.external_boot_store import (
+    AdmittedRemoteModulePreparation,
+    RemoteCleanupFinalizedError,
+    RemoteCleanupQuarantineV1,
+    RemoteExternalBootRecoveryRecord,
+    RemoteExternalBootStore,
+    RemoteFinalizedBootArtifactV1,
+    RemoteFinalizedTeardownRefsV1,
+    RemoteSystemTeardownIntentV1,
+    _recovery_identity,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
     parse_boot_artifact_name,
@@ -327,7 +331,7 @@ def test_concrete_remote_prepare_captures_source_before_deriving_durable_recover
 ) -> None:
     expected = _record()
     plan = _plan_for_record(expected)
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     _publish_terminal(store, expected)
     modules = store.reopen_terminal(expected.binding, plan.identity)
     actions: list[str] = []
@@ -616,7 +620,7 @@ async def test_remote_adapter_replays_materialize_and_prepare_without_repeating_
 ) -> None:
     record = _record()
     plan = _plan_for_record(record)
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     _publish_terminal(store, record)
     terminal = store.reopen_terminal(record.binding, plan.identity)
     calls: list[str] = []
@@ -678,7 +682,7 @@ async def test_remote_adapter_adopts_a_new_generations_materialize(tmp_path: Pat
     """A retry generation re-materializes by adopting the first generation's receipt (#3348)."""
     record = _record()
     plan = _plan_for_record(record)
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     _publish_terminal(store, record)
     terminal = store.reopen_terminal(record.binding, plan.identity)
     calls: list[str] = []
@@ -747,7 +751,7 @@ def test_prepare_records_the_power_written_ahead_of_the_stop(
 ) -> None:
     record = _record()
     plan = _plan_for_record(record)
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     _publish_terminal(store, record)
     terminal = store.reopen_terminal(record.binding, plan.identity)
     authority = terminal.request.authority
@@ -1140,7 +1144,7 @@ async def test_remote_release_cleanup_must_name_the_object_it_deletes(tmp_path: 
 def test_coordinator_cleanup_refuses_a_record_from_another_preparation(tmp_path: Path) -> None:
     record = _record()
     operations = _NativeOperations()
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     _publish_terminal(store, record)
     foreign = record.model_copy(
         update={
@@ -1655,18 +1659,18 @@ async def test_durable_remote_preparation_reopens_before_and_after_mutation(tmp_
             calls += 1
             return _terminal_response(request)
 
-    first = RemoteModuleVolumePreparationStore(tmp_path)
+    first = RemoteExternalBootStore(tmp_path)
     first.stage(request, 999.0)
     first.close()
 
-    second = RemoteModuleVolumePreparationStore(tmp_path)
+    second = RemoteExternalBootStore(tmp_path)
     durable = DurableRemoteModuleVolumePreparationHost(second, cast(Any, Host()))
     assert not durable.execution_started(request)
     expected = await durable.execute(request)
     assert durable.execution_started(request)
     second.close()
 
-    third = RemoteModuleVolumePreparationStore(tmp_path)
+    third = RemoteExternalBootStore(tmp_path)
     replay = DurableRemoteModuleVolumePreparationHost(third, cast(Any, Host()))
     assert await replay.execute(request) == expected
     assert calls == 1
@@ -1698,7 +1702,7 @@ async def test_durable_remote_lifecycle_waits_through_lost_reply_and_reopens_ter
             await release.wait()
             return expected
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(preparation, 999.0)
     store.publish_result(preparation, _terminal_response(preparation))
     durable = DurableRemoteModuleVolumePreparationHost(
@@ -1714,7 +1718,7 @@ async def test_durable_remote_lifecycle_waits_through_lost_reply_and_reopens_ter
         await task
     store.close()
 
-    restarted = RemoteModuleVolumePreparationStore(tmp_path)
+    restarted = RemoteExternalBootStore(tmp_path)
     assert (
         await DurableRemoteModuleVolumePreparationHost(
             restarted, cast(Any, Host()), monotonic=lambda: 100.0
@@ -1793,7 +1797,7 @@ async def test_remote_reap_requires_restored_cleanup_or_installed_teardown(
             calls += 1
             return expected
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(preparation, 999.0)
     store.publish_result(preparation, _terminal_response(preparation))
     durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, Host()))
@@ -2251,7 +2255,7 @@ def test_durable_remote_preparation_preserves_first_authority_clock_deadline(
     tmp_path: Path,
 ) -> None:
     request = _remote_preparation_request()
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(request, 999.0)
     store.stage(request, 1029.0)
     admitted = store.reopen_request(request)
@@ -2277,13 +2281,13 @@ async def test_durable_remote_preparation_failure_is_terminal_for_recovery(tmp_p
         async def restore_system_power(self, admitted: object, prior: object) -> None:
             raise RuntimeError("System power could not be restored")
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(request, 999.0)
     durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
     with pytest.raises(RuntimeError, match="after mutation"):
         await durable.execute(request)
     store.close()
-    restarted = RemoteModuleVolumePreparationStore(tmp_path)
+    restarted = RemoteExternalBootStore(tmp_path)
     with pytest.raises(CategorizedError, match="requires recovery"):
         await DurableRemoteModuleVolumePreparationHost(restarted, cast(Any, FailingHost())).execute(
             request
@@ -2320,7 +2324,7 @@ async def test_durable_remote_preparation_failure_restores_power_and_does_not_la
         async def restore_system_power(self, admitted: object, prior: object) -> None:
             restored.append(prior)
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(request, 999.0)
     durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
     for _ in range(2):
@@ -2344,7 +2348,7 @@ async def test_failure_before_the_stop_is_reported_as_refused_before_mutation(
         async def observe_system_power(self, admitted: object) -> NoReturn:
             raise ValueError("power could not be read")
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(request, 999.0)
     durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, UnreadableHost()))
     with pytest.raises(CategorizedError) as failed:
@@ -2365,7 +2369,7 @@ async def test_unclearable_prior_power_record_does_not_latch_a_restored_system(
         async def execute(self, request: object) -> object:
             raise RuntimeError("provider returned after mutation")
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(request, 999.0)
 
     def refuse(*_args: object) -> None:
@@ -2394,7 +2398,7 @@ def _binding_for(request: RemoteModuleVolumePreparationRequestV1) -> ExternalBoo
 async def test_a_recorded_stop_counts_as_an_execution_that_started(tmp_path: Path) -> None:
     """A crash after the stop leaves the System stopped, so a resume must not be refused."""
     request = _remote_preparation_request()
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(request, 999.0)
     durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, InactiveSystemHost()))
     assert durable.execution_started(request) is False
@@ -2419,7 +2423,7 @@ async def test_a_record_another_request_wrote_is_not_a_started_execution(tmp_pat
         async def execute(self, request: object) -> object:
             return expected
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(first, 999.0)
     store.stage(later, 999.0)
     durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, SucceedingHost()))
@@ -2440,7 +2444,7 @@ async def test_an_orphan_owner_does_not_wedge_a_later_request(tmp_path: Path) ->
             "authority": first.authority.model_copy(update={"operation_identity": "prepare-later"})
         }
     )
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.record_prior_power(first.authority, "running")
     (power,) = tmp_path.glob("*.prior-power")
     power.unlink()
@@ -2459,7 +2463,7 @@ async def test_a_restored_abandon_is_not_an_execution_that_started(tmp_path: Pat
         async def execute(self, request: object) -> object:
             raise RuntimeError("provider returned after mutation")
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(request, 999.0)
     durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
     with pytest.raises(CategorizedError):
@@ -2481,7 +2485,7 @@ async def test_cancelled_abandon_keeps_the_failure_latched(tmp_path: Path) -> No
         async def restore_system_power(self, admitted: object, prior: object) -> None:
             raise asyncio.CancelledError
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(request, 999.0)
     durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
     with pytest.raises(asyncio.CancelledError):
@@ -2508,7 +2512,7 @@ async def test_durable_remote_preparation_cancellation_waits_and_records_termina
             await release.wait()
             return expected
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(request, 999.0)
     task = asyncio.create_task(
         DurableRemoteModuleVolumePreparationHost(store, cast(Any, BlockingHost())).execute(request)
@@ -2522,7 +2526,7 @@ async def test_durable_remote_preparation_cancellation_waits_and_records_termina
         await task
     store.close()
 
-    restarted = RemoteModuleVolumePreparationStore(tmp_path)
+    restarted = RemoteExternalBootStore(tmp_path)
     assert (
         await DurableRemoteModuleVolumePreparationHost(
             restarted, cast(Any, BlockingHost())
@@ -2547,7 +2551,7 @@ async def test_durable_remote_preparation_cancel_persists_exceptional_completion
             await release.wait()
             raise RuntimeError("provider failed after cancellation")
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(request, 999.0)
     task = asyncio.create_task(
         DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost())).execute(request)
@@ -2584,7 +2588,7 @@ async def test_durable_remote_lifecycle_cancel_persists_exceptional_completion(
             await release.wait()
             raise RuntimeError("provider failed after cancellation")
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(preparation, 999.0)
     store.publish_result(preparation, _terminal_response(preparation))
     durable = DurableRemoteModuleVolumePreparationHost(
@@ -2623,7 +2627,7 @@ async def test_failed_remote_reap_completion_still_requires_recovery(tmp_path: P
             calls += 1
             raise RuntimeError("provider failed after mutation")
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(preparation, 999.0)
     store.publish_result(preparation, _terminal_response(preparation))
     durable = DurableRemoteModuleVolumePreparationHost(store, cast(Any, FailingHost()))
@@ -2649,7 +2653,7 @@ async def test_durable_remote_preparation_retries_unrecorded_provider_return(
         calls += 1
         return _prepared_volumes(request)
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(request, 999.0)
     executor = RemoteModulePreparationExecutor()
     await RemoteModuleVolumePreparationHost(prepare, executor).execute(request)
@@ -2665,7 +2669,7 @@ async def test_durable_remote_preparation_retries_unrecorded_provider_return(
             calls += 1
             return _terminal_response(request)
 
-    restarted = RemoteModuleVolumePreparationStore(tmp_path)
+    restarted = RemoteExternalBootStore(tmp_path)
     durable = DurableRemoteModuleVolumePreparationHost(restarted, cast(Any, Host()))
     assert (await durable.execute(request)).prepared() == _prepared_volumes(request)
     assert calls == 2
@@ -2676,7 +2680,7 @@ def test_durable_remote_preparation_rejects_same_authority_with_changed_operatio
     tmp_path: Path,
 ) -> None:
     request = _remote_preparation_request()
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(request, 999.0)
     changed = request.model_copy(
         update={
@@ -2695,14 +2699,12 @@ def test_durable_remote_preparation_rejects_same_authority_with_changed_operatio
 def test_preparation_store_removes_its_exact_temporary_after_publish_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
 
     def fail(*_args: object, **_kwargs: object) -> object:
         raise OSError(f"controlled {failure} failure")
 
-    monkeypatch.setattr(
-        f"kdive.providers.remote_libvirt.external_boot_authority.os.{failure}", fail
-    )
+    monkeypatch.setattr(f"kdive.providers.remote_libvirt.external_boot_store.os.{failure}", fail)
     with pytest.raises(OSError, match=f"controlled {failure} failure"):
         store.stage(_remote_preparation_request(), 999.0)
     store.close()
@@ -2713,7 +2715,7 @@ def test_preparation_store_removes_its_exact_temporary_after_publish_failure(
 def test_preparation_store_rejects_zero_progress_write_without_retrying(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     calls = 0
 
     def zero_once(_descriptor: int, _data: object) -> int:
@@ -2723,9 +2725,7 @@ def test_preparation_store_rejects_zero_progress_write_without_retrying(
             return 0
         raise AssertionError("write retried after reporting zero progress")
 
-    monkeypatch.setattr(
-        "kdive.providers.remote_libvirt.external_boot_authority.os.write", zero_once
-    )
+    monkeypatch.setattr("kdive.providers.remote_libvirt.external_boot_store.os.write", zero_once)
     with pytest.raises(OSError, match="made no progress"):
         store.stage(_remote_preparation_request(), 999.0)
     store.close()
@@ -2744,10 +2744,10 @@ def test_preparation_store_refuses_fifo_without_blocking_before_metadata_check(
 from pathlib import Path
 import sys
 from kdive.providers.remote_libvirt.external_boot_authority import (
-    RemoteModuleVolumePreparationStore,
+    RemoteExternalBootStore,
 )
 
-store = RemoteModuleVolumePreparationStore(Path(sys.argv[1]))
+store = RemoteExternalBootStore(Path(sys.argv[1]))
 try:
     store._read('foreign-fifo')
 except PermissionError:
@@ -2805,7 +2805,7 @@ def test_preparation_receipt_survives_core_commit_loss_without_repeating_provide
             calls.append("prepare")
             return record
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     coordinator = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()), store, lambda: 123.0
     )
@@ -2818,7 +2818,7 @@ def test_preparation_receipt_survives_core_commit_loss_without_repeating_provide
     expected = coordinator.execute_preparation(request)
     store.close()  # Simulate loss before core commits the returned receipt.
 
-    reopened_store = RemoteModuleVolumePreparationStore(tmp_path)
+    reopened_store = RemoteExternalBootStore(tmp_path)
     reopened = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()), reopened_store, lambda: 456.0
     )
@@ -2835,7 +2835,7 @@ def test_materialization_requires_explicit_matching_activation_binding(tmp_path:
         def materialize(self, *args: object) -> object:
             raise AssertionError("provider reached without an activation binding")
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     coordinator = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
     )
@@ -2860,7 +2860,7 @@ def test_materialization_requires_explicit_matching_activation_binding(tmp_path:
 def test_preparation_store_refuses_mismatched_or_conflicting_publication(tmp_path: Path) -> None:
     record = _record()
     request = _preparation_request(record, "materialize")
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     mismatched = ExternalBootPreparationObservation(
         state="materialized",
         binding=request.binding,
@@ -2909,7 +2909,7 @@ def test_preparation_store_rejects_wrong_phase_and_invalid_closed_shape_before_w
         materialization=record.materialization,
         recovery_point=point,
     )
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     with pytest.raises(ValueError, match="phase and state differ"):
         store.publish_preparation(request, wrong_phase)
 
@@ -2924,7 +2924,7 @@ def test_materialization_index_rejects_path_before_descriptor_relative_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     plan = _plan_for_record(_record())
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     name = f"{plan.identity.removeprefix('sha256:')}.materialization-index"
     store._publish(name, b"../outside")
     real_open = os.open
@@ -2936,9 +2936,7 @@ def test_materialization_index_rejects_path_before_descriptor_relative_open(
             raise AssertionError("corrupted index escaped the preparation root")
         return real_open(path, flags, mode, dir_fd=dir_fd)
 
-    monkeypatch.setattr(
-        "kdive.providers.remote_libvirt.external_boot_authority.os.open", guarded_open
-    )
+    monkeypatch.setattr("kdive.providers.remote_libvirt.external_boot_store.os.open", guarded_open)
     with pytest.raises(ProviderRecoveryRefusal, match="index is malformed"):
         store.reopen_materialization_for_plan(plan)
     assert escaped == []
@@ -2956,7 +2954,7 @@ def test_preparation_takeover_adopts_only_authenticated_same_phase_receipt(
             calls.append("materialize")
             return record.materialization
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     coordinator = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()), store, lambda: 1.0
     )
@@ -3044,7 +3042,7 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
             assert recovery == record and owner == preparation_authority
             calls.append(("cleanup", deadline))
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     coordinator = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()), store, lambda: 123.0
     )
@@ -3061,7 +3059,7 @@ def test_six_operation_coordinator_reopens_exact_recovery_after_restart(tmp_path
     assert preparation_authority != authority
     store.close()
 
-    restarted_store = RemoteModuleVolumePreparationStore(tmp_path)
+    restarted_store = RemoteExternalBootStore(tmp_path)
     restarted = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()),
         restarted_store,
@@ -3092,7 +3090,7 @@ def test_coordinator_rejects_changed_recovery_before_provider_contact(tmp_path: 
         def activate(self, *args: object) -> None:
             raise AssertionError("provider touched through activate")
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.publish_materialization(_plan_for_record(record), record.materialization)
     _publish_terminal(store, record)
     coordinator = RemoteExternalBootCoordinator(
@@ -3134,7 +3132,7 @@ def test_running_observation_reopens_exact_recovery_after_restart(tmp_path: Path
         intended_target_identity=record.target_state.definition,
         recovery_objects=(),
     )
-    first = RemoteModuleVolumePreparationStore(tmp_path)
+    first = RemoteExternalBootStore(tmp_path)
     first.publish_recovery(record)
     first.close()
     observed = RunningKernelObservation(
@@ -3149,7 +3147,7 @@ def test_running_observation_reopens_exact_recovery_after_restart(tmp_path: Path
             calls.append((recovery, authority))
             return observed
 
-    restarted = RemoteModuleVolumePreparationStore(tmp_path)
+    restarted = RemoteExternalBootStore(tmp_path)
     coordinator = RemoteExternalBootCoordinator(
         cast(RemoteExternalBootOperations, Operations()), restarted, lambda: 123.0
     )
@@ -3168,7 +3166,7 @@ def test_running_observation_reopens_exact_recovery_after_restart(tmp_path: Path
 
 def test_running_observation_rejects_changed_request_before_provider(tmp_path: Path) -> None:
     record = _record()
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.publish_recovery(record)
 
     class Operations:
@@ -3239,7 +3237,7 @@ def test_remote_recovery_object_reopens_geometry_and_deletes_exact_volume(tmp_pa
             ),
         }
     )
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.publish_recovery(record)
 
     class Volume:
@@ -3388,7 +3386,7 @@ async def test_remote_system_teardown_restarts_after_lost_storage_response(
                 recovery_absent=True,
             )
 
-    def adapter(store: RemoteModuleVolumePreparationStore) -> RemoteExternalBootAuthorityAdapter:
+    def adapter(store: RemoteExternalBootStore) -> RemoteExternalBootAuthorityAdapter:
         executor = RemoteModulePreparationExecutor()
         return RemoteExternalBootAuthorityAdapter(
             RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
@@ -3396,7 +3394,7 @@ async def test_remote_system_teardown_restarts_after_lost_storage_response(
             teardown_clock=lambda: datetime(2026, 9, 6, tzinfo=UTC),
         )
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     first = adapter(store)
     with pytest.raises(RuntimeError, match="lost response"):
         await first.execute_system_teardown(request, context, reservation)
@@ -3404,7 +3402,7 @@ async def test_remote_system_teardown_restarts_after_lost_storage_response(
     store.close()
     assert calls == ["validate", "destroy", "undefine", "remove"]
 
-    restarted_store = RemoteModuleVolumePreparationStore(tmp_path)
+    restarted_store = RemoteExternalBootStore(tmp_path)
     restarted = adapter(restarted_store)
     result = await restarted.execute_system_teardown(request, context, reservation)
     assert result.complete
@@ -3460,7 +3458,7 @@ class _CompletingTeardownOperations:
 
 
 def _completing_teardown_adapter(
-    store: RemoteModuleVolumePreparationStore, operations: _CompletingTeardownOperations
+    store: RemoteExternalBootStore, operations: _CompletingTeardownOperations
 ) -> RemoteExternalBootAuthorityAdapter:
     return RemoteExternalBootAuthorityAdapter(
         RemoteExternalBootCoordinator(cast(Any, operations), store, lambda: 300.0),
@@ -3482,7 +3480,7 @@ async def test_remote_system_teardown_observation_across_generations_is_bounded(
     tmp_path: Path,
 ) -> None:
     """#2921: an earlier record is not the anchor's own; a later one supersedes it."""
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     operations = _CompletingTeardownOperations()
     adapter = _completing_teardown_adapter(store, operations)
     first = _remote_teardown_request()
@@ -3527,7 +3525,7 @@ async def test_remote_system_teardown_observation_across_generations_is_bounded(
 async def test_remote_system_teardown_observation_refuses_another_subject_at_any_generation(
     tmp_path: Path, generation: int
 ) -> None:
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     operations = _CompletingTeardownOperations()
     adapter = _completing_teardown_adapter(store, operations)
     retained = _remote_teardown_request()
@@ -3559,7 +3557,7 @@ async def test_remote_system_teardown_reaps_full_private_recovery_before_undefin
 ) -> None:
     recovery = _record()
     plan = _plan_for_record(recovery)
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     _publish_terminal(store, recovery)
     store.publish_materialization(plan, recovery.materialization)
     store.publish_recovery(recovery)
@@ -3657,7 +3655,7 @@ async def test_remote_system_teardown_cancellation_retains_underlying_checkpoint
         def remove_system_artifacts(self, _state: object) -> None:
             raise AssertionError("cancellation must stop before another phase")
 
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     executor = RemoteModulePreparationExecutor()
     adapter = RemoteExternalBootAuthorityAdapter(
         RemoteExternalBootCoordinator(cast(Any, Operations()), store, lambda: 300.0),
@@ -3703,7 +3701,7 @@ async def test_remote_system_teardown_retains_unfinished_preparation_before_unde
             "source_manifest": plan.module_obligation.source_manifest,
         }
     )
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     store.stage(
         RemoteModuleVolumePreparationRequestV1(authority=authority, operation=operation),
         999.0,
@@ -4318,7 +4316,7 @@ async def test_remote_system_teardown_keeps_an_adopted_receipt(tmp_path: Path) -
     assert await adapter.observe_recovery_object(observed.binding, authority) == adopted
     receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
     assert receipt is not None and receipt.managed
-    identity = external_boot_authority._recovery_identity(receipt.recovery_ref)
+    identity = _recovery_identity(receipt.recovery_ref)
     index = f"{store._recovery_key(record.binding, record.plan_identity)}.recovery-index"
     assert _store_names(store) == {
         _teardown_name(store),
@@ -4337,7 +4335,7 @@ class _CollectingTeardownOperations(_CompletingTeardownOperations):
 
 
 def _collecting_teardown_adapter(
-    store: RemoteModuleVolumePreparationStore, operations: _CompletingTeardownOperations
+    store: RemoteExternalBootStore, operations: _CompletingTeardownOperations
 ) -> RemoteExternalBootAuthorityAdapter:
     return RemoteExternalBootAuthorityAdapter(
         RemoteExternalBootCoordinator(cast(Any, operations), store, lambda: 300.0),
@@ -4348,7 +4346,7 @@ def _collecting_teardown_adapter(
 
 
 async def _system_teardown(
-    store: RemoteModuleVolumePreparationStore,
+    store: RemoteExternalBootStore,
     operations: _CompletingTeardownOperations | None = None,
 ) -> bool:
     adapter = _collecting_teardown_adapter(store, operations or _CollectingTeardownOperations())
@@ -4363,7 +4361,7 @@ async def _system_teardown(
 
 
 async def _observe_teardown(
-    store: RemoteModuleVolumePreparationStore, operations: _CompletingTeardownOperations
+    store: RemoteExternalBootStore, operations: _CompletingTeardownOperations
 ) -> bool:
     adapter = _collecting_teardown_adapter(store, operations)
     request = _remote_teardown_request()
@@ -4374,7 +4372,7 @@ async def _observe_teardown(
     return result.complete
 
 
-def _teardown_name(store: RemoteModuleVolumePreparationStore) -> str:
+def _teardown_name(store: RemoteExternalBootStore) -> str:
     return f"{store._system_teardown_key(_record().binding.system_id)}.teardown"
 
 
@@ -4472,7 +4470,7 @@ async def test_remote_stage_after_system_teardown_is_refused(tmp_path: Path) -> 
     lifecycle = _module_lifecycle_request(terminal.request, action="restore")
     assert await _system_teardown(store)
     names = _store_names(store)
-    finalized_error = external_boot_authority.RemoteCleanupFinalizedError
+    finalized_error = RemoteCleanupFinalizedError
 
     with pytest.raises(finalized_error, match="System teardown"):
         store.stage(terminal.request, 1.0)
@@ -4499,7 +4497,7 @@ async def test_remote_stage_of_a_sibling_after_system_teardown_is_refused(
     assert await _system_teardown(store, _ProvingTeardownOperations())
     names = _store_names(store)
 
-    with pytest.raises(external_boot_authority.RemoteCleanupFinalizedError):
+    with pytest.raises(RemoteCleanupFinalizedError):
         store.stage(staged, 1.0)
     assert store.cleanup_finalized(sibling.binding, sibling.plan_identity)
     store.finalize_cleanup_quarantine(sibling_receipt)
@@ -4661,7 +4659,7 @@ def test_remote_activation_volumes_absent_reads_every_named_volume() -> None:
 
 
 def _seed_recovered_sibling(
-    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+    store: RemoteExternalBootStore, record: RemoteExternalBootRecoveryRecord
 ) -> RemoteExternalBootRecoveryRecord:
     """Another activation with every per-activation file, a recovery record and its receipt."""
     objects = sorted(
@@ -4690,7 +4688,7 @@ def _seed_recovered_sibling(
 
 
 def _activation_names(
-    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+    store: RemoteExternalBootStore, record: RemoteExternalBootRecoveryRecord
 ) -> set[str]:
     """An activation's own files on disk plus the plan's shared materialization pair."""
     derived, anchors = store._activation_file_groups(
@@ -4734,7 +4732,7 @@ async def test_remote_system_teardown_collects_every_provable_activation(
 
     receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
     assert receipt is not None and receipt.managed
-    identity = external_boot_authority._recovery_identity(receipt.recovery_ref)
+    identity = _recovery_identity(receipt.recovery_ref)
     index = f"{store._recovery_key(record.binding, record.plan_identity)}.recovery-index"
     assert _store_names(store) == {
         _teardown_name(store),
@@ -4744,7 +4742,7 @@ async def test_remote_system_teardown_collects_every_provable_activation(
         *kept_names,
     }
     assert sorted(operations.proved) == [absent.binding.activation_id, kept.binding.activation_id]
-    with pytest.raises(external_boot_authority.RemoteCleanupFinalizedError):
+    with pytest.raises(RemoteCleanupFinalizedError):
         store.stage(absent_request, 1.0)
     cleanup = request.model_copy(update={"activation_id": UUID(absent.binding.activation_id)})
     assert adapter._observe(cleanup).category == "absent"
@@ -4793,15 +4791,15 @@ async def test_remote_teardown_collection_resumes_after_a_crash_at_any_unlink(
                     raise OSError("injected crash")
             real_unlink(path, *args, **kwargs)
 
-        monkeypatch.setattr(external_boot_authority.os, "unlink", failing)
+        monkeypatch.setattr(external_boot_store.os, "unlink", failing)
         try:
             assert await _system_teardown(store, operations)
         finally:
-            monkeypatch.setattr(external_boot_authority.os, "unlink", real_unlink)
+            monkeypatch.setattr(external_boot_store.os, "unlink", real_unlink)
         crashed = seen >= crash_at
         if crashed:
             crashes += 1
-            with pytest.raises(external_boot_authority.RemoteCleanupFinalizedError):
+            with pytest.raises(RemoteCleanupFinalizedError):
                 store.stage(staged, 1.0)
             assert await _observe_teardown(store, operations)
         assert _store_names(store) == {_teardown_name(store)}
@@ -5104,7 +5102,7 @@ async def test_remote_delete_rechecks_the_receipt_it_finalizes(
 
 
 def _seed_activation_residue(
-    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+    store: RemoteExternalBootStore, record: RemoteExternalBootRecoveryRecord
 ) -> None:
     """Every per-activation file a release leaves besides the recovery record (#3333)."""
     terminal = store.reopen_terminal(record.binding, record.plan_identity)
@@ -5127,7 +5125,7 @@ def _seed_activation_residue(
     )
 
 
-def _seed_system_teardown_intent(store: RemoteModuleVolumePreparationStore) -> str:
+def _seed_system_teardown_intent(store: RemoteExternalBootStore) -> str:
     """A real in-progress teardown record, so the torn-down check can parse it."""
     request = _remote_teardown_request()
     anchor = RemoteExternalBootAuthorityAdapter._teardown_anchor(
@@ -5141,7 +5139,7 @@ def _seed_system_teardown_intent(store: RemoteModuleVolumePreparationStore) -> s
     return _teardown_name(store)
 
 
-def _store_names(store: RemoteModuleVolumePreparationStore) -> set[str]:
+def _store_names(store: RemoteExternalBootStore) -> set[str]:
     return set(list_directory_descriptor(store._root_fd))
 
 
@@ -5152,7 +5150,7 @@ async def _finalized_release_store(
     RemoteExternalBootRecoveryRecord,
     AuthorityMutationRequestV1,
     AuthorityCommitContextV1,
-    RemoteModuleVolumePreparationStore,
+    RemoteExternalBootStore,
 ]:
     adapter, record, request, context = await _cleaned_release(tmp_path)
     store = adapter._coordinator._store
@@ -5287,14 +5285,14 @@ async def test_remote_finalize_resumes_after_a_crash_at_any_deletion(
                 raise OSError("injected crash")
             real_unlink(path, *args, **kwargs)
 
-        monkeypatch.setattr(external_boot_authority.os, "unlink", failing)
+        monkeypatch.setattr(external_boot_store.os, "unlink", failing)
         try:
             await adapter.finalize(request, context)
             crashed = False
         except OSError:
             crashed = True
         finally:
-            monkeypatch.setattr(external_boot_authority.os, "unlink", real_unlink)
+            monkeypatch.setattr(external_boot_store.os, "unlink", real_unlink)
         if crashed:
             crashes += 1
             await adapter.finalize(request, context)
@@ -5313,7 +5311,7 @@ async def test_remote_reads_of_a_finalized_activation_say_finalized_not_unknown(
     adapter, record, request, context, store = await _finalized_release_store(tmp_path)
     teardown = _seed_system_teardown_intent(store)
     await adapter.finalize(request, context)
-    finalized_error = external_boot_authority.RemoteCleanupFinalizedError
+    finalized_error = RemoteCleanupFinalizedError
 
     with pytest.raises(finalized_error):
         store.reopen_terminal(record.binding, record.plan_identity)
@@ -5346,7 +5344,7 @@ async def test_remote_replays_after_finalize_are_refused_not_recreated(tmp_path:
     prepare = _preparation_request(record, "materialize", operation_identity="replayed")
     await adapter.finalize(request, context)
     names = _store_names(store)
-    finalized_error = external_boot_authority.RemoteCleanupFinalizedError
+    finalized_error = RemoteCleanupFinalizedError
 
     with pytest.raises(finalized_error):
         store.stage(terminal.request, 1.0)
@@ -5414,7 +5412,7 @@ async def test_remote_teardown_after_finalize_protects_the_same_volumes_as_befor
 
 def test_remote_finalized_refs_without_a_terminal_protect_the_nonce_volumes() -> None:
     binding = _record().binding
-    refs = external_boot_authority.RemoteFinalizedTeardownRefsV1(
+    refs = RemoteFinalizedTeardownRefsV1(
         module_volumes=(), operation_nonce="c" * 32, boot_artifacts=()
     )
     state = RemoteSystemTeardownState(
@@ -5532,7 +5530,7 @@ def test_remote_finalized_teardown_proves_valid_boot_artifacts_like_the_live_rec
 ) -> None:
     record = _record_with_boot_names()
     assert record.materialization.verified_initrd_sha256 is not None
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     _publish_terminal(store, record)
     store.publish_materialization(_plan_for_record(record), record.materialization)
     coordinator = RemoteExternalBootCoordinator(cast(Any, object()), store, lambda: 1.0)
@@ -5542,7 +5540,7 @@ def test_remote_finalized_teardown_proves_valid_boot_artifacts_like_the_live_rec
     assert len(boot) == 2
 
     store._write_finalized_marker(
-        external_boot_authority.RemoteCleanupQuarantineV1(
+        RemoteCleanupQuarantineV1(
             binding=record.binding,
             plan_identity=record.plan_identity,
             recovery_ref=OpaqueProviderRef(ref="remote-external-boot/" + "a" * 64),
@@ -5646,7 +5644,7 @@ async def test_remote_system_teardown_of_a_finalized_activation_checks_unfinishe
 
 
 def _recovery_names(
-    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+    store: RemoteExternalBootStore, record: RemoteExternalBootRecoveryRecord
 ) -> tuple[str, str]:
     """The recovery index and the recovery record it names (#3419)."""
     receipt = store.read_cleanup_quarantine(record.binding, record.plan_identity)
@@ -5680,12 +5678,12 @@ async def _finalize_crashing_at(
             raise OSError("injected crash")
         real_unlink(path, *args, **kwargs)
 
-    monkeypatch.setattr(external_boot_authority.os, "unlink", failing)
+    monkeypatch.setattr(external_boot_store.os, "unlink", failing)
     try:
         with pytest.raises(OSError, match="injected crash"):
             await adapter.finalize(request, context)
     finally:
-        monkeypatch.setattr(external_boot_authority.os, "unlink", real_unlink)
+        monkeypatch.setattr(external_boot_store.os, "unlink", real_unlink)
 
 
 @pytest.mark.anyio
@@ -5795,7 +5793,7 @@ _REMEDY = (
 _PADDING_ACTIVATION = UUID("00000000-0000-4000-8000-0000000000c1")
 
 
-def _counted_names(store: RemoteModuleVolumePreparationStore) -> int:
+def _counted_names(store: RemoteExternalBootStore) -> int:
     return sum(
         1
         for name in _store_names(store)
@@ -5805,7 +5803,7 @@ def _counted_names(store: RemoteModuleVolumePreparationStore) -> int:
 
 
 def _pad_requests(
-    store: RemoteModuleVolumePreparationStore,
+    store: RemoteExternalBootStore,
     record: RemoteExternalBootRecoveryRecord,
     activation_id: UUID,
     total: int,
@@ -5917,6 +5915,8 @@ def test_remote_refusal_reasons_are_never_raised_as_plain_value_errors() -> None
     package = Path(external_boot_authority.__file__).parent
     adapter_modules = (
         "external_boot_authority.py",
+        "external_boot_store.py",
+        "../external_boot_authority/module_protocol.py",
         "external_boot_operations.py",
         "recovery_objects.py",
     )

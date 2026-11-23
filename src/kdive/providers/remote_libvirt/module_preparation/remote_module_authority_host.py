@@ -43,7 +43,7 @@ from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRef
 from kdive.providers.ports.external_boot import ExternalBootArtifactStager, OpaqueProviderRef
 from kdive.providers.ports.module_operation import RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.debuginfo_module_tree import STAGED_NAME
-from kdive.providers.remote_libvirt.external_boot_authority import (
+from kdive.providers.remote_libvirt.external_boot_store import (
     AdmittedRemoteModulePreparation,
     PriorPower,
     RemoteModuleTerminalRecord,

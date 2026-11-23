@@ -14,9 +14,7 @@ from kdive.providers.ports.external_boot import (
     RecoveryObjectBinding,
     RecoveryObjectObservation,
 )
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    RemoteModuleVolumePreparationStore,
-)
+from kdive.providers.remote_libvirt.external_boot_store import RemoteExternalBootStore
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
     parse_boot_artifact_name,
 )
@@ -48,7 +46,7 @@ class RemoteExternalBootRecoveryObjects:
     def __init__(
         self,
         *,
-        store: RemoteModuleVolumePreparationStore,
+        store: RemoteExternalBootStore,
         connection: RecoveryObjectConnection,
         boot_artifact_pool: str,
         inspect_attachments: Callable[[], AttachmentInspection],

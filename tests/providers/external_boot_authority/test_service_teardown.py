@@ -35,9 +35,9 @@ from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootAuthorityAdapter,
     RemoteExternalBootCoordinator,
-    RemoteModuleVolumePreparationStore,
     RemoteSystemTeardownInspection,
 )
+from kdive.providers.remote_libvirt.external_boot_store import RemoteExternalBootStore
 from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )
@@ -543,7 +543,7 @@ async def test_takeover_recovers_a_generation_that_never_began_over_an_older_rec
     )
     repository = _TeardownRepository(peer, first)
     (tmp_path / "provider").mkdir(mode=0o700)
-    store = RemoteModuleVolumePreparationStore(tmp_path / "provider")
+    store = RemoteExternalBootStore(tmp_path / "provider")
     host = _RemoteTeardownHost()
     adapter = _DiesBeforeBegin(
         RemoteExternalBootCoordinator(cast(Any, host), store, lambda: 300.0),

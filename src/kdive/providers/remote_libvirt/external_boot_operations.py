@@ -25,14 +25,16 @@ from kdive.providers.ports.external_boot import (
 from kdive.providers.ports.module_operation import RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootObservedState,
-    RemoteExternalBootRecoveryRecord,
-    RemoteFinalizedTeardownRefsV1,
-    RemoteModuleTerminalRecord,
     RemoteSystemTeardownInspection,
     RemoteSystemTeardownState,
 )
 from kdive.providers.remote_libvirt.external_boot_materialization import (
     ConcreteRemoteExternalBootMaterializer,
+)
+from kdive.providers.remote_libvirt.external_boot_store import (
+    RemoteExternalBootRecoveryRecord,
+    RemoteFinalizedTeardownRefsV1,
+    RemoteModuleTerminalRecord,
 )
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     AcknowledgedDefinition,

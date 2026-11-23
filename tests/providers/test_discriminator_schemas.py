@@ -74,7 +74,7 @@ _DIGESTS: dict[str, dict[str, str]] = {
         "LocalPartialAbortReceiptV1": "1efa8ca51db4",  # pragma: allowlist secret
         "LocalPreparationReceiptsV1": "a7d76c94cdaa",  # pragma: allowlist secret
     },
-    "kdive.providers.remote_libvirt.external_boot_authority": {
+    "kdive.providers.remote_libvirt.external_boot_store": {
         "RemoteSystemTeardownAnchorV1": "b22720bd9b82",  # pragma: allowlist secret
         "RemoteSystemTeardownIntentV1": "4967ca4a7b80",  # pragma: allowlist secret
         "RemoteSystemTeardownRecordV1": "0a198acd7969",  # pragma: allowlist secret

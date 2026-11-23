@@ -32,8 +32,10 @@ from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootAuthorityAdapter,
     RemoteExternalBootCoordinator,
     RemoteExternalBootObservedState,
+)
+from kdive.providers.remote_libvirt.external_boot_store import (
     RemoteExternalBootRecoveryRecord,
-    RemoteModuleVolumePreparationStore,
+    RemoteExternalBootStore,
 )
 from kdive.providers.remote_libvirt.lifecycle.external_boot import prepare_target_definition
 from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
@@ -107,7 +109,7 @@ def _native_adapter(
 ]:
     """A real store holding one prepared remote activation, behind the native adapter."""
     record = record or _record()
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     _publish_terminal(store, record)
     prepared = store.reopen_terminal(record.binding, record.plan_identity).request.authority
     preparation_authority = OpaqueProviderRef(
@@ -327,7 +329,7 @@ def _plan_for_record(record: RemoteExternalBootRecoveryRecord) -> ExternalBootPl
 
 
 def _publish_terminal(
-    store: RemoteModuleVolumePreparationStore, record: RemoteExternalBootRecoveryRecord
+    store: RemoteExternalBootStore, record: RemoteExternalBootRecoveryRecord
 ) -> None:
     plan = _plan_for_record(record)
     base = _remote_preparation_request()

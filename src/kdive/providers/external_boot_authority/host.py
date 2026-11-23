@@ -1740,7 +1740,6 @@ def _build_mutation_service(
         DurableRemoteModuleVolumePreparationHost,
         RemoteExternalBootAuthorityAdapter,
         RemoteExternalBootCoordinator,
-        RemoteModuleVolumePreparationStore,
     )
     from kdive.providers.remote_libvirt.external_boot_materialization import (
         REMOTE_MATERIALIZATION_CAPACITY_BYTES,
@@ -1749,6 +1748,7 @@ def _build_mutation_service(
     from kdive.providers.remote_libvirt.external_boot_operations import (
         ConcreteRemoteExternalBootOperations,
     )
+    from kdive.providers.remote_libvirt.external_boot_store import RemoteExternalBootStore
     from kdive.providers.remote_libvirt.lifecycle.external_boot import OBSERVATION_PROGRAMS
     from kdive.providers.remote_libvirt.module_preparation.remote_module_authority_host import (
         FactoryRemoteModuleAuthorityHost,
@@ -1770,7 +1770,7 @@ def _build_mutation_service(
         if isinstance(binding.adapter, AuthorityAdapterCloser):
             binding.adapter.close()
         raise
-    module_store = RemoteModuleVolumePreparationStore(config.remote_module_store_dir)
+    module_store = RemoteExternalBootStore(config.remote_module_store_dir)
     module_executor = RemoteModulePreparationExecutor()
     registry = SecretRegistry()
     monotonic = time.monotonic

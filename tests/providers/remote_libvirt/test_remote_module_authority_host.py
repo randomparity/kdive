@@ -53,8 +53,8 @@ from kdive.providers.remote_libvirt.authority_client import (
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
     DurableRemoteModuleVolumePreparationHost,
-    RemoteModuleVolumePreparationStore,
 )
+from kdive.providers.remote_libvirt.external_boot_store import RemoteExternalBootStore
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
 from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
@@ -275,7 +275,7 @@ async def test_production_factory_binds_overlay_and_verified_installed_appliance
     )
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir(mode=0o700)
-    store = RemoteModuleVolumePreparationStore(evidence_root)
+    store = RemoteExternalBootStore(evidence_root)
     durable = DurableRemoteModuleVolumePreparationHost(
         store, FactoryRemoteModuleAuthorityHost(factory), monotonic=clock
     )
@@ -522,7 +522,7 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
 
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir(mode=0o700)
-    store = RemoteModuleVolumePreparationStore(evidence_root)
+    store = RemoteExternalBootStore(evidence_root)
     durable_host = DurableRemoteModuleVolumePreparationHost(store, host)
     store.stage(request, 10_000.0)
     response = await durable_host.execute(request)
@@ -683,7 +683,7 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
     assert repository.discharged
     store.close()
 
-    restarted_store = RemoteModuleVolumePreparationStore(evidence_root)
+    restarted_store = RemoteExternalBootStore(evidence_root)
     appliance.created_flags = None
     replay = await DurableRemoteModuleVolumePreparationHost(restarted_store, host).execute(request)
     assert replay == response
@@ -787,7 +787,7 @@ class _Quiesce:
         )
         evidence_root = tmp_path / "evidence"
         evidence_root.mkdir(mode=0o700)
-        self.store = RemoteModuleVolumePreparationStore(evidence_root)
+        self.store = RemoteExternalBootStore(evidence_root)
         self.store.stage(self.request, deadline)
         self.durable = DurableRemoteModuleVolumePreparationHost(self.store, host)
 
@@ -1601,7 +1601,7 @@ async def test_expired_deadline_leaves_a_running_system_running(tmp_path: Path) 
 
 
 def test_prior_power_record_is_first_write_wins_and_validated(tmp_path: Path) -> None:
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     authority = _request().authority
     assert store.record_prior_power(authority, "running") == "running"
     assert store.record_prior_power(authority, "inactive") == "running"
