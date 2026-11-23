@@ -51,6 +51,7 @@ from kdive.jobs.models import (
     ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureV1,
+    ExternalBootAuthorityHandlerResult,
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthorityResultV1,
     ExternalBootAuthoritySuccessV1,
@@ -606,9 +607,14 @@ class Worker:
                     job.id,
                 )
                 return False
-            if isinstance(result_ref, ExternalBootAuthorityResultV1) and _authority_binding_matches(
-                marker, result_ref
-            ):
+            if isinstance(
+                result_ref,
+                (
+                    ExternalBootAuthoritySuccessV1,
+                    ExternalBootAuthorityFailureV1,
+                    ExternalBootAuthorityConflictV1,
+                ),
+            ) and _authority_binding_matches(marker, result_ref):
                 return await self._commit_external_result(job, result_ref)
             else:
                 _log.warning(
@@ -638,7 +644,7 @@ class Worker:
         return False
 
     async def _commit_external_result(
-        self, job: Job, result: ExternalBootAuthorityResultV1
+        self, job: Job, result: ExternalBootAuthorityHandlerResult
     ) -> bool:
         async with self._pool.connection() as conn:
             if isinstance(result, ExternalBootAuthoritySuccessV1):

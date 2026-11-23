@@ -2,8 +2,9 @@
 
 A :data:`JobHandler` is the async callable a worker invokes for one claimed
 :class:`~kdive.domain.operations.jobs.Job`; it runs the op and returns a ``result_ref``
-(object-store key) or ``None``, or raises to fail the job. :class:`HandlerRegistry`
-binds exactly one handler per :class:`~kdive.domain.operations.jobs.JobKind`; plane registrars
+(object-store key), ``None``, or a typed authority completion, or raises to fail the job.
+:class:`HandlerRegistry` binds one handler per
+:class:`~kdive.domain.operations.jobs.JobKind`; plane registrars
 populate it at worker startup and the worker dispatches by ``Job.kind``.
 """
 
@@ -500,7 +501,12 @@ class ExternalBootDerivedTeardownCompletion(ExternalBootAuthoritySuccessV1):
     """The teardown handler already consumed its exact authority receipt transaction."""
 
 
-type JobHandlerResult = str | None | ExternalBootAuthorityResultV1 | AuthoritySystemResponseV1
+type ExternalBootAuthorityHandlerResult = (
+    ExternalBootAuthoritySuccessV1
+    | ExternalBootAuthorityFailureV1
+    | ExternalBootAuthorityConflictV1
+)
+type JobHandlerResult = str | None | ExternalBootAuthorityHandlerResult | AuthoritySystemResponseV1
 type JobHandler = Callable[[AsyncConnection, Job], Awaitable[JobHandlerResult]]
 
 
