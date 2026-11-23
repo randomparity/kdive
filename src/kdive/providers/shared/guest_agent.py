@@ -173,14 +173,24 @@ def _exit_status(payload: dict[str, Any]) -> int:
     raises ``INFRASTRUCTURE_FAILURE`` instead.
     """
     if "exitcode" in payload:
-        return int(payload["exitcode"])
-    signal = payload.get("signal")
-    if signal is not None:
-        return 128 + int(signal)
-    raise CategorizedError(
-        "guest agent reported a process exit without an exit code or signal",
-        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-    )
+        field = "exitcode"
+    elif "signal" in payload:
+        field = "signal"
+    else:
+        raise CategorizedError(
+            "guest agent reported a process exit without an exit code or signal",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
+    try:
+        value = payload[field]
+        if type(value) is not int:
+            raise TypeError("process exit code and signal must be integers")
+        return value if field == "exitcode" else 128 + value
+    except TypeError as exc:
+        raise CategorizedError(
+            f"guest agent returned an invalid {field!r}",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        ) from exc
 
 
 def _decode_capture(payload: dict[str, Any], field: str) -> bytes:
@@ -188,8 +198,10 @@ def _decode_capture(payload: dict[str, Any], field: str) -> bytes:
     if raw is None:
         return b""
     try:
-        return base64.b64decode(raw)
-    except (binascii.Error, ValueError) as exc:
+        if not isinstance(raw, str):
+            raise TypeError("capture must be a base64 string")
+        return base64.b64decode(raw, validate=True)
+    except (binascii.Error, TypeError, ValueError) as exc:
         raise CategorizedError(
             f"guest agent returned an undecodable {field!r} capture",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -285,7 +297,9 @@ class GuestAgentExec:
             reply = self._agent(domain, status_command)
             try:
                 payload = reply["return"]
-                exited = bool(payload["exited"])
+                exited = payload["exited"]
+                if type(exited) is not bool:
+                    raise TypeError("exited must be a boolean")
             except (KeyError, TypeError) as exc:
                 raise CategorizedError(
                     "guest agent returned a malformed guest-exec-status reply",

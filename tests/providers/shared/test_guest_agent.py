@@ -18,7 +18,11 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
-from kdive.providers.shared.guest_agent import GuestAgentExec, qemu_agent_command
+from kdive.providers.shared.guest_agent import (
+    AgentExecResult,
+    GuestAgentExec,
+    qemu_agent_command,
+)
 from tests.providers.remote_libvirt.conftest import libvirt_error
 
 
@@ -470,3 +474,48 @@ def test_run_sleeps_the_configured_poll_interval_between_polls() -> None:
     )
     exc.run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert slept == [0.25, 0.25]
+
+
+def _run_status_reply(payload: object) -> AgentExecResult:
+    def reply(domain: object, command: str, timeout: int, flags: int) -> str:
+        if json.loads(command)["execute"] == "guest-exec":
+            return json.dumps({"return": {"pid": 4242}})
+        return json.dumps({"return": payload})
+
+    return GuestAgentExec(
+        agent_command=reply,
+        allowed_programs=_ALLOWED,
+        sleep=lambda _s: None,
+        monotonic=_float_clock(),
+    ).run(_DOMAIN, ["/usr/bin/curl"])
+
+
+@pytest.mark.parametrize("exited", ["false", "true", 0, 1, None, [], {}])
+def test_status_requires_a_boolean_exited_field(exited: object) -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        _run_status_reply({"exited": exited, "exitcode": 0})
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert excinfo.value.__cause__ is not None
+
+
+@pytest.mark.parametrize("field", ["exitcode", "signal"])
+@pytest.mark.parametrize("value", [None, "0", "invalid", 0.5, True, [], {}])
+def test_exit_status_requires_integer_fields(field: str, value: object) -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        _run_status_reply({"exited": True, field: value})
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert excinfo.value.__cause__ is not None
+
+
+@pytest.mark.parametrize("field", ["out-data", "err-data"])
+@pytest.mark.parametrize("value", [42, True, [], {}, "!!!!", "a", "é"])
+def test_capture_requires_a_base64_string(field: str, value: object) -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        _run_status_reply({"exited": True, "exitcode": 0, field: value})
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert excinfo.value.__cause__ is not None
+
+
+def test_null_captures_remain_empty() -> None:
+    result = _run_status_reply({"exited": True, "exitcode": 0, "out-data": None, "err-data": None})
+    assert result == (0, b"", b"")
