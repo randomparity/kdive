@@ -51,6 +51,7 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.jobs import queue
 from kdive.jobs.external_boot_models import (
+    ActivateResult,
     ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureV1,
@@ -58,10 +59,9 @@ from kdive.jobs.external_boot_models import (
     ExternalBootAuthorityResultV1,
     ExternalBootAuthoritySuccessV1,
     ExternalBootDerivedTeardownCompletion,
-    _ActivateResult,
+    RecoveryAttemptResult,
+    TeardownResult,
     _FailureResult,
-    _RecoveryAttemptResult,
-    _TeardownResult,
 )
 from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
@@ -636,7 +636,7 @@ def test_activate_reuses_the_persisted_readiness_deadline(
         result = await _run_operation(authority_role_dsns, seed, case, "activate")
 
         payload = result.result
-        assert isinstance(payload, _ActivateResult)
+        assert isinstance(payload, ActivateResult)
         assert payload.activation_readiness_deadline == datetime(2027, 1, 1, tzinfo=UTC)
 
     _drive(migrated_url, authority_role_dsns, "activate", body)
@@ -1173,6 +1173,10 @@ def test_teardown_consumes_the_typed_authority_response_and_terminal_head(
             response.journal_sequence,
             response.journal_digest,
         )
+        assert (result.journal_sequence, result.journal_digest) == (
+            response.journal_sequence,
+            response.journal_digest,
+        )
         assert head["head_record"]["observation"] == response.observation.model_dump(
             mode="json", by_alias=True
         )
@@ -1201,7 +1205,7 @@ def test_teardown_quarantine_retains_core_owned_state(
                 _job(case),
                 ExternalBootAuthorityMarkerV1.model_validate(case.marker),
             )
-        assert cast(_TeardownResult, result.result).response.proof.disposition == (
+        assert cast(TeardownResult, result.result).response.proof.disposition == (
             "retained_quarantine"
         )
         assert await _core_owned_teardown_row_counts(seed, case) == (1, 1)
@@ -1864,7 +1868,7 @@ def test_reentry_gets_a_fresh_deadline_not_a_refusal(
     result = _run_reentry(migrated_url, authority_role_dsns, operation, job_attempt=2)
 
     assert isinstance(result, ExternalBootAuthoritySuccessV1)
-    assert isinstance(result.result, _RecoveryAttemptResult)
+    assert isinstance(result.result, RecoveryAttemptResult)
     assert result.result.deadline == _REENTRY_NOW + _REENTRY_TIMEOUT
 
 

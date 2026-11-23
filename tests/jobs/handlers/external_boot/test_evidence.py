@@ -13,7 +13,10 @@ from types import SimpleNamespace
 from typing import cast
 from uuid import uuid4
 
-from kdive.domain.external_boot_activation import ExternalBootActivation
+from kdive.domain.external_boot_activation import (
+    ExternalBootActivation,
+    ExternalBootTerminalEvidenceV1,
+)
 from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.jobs.handlers.external_boot.evidence import (
     known_object_refs,
@@ -110,8 +113,15 @@ def test_terminal_evidence_takes_composite_state_from_the_acknowledgement() -> N
 
     evidence = terminal_evidence(context, "active")
 
-    assert evidence["composite_state"] == DIGEST
-    assert evidence["activation_id"] == str(activation_id)
-    assert evidence["system_id"] == str(system_id)
-    assert evidence["outcome"] == "active"
-    assert evidence["schema"] == "external-boot-terminal-evidence-v1"
+    assert isinstance(evidence, ExternalBootTerminalEvidenceV1)
+    assert evidence.composite_state == DIGEST
+    assert evidence.activation_id == activation_id
+    assert evidence.system_id == system_id
+    assert evidence.outcome == "active"
+    serialized = evidence.model_dump(mode="json", by_alias=True)
+    assert serialized["schema"] == "external-boot-terminal-evidence-v1"
+    assert "schema_" not in serialized
+    assert serialized["activation_id"] == str(activation_id)
+    assert serialized["system_id"] == str(system_id)
+    assert serialized["observed_at"].endswith("Z")
+    assert ExternalBootTerminalEvidenceV1.model_validate(serialized) == evidence

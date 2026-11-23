@@ -64,7 +64,7 @@ class _ReleaseObject(_ClosedModel):
     absent: Literal[True]
 
 
-class _ReleaseEvidence(_ClosedModel):
+class ReleaseResultEvidence(_ClosedModel):
     schema_: Literal["external-boot-release-evidence-v1"] = Field(alias="schema")
     activation_id: UUID
     system_id: UUID
@@ -78,7 +78,7 @@ class _ReleaseEvidence(_ClosedModel):
     _normalize_timestamp = field_validator("verified_at")(_utc_datetime)
 
 
-class _CleanupEvidence(_ClosedModel):
+class CleanupResultEvidence(_ClosedModel):
     schema_: Literal["external-boot-cleanup-evidence-v1"] = Field(alias="schema")
     activation_id: UUID
     system_id: UUID
@@ -105,7 +105,7 @@ class _ResultBase(_ClosedModel):
     )
 
 
-class _ActivateResult(_ResultBase):
+class ActivateResult(_ResultBase):
     operation: Literal["activate"]
     result_ref: _ResultRef
     evidence: ExternalBootTerminalEvidenceV1
@@ -114,39 +114,39 @@ class _ActivateResult(_ResultBase):
     _normalize_timestamp = field_validator("activation_readiness_deadline")(_utc_datetime)
 
 
-class _RecoverResult(_ResultBase):
+class RecoverResult(_ResultBase):
     operation: Literal["recover", "resolve-conflict"]
     result_ref: _ResultRef
     evidence: ExternalBootTerminalEvidenceV1
 
 
-class _ReleaseResult(_ResultBase):
+class ReleaseResult(_ResultBase):
     operation: Literal["release"]
     result_ref: _ResultRef
     release_identity: _Digest
-    evidence: _ReleaseEvidence
+    evidence: ReleaseResultEvidence
 
 
-class _CleanupResult(_ResultBase):
+class CleanupResult(_ResultBase):
     operation: Literal["cleanup"]
     result_ref: _ResultRef
-    evidence: _CleanupEvidence
+    evidence: CleanupResultEvidence
 
 
-class _TeardownResult(_ResultBase):
+class TeardownResult(_ResultBase):
     operation: Literal["teardown"]
     result_ref: _ResultRef
     response: AuthorityTeardownResponseV1
 
 
-class _DeadlineResult(_ResultBase):
+class DeadlineResult(_ResultBase):
     operation: Literal["deadline"]
     deadline: datetime
 
     _normalize_timestamp = field_validator("deadline")(_utc_datetime)
 
 
-class _RecoveryAttemptResult(_ResultBase):
+class RecoveryAttemptResult(_ResultBase):
     operation: Literal["recovery-attempt"]
     attempt_id: UUID
     recovery_basis: Literal["recovery_point", "pre_recovery"]
@@ -156,7 +156,7 @@ class _RecoveryAttemptResult(_ResultBase):
     _normalize_timestamp = field_validator("deadline")(_utc_datetime)
 
 
-class _ConflictResult(_ResultBase):
+class ConflictResult(_ResultBase):
     """ADR-0805: the authority journaled a terminal conflict for this operation."""
 
     operation: Literal["conflict"]
@@ -268,15 +268,26 @@ class _FailureResult(_ResultBase):
         return self
 
 
+type ExternalBootSuccessPayload = (
+    ActivateResult
+    | RecoverResult
+    | ReleaseResult
+    | CleanupResult
+    | TeardownResult
+    | DeadlineResult
+    | RecoveryAttemptResult
+)
+
+
 type ExternalBootResultPayload = Annotated[
-    _ActivateResult
-    | _RecoverResult
-    | _ReleaseResult
-    | _CleanupResult
-    | _TeardownResult
-    | _DeadlineResult
-    | _RecoveryAttemptResult
-    | _ConflictResult
+    ActivateResult
+    | RecoverResult
+    | ReleaseResult
+    | CleanupResult
+    | TeardownResult
+    | DeadlineResult
+    | RecoveryAttemptResult
+    | ConflictResult
     | _FailureResult,
     Field(discriminator="operation"),
 ]
@@ -415,21 +426,21 @@ class ExternalBootAuthorityResultV1(BaseModel):
                 raise ValueError("terminal evidence has at most 4096 objects")
             for provider_ref in evidence.objects:
                 _utf8_bytes(provider_ref.ref, 1024)
-        if isinstance(result, _ActivateResult) and result.evidence.outcome != "active":
+        if isinstance(result, ActivateResult) and result.evidence.outcome != "active":
             raise ValueError("activate evidence outcome must be active")
-        if isinstance(result, _RecoverResult) and result.evidence.outcome != "recovered":
+        if isinstance(result, RecoverResult) and result.evidence.outcome != "recovered":
             raise ValueError("recovery evidence outcome must be recovered")
-        if isinstance(result, _ReleaseResult):
+        if isinstance(result, ReleaseResult):
             refs = [item.object.ref for item in result.evidence.objects]
             if refs != sorted(set(refs)):
                 raise ValueError("release evidence object references must be sorted and unique")
         if (
-            isinstance(result, _CleanupResult)
+            isinstance(result, CleanupResult)
             and result.evidence.mode == "ordinary"
             and result.evidence.teardown_identity is not None
         ):
             raise ValueError("ordinary cleanup cannot carry teardown identity")
-        if isinstance(result, _TeardownResult) and (self.journal_sequence, self.journal_digest) != (
+        if isinstance(result, TeardownResult) and (self.journal_sequence, self.journal_digest) != (
             result.response.journal_sequence,
             result.response.journal_digest,
         ):

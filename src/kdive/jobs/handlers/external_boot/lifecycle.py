@@ -33,13 +33,23 @@ from kdive.domain.external_boot_values import RecoveryPoint, RunningKernelObserv
 from kdive.domain.operations.jobs import Job
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.jobs.external_boot_models import (
+    ActivateResult,
+    CleanupResult,
+    CleanupResultEvidence,
+    DeadlineResult,
     ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,
     ExternalBootDerivedReleaseCompletion,
     ExternalBootDerivedTeardownCompletion,
+    RecoverResult,
+    RecoveryAttemptResult,
+    ReleaseResult,
+    ReleaseResultEvidence,
+    TeardownResult,
 )
 from kdive.jobs.handlers.external_boot.evidence import (
+    authority_carrier_data,
     authority_result,
     conflict_result,
     terminal_evidence,
@@ -302,7 +312,7 @@ async def _run_active_release(
                 context.authority.generation,
                 recover.operation_identity,
                 recover.operation_digest,
-                json.dumps(evidence),
+                evidence.model_dump_json(by_alias=True),
             ),
         )
         if status != "applied":
@@ -367,7 +377,7 @@ async def _run_active_release(
         "system_id": str(context.marker.system_id),
         "release_identity": identity,
         "mode": "ordinary",
-        "completed_at": _now(),
+        "completed_at": _now().isoformat().replace("+00:00", "Z"),
     }
     status = await _derived_release_status(
         context.connection,
@@ -389,16 +399,15 @@ async def _run_active_release(
             "derived release finalization was superseded", category=ErrorCategory.STALE_HANDLE
         )
     return ExternalBootDerivedReleaseCompletion.model_validate(
-        authority_result(
+        authority_carrier_data(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "release",
-                "result_ref": None,
-                "release_identity": identity,
-                "evidence": release,
-            },
-        ).model_dump(mode="json", by_alias=True)
+            ReleaseResult(
+                operation="release",
+                result_ref=None,
+                release_identity=identity,
+                evidence=ReleaseResultEvidence.model_validate(release),
+            ),
+        )
     )
 
 
@@ -406,8 +415,8 @@ def _refuse(message: str) -> CategorizedError:
     return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR, terminal=True)
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _recovery(context: OperationContext) -> RecoveryPoint:
@@ -743,13 +752,12 @@ def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
             raise _refuse("activating row has no activation readiness deadline")
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "activate",
-                "result_ref": None,
-                "evidence": terminal_evidence(context, "active"),
-                "activation_readiness_deadline": deadline.isoformat().replace("+00:00", "Z"),
-            },
+            ActivateResult(
+                operation="activate",
+                result_ref=None,
+                evidence=terminal_evidence(context, "active"),
+                activation_readiness_deadline=deadline,
+            ),
         )
 
     def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
@@ -770,11 +778,7 @@ def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
         )
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "deadline",
-                "deadline": deadline.isoformat().replace("+00:00", "Z"),
-            },
+            DeadlineResult(operation="deadline", deadline=deadline),
         )
 
     return _handler(
@@ -796,12 +800,11 @@ def recover_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     ) -> ExternalBootAuthoritySuccessV1:
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "recover",
-                "result_ref": None,
-                "evidence": terminal_evidence(context, "recovered"),
-            },
+            RecoverResult(
+                operation="recover",
+                result_ref=None,
+                evidence=terminal_evidence(context, "recovered"),
+            ),
         )
 
     def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
@@ -819,13 +822,12 @@ def recover_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
         )
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "recovery-attempt",
-                "attempt_id": str(attempt_id),
-                "recovery_basis": "recovery_point",
-                "deadline": deadline.isoformat().replace("+00:00", "Z"),
-            },
+            RecoveryAttemptResult(
+                operation="recovery-attempt",
+                attempt_id=attempt_id,
+                recovery_basis="recovery_point",
+                deadline=deadline,
+            ),
         )
 
     async def require_attempt(
@@ -856,12 +858,11 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
     ) -> ExternalBootAuthoritySuccessV1:
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "resolve-conflict",
-                "result_ref": None,
-                "evidence": terminal_evidence(context, "recovered"),
-            },
+            RecoverResult(
+                operation="resolve-conflict",
+                result_ref=None,
+                evidence=terminal_evidence(context, "recovered"),
+            ),
         )
 
     async def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
@@ -892,14 +893,13 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
         )
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "recovery-attempt",
-                "attempt_id": str(attempt_id),
-                "recovery_basis": "pre_recovery",
-                "deadline": deadline.isoformat().replace("+00:00", "Z"),
-                "observed_composite_state": expected,
-            },
+            RecoveryAttemptResult(
+                operation="recovery-attempt",
+                attempt_id=attempt_id,
+                recovery_basis="pre_recovery",
+                deadline=deadline,
+                observed_composite_state=expected,
+            ),
         )
 
     async def require_attempt(
@@ -967,19 +967,17 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
 
 def _cleanup_evidence(
     context: OperationContext, *, teardown_identity: str | None
-) -> dict[str, Any]:
+) -> CleanupResultEvidence:
     ordinary = context.activation.state in _ORDINARY_CLEANUP_STATES
-    evidence: dict[str, Any] = {
-        "schema": "external-boot-cleanup-evidence-v1",
-        "activation_id": str(context.marker.activation_id),
-        "system_id": str(context.marker.system_id),
-        "release_identity": context.prerequisites["release_identity"],
-        "mode": "ordinary" if ordinary else "system_teardown",
-        "completed_at": _now(),
-    }
-    if teardown_identity is not None:
-        evidence["teardown_identity"] = teardown_identity
-    return evidence
+    return CleanupResultEvidence(
+        schema_="external-boot-cleanup-evidence-v1",
+        activation_id=context.marker.activation_id,
+        system_id=context.marker.system_id,
+        release_identity=context.prerequisites["release_identity"],
+        mode="ordinary" if ordinary else "system_teardown",
+        teardown_identity=teardown_identity,
+        completed_at=_now(),
+    )
 
 
 def cleanup_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
@@ -998,17 +996,16 @@ def cleanup_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
         ordinary = context.activation.state in _ORDINARY_CLEANUP_STATES
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "cleanup",
-                "result_ref": None,
-                "evidence": _cleanup_evidence(
+            CleanupResult(
+                operation="cleanup",
+                result_ref=None,
+                evidence=_cleanup_evidence(
                     context,
                     teardown_identity=(
                         None if ordinary else context.prerequisites["teardown_identity"]
                     ),
                 ),
-            },
+            ),
         )
 
     return _handler(
@@ -1120,29 +1117,12 @@ def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
             raise CategorizedError(
                 "teardown receipt was superseded", category=ErrorCategory.STALE_HANDLE
             )
-        carrier = {
-            "schema": "external-boot-authority-result-v1",
-            "authority_id": context.authority.authority_id,
-            "generation": context.authority.generation,
-            "activation_id": context.marker.activation_id,
-            "run_id": context.marker.run_id,
-            "system_id": context.marker.system_id,
-            "plan_identity": context.marker.plan_identity,
-            "purpose": context.marker.purpose,
-            "provider_kind": context.marker.provider_kind,
-            "authority_instance": context.marker.authority_instance,
-            "admitted_operation": context.marker.operation,
-            "operation_identity": context.marker.operation_identity,
-            "operation_digest": context.authority.operation_digest,
-            "journal_sequence": response.journal_sequence,
-            "journal_digest": response.journal_digest,
-            "result": {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "teardown",
-                "result_ref": None,
-                "response": response.model_dump(mode="json", by_alias=True),
-            },
-        }
+        carrier = authority_carrier_data(
+            context,
+            TeardownResult(operation="teardown", result_ref=None, response=response),
+        )
+        carrier["journal_sequence"] = response.journal_sequence
+        carrier["journal_digest"] = response.journal_digest
         return ExternalBootDerivedTeardownCompletion.model_validate(carrier)
 
     async def handler(

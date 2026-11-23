@@ -4,6 +4,7 @@ import asyncio
 import subprocess
 import sys
 from contextlib import AbstractAsyncContextManager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast, get_type_hints
 from unittest.mock import AsyncMock
@@ -16,6 +17,7 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.external_boot_models import (
+    DeadlineResult,
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureContext,
     ExternalBootAuthorityFailureV1,
@@ -948,3 +950,11 @@ def test_authority_models_import_without_loading_generic_registry() -> None:
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_typed_payload_still_checks_carrier_operation() -> None:
+    payload = DeadlineResult(operation="deadline", deadline=datetime(2026, 8, 29, tzinfo=UTC))
+    data = _carrier(payload.model_dump(mode="json", by_alias=True))
+    data.update({"purpose": "release", "admitted_operation": "release", "result": payload})
+    with pytest.raises(ValidationError, match="result operation does not match authority purpose"):
+        ExternalBootAuthoritySuccessV1.model_validate(data)

@@ -21,8 +21,8 @@ from kdive.jobs.external_boot_models import (
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,
+    RecoveryAttemptResult,
     _FailureResult,
-    _RecoveryAttemptResult,
 )
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
@@ -632,7 +632,7 @@ def test_resolve_conflict_starts_a_fresh_attempt_from_its_own_clock(
             async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
                 result = await handler(worker, job, marker)
                 assert result.result.operation == "recovery-attempt"
-                assert isinstance(result.result, _RecoveryAttemptResult)
+                assert isinstance(result.result, RecoveryAttemptResult)
                 assert result.result.deadline == now + timedelta(seconds=120)
                 assert result.result.attempt_id != case.attempt_id
                 assert executor.requests == []
