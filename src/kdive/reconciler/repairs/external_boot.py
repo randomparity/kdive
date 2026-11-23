@@ -11,6 +11,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from pydantic import ValidationError
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
@@ -322,11 +323,20 @@ async def repair_external_boot_lane(
                     live_jobs=live_jobs,
                 )
             repaired += inserted
-        except Exception:
-            # Provider and durable payload exceptions may contain host identifiers. The lane's
-            # bounded operation label is enough for telemetry; raw diagnostics stay private.
+        except Exception as error:
+            # Messages and tracebacks may contain provider identities or durable payloads.
+            category = (
+                error.category
+                if isinstance(error, CategorizedError)
+                else ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
             _log.warning(
-                "reconciler: external-boot %s candidate repair failed", candidate.operation
+                "reconciler: external-boot %s candidate repair failed "
+                "activation_id=%s exception=%s category=%s",
+                candidate.operation,
+                candidate.activation_id,
+                type(error).__name__[:80],
+                category.value,
             )
     return repaired
 

@@ -14,6 +14,7 @@ from psycopg.errors import ForeignKeyViolation, InsufficientPrivilege, QueryCanc
 from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.jobs.payloads import BootPayload
 from kdive.reconciler.repairs import external_boot
 from tests.db.external_boot_authority_support import _RoleDsns
@@ -393,3 +394,74 @@ def test_reservation_cannot_exist_without_an_activation(migrated_url: str) -> No
                 )
 
     asyncio.run(body())
+
+
+@pytest.mark.parametrize("failure_kind", ["database", "payload", "provider"])
+def test_repair_failures_keep_safe_diagnostics_and_transaction_isolation(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure_kind: str,
+) -> None:
+    # Synthetic marker verifies exception details never reach logs.
+    secret = "sentinel-provider-secret"  # pragma: allowlist secret
+    failures = {
+        "database": QueryCanceled(secret),
+        "payload": ValueError(secret),
+        "provider": CategorizedError(secret, category=ErrorCategory.TRANSPORT_FAILURE),
+    }
+    failure = failures[failure_kind]
+    candidates = tuple(
+        external_boot._Candidate(
+            uuid4(), uuid4(), uuid4(), "sha256:" + "a" * 64, secret, "activate"
+        )
+        for _ in range(2)
+    )
+    monkeypatch.setattr(external_boot, "_candidates", AsyncMock(return_value=candidates))
+    monkeypatch.setattr(external_boot, "_candidate_jobs", AsyncMock(return_value=()))
+
+    async def enqueue(
+        conn: psycopg.AsyncConnection, candidate: external_boot._Candidate, **_kwargs: object
+    ) -> bool:
+        await conn.execute(
+            "INSERT INTO repair_attempt_probe (candidate_id) VALUES (%s)",
+            (candidate.activation_id,),
+        )
+        if candidate is candidates[0]:
+            raise failure
+        return True
+
+    monkeypatch.setattr(external_boot, "_enqueue_candidate", enqueue)
+
+    async def body() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            await conn.execute("CREATE TEMP TABLE repair_attempt_probe (candidate_id uuid)")
+            for _ in range(2):
+                assert (
+                    await external_boot.repair_external_boot_lane(
+                        conn,
+                        lane="activation",
+                        resolver=resolver_for(build_vehicle()),
+                        authority_instance=secret,
+                    )
+                    == 1
+                )
+                assert conn.info.transaction_status is TransactionStatus.IDLE
+            cursor = await conn.execute("SELECT candidate_id FROM repair_attempt_probe")
+            assert await cursor.fetchall() == [(candidates[1].activation_id,)] * 2
+
+    asyncio.run(body())
+    records = [r for r in caplog.records if r.name == external_boot.__name__]
+    assert len(records) == 2
+    expected_category = (
+        ErrorCategory.TRANSPORT_FAILURE
+        if failure_kind == "provider"
+        else ErrorCategory.INFRASTRUCTURE_FAILURE
+    )
+    for record in records:
+        message = record.getMessage()
+        assert f"activation_id={candidates[0].activation_id}" in message
+        assert f"exception={type(failure).__name__}" in message
+        assert f"category={expected_category.value}" in message
+        assert secret not in message
+        assert record.exc_info is None
