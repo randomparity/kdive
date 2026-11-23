@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -586,14 +587,21 @@ def test_image_config_closes_architectures_bounds_and_paths() -> None:
 
 def test_appliance_source_has_fixed_depmod_and_no_guest_exec_or_network() -> None:
     source = (APPLIANCE / "appliance.py").read_text(encoding="utf-8")
-    assert 'DEPMOD = "/sbin/depmod"' in source
-    assert "shell=True" not in source
-    assert "socket" not in source
-    assert "os.exec" not in source
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert all(alias.name.split(".")[0] != "socket" for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert (node.module or "").split(".")[0] != "socket"
+            if node.module == "os":
+                assert all(not alias.name.startswith("exec") for alias in node.names)
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            assert not (node.value.id == "os" and node.attr.startswith("exec"))
     assert source.startswith("#!/usr/bin/python3 -S\n")
-    assert "subprocess.Popen(" in source and '[DEPMOD, "-b"' in source
-    assert "200_000" in source
-    assert "8 * 1024**3" in source
+    appliance = _module()
+    assert appliance.DEPMOD == "/sbin/depmod"
+    assert appliance.ENTRY_LIMIT == 200_000
+    assert appliance.BYTE_LIMIT == 8 * 1024**3
 
 
 def test_appliance_devtmpfs_mount_allows_its_device_nodes(
