@@ -47,12 +47,12 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
+    AuthorityServiceError,
     AuthorityTeardownMutationRequestV1,
     JournalPhase,
     JournalRecordV1,
 )
 from kdive.providers.external_boot_authority.service import (
-    AuthorityServiceError,
     ExternalBootAuthorityService,
     ProofBarrierAbort,
 )

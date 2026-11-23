@@ -38,8 +38,10 @@ from kdive.providers.external_boot_authority.host import (
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     ModuleVolumeSweepResponseV1,
 )
-from kdive.providers.external_boot_authority.protocol import AuthorityStrandedObservationResponseV1
-from kdive.providers.external_boot_authority.service import AuthorityServiceError
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityServiceError,
+    AuthorityStrandedObservationResponseV1,
+)
 from kdive.providers.external_boot_authority.transport import (
     MAX_CREDENTIAL_BYTES,
     MAX_ENVELOPE_BYTES,

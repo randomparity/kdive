@@ -14,11 +14,9 @@ from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityOperation,
-)
-from kdive.providers.external_boot_authority.service import (
     AuthorityServiceError,
-    ExternalBootAuthorityService,
 )
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,

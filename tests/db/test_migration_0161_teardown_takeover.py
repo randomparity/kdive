@@ -21,15 +21,13 @@ from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     AuthorityCommitContextV1,
+    AuthorityServiceError,
     AuthorityTeardownMutationRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthorityServiceError,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,

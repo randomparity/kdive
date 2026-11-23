@@ -17,8 +17,8 @@ from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
+    AuthorityServiceError,
 )
-from kdive.providers.external_boot_authority.service import AuthorityServiceError
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootRecoveryObjectPorts,

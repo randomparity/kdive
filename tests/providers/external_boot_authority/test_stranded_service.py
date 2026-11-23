@@ -13,16 +13,13 @@ import pytest
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityServiceError,
     AuthorityStrandedObservationRequestV1,
     AuthorityStrandedObservationResponseV1,
     JournalRecordV1,
     record_digest,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthorityServiceError,
-    ExternalBootAuthorityService,
-    _Lane,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService, _Lane
 from kdive.providers.external_boot_authority.stranded import (
     StrandedAuthorityFacts,
     StrandedObservationRepository,

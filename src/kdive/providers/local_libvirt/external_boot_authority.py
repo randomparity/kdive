@@ -31,11 +31,11 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
+    AuthorityServiceError,
     AuthorityTeardownMutationRequestV1,
     ObservationCategory,
     operation_is_permitted,
 )
-from kdive.providers.external_boot_authority.service import AuthorityServiceError
 from kdive.providers.external_boot_authority.stranded import (
     StrandedAuthorityFacts,
     StrandedTarget,

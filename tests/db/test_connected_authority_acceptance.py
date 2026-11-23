@@ -31,13 +31,13 @@ from kdive.providers.external_boot_authority.network_client import _resolve_tls_
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
     AuthorityMutationRequestV1,
+    AuthorityServiceError,
     AuthorityStrandedObservationRequestV1,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     canonical_record_bytes,
 )
-from kdive.providers.external_boot_authority.service import AuthorityServiceError
 from kdive.providers.local_libvirt import composition as local_composition
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalObservedState,

@@ -28,15 +28,13 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
+    AuthorityServiceError,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthorityServiceError,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 
 _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64

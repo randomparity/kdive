@@ -19,8 +19,8 @@ from kdive.providers.external_boot_authority.orphan import RecoveryOrphanAuthori
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
+    AuthorityServiceError,
 )
-from kdive.providers.external_boot_authority.service import AuthorityServiceError
 
 _SYSTEM = uuid4()
 

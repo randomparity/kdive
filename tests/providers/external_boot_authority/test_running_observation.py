@@ -75,7 +75,7 @@ async def test_running_read_uses_current_authority_without_journal_writes(
 async def test_running_read_rejects_supersession_after_provider_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from kdive.providers.external_boot_authority.service import AuthorityServiceError
+    from kdive.providers.external_boot_authority.protocol import AuthorityServiceError
 
     service, repository, adapter, peer, takeover = _service(tmp_path)
 

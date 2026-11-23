@@ -5,8 +5,10 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from kdive.providers.external_boot_authority.protocol import AuthorityInstallRefusalV1
-from kdive.providers.external_boot_authority.service import AuthorityServiceError
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityInstallRefusalV1,
+    AuthorityServiceError,
+)
 
 _MAX = 2**63 - 1
 _VALID = {"vmlinux_bytes": 3, "free_bytes": 1, "headroom_bytes": 2}

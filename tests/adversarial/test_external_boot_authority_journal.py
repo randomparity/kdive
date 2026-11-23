@@ -19,14 +19,12 @@ from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityOperation,
+    AuthorityServiceError,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     RecoveryObjectBindingV1,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthorityServiceError,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from tests.providers.external_boot_authority.service_support import _mutation, _service
 
 

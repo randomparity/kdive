@@ -17,15 +17,13 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityOperation,
+    AuthorityServiceError,
     AuthorityTeardownMutationRequestV1,
     JournalPhase,
     record_digest,
     teardown_proof_digest,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthorityServiceError,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,

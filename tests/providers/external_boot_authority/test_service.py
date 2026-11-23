@@ -31,13 +31,13 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryOrphanDispositionRequestV1,
+    AuthorityServiceError,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
 )
 from kdive.providers.external_boot_authority.service import (
-    AuthorityServiceError,
     AuthorityServiceMetrics,
     ExternalBootAuthorityService,
 )

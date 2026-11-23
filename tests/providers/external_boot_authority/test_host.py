@@ -35,16 +35,14 @@ from kdive.providers.external_boot_authority.protocol import (
     MAX_MESSAGE_BYTES,
     AuthorityObservationV1,
     AuthorityOperation,
+    AuthorityServiceError,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     canonical_record_bytes,
     record_digest,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthorityServiceError,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.ports.external_boot import (
     ExternalBootActivationBinding,
     ExternalBootPlan,

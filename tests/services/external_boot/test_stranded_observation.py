@@ -21,10 +21,10 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind, JobState
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthorityServiceError,
     AuthorityStrandedObservationRequestV1,
     record_digest,
 )
-from kdive.providers.external_boot_authority.service import AuthorityServiceError
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole
 from kdive.services.external_boot.settlement import (

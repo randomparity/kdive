@@ -34,7 +34,6 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
     AuthorityConflictResolutionRequestV1,
-    AuthorityInstallRefusalV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
@@ -44,12 +43,14 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
+    AuthorityServiceError,
     AuthorityStrandedObservationRequestV1,
     AuthorityStrandedObservationResponseV1,
     AuthorityTakeoverRequestV1,
     AuthorityTeardownMutationRequestV1,
     AuthorityTeardownProofV1,
     AuthorityTeardownResponseV1,
+    JournalConflictReason,
     JournalPhase,
     JournalRecordV1,
     record_digest,
@@ -381,82 +382,6 @@ class AuthorityReleasePhaseRepository(Protocol):
         acknowledgement_sequence: int,
         acknowledgement_digest: str,
     ) -> AuthorityBinding | None: ...
-
-
-JournalConflictReason = Literal[
-    "ack_watermark_missing",
-    "checkpoint_refused",
-    "completion_evidence_missing",
-    "finish_mutation_started_missing",
-    "head_absent_records_present",
-    "head_mismatch_observe",
-    "head_mismatch_recover",
-    "head_present_records_empty",
-    "head_unanchored_commit",
-    "head_unanchored_terminal",
-    "lane_failed_current_read",
-    "lane_failed_lifecycle",
-    "lane_failed_mutation",
-    "lane_failed_observe",
-    "lane_failed_takeover",
-    "lane_failed_terminal_preparation",
-    "latest_not_mutation_started",
-    "mutation_started_missing",
-    "observation_missing",
-    "observe_records_empty",
-    "orphan_binding_changed",
-    "orphan_binding_changed_after_disposition",
-    "orphan_digest_changed",
-    "orphan_row_foreign_authority",
-    "orphan_selection_malformed",
-    "orphan_system_mismatch",
-    "pending_predecessor_missing",
-    "phase_not_replayable",
-    "predecessor_not_target",
-    "predecessor_operation_mismatch",
-    "preparation_plan_missing",
-    "release_phase_mismatch",
-    "replay_mutation_started_missing",
-    "stranded_head_mismatch",
-    "stranded_lane_failed",
-    "suspended_state_mismatch",
-    "takeover_head_missing",
-    "takeover_head_missing_after_watermark",
-    "terminal_operation_mismatch",
-    "terminal_record_missing",
-    "terminal_replay_mismatch",
-    "unresolved_binding_mismatch",
-    "unresolved_head_missing",
-]
-"""Closed set naming the check behind a `journal_conflict`; a log field, never a metric label."""
-
-
-class AuthorityServiceError(RuntimeError):
-    """Bounded failure safe to expose across the authority boundary."""
-
-    def __init__(
-        self,
-        category: Literal[
-            "unauthenticated",
-            "superseded",
-            "journal_conflict",
-            "provider_conflict",
-            "system_held",
-            "configuration_error",
-            "install_failure",
-        ],
-        *,
-        reason: JournalConflictReason | None = None,
-        telemetry_recorded: bool = False,
-        install_refusal: AuthorityInstallRefusalV1 | None = None,
-    ):
-        if (category == "install_failure") is (install_refusal is None):
-            raise ValueError("install_failure and install_refusal are a pair")
-        self.category = category
-        self.reason = reason
-        self.install_refusal = install_refusal
-        self.telemetry_recorded = telemetry_recorded
-        super().__init__(category)
 
 
 @dataclass(slots=True)

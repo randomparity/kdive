@@ -33,11 +33,11 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
+    AuthorityServiceError,
     JournalPhase,
     JournalRecordV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import AuthorityServiceError
 from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
 from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.security.authz.context import RequestContext

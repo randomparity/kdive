@@ -30,6 +30,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
+    AuthorityServiceError,
     AuthorityTeardownMutationRequestV1,
     ObservationCategory,
     operation_is_permitted,
@@ -3833,9 +3834,6 @@ class RemoteExternalBootAuthorityAdapter:
             receipt.operation_identity != context.operation_identity
             or receipt.attempt_id != context.attempt_id
         ):
-            # Deferred: the service module imports this one.
-            from kdive.providers.external_boot_authority.service import AuthorityServiceError
-
             raise AuthorityServiceError("provider_conflict")
         return (_quarantine_observation(receipt),)
 

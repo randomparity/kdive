@@ -44,6 +44,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
+    AuthorityServiceError,
     AuthorityStrandedObservationRequestV1,
     AuthorityStrandedObservationResponseV1,
     AuthorityTakeoverRequestV1,
@@ -53,7 +54,6 @@ from kdive.providers.external_boot_authority.protocol import (
     decode_authority_request,
     read_frame,
 )
-from kdive.providers.external_boot_authority.service import AuthorityServiceError
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
