@@ -724,8 +724,6 @@ async def run_operation[R: ExternalBootAuthorityResultV1](
             teardown_executor=client,
         )
     prerequisites = await require_preconditions(conn, activation, marker)
-    if ports.authority_client_factory is not None:
-        prerequisites = dict(prerequisites) | {"authority_executor": ports.authority_executor}
     if _prepares(activation, marker) and ports.preparation_executor is None:
         raise _refuse("no external-boot authority preparation executor is configured")
     if marker.operation == "teardown" and ports.teardown_executor is None:
