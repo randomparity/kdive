@@ -126,9 +126,10 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
 
         Pass `find` to jump to the nearest literal match instead of reading a fixed window: the
         response then carries `data.match_found` plus, on a hit, `data.match_offset`/
-        `data.match_line`, the surrounding `data.content`, and `data.next_offset` to continue in
-        `direction`. Use it to locate a crash signature in a large console log without paging the
-        whole file.
+        `data.match_line` and the surrounding `data.content`. When present, `data.next_offset`
+        continues beyond the matched line in `direction`. Stop when `data.match_found` is false
+        or `data.next_offset` is absent, including on a successful hit. Use it to locate a crash
+        signature in a large console log without paging the whole file.
 
         An artifact above the fetch ceiling sets `content_omitted` and is retrieved via presigned
         `refs.download_uri` when the store is reachable and redaction checks pass; a `find` over
