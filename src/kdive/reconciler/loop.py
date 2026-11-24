@@ -251,7 +251,7 @@ class _RepairState:
 
     external_boot_cursors: external_boot_repairs.RepairCursors
     teardown_warnings: system_repairs.TeardownWarningHistory
-    stalled_teardown_progress: system_repairs.StalledTeardownProgress
+    system_repair_progress: system_repairs.SystemRepairProgress
 
 
 @dataclass(frozen=True, slots=True)
@@ -688,7 +688,11 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     # stalled-state repairs do.
     _RepairCatalogEntry(
         "leaked_mutation_obligations",
-        lambda _r, _c, _g, _state: _repair_leaked_mutation_obligations,
+        lambda _r, _c, _g, state: (
+            lambda conn: _repair_leaked_mutation_obligations(
+                conn, progress=state.system_repair_progress
+            )
+        ),
     ),
     # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted teardown job.
     # Replays stranded ordinary teardowns while preserving operator cancellation.
@@ -698,7 +702,7 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
             lambda conn: _repair_stalled_tearing_down_systems(
                 conn,
                 warnings=state.teardown_warnings,
-                progress=state.stalled_teardown_progress,
+                progress=state.system_repair_progress,
             )
         ),
     ),
@@ -747,7 +751,11 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     # reprovision job can still write its disk.
     _RepairCatalogEntry(
         "stalled_reprovisioning_systems",
-        lambda _r, _c, _g, _state: _repair_stalled_reprovisioning_systems,
+        lambda _r, _c, _g, state: (
+            lambda conn: _repair_stalled_reprovisioning_systems(
+                conn, progress=state.system_repair_progress
+            )
+        ),
     ),
     _RepairCatalogEntry(
         "stalled_creating_snapshots",
@@ -905,14 +913,14 @@ def _repair_plan(
     image_publish_grace: timedelta,
     external_boot_cursors: external_boot_repairs.RepairCursors | None = None,
     teardown_warnings: system_repairs.TeardownWarningHistory | None = None,
-    stalled_teardown_progress: system_repairs.StalledTeardownProgress | None = None,
+    stalled_teardown_progress: system_repairs.SystemRepairProgress | None = None,
 ) -> tuple[_RepairSpec, ...]:
     cursors = {} if external_boot_cursors is None else external_boot_cursors
     warnings = (
         system_repairs.TeardownWarningHistory() if teardown_warnings is None else teardown_warnings
     )
     progress = (
-        system_repairs.StalledTeardownProgress()
+        system_repairs.SystemRepairProgress()
         if stalled_teardown_progress is None
         else stalled_teardown_progress
     )
@@ -957,7 +965,7 @@ async def reconcile_once(
     config: ReconcileConfig,
     external_boot_cursors: external_boot_repairs.RepairCursors | None = None,
     teardown_warnings: system_repairs.TeardownWarningHistory | None = None,
-    stalled_teardown_progress: system_repairs.StalledTeardownProgress | None = None,
+    stalled_teardown_progress: system_repairs.SystemRepairProgress | None = None,
 ) -> ReconcileReport:
     """Run the repairs once, each isolated, each on a fresh pooled connection.
 
@@ -965,7 +973,7 @@ async def reconcile_once(
     continues — one repair never starves the others. Returns the partial counts.
     Repeat standalone callers may supply cursor/progress state and teardown warning history;
     omitted state is one-shot. Reconciler owns and supplies independent observations
-    (ADR-0839, ADR-0841, ADR-0842).
+    (ADR-0839, ADR-0841, ADR-0842, ADR-0852).
 
     The ``→expired`` allocation sweep runs **first** so that the allocations it moves to
     ``expired`` are seen as orphaning their System by :func:`_repair_orphaned_systems` in
@@ -1083,7 +1091,7 @@ class Reconciler:
         self._config = config
         self._external_boot_cursors: external_boot_repairs.RepairCursors = {}
         self._teardown_warnings = system_repairs.TeardownWarningHistory()
-        self._stalled_teardown_progress = system_repairs.StalledTeardownProgress()
+        self._system_repair_progress = system_repairs.SystemRepairProgress()
         self._heartbeat_tick = config.heartbeat_tick.total_seconds()
         self._telemetry = config.telemetry or ReconcilerTelemetry.disabled()
         self._fleet_telemetry = config.fleet_telemetry or FleetTelemetry.disabled()
@@ -1096,7 +1104,7 @@ class Reconciler:
             config=self._config,
             external_boot_cursors=self._external_boot_cursors,
             teardown_warnings=self._teardown_warnings,
-            stalled_teardown_progress=self._stalled_teardown_progress,
+            stalled_teardown_progress=self._system_repair_progress,
         )
 
     async def run(self, stop: asyncio.Event) -> None:

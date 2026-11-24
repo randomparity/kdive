@@ -139,6 +139,7 @@ _REPROVISION_BLOCKING_PARAMS = (
 _STALLED_REPROVISIONING_CANDIDATES_SQL = (
     "SELECT s.id FROM systems s "
     f"WHERE s.state = %s AND NOT {_REPROVISION_BLOCKING} "
+    "AND (%s::uuid IS NULL OR s.id > %s) "
     "ORDER BY s.id "
     "LIMIT %s"
 )
@@ -169,6 +170,7 @@ _LEAKED_MUTATION_CANDIDATES_SQL = (
     "    WHERE j.dedup_key = s.id::text || ':teardown' "
     f"      AND {_TEARDOWN_IN_FLIGHT} "
     "  ) "
+    "AND (%s::uuid IS NULL OR o.system_id > %s) "
     "ORDER BY o.system_id "
     "LIMIT %s"
 )
@@ -194,10 +196,19 @@ class TeardownWarningHistory:
 
 
 @dataclass(slots=True)
-class StalledTeardownProgress:
-    """Last ordinarily inspected System for one runner's bounded scan (ADR-0842)."""
+class SystemRepairProgress:
+    """One runner's independent last-inspected System IDs (ADR-0842, ADR-0852).
+
+    ``after`` retains the historical stalled-teardown constructor and field contract.
+    """
 
     after: UUID | None = None
+    leaked_mutation_after: UUID | None = None
+    stalled_reprovision_after: UUID | None = None
+
+
+# Preserve the existing standalone progress import and constructor identity.
+StalledTeardownProgress = SystemRepairProgress
 
 
 async def repair_orphaned_systems(conn: AsyncConnection) -> int:
@@ -289,7 +300,50 @@ async def report_stranded_orphan_teardowns(
     return len(new)
 
 
-async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
+async def _leaked_mutation_candidates(
+    conn: AsyncConnection, *, after: UUID | None = None
+) -> list[UUID]:
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            _LEAKED_MUTATION_CANDIDATES_SQL,
+            (
+                list(_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES),
+                list(_ACTIVE_JOB_STATE_VALUES),
+                _TEARDOWN_SETTLE,
+                after,
+                after,
+                _LEAKED_MUTATION_REPAIR_LIMIT,
+            ),
+        )
+        return [row["system_id"] for row in await cur.fetchall()]
+
+
+async def _repair_leaked_mutation_candidate(
+    conn: AsyncConnection, system_id: UUID, obligations: RemoteModuleAttemptObligationRepository
+) -> int:
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        # The terminal state, teardown window, and recovery-owner absence are re-read
+        # together under the System lock. Activation creation uses the same lock, so a
+        # recovery owner cannot appear between this check and the discharge below.
+        async with conn.cursor() as cur:
+            await cur.execute(
+                _LEAKED_MUTATION_CANDIDATE_RECHECK_SQL,
+                (
+                    system_id,
+                    list(_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES),
+                    list(_ACTIVE_JOB_STATE_VALUES),
+                    _TEARDOWN_SETTLE,
+                ),
+            )
+            if await cur.fetchone() is None:
+                return 0
+        discharged = await obligations.worker_discharge_system_mutation_obligations(conn, system_id)
+    return discharged
+
+
+async def repair_leaked_mutation_obligations(
+    conn: AsyncConnection, *, progress: SystemRepairProgress | None = None
+) -> int:
     """Discharge eligible terminal-System obligations (ADR-0634, ADR-0652).
 
     The teardown handler commits `torn_down` before the discharge that follows it, and a failed
@@ -302,51 +356,33 @@ async def repair_leaked_mutation_obligations(conn: AsyncConnection) -> int:
     `_TEARDOWN_SETTLE`; ADR-0634 carries why job state alone is not enough and what the window
     does not cover. Bounded at `_LEAKED_MUTATION_REPAIR_LIMIT` candidates per pass, so a backlog
     drains over several passes rather than holding up the rest of the catalog in one.
+
+    Repeated callers may supply runner-owned progress (ADR-0852). Handled failures and
+    guarded skips advance the hint; cancellation leaves the interrupted candidate retryable.
     """
-    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            _LEAKED_MUTATION_CANDIDATES_SQL,
-            (
-                list(_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES),
-                list(_ACTIVE_JOB_STATE_VALUES),
-                _TEARDOWN_SETTLE,
-                _LEAKED_MUTATION_REPAIR_LIMIT,
-            ),
-        )
-        candidates: list[UUID] = [row["system_id"] for row in await cur.fetchall()]
+    if progress is None:
+        progress = SystemRepairProgress()
+    candidates = await _leaked_mutation_candidates(conn, after=progress.leaked_mutation_after)
+    if not candidates and progress.leaked_mutation_after is not None:
+        candidates = await _leaked_mutation_candidates(conn)
+    if not candidates:
+        progress.leaked_mutation_after = None
     obligations = RemoteModuleAttemptObligationRepository()
     discharged_rows = 0
     failures = 0
     for system_id in candidates:
         try:
-            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-                # The terminal state, teardown window, and recovery-owner absence are re-read
-                # together under the System lock. Activation creation uses the same lock, so a
-                # recovery owner cannot appear between this check and the discharge below.
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        _LEAKED_MUTATION_CANDIDATE_RECHECK_SQL,
-                        (
-                            system_id,
-                            list(_ORPHANED_SYSTEM_TERMINAL_STATE_VALUES),
-                            list(_ACTIVE_JOB_STATE_VALUES),
-                            _TEARDOWN_SETTLE,
-                        ),
-                    )
-                    if await cur.fetchone() is None:
-                        continue
-                discharged = await obligations.worker_discharge_system_mutation_obligations(
-                    conn, system_id
-                )
+            discharged = await _repair_leaked_mutation_candidate(conn, system_id, obligations)
         except Exception:  # noqa: BLE001 - one System must not starve the rest of the batch
             failures += 1
             _log.warning(
                 "reconciler: leaked mutation obligation discharge failed for system %s; "
-                "retrying next pass",
+                "retrying on a later pass",
                 system_id,
                 exc_info=True,
             )
-            continue
+            discharged = 0
+        progress.leaked_mutation_after = system_id
         if discharged:
             discharged_rows += discharged
             _log.info(
@@ -527,7 +563,7 @@ async def repair_stalled_tearing_down_systems(
     conn: AsyncConnection,
     *,
     warnings: TeardownWarningHistory | None = None,
-    progress: StalledTeardownProgress | None = None,
+    progress: SystemRepairProgress | None = None,
 ) -> int:
     """Requeue ordinary teardown when its durable fence outlives its retryable job.
 
@@ -551,7 +587,7 @@ async def repair_stalled_tearing_down_systems(
     """
     history = TeardownWarningHistory() if warnings is None else warnings
     if progress is None:
-        progress = StalledTeardownProgress()
+        progress = SystemRepairProgress()
     candidates = await _stalled_teardown_candidates(conn, after=progress.after)
     if not candidates and progress.after is not None:
         candidates = await _stalled_teardown_candidates(conn)
@@ -688,7 +724,64 @@ async def repair_stalled_restoring_systems(conn: AsyncConnection) -> int:
     return recovered
 
 
-async def repair_stalled_reprovisioning_systems(conn: AsyncConnection) -> int:
+async def _stalled_reprovision_candidates(
+    conn: AsyncConnection, *, after: UUID | None = None
+) -> list[UUID]:
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            _STALLED_REPROVISIONING_CANDIDATES_SQL,
+            (
+                SystemState.REPROVISIONING.value,
+                *_REPROVISION_BLOCKING_PARAMS,
+                after,
+                after,
+                _STALLED_REPROVISIONING_REPAIR_LIMIT,
+            ),
+        )
+        return [row["id"] for row in await cur.fetchall()]
+
+
+async def _repair_stalled_reprovision_candidate(conn: AsyncConnection, system_id: UUID) -> bool:
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                _STALLED_REPROVISIONING_RECHECK_SQL,
+                (
+                    system_id,
+                    SystemState.REPROVISIONING.value,
+                    *_REPROVISION_BLOCKING_PARAMS,
+                ),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            return False
+        await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
+        # A stalled reprovision leaves the device set indeterminate (the handler frees
+        # backing storage before the provider call), so `attached` no longer holds (#3732).
+        await mark_attached_devices_lost(conn, system_id)
+        category = await _limbo_category(
+            conn, system_id, JobKind.REPROVISION, ErrorCategory.REPROVISION_INCOMPLETE
+        )
+        if category is not None:
+            await record_system_failure_category(conn, system_id, category)
+        await audit.record_system(
+            conn,
+            principal=SYSTEM_RECONCILER_PRINCIPAL,
+            event=audit.AuditEvent(
+                tool="systems.reprovision",
+                object_kind="systems",
+                object_id=system_id,
+                transition="reprovisioning->failed",
+                args={"system_id": str(system_id)},
+                project=row["project"],
+            ),
+        )
+    return True
+
+
+async def repair_stalled_reprovisioning_systems(
+    conn: AsyncConnection, *, progress: SystemRepairProgress | None = None
+) -> int:
     """Settle a `reprovisioning` System no reprovision job can finish -> `failed` (#2980).
 
     `reprovisioning` leaves only through the reprovision handler, and since #2928
@@ -697,63 +790,35 @@ async def repair_stalled_reprovisioning_systems(conn: AsyncConnection) -> int:
     System goes to `failed` (never back to `ready`), which makes `systems.teardown` reachable.
     `_REPROVISION_BLOCKING` defines which job rows still defer it. The category follows the
     restore lane's ADR-0513 §1a rule (`_limbo_category`). Runs after `repair_abandoned_jobs`.
+
+    Each pass inspects at most 100 candidates using runner-owned progress (ADR-0852).
+    Handled failures and guarded skips advance; cancellation retries the interrupted System.
     """
-    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            _STALLED_REPROVISIONING_CANDIDATES_SQL,
-            (
-                SystemState.REPROVISIONING.value,
-                *_REPROVISION_BLOCKING_PARAMS,
-                _STALLED_REPROVISIONING_REPAIR_LIMIT,
-            ),
-        )
-        candidates: list[UUID] = [row["id"] for row in await cur.fetchall()]
+    if progress is None:
+        progress = SystemRepairProgress()
+    candidates = await _stalled_reprovision_candidates(
+        conn, after=progress.stalled_reprovision_after
+    )
+    if not candidates and progress.stalled_reprovision_after is not None:
+        candidates = await _stalled_reprovision_candidates(conn)
+    if not candidates:
+        progress.stalled_reprovision_after = None
     settled = 0
     for system_id in candidates:
         try:
-            async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-                async with conn.cursor(row_factory=dict_row) as cur:
-                    await cur.execute(
-                        _STALLED_REPROVISIONING_RECHECK_SQL,
-                        (
-                            system_id,
-                            SystemState.REPROVISIONING.value,
-                            *_REPROVISION_BLOCKING_PARAMS,
-                        ),
-                    )
-                    row = await cur.fetchone()
-                if row is None:
-                    continue
-                await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
-                # A stalled reprovision leaves the device set indeterminate (the handler frees
-                # backing storage before the provider call), so `attached` no longer holds (#3732).
-                await mark_attached_devices_lost(conn, system_id)
-                category = await _limbo_category(
-                    conn, system_id, JobKind.REPROVISION, ErrorCategory.REPROVISION_INCOMPLETE
-                )
-                if category is not None:
-                    await record_system_failure_category(conn, system_id, category)
-                await audit.record_system(
-                    conn,
-                    principal=SYSTEM_RECONCILER_PRINCIPAL,
-                    event=audit.AuditEvent(
-                        tool="systems.reprovision",
-                        object_kind="systems",
-                        object_id=system_id,
-                        transition="reprovisioning->failed",
-                        args={"system_id": str(system_id)},
-                        project=row["project"],
-                    ),
-                )
+            repaired = await _repair_stalled_reprovision_candidate(conn, system_id)
         except Exception:  # noqa: BLE001 - one stuck System must not starve the repair lane
             _log.warning(
-                "reconciler: stalled reprovision settle failed for system %s; retrying next pass",
+                "reconciler: stalled reprovision settle failed for system %s; "
+                "retrying on a later pass",
                 system_id,
                 exc_info=True,
             )
-            continue
-        settled += 1
-        _log.info("reconciler: stalled reprovisioning system %s -> failed", system_id)
+            repaired = False
+        progress.stalled_reprovision_after = system_id
+        if repaired:
+            settled += 1
+            _log.info("reconciler: stalled reprovisioning system %s -> failed", system_id)
     return settled
 
 
