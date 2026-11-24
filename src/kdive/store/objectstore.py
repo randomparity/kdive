@@ -67,12 +67,11 @@ def _normalize_etag(raw: str) -> str:
     return raw.strip('"')
 
 
-def _infrastructure_error(op: str, key: str, err: BotoCoreError | ClientError) -> CategorizedError:
-    """Map an S3 client or transport error to a typed infrastructure failure.
+def _infrastructure_error(op: str, key: str, err: Exception) -> CategorizedError:
+    """Map an S3 operation, transport or body-close error to typed infrastructure failure.
 
-    ``ClientError`` carries an S3 error code in its ``response``; a ``BotoCoreError``
-    (connection refused, DNS failure, connect/read timeout) has no response, so its
-    exception class name stands in for the code.
+    ``ClientError`` carries an S3 error code in its ``response``. Other errors, including
+    transport faults and ordinary body-close failures, use their exception class name.
     """
     if isinstance(err, ClientError):
         code = err.response.get("Error", {}).get("Code", "unknown")
@@ -614,22 +613,36 @@ class ObjectStore:
         but the body is not materialized: the yielded ``reader`` streams it and maps a mid-stream
         transport fault to ``INFRASTRUCTURE_FAILURE``. The body is closed on ``with``-exit,
         aborting a partially-read download. Async callers offload the whole ``with`` block via
-        ``asyncio.to_thread`` (ADR-0400).
+        ``asyncio.to_thread`` (ADR-0400). Ordinary close failures preserve an active read or
+        consumer exception with a type-only note; a standalone close fault is infrastructure
+        failure. Control exceptions from close propagate unchanged (ADR-0860).
 
         Raises:
             CategorizedError: the object is missing or (with an ``etag``) no longer matches
                 (``STALE_HANDLE``); the object lacks interpretable sensitivity metadata, the get
-                otherwise fails, or the body read fails mid-stream (``INFRASTRUCTURE_FAILURE``).
+                otherwise fails, or the body read or standalone close fails
+                (``INFRASTRUCTURE_FAILURE``).
         """
         resp, sensitivity, retention_class = self._open_get(key, etag, version_id=version_id)
         body = resp["Body"]
+        primary: BaseException | None = None
         try:
             # RawIOBase provides the read interface tarfile uses but is not a nominal
             # IO[bytes] in typeshed; cast at this one construction site.
             reader = cast(IO[bytes], _StreamingBodyReader(body, key))
             yield artifact_types.StreamedArtifact(reader, sensitivity, retention_class)
+        except BaseException as err:
+            primary = err
+            raise
         finally:
-            body.close()
+            try:
+                body.close()
+            except Exception as close_error:
+                if primary is None:
+                    raise _infrastructure_error("get_object body close", key, close_error) from None
+                primary.add_note(
+                    "object-store get_object body close failed: " + type(close_error).__name__
+                )
 
     def ping(self) -> None:
         """Probe the bucket's reachability with a ``HEAD`` (ADR-0090 §5 readiness check).
