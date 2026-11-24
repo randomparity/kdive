@@ -14,7 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts.catalog.read_model import ArtifactReadRef
 from kdive.domain.capacity.state import DebugSessionState
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import DebugSession
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug.operations import runtime as ops
@@ -295,5 +295,184 @@ def test_cancelled_caller_still_retrieves_the_task_error() -> None:
             await waiter
         assert task.done()
         assert task._log_traceback is False  # Retrieved, so no "never retrieved" log at GC.
+
+    asyncio.run(check())
+
+
+class _EngineLifecycleBoundary:
+    def __init__(self, engine: DebugEngineRuntime, events: list[str], name: str) -> None:
+        self.engine = engine
+        self.events = events
+        self.name = name
+
+    def owned_session_ids(self) -> tuple[str, ...]:
+        return self.engine.owned_session_ids()
+
+    async def sweep_once(self, pool: AsyncConnectionPool, *, shutdown: bool = False) -> None:
+        self.events.append(f"{self.name}:shutdown" if shutdown else f"{self.name}:sweep")
+        await self.engine.sweep_once(pool, shutdown=shutdown)
+
+    def begin_close(self) -> None:
+        self.events.append(f"{self.name}:close")
+        self.engine.begin_close()
+
+    async def drain(self) -> None:
+        self.events.append(f"{self.name}:drain")
+        await self.engine.drain()
+
+
+def test_resolver_uses_engine_lifecycle_without_private_bookkeeping(tmp_path: Path) -> None:
+    async def check() -> None:
+        runtime, attachment = _owned(tmp_path)
+        session = _session()
+        runtime.attach_or_reuse(session)
+        pending_id = str(uuid4())
+        pending_root = tmp_path / "pending"
+        pending_root.mkdir()
+        runtime._pending_roots[pending_id] = pending_root
+        events: list[str] = []
+        boundary = cast(DebugEngineRuntime, _EngineLifecycleBoundary(runtime, events, "engine"))
+        owner = _owner(boundary)
+        assert set(owner.owned()) == {(boundary, str(session.id)), (boundary, pending_id)}
+        await owner.sweep_once(_pool(("live",)))
+        assert not pending_root.exists()
+        assert attachment.staging_dir is not None and attachment.staging_dir.exists()
+        assert runtime.owned_session_ids() == (str(session.id),)
+        async with owner.lifespan(_pool(("live",))):
+            pass
+        assert not attachment.staging_dir.exists()
+        assert runtime.owned_session_ids() == ()
+        assert events.index("engine:close") < events.index("engine:drain")
+        assert events.index("engine:drain") < events.index("engine:shutdown")
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("operation", ["attach", "run"])
+def test_engine_close_rejects_new_admission(tmp_path: Path, operation: str) -> None:
+    async def check() -> None:
+        runtime, _attachment = _owned(tmp_path)
+        runtime.begin_close()
+        runtime.begin_close()
+        with pytest.raises(CategorizedError) as caught:
+            if operation == "attach":
+                runtime.attach_or_reuse(_session())
+            else:
+                await runtime.run(
+                    _session(), lambda _engine, _attachment: ToolResponse.success("s", "live")
+                )
+        assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        assert runtime.owned_session_ids() == ()
+        await runtime.drain()
+
+    asyncio.run(check())
+
+
+def test_shutdown_closes_all_engines_before_draining_and_final_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def check() -> None:
+        first_root, second_root = tmp_path / "first", tmp_path / "second"
+        first_root.mkdir()
+        second_root.mkdir()
+        first, first_attachment = _owned(first_root)
+        second, second_attachment = _owned(second_root)
+        first_entered, first_release = threading.Event(), threading.Event()
+        second_entered, second_release = threading.Event(), threading.Event()
+
+        def attach_first(**_kwargs: object) -> GdbMiAttachment:
+            first_entered.set()
+            assert first_release.wait(30)
+            return first_attachment
+
+        def attach_second(**_kwargs: object) -> GdbMiAttachment:
+            second_entered.set()
+            assert second_release.wait(30)
+            return second_attachment
+
+        first._attach = attach_first
+        second._attach = attach_second
+        first_drain_started, second_drain_started = asyncio.Event(), asyncio.Event()
+        first_drain, second_drain = first.drain, second.drain
+
+        async def drain_first() -> None:
+            first_drain_started.set()
+            await first_drain()
+
+        async def drain_second() -> None:
+            second_drain_started.set()
+            await second_drain()
+
+        monkeypatch.setattr(first, "drain", drain_first)
+        monkeypatch.setattr(second, "drain", drain_second)
+        events: list[str] = []
+        first_boundary = cast(DebugEngineRuntime, _EngineLifecycleBoundary(first, events, "first"))
+        second_boundary = cast(
+            DebugEngineRuntime, _EngineLifecycleBoundary(second, events, "second")
+        )
+        owner = _owner(first_boundary)
+        owner._runtimes[(ResourceKind.REMOTE_LIBVIRT, "second")] = second_boundary
+        final_sweep_started = asyncio.Event()
+        original_sweep = owner.sweep_once
+
+        async def sweep(pool: AsyncConnectionPool, *, shutdown: bool = False) -> None:
+            if shutdown:
+                final_sweep_started.set()
+            await original_sweep(pool, shutdown=shutdown)
+
+        monkeypatch.setattr(owner, "sweep_once", sweep)
+        first_session, second_session = _session(), _session()
+        second_session.id = uuid4()
+        context = owner.lifespan(_pool(("live",)))
+        await context.__aenter__()
+        running = [
+            asyncio.create_task(
+                first.run(first_session, lambda _e, _a: ToolResponse.success("a", "live"))
+            ),
+            asyncio.create_task(
+                second.run(second_session, lambda _e, _a: ToolResponse.success("b", "live"))
+            ),
+        ]
+        closing = None
+        try:
+            assert await asyncio.to_thread(first_entered.wait, 5)
+            assert await asyncio.to_thread(second_entered.wait, 5)
+            assert owner.owned() == ()
+            closing = asyncio.create_task(context.__aexit__(None, None, None))
+            await asyncio.wait_for(first_drain_started.wait(), timeout=5)
+            # An admission regression must fail immediately, not block another fake attach.
+            for engine in (first, second):
+                monkeypatch.setattr(
+                    engine, "_attach", Mock(side_effect=AssertionError("attach after shutdown"))
+                )
+            for engine, session in ((first, first_session), (second, second_session)):
+                with pytest.raises(CategorizedError) as caught:
+                    await engine.run(session, lambda _e, _a: ToolResponse.success("new", "live"))
+                assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+            assert events.index("second:close") < events.index("first:drain")
+            assert not final_sweep_started.is_set() and not closing.done()
+            first_release.set()
+            await running[0]
+            await asyncio.wait_for(second_drain_started.wait(), timeout=5)
+            assert not final_sweep_started.is_set() and not closing.done()
+            assert (
+                second_attachment.staging_dir is not None and second_attachment.staging_dir.exists()
+            )
+        finally:
+            first_release.set()
+            second_release.set()
+            await asyncio.gather(*running)
+            if closing is None:
+                await context.__aexit__(None, None, None)
+            else:
+                await closing
+        assert final_sweep_started.is_set()
+        assert (
+            first_attachment.staging_dir is not None and not first_attachment.staging_dir.exists()
+        )
+        assert (
+            second_attachment.staging_dir is not None and not second_attachment.staging_dir.exists()
+        )
+        assert owner.owned() == ()
 
     asyncio.run(check())

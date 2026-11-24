@@ -192,8 +192,8 @@ class DebugEngineRuntime:
 
     Owns the in-process :class:`GdbMiSessionRegistry`, a per-session ``asyncio.Lock`` table (the
     get-or-create guarded by a plain :class:`threading.Lock`), and the injected
-    :class:`AttachSeam`. One instance is built in app assembly and shared by every
-    Debug-plane handler (and by `end_session`'s reap).
+    :class:`AttachSeam`, session cleanup eligibility and close/drain bookkeeping (ADR-0862).
+    Instances are shared by Debug-plane handlers and `end_session` through the provider resolver.
     """
 
     def __init__(
@@ -308,6 +308,47 @@ class DebugEngineRuntime:
         finally:
             self._active.discard(task)
 
+    def owned_session_ids(self) -> tuple[str, ...]:
+        """Snapshot attachment and pending-root ownership without exposing their containers."""
+        return tuple(set(self._registry.ids()) | self._pending_roots.keys())
+
+    async def sweep_once(self, pool: AsyncConnectionPool, *, shutdown: bool = False) -> None:
+        for sid in self.owned_session_ids():
+            try:
+                async with self.lock_for(sid):
+                    attachment = self._registry.get(sid)
+                    if attachment is None and sid not in self._pending_roots:
+                        continue
+                    if not shutdown and attachment is not None and not attachment.cleanup_pending:
+                        async with (
+                            asyncio.timeout(5.0),
+                            pool.connection() as conn,
+                            conn.cursor() as cur,
+                        ):
+                            await cur.execute(
+                                "SELECT state FROM debug_sessions WHERE id = %s", (UUID(sid),)
+                            )
+                            row = await cur.fetchone()
+                        if row is not None and row[0] == "live":
+                            continue
+                    await run_to_completion(functools.partial(self.reap, sid))
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "debug cleanup pending for %s (%s); retry debug.end_session after recovery",
+                    sid,
+                    type(exc).__name__,
+                )
+
+    def begin_close(self) -> None:
+        """Reject new admission before the resolver waits for any active engine work."""
+        self._closing = True
+
+    async def drain(self) -> None:
+        """Wait for admitted work, including first attaches that have not published an owner."""
+        active = tuple(self._active)
+        if active:
+            await asyncio.wait(active)
+
 
 class DebugRuntimeResolver:
     """Provider-aware cache of per-provider debug engine runtimes."""
@@ -359,38 +400,13 @@ class DebugRuntimeResolver:
     def owned(self) -> tuple[tuple[DebugEngineRuntime, str], ...]:
         with self._guard:
             runtimes = tuple(self._runtimes.values())
-        return tuple(
-            (runtime, sid)
-            for runtime in runtimes
-            for sid in set(runtime._registry.ids()) | runtime._pending_roots.keys()
-        )
+        return tuple((runtime, sid) for runtime in runtimes for sid in runtime.owned_session_ids())
 
     async def sweep_once(self, pool: AsyncConnectionPool, *, shutdown: bool = False) -> None:
-        for runtime, sid in self.owned():
-            try:
-                async with runtime.lock_for(sid):
-                    attachment = runtime._registry.get(sid)
-                    if attachment is None and sid not in runtime._pending_roots:
-                        continue
-                    if not shutdown and attachment is not None and not attachment.cleanup_pending:
-                        async with (
-                            asyncio.timeout(5.0),
-                            pool.connection() as conn,
-                            conn.cursor() as cur,
-                        ):
-                            await cur.execute(
-                                "SELECT state FROM debug_sessions WHERE id = %s", (UUID(sid),)
-                            )
-                            row = await cur.fetchone()
-                        if row is not None and row[0] == "live":
-                            continue
-                    await run_to_completion(functools.partial(runtime.reap, sid))
-            except Exception as exc:
-                logging.getLogger(__name__).warning(
-                    "debug cleanup pending for %s (%s); retry debug.end_session after recovery",
-                    sid,
-                    type(exc).__name__,
-                )
+        with self._guard:
+            runtimes = tuple(self._runtimes.values())
+        for runtime in runtimes:
+            await runtime.sweep_once(pool, shutdown=shutdown)
 
     @asynccontextmanager
     async def lifespan(self, pool: AsyncConnectionPool) -> AsyncGenerator[None]:
@@ -412,12 +428,11 @@ class DebugRuntimeResolver:
                     self._closing = True
                     runtimes = tuple(self._runtimes.values())
                     for runtime in runtimes:
-                        runtime._closing = True
+                        runtime.begin_close()
                 stopped.set()
                 await task
-                active = {work for runtime in runtimes for work in tuple(runtime._active)}
-                if active:
-                    await asyncio.wait(active)
+                for runtime in runtimes:
+                    await runtime.drain()
                 await self.sweep_once(pool, shutdown=True)
 
             await _finish_task(asyncio.create_task(shutdown()))
