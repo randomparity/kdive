@@ -7,15 +7,16 @@ methods match what the repository claims — rather than diff scope.
 
 The contract is narrower than the module name suggests, and worth stating plainly: changing
 an existing provider's advertised set reddens this test, because it asserts two hardcoded keys
-against ``build_local_runtime`` and ``build_remote_runtime``. Nothing enumerates the resolver's
-registered kinds, so a newly registered provider with no row here stays green and undetected.
+against a production resolver explicitly enabling local and remote. The pinned scope remains
+those two providers, so a new provider with no row here stays green and undetected.
 Closing that is the registered-kinds completeness assertion #1820 owns.
 """
 
 from __future__ import annotations
 
 from kdive.domain.capture import CaptureMethod
-from kdive.providers.assembly.composition import build_local_runtime, build_remote_runtime
+from kdive.domain.catalog.resources import ResourceKind
+from kdive.providers.assembly.composition import ProviderComposition
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 # Remote advertises console/host_dump/gdbstub/kdump (M2.5 exit; no fadump — that is a local
@@ -32,8 +33,14 @@ CAPTURE_COVERAGE: dict[str, frozenset[str]] = {
 
 def test_capture_coverage_matches_the_real_advertised_provider_sets() -> None:
     registry = SecretRegistry()
-    remote = build_remote_runtime(secret_registry=registry).support.capture_methods
-    local = build_local_runtime(secret_registry=registry).support.capture_methods
+    resolver = ProviderComposition(secret_registry=registry).build_provider_resolver(
+        enable_local_libvirt=True,
+        enable_remote_libvirt=True,
+        enable_fault_inject=False,
+        enable_byo_host=False,
+    )
+    remote = resolver.resolve(ResourceKind.REMOTE_LIBVIRT).support.capture_methods
+    local = resolver.resolve(ResourceKind.LOCAL_LIBVIRT).support.capture_methods
     assert CAPTURE_COVERAGE["remote-libvirt"] == frozenset(m.value for m in remote)
     assert CAPTURE_COVERAGE["local-libvirt"] == frozenset(m.value for m in local)
     # Local advertises the core-producing methods it can fetch — kdump (#115/ADR-0203 overlay

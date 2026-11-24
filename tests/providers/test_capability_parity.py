@@ -31,11 +31,8 @@ import kdive
 from kdive.components import references
 from kdive.components.references import ROOTFS_COMPONENT, ComponentKind
 from kdive.components.validation import ComponentSourceCapabilities
-from kdive.providers.assembly.composition import (
-    ProviderComposition,
-    build_local_runtime,
-    build_remote_runtime,
-)
+from kdive.domain.catalog.resources import ResourceKind
+from kdive.providers.assembly.composition import ProviderComposition
 from kdive.providers.core.runtime import ProviderRuntime, ProviderSupport
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -54,6 +51,10 @@ _ROOTFS_CATALOG_WAIVER = (
 # key listed here whose gap no longer exists reddens the stale-waiver guard. Removing a real
 # capability to silence the guard is the wrong fix — wire it into remote or waive it with a reason.
 _WAIVERS: dict[str, str] = {
+    "port:discovery_registrar": (
+        "local discovers its host; remote resource rows are inventory-owned (ADR-0112), so "
+        "remote has no discovery registrar rather than an unreachable no-op adapter."
+    ),
     "port:domain_presence": (
         "the stranded observation serves local-libvirt, where #3138 and ADR-0752's inventory "
         "declaration live; a remote stranded System stays stranded (ADR-0816 amendment, #3574)."
@@ -154,8 +155,14 @@ def _advertised_capabilities(runtime: ProviderRuntime) -> set[str]:
 
 def _local_and_remote_capabilities() -> tuple[set[str], set[str]]:
     registry = SecretRegistry()
-    local = _advertised_capabilities(build_local_runtime(secret_registry=registry))
-    remote = _advertised_capabilities(build_remote_runtime(secret_registry=registry))
+    resolver = ProviderComposition(secret_registry=registry).build_provider_resolver(
+        enable_local_libvirt=True,
+        enable_remote_libvirt=True,
+        enable_fault_inject=False,
+        enable_byo_host=False,
+    )
+    local = _advertised_capabilities(resolver.resolve(ResourceKind.LOCAL_LIBVIRT))
+    remote = _advertised_capabilities(resolver.resolve(ResourceKind.REMOTE_LIBVIRT))
     return local, remote
 
 

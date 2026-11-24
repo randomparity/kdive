@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -28,11 +29,13 @@ from kdive.providers.core.discovery_registration import (
     ProviderDiscoveryRegistration,
 )
 from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.fault_inject.inventory import FaultInjectInventory
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.infra.reaping import OwnedDomain
 from kdive.providers.local_libvirt.debug.fault_inject import LocalLibvirtFaultInjection
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
+from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.ports.handles import (
     SystemHandle,
     TransportHandle,
@@ -44,6 +47,7 @@ from kdive.providers.ports.retrieve import (
     IntrospectOutput,
     LiveScriptOutput,
 )
+from kdive.providers.remote_libvirt.config import RemoteAuthorityBinding
 from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtControl
 from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstall
 from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtProvisioning
@@ -251,7 +255,7 @@ def test_provider_runtime_returns_typed_provider_ports_directly() -> None:
 
 
 def test_default_runtime_advertises_implemented_component_sources_only() -> None:
-    runtime = composition.build_local_runtime(secret_registry=SecretRegistry())
+    runtime = _runtime(ResourceKind.LOCAL_LIBVIRT)
 
     assert isinstance(runtime.profile_policy, LocalLibvirtProfilePolicy)
     assert runtime.support.component_sources.provider == "local-libvirt"
@@ -263,14 +267,14 @@ def test_default_runtime_advertises_implemented_component_sources_only() -> None
 
 
 def test_default_runtime_exposes_rootfs_build_plane() -> None:
-    runtime = composition.build_local_runtime(secret_registry=SecretRegistry())
+    runtime = _runtime(ResourceKind.LOCAL_LIBVIRT)
 
     assert runtime.rootfs is not None
     assert isinstance(runtime.rootfs.build_plane, LocalLibvirtRootfsBuildPlane)
 
 
 def test_default_runtime_wires_the_fault_injection_inspector() -> None:
-    runtime = composition.build_local_runtime(secret_registry=SecretRegistry())
+    runtime = _runtime(ResourceKind.LOCAL_LIBVIRT)
 
     assert isinstance(runtime.fault_injection, LocalLibvirtFaultInjection)
 
@@ -349,7 +353,7 @@ def test_enabling_fault_inject_registers_both_kinds(
 
 
 def test_fault_inject_runtime_advertises_its_provider_identity() -> None:
-    runtime = composition.build_fault_inject_runtime()
+    runtime = _runtime(ResourceKind.FAULT_INJECT)
 
     assert isinstance(runtime.profile_policy, FaultInjectProfilePolicy)
     assert runtime.support.component_sources.provider == "fault-inject"
@@ -361,17 +365,26 @@ def test_fault_inject_runtime_provision_is_visible_to_a_reaper_on_the_same_inven
     import asyncio
     from uuid import UUID
 
-    from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper
+    from kdive.providers.fault_inject.inventory import FaultInjectInventory
 
     inventory = FaultInjectInventory()
-    runtime = composition.build_fault_inject_runtime(inventory=inventory)
+    owner = composition.ProviderComposition(fault_inject_inventory=inventory)
+    runtime = owner.build_provider_resolver(
+        enable_local_libvirt=False,
+        enable_remote_libvirt=False,
+        enable_fault_inject=True,
+        enable_byo_host=False,
+    ).resolve(ResourceKind.FAULT_INJECT)
     system_id = UUID("33333333-3333-3333-3333-333333333333")
 
     domain = runtime.provisioner.provision(system_id, _provisioning_profile())
 
     # The shared-inventory seam: a domain the runtime provisions is reapable through a
     # FaultInjectReaper built over the same inventory (the reconciler leaked-domain seam).
-    owned = asyncio.run(FaultInjectReaper(inventory).list_owned())
+    reaper = owner.build_reconciler_reaper(
+        enable_local_libvirt=False, enable_remote_libvirt=False, enable_fault_inject=True
+    )
+    owned = asyncio.run(reaper.list_owned())
     assert [d.name for d in owned] == [domain]
 
 
@@ -813,7 +826,7 @@ def test_fault_inject_runtime_without_engine_uses_bare_happy_path_ports() -> Non
     from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
     from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
 
-    runtime = composition.build_fault_inject_runtime()
+    runtime = composition.fault_inject_composition.build_runtime()
 
     # No engine -> the happy-path ports are used unchanged (no faulting wrapper).
     assert isinstance(runtime.provisioner, FaultInjectProvisioning)
@@ -826,7 +839,7 @@ def test_fault_inject_runtime_with_engine_wraps_ports_in_faulting_decorators() -
     from kdive.providers.fault_inject.lifecycle.faulted import FaultedInstall, FaultedProvisioning
 
     engine = FaultEngine(seed=7, fault_rate={"provision": 1.0}, max_latency_s={})
-    runtime = composition.build_fault_inject_runtime(engine=engine)
+    runtime = composition.fault_inject_composition.build_runtime(engine=engine)
 
     assert isinstance(runtime.provisioner, FaultedProvisioning)
     assert isinstance(runtime.installer, FaultedInstall)
@@ -869,8 +882,9 @@ def test_remote_runtime_buildable_without_operator_config(
     monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)
 
     # Construction stays independent of operator connection config (ADR-0076).
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = composition.remote_composition.build_runtime(secret_registry=SecretRegistry())
 
+    assert isinstance(runtime.profile_policy, RemoteLibvirtProfilePolicy)
     registrar = runtime.discovery_registrar
     assert registrar is None
 
@@ -900,11 +914,11 @@ def test_descriptor_without_registration_builds_its_runtime_once() -> None:
 
 
 @pytest.mark.parametrize("kind", [ResourceKind.FAULT_INJECT, ResourceKind.REMOTE_LIBVIRT])
-def test_inventory_owned_direct_helpers_have_no_registrar(kind: ResourceKind) -> None:
+def test_inventory_owned_provider_builders_have_no_registrar(kind: ResourceKind) -> None:
     runtime = (
-        composition.build_fault_inject_runtime()
+        composition.fault_inject_composition.build_runtime()
         if kind is ResourceKind.FAULT_INJECT
-        else composition.build_remote_runtime(secret_registry=SecretRegistry())
+        else composition.remote_composition.build_runtime(secret_registry=SecretRegistry())
     )
     registrar = runtime.discovery_registrar
     assert registrar is None
@@ -1013,78 +1027,80 @@ def test_creates_false_registrar_never_resolves_target_or_writes() -> None:
     assert resolved is False
 
 
-def test_build_runtime_helpers_thread_registry_and_local_discovery(
+def test_resolver_threads_shared_registry_into_provider_runtimes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: list[ProviderDiscoveryRegistration] = []
+    seen: dict[str, object] = {}
+    registrations: list[ProviderDiscoveryRegistration] = []
+    real_local = composition.local_composition.build_runtime
+    real_remote = composition.remote_composition.build_runtime
+    real_fault = composition.fault_inject_composition.build_runtime
     real_with = composition._with_discovery_registration
+    expected_registry = SecretRegistry()
+    expected_store = ObjectStore(object(), "bucket")
 
-    def _spy_with(
+    def authority_factory(_binding: RemoteAuthorityBinding) -> AuthorityRequestSender:
+        raise AssertionError("runtime construction must not contact an authority")
+
+    def attach(
         runtime: ProviderRuntime, registration: ProviderDiscoveryRegistration
     ) -> ProviderRuntime:
-        captured.append(registration)
         assert registration is not None
+        registrations.append(registration)
         return real_with(runtime, registration)
 
-    monkeypatch.setattr(composition, "_with_discovery_registration", _spy_with)
-    seen: dict[str, object] = {}
-    real_local = composition.local_composition.build_runtime
-    real_remote = composition.remote_composition.build_runtime
-
-    def _local(*, secret_registry: SecretRegistry, store: ObjectStore) -> ProviderRuntime:
-        seen["local"] = secret_registry
-        return real_local(secret_registry=secret_registry, store=store)
-
-    def _remote(*, secret_registry: SecretRegistry, store: ObjectStore) -> ProviderRuntime:
-        seen["remote"] = secret_registry
-        return real_remote(secret_registry=secret_registry, store=store)
-
-    monkeypatch.setattr(composition.local_composition, "build_runtime", _local)
-    monkeypatch.setattr(composition.remote_composition, "build_runtime", _remote)
-    local_registry = SecretRegistry()
-    remote_registry = SecretRegistry()
-    local = composition.build_local_runtime(secret_registry=local_registry)
-    fault = composition.build_fault_inject_runtime()
-    remote = composition.build_remote_runtime(secret_registry=remote_registry)
-
-    assert seen["local"] is local_registry
-    assert seen["remote"] is remote_registry
-    assert len(captured) == 1
-    assert captured[0].kind is ResourceKind.LOCAL_LIBVIRT
-    assert local.discovery_registrar is not None
-    assert fault.discovery_registrar is None
-    assert remote.discovery_registrar is None
-
-
-def test_resolver_threads_shared_registry_into_provider_runtimes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    seen: dict[str, object] = {}
-    real_local = composition.local_composition.build_runtime
-    real_remote = composition.remote_composition.build_runtime
-
-    def _local(
+    def local(
         *, secret_registry: SecretRegistry, store: ObjectStore, authority_sender: object
     ) -> ProviderRuntime:
         assert authority_sender is None
-        seen["local"] = secret_registry
+        seen["local_registry"] = secret_registry
+        seen["local_store"] = store
         return real_local(secret_registry=secret_registry, store=store)
 
-    def _remote(
-        *, secret_registry: SecretRegistry, store: ObjectStore, authority_sender_factory: object
+    def remote(
+        *,
+        secret_registry: SecretRegistry,
+        store: ObjectStore,
+        authority_sender_factory: Callable[[RemoteAuthorityBinding], AuthorityRequestSender] | None,
     ) -> ProviderRuntime:
-        assert authority_sender_factory is None
-        seen["remote"] = secret_registry
-        return real_remote(secret_registry=secret_registry, store=store)
+        seen["remote_registry"] = secret_registry
+        seen["remote_store"] = store
+        seen["authority_factory"] = authority_sender_factory
+        return real_remote(
+            secret_registry=secret_registry,
+            store=store,
+            authority_sender_factory=authority_sender_factory,
+        )
 
-    monkeypatch.setattr(composition.local_composition, "build_runtime", _local)
-    monkeypatch.setattr(composition.remote_composition, "build_runtime", _remote)
-    _declare_remote(tmp_path, monkeypatch)
-    expected_registry = SecretRegistry()
-    composition.ProviderComposition(secret_registry=expected_registry).build_provider_resolver()
+    def fault(*, inventory: FaultInjectInventory, store: ObjectStore) -> ProviderRuntime:
+        seen["fault_store"] = store
+        return real_fault(inventory=inventory, store=store)
 
-    assert seen["local"] is expected_registry
-    assert seen["remote"] is expected_registry
+    monkeypatch.setattr(composition, "_with_discovery_registration", attach)
+    monkeypatch.setattr(composition.local_composition, "build_runtime", local)
+    monkeypatch.setattr(composition.remote_composition, "build_runtime", remote)
+    monkeypatch.setattr(composition.fault_inject_composition, "build_runtime", fault)
+    resolver = composition.ProviderComposition(
+        secret_registry=expected_registry, object_store=expected_store
+    ).build_provider_resolver(
+        enable_local_libvirt=True,
+        enable_remote_libvirt=True,
+        enable_fault_inject=True,
+        enable_byo_host=False,
+        authority_sender_factory=authority_factory,
+    )
+
+    assert seen["local_registry"] is expected_registry
+    assert seen["remote_registry"] is expected_registry
+    assert seen["local_store"] is expected_store
+    assert seen["remote_store"] is expected_store
+    assert seen["fault_store"] is expected_store
+    assert seen["authority_factory"] is authority_factory
+    assert len(registrations) == 1
+    assert registrations[0].kind is ResourceKind.LOCAL_LIBVIRT
+    assert resolver.resolve(ResourceKind.LOCAL_LIBVIRT).discovery_registrar is not None
+    assert resolver.resolve(ResourceKind.REMOTE_LIBVIRT).discovery_registrar is None
+    assert resolver.resolve(ResourceKind.FAULT_INJECT).discovery_registrar is None
 
 
 def test_remote_factory_builders_thread_the_shared_registry(
@@ -1153,7 +1169,7 @@ def test_remote_runtime_advertises_all_four_capture_methods() -> None:
     # M2.5 brings remote to 4/4 advertised methods: the two-phase kdump path (ADR-0084), the
     # host-side core-dump host_dump path (ADR-0094, #301), the already-wired gdbstub transport
     # (ADR-0083/0085, #302), and the reconciler-owned console collector (#303, ADR-0095).
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = _runtime(ResourceKind.REMOTE_LIBVIRT)
 
     assert runtime.support.capture_methods == frozenset(
         {
@@ -1169,7 +1185,7 @@ def test_remote_runtime_advertises_its_debug_and_introspection_descriptor() -> N
     # ADR-0208: remote reports what it already implements — both live-debug transports
     # (gdbstub + drgn-live, ADR-0083/0085) and both introspection modes (offline-vmcore +
     # live, the wired RemoteLibvirtVmcoreIntrospect / RemoteLibvirtLiveIntrospect ports).
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = _runtime(ResourceKind.REMOTE_LIBVIRT)
 
     assert runtime.support.debug_transports == frozenset({"gdbstub", "drgn-live"})
     assert runtime.support.introspection == frozenset({"offline-vmcore", "live", "live-script"})
@@ -1178,7 +1194,7 @@ def test_remote_runtime_advertises_its_debug_and_introspection_descriptor() -> N
 def test_remote_runtime_advertises_host_dump_as_a_capture_method() -> None:
     # #301: HOST_DUMP is in vmcore.fetch's VMCORE_METHODS, so advertising it admits
     # vmcore.fetch(method=host_dump) on remote through the existing tool.
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = _runtime(ResourceKind.REMOTE_LIBVIRT)
 
     assert CaptureMethod.HOST_DUMP in runtime.support.capture_methods
 
@@ -1187,7 +1203,7 @@ def test_remote_runtime_advertises_gdbstub_as_a_capture_method() -> None:
     # AC2: GDBSTUB is counted by the advertised capability surface. gdbstub is not
     # consumed through vmcore.fetch (only HOST_DUMP/KDUMP are), so there is no selection
     # path to gate; the assertion is membership in the advertised set.
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = _runtime(ResourceKind.REMOTE_LIBVIRT)
 
     assert CaptureMethod.GDBSTUB in runtime.support.capture_methods
 
@@ -1196,7 +1212,7 @@ def test_remote_runtime_advertises_console_as_a_capture_method() -> None:
     # #303 (ADR-0095): CONSOLE is in the advertised set so the reconciler-owned collector's
     # artifact is selectable. Like gdbstub, console is consumed off the boot/diagnostic plane,
     # not through vmcore.fetch, so the assertion is membership in the advertised set.
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = _runtime(ResourceKind.REMOTE_LIBVIRT)
 
     assert CaptureMethod.CONSOLE in runtime.support.capture_methods
 
@@ -1210,7 +1226,7 @@ def test_remote_runtime_gdbstub_debug_path_is_unchanged(
     from kdive.providers.remote_libvirt.debug.gdbmi import remote_attach_seam
     from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnect
 
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = composition.remote_composition.build_runtime(secret_registry=SecretRegistry())
 
     assert runtime.debug is not None
     assert runtime.debug.attach_seam is remote_attach_seam
@@ -1218,7 +1234,7 @@ def test_remote_runtime_gdbstub_debug_path_is_unchanged(
 
 
 def test_remote_runtime_has_real_control_and_retrieve() -> None:
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = composition.remote_composition.build_runtime(secret_registry=SecretRegistry())
 
     assert isinstance(runtime.profile_policy, RemoteLibvirtProfilePolicy)
     assert isinstance(runtime.controller, RemoteLibvirtControl)
@@ -1232,7 +1248,7 @@ def test_remote_runtime_has_real_provisioner(monkeypatch: pytest.MonkeyPatch) ->
     # any operator config (config is read per op, ADR-0076/0080).
     monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)
 
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = composition.remote_composition.build_runtime(secret_registry=SecretRegistry())
 
     assert isinstance(runtime.provisioner, RemoteLibvirtProvisioning)
 
@@ -1242,7 +1258,7 @@ def test_remote_runtime_has_no_rootfs_validator(monkeypatch: pytest.MonkeyPatch)
     # rootfs validation to add; the registrar supplies the no-op boundary behavior.
     monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)
 
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = composition.remote_composition.build_runtime(secret_registry=SecretRegistry())
 
     assert runtime.rootfs is not None
     assert runtime.rootfs.validator is None
@@ -1251,7 +1267,7 @@ def test_remote_runtime_has_no_rootfs_validator(monkeypatch: pytest.MonkeyPatch)
 def test_remote_runtime_exposes_rootfs_build_plane(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)
 
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = composition.remote_composition.build_runtime(secret_registry=SecretRegistry())
 
     assert runtime.rootfs is not None
     assert isinstance(runtime.rootfs.build_plane, RemoteLibvirtRootfsBuildPlane)
@@ -1262,7 +1278,7 @@ def test_remote_runtime_has_real_installer_and_booter(monkeypatch: pytest.Monkey
     # without operator config, and one object realizes both ports (as local does).
     monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)
 
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = composition.remote_composition.build_runtime(secret_registry=SecretRegistry())
 
     assert isinstance(runtime.installer, RemoteLibvirtInstall)
     assert runtime.booter is runtime.installer
@@ -1281,7 +1297,7 @@ def test_remote_runtime_wires_connect_and_introspect_ports(
     )
     from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnect
 
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = composition.remote_composition.build_runtime(secret_registry=SecretRegistry())
 
     assert isinstance(runtime.connector, RemoteLibvirtConnect)
     assert runtime.debug is not None
@@ -1296,8 +1312,24 @@ def test_remote_runtime_accepts_a_supplied_local_rootfs_and_declares_nothing_els
     # and PATCH (ADR-0081/0096) and KERNEL/VMLINUX (ADR-0430, #1432) were removed by ADR-0563
     # (#1942): the server-build plane that would have supplied a config or patch ref is gone
     # (`fde55d70e`), so nothing ever asked the map about them.
-    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+    runtime = _runtime(ResourceKind.REMOTE_LIBVIRT)
 
     accepted = runtime.support.component_sources.accepted_component_sources
     assert accepted == {ROOTFS_COMPONENT: frozenset({"local"})}
     assert runtime.support.component_sources.provider == ResourceKind.REMOTE_LIBVIRT.value
+
+
+def test_production_assembly_has_no_alternate_runtime_exports() -> None:
+    names = ("build_local_runtime", "build_remote_runtime", "build_fault_inject_runtime")
+    assert not any(hasattr(composition, name) for name in names)
+    assert set(names).isdisjoint(composition.__all__)
+
+
+def _runtime(kind: ResourceKind) -> ProviderRuntime:
+    owner = composition.ProviderComposition(secret_registry=SecretRegistry())
+    return owner.build_provider_resolver(
+        enable_local_libvirt=kind is ResourceKind.LOCAL_LIBVIRT,
+        enable_remote_libvirt=kind is ResourceKind.REMOTE_LIBVIRT,
+        enable_fault_inject=kind is ResourceKind.FAULT_INJECT,
+        enable_byo_host=False,
+    ).resolve(kind)

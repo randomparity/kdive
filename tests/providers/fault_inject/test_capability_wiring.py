@@ -14,6 +14,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.assembly import composition
 from kdive.providers.core.resolver import ProviderBinding
+from kdive.providers.fault_inject import composition as fault_composition
 from kdive.providers.fault_inject.capabilities import (
     FAULT_RATE_KEY,
     HOTPLUG_BEHAVIOUR_KEY,
@@ -160,7 +161,7 @@ def test_hotplug_ledger_survives_a_rebind_with_changed_behaviour() -> None:
 def test_build_time_behaviour_is_the_default_for_a_row_without_the_key() -> None:
     from kdive.providers.fault_inject.lifecycle.hotplug import HotplugBehaviour
 
-    runtime = composition.build_fault_inject_runtime(hotplug_behaviour=HotplugBehaviour.BUSY)
+    runtime = fault_composition.build_runtime(hotplug_behaviour=HotplugBehaviour.BUSY)
     bound = runtime.for_resource("fi-1", {})
 
     assert bound.device_hotplug is not None

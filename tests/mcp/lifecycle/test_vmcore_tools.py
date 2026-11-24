@@ -264,13 +264,15 @@ def _real_local_handlers() -> vmcore_handler_tools.VmcoreHandlers:
     the production local composition, so the ADR-0208 narrowing to ``{KDUMP}`` is what drives the
     admission decision.
     """
-    from kdive.domain.catalog.resources import ResourceKind
-    from kdive.providers.assembly.composition import build_local_runtime
-    from kdive.providers.core.resolver import ProviderResolver
+    from kdive.providers.assembly.composition import ProviderComposition
 
     registry = SecretRegistry()
-    runtime = build_local_runtime(secret_registry=registry)
-    resolver = ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
+    resolver = ProviderComposition(secret_registry=registry).build_provider_resolver(
+        enable_local_libvirt=True,
+        enable_remote_libvirt=False,
+        enable_fault_inject=False,
+        enable_byo_host=False,
+    )
     return vmcore_handler_tools.VmcoreHandlers(resolver=resolver, secret_registry=registry)
 
 

@@ -59,7 +59,7 @@ from kdive.mcp.tools.lifecycle.systems.snapshot import (
     snapshot_system,
 )
 from kdive.mcp.tools.lifecycle.systems.view import get_system
-from kdive.providers.assembly.composition import build_local_runtime
+from kdive.providers.assembly.composition import ProviderComposition
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied
@@ -689,8 +689,12 @@ def _ppc64le_profile() -> dict[str, Any]:
 
 
 def _real_local_resolver() -> ProviderResolver:
-    runtime = build_local_runtime(secret_registry=SecretRegistry())
-    return ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
+    return ProviderComposition(secret_registry=SecretRegistry()).build_provider_resolver(
+        enable_local_libvirt=True,
+        enable_remote_libvirt=False,
+        enable_fault_inject=False,
+        enable_byo_host=False,
+    )
 
 
 @pytest.mark.parametrize(

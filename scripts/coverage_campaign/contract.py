@@ -13,12 +13,12 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
 from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
 from kdive.mcp.tools.lifecycle.vmcore.handlers import VMCORE_METHODS
+from kdive.providers.assembly.composition import ProviderComposition
 from kdive.providers.core.runtime import ProviderSupport
-from kdive.providers.local_libvirt.composition import build_runtime as build_local_runtime
-from kdive.providers.remote_libvirt.composition import build_runtime as build_remote_runtime
 from kdive.security.secrets.secret_registry import SecretRegistry
 from scripts.coverage_campaign.evidence import NodeID
 from scripts.coverage_campaign.gridgen import CensusRow, generate_rows
@@ -170,13 +170,19 @@ def load_mapping(path: Path = _MAPPING) -> ContractMapping:
 
 def read_inventory() -> Inventory:
     registry = SecretRegistry()
+    resolver = ProviderComposition(secret_registry=registry).build_provider_resolver(
+        enable_local_libvirt=True,
+        enable_remote_libvirt=True,
+        enable_fault_inject=False,
+        enable_byo_host=False,
+    )
     return Inventory(
         tuple(generate_rows()),
         load_rootfs_catalog(),
         SUPPORTED_ARCHES,
         {
-            "local-libvirt": build_local_runtime(secret_registry=registry).support,
-            "remote-libvirt": build_remote_runtime(secret_registry=registry).support,
+            "local-libvirt": resolver.resolve(ResourceKind.LOCAL_LIBVIRT).support,
+            "remote-libvirt": resolver.resolve(ResourceKind.REMOTE_LIBVIRT).support,
         },
     )
 

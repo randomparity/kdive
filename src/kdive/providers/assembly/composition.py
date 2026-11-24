@@ -31,9 +31,7 @@ from kdive.providers.core.resource_registration import register_or_refresh_disco
 from kdive.providers.core.runtime import DiscoveryRegistrar, ProviderRuntime
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.fault_inject import composition as fault_inject_composition
-from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
-from kdive.providers.fault_inject.lifecycle.hotplug import HotplugBehaviour
 from kdive.providers.infra.console_hosting import DbRunningRemoteSystems
 from kdive.providers.infra.reaping import (
     CaptureReaper,
@@ -61,7 +59,6 @@ from kdive.providers.remote_libvirt.config import (
     is_remote_libvirt_configured,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
 from kdive.store.objectstore import ObjectStore, object_store_from_env
 
 if TYPE_CHECKING:
@@ -184,31 +181,6 @@ def _with_discovery_registration(
     runtime: ProviderRuntime, registration: ProviderDiscoveryRegistration
 ) -> ProviderRuntime:
     return replace(runtime, discovery_registrar=_discovery_registrar(registration))
-
-
-def build_local_runtime(
-    *, secret_registry: SecretRegistry, store: ObjectStore = UNCONFIGURED_OBJECT_STORE
-) -> ProviderRuntime:
-    runtime = local_composition.build_runtime(secret_registry=secret_registry, store=store)
-    return _with_discovery_registration(runtime, local_composition.discovery_registration())
-
-
-def build_fault_inject_runtime(
-    *,
-    inventory: FaultInjectInventory | None = None,
-    engine: FaultEngine | None = None,
-    hotplug_behaviour: HotplugBehaviour | None = None,
-    store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
-) -> ProviderRuntime:
-    return fault_inject_composition.build_runtime(
-        inventory=inventory, engine=engine, hotplug_behaviour=hotplug_behaviour, store=store
-    )
-
-
-def build_remote_runtime(
-    *, secret_registry: SecretRegistry, store: ObjectStore = UNCONFIGURED_OBJECT_STORE
-) -> ProviderRuntime:
-    return remote_composition.build_runtime(secret_registry=secret_registry, store=store)
 
 
 async def ensure_local_host_registered(pool: AsyncConnectionPool) -> None:
@@ -589,9 +561,6 @@ class ProviderComposition:
 
 
 __all__ = [
-    "build_fault_inject_runtime",
-    "build_local_runtime",
-    "build_remote_runtime",
     "ensure_local_host_registered",
     "ProviderComposition",
 ]
