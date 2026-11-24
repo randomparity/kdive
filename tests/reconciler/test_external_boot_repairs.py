@@ -66,8 +66,10 @@ def test_repair_rebinds_successor_to_current_authority(monkeypatch: pytest.Monke
     )
     build = AsyncMock(return_value=(source.kind, payload))
     enqueue = AsyncMock(return_value=(source, True))
+    replay = AsyncMock(return_value=None)
     monkeypatch.setattr(external_boot, "build_external_boot_payload", build)
     monkeypatch.setattr(external_boot.queue, "enqueue_with_status", enqueue)
+    monkeypatch.setattr(external_boot.queue, "dedup_replay", replay)
 
     repaired = asyncio.run(
         external_boot._enqueue_candidate(
@@ -86,6 +88,8 @@ def test_repair_rebinds_successor_to_current_authority(monkeypatch: pytest.Monke
     assert call.kwargs["authority_instance"] == "authority-current"
     assert str(source.id) in call.kwargs["operation_identity"]
     assert enqueue.await_count == 1
+    assert replay.await_args is not None and enqueue.await_args is not None
+    assert replay.await_args.args[1] == enqueue.await_args.args[4]
 
 
 def test_live_successor_suppresses_enqueue(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -314,6 +314,9 @@ async def _enqueue_candidate(
         f"{candidate.activation_id}:{candidate.operation}:{source.id}:"
         f"{sha256(phase.encode()).hexdigest()}"
     )
+    dedup_key = f"{_REPAIR_KEY_PREFIX}{admission_identity}"
+    if await queue.dedup_replay(conn, dedup_key) is not None:
+        return False
     operation_identity = f"repair:{admission_identity}"
     kind, payload = await build_external_boot_payload(
         conn,
@@ -335,7 +338,7 @@ async def _enqueue_candidate(
         kind,
         payload,
         source.authorizing,
-        f"{_REPAIR_KEY_PREFIX}{admission_identity}",
+        dedup_key,
     )
     return inserted
 

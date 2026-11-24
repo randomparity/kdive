@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import psycopg
@@ -122,10 +123,17 @@ async def _case(url: str, roles: _RoleDsns, operation: str = "activate") -> Asyn
 
 
 @pytest.mark.parametrize("operation", list(_OPERATIONS))
-@pytest.mark.parametrize("terminal", ["running", "failed"])
+@pytest.mark.parametrize("terminal", ["running", "failed", "succeeded", "canceled"])
 def test_unchanged_phase_does_not_replenish_automatic_attempts(
-    migrated_url: str, authority_role_dsns: _RoleDsns, operation: str, terminal: str
+    migrated_url: str,
+    authority_role_dsns: _RoleDsns,
+    operation: str,
+    terminal: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    builder = AsyncMock(wraps=external_boot.build_external_boot_payload)
+    monkeypatch.setattr(external_boot, "build_external_boot_payload", builder)
+
     async def run() -> None:
         async with _case(migrated_url, authority_role_dsns, operation) as case:
             before = await (
@@ -145,6 +153,7 @@ def test_unchanged_phase_does_not_replenish_automatic_attempts(
                 for replacement in await case.ids() - prior:
                     await case.exhaust(replacement, state=terminal)
             assert counts == [0, 0, 0]
+            assert builder.await_count == 1
             assert await case.ids() == {job_id}
             row = await (
                 await case.admin.execute(
