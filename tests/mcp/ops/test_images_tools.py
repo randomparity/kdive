@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from unittest.mock import AsyncMock, Mock
 from uuid import UUID, uuid4
 
 import psycopg
@@ -39,6 +41,7 @@ from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisi
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.jobs.payloads import ImageBuildPayload
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.ops.images import _common as image_common
 from kdive.mcp.tools.ops.images import build_publish as image_build_publish
 from kdive.mcp.tools.ops.images import delete as image_delete
 from kdive.mcp.tools.ops.images import registrar as images_registrar
@@ -976,3 +979,153 @@ def test_extend_operator_denied_and_audited(migrated_url: str) -> None:
         ]
 
     asyncio.run(_run())
+
+
+@asynccontextmanager
+async def _failed_denial_audit(
+    pool: AsyncConnectionPool,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fault: str,
+    audit_connection_number: int,
+) -> AsyncGenerator[None]:
+    original_connection = pool.connection
+    connection_calls = 0
+    failure = RuntimeError("sensitive-audit-error principal-secret project-secret")
+
+    async def fail_write(*args: object, **kwargs: object) -> None:
+        raise failure
+
+    @asynccontextmanager
+    async def connection_context() -> AsyncGenerator[psycopg.AsyncConnection]:
+        if fault == "connection_enter":
+            raise failure
+        async with original_connection() as conn:
+            original_transaction = conn.transaction
+
+            @asynccontextmanager
+            async def transaction_context() -> AsyncGenerator[None]:
+                if fault == "transaction_enter":
+                    raise failure
+                async with original_transaction():
+                    yield
+                if fault == "transaction_exit":
+                    raise failure
+
+            with monkeypatch.context() as transaction_patch:
+                transaction_patch.setattr(conn, "transaction", transaction_context)
+                yield conn
+        if fault == "connection_exit":
+            raise failure
+
+    def connection() -> AbstractAsyncContextManager[psycopg.AsyncConnection]:
+        nonlocal connection_calls
+        connection_calls += 1
+        if connection_calls < audit_connection_number:
+            return original_connection()
+        if fault == "connection_call":
+            raise failure
+        return connection_context()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pool, "connection", connection)
+        if fault == "write":
+            patch.setattr(image_common.audit, "record_denial", fail_write)
+        yield
+    assert connection_calls == audit_connection_number
+
+
+@pytest.mark.parametrize("tool", [UPLOAD_TOOL, DELETE_TOOL])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "connection_call",
+        "connection_enter",
+        "transaction_enter",
+        "write",
+        "transaction_exit",
+        "connection_exit",
+    ],
+)
+def test_image_project_denial_survives_audit_failure(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tool: str,
+    fault: str,
+) -> None:
+    async def run() -> None:
+        async with _pool(migrated_url) as pool:
+            image_id = await _insert_private_image(pool)
+            before = await _catalog_rows(migrated_url)
+            forbidden_upload = AsyncMock(side_effect=AssertionError("upload service entered"))
+            monkeypatch.setattr(_UPLOAD_MODULE, "register_private_upload", forbidden_upload)
+            with caplog.at_level(logging.WARNING, logger=image_common.__name__):
+                async with _failed_denial_audit(
+                    pool,
+                    monkeypatch,
+                    fault=fault,
+                    audit_connection_number=2 if tool == DELETE_TOOL else 1,
+                ):
+                    if tool == DELETE_TOOL:
+                        response = await image_delete.delete(
+                            pool,
+                            _member_ctx(role=Role.VIEWER),
+                            image_id=str(image_id),
+                        )
+                        expected_id = str(image_id)
+                    else:
+                        response = await _UPLOAD_MODULE.upload(
+                            pool,
+                            _member_ctx(role=Role.VIEWER),
+                            cast(UploadObjectStore, _UnusedUploadStore()),
+                            _UPLOAD_MODULE.ImageUploadRequest(
+                                project=_TARGET_PROJECT,
+                                name="custom",
+                                arch="x86_64",
+                                quarantine_key="quarantine/abc",
+                            ),
+                        )
+                        expected_id = "custom"
+            assert response.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+            assert response.object_id == expected_id
+            assert response.data["missing_roles"] == ["operator"]
+            assert await _catalog_rows(migrated_url) == before
+            assert await _image_exists(migrated_url, image_id)
+            forbidden_upload.assert_not_awaited()
+        warnings = [record for record in caplog.records if record.name == image_common.__name__]
+        assert len(warnings) == 1
+        warning = warnings[0]
+        assert warning.levelno == logging.WARNING
+        assert warning.args == (tool,)
+        assert warning.exc_info is None and warning.stack_info is None
+        for private in (
+            "sensitive-audit-error",
+            "principal-secret",
+            "project-secret",
+            "dev-1",
+            "sess-dev",
+            _TARGET_PROJECT,
+            "quarantine/abc",
+        ):
+            assert private not in warning.getMessage()
+
+    asyncio.run(run())
+
+
+def test_image_project_denial_audit_propagates_cancellation() -> None:
+    cancellation = asyncio.CancelledError()
+    pool = cast(AsyncConnectionPool, Mock(connection=Mock(side_effect=cancellation)))
+
+    async def run() -> None:
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await image_common.audit_project_denial(
+                pool,
+                _member_ctx(role=Role.VIEWER),
+                tool=UPLOAD_TOOL,
+                project=_TARGET_PROJECT,
+                args={"name": "custom"},
+            )
+        assert raised.value is cancellation
+
+    asyncio.run(run())
