@@ -1755,22 +1755,35 @@ def prove_no_foreign_system_storage_references(
 
 
 def _system_storage_paths(overlay: str, baseline: str) -> frozenset[str]:
+    def on_walk_error(error: OSError) -> None:
+        # A missing subtree leaves an incomplete proof; only the absent root is benign.
+        if isinstance(error, FileNotFoundError) and error.filename == baseline:
+            return
+        raise error
+
     paths: set[str] = set()
     try:
         if stat.S_ISREG(os.stat(overlay, follow_symlinks=False).st_mode):
             paths.add(overlay)
     except FileNotFoundError:
         pass
-    try:
-        for current, _directories, files in os.walk(baseline, followlinks=False):
-            for name in files:
-                path = os.path.join(current, name)
-                if stat.S_ISREG(os.stat(path, follow_symlinks=False).st_mode):
+    for current, _directories, files in os.walk(baseline, followlinks=False, onerror=on_walk_error):
+        for name in files:
+            path = os.path.join(current, name)
+            try:
+                mode = os.stat(path, follow_symlinks=False).st_mode
+                if stat.S_ISDIR(mode):
+                    raise OSError(
+                        errno.EIO,
+                        "local System teardown storage enumeration skipped a directory",
+                        path,
+                    )
+                if stat.S_ISREG(mode):
                     paths.add(path)
-                if len(paths) > 4096:
-                    raise ValueError("local System teardown storage path set exceeds its bound")
-    except FileNotFoundError:
-        pass
+            except FileNotFoundError:
+                continue
+            if len(paths) > 4096:
+                raise ValueError("local System teardown storage path set exceeds its bound")
     return frozenset(paths)
 
 

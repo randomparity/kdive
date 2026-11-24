@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
+import os
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -16,6 +18,9 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 from kdive.domain.external_boot_values import RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.local_libvirt.lifecycle.boot.owned_domain import owned_system_semantic_identity
+from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    prove_no_foreign_system_storage_references,
+)
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
 from kdive.providers.local_libvirt.lifecycle.storage import (
@@ -358,7 +363,10 @@ def test_retry_rejects_divergent_live_xml_before_provisioner_mutation(tmp_path: 
         provider._verify_retained_provision_identity(intent)
 
 
-def test_teardown_checks_retained_identity_and_siblings_before_destroy(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failure", ["foreign", "root", "nested"])
+def test_teardown_checks_retained_identity_and_siblings_before_destroy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
     intent = _intent(tmp_path)
     Path(intent.overlay).parent.mkdir()
     Path(intent.overlay).write_bytes(b"qcow2")
@@ -399,9 +407,29 @@ def test_teardown_checks_retained_identity_and_siblings_before_destroy(tmp_path:
         def close(self) -> None:
             events.append("close")
 
-    def reject_sibling(_system_id: object, _overlay: object, _baseline: object) -> None:
+    proof_connection = FakeLibvirtConn()
+    monkeypatch.setattr(proof_connection, "close", lambda: events.append("proof.close") or 0)
+    if failure != "foreign":
+        nested = Path(intent.baseline) / "nested"
+        nested.mkdir()
+        (nested / "kernel").touch()
+        denied = Path(intent.baseline) if failure == "root" else nested
+        original = os.scandir
+
+        def scan(path: str):
+            if path == str(denied):
+                raise PermissionError(errno.EACCES, "storage unreadable", path)
+            return original(path)
+
+        monkeypatch.setattr(os, "scandir", scan)
+
+    def reject_sibling(system_id: UUID, overlay: str, baseline: str) -> None:
         events.append("siblings")
-        raise LocalAuthoritySystemError("foreign overlay attachment")
+        if failure == "foreign":
+            raise LocalAuthoritySystemError("foreign overlay attachment")
+        prove_no_foreign_system_storage_references(
+            lambda: proof_connection, system_id, overlay, baseline
+        )
 
     base = tmp_path / "base.qcow2"
     provider = LocalAuthoritySystemProvider(
@@ -418,34 +446,25 @@ def test_teardown_checks_retained_identity_and_siblings_before_destroy(tmp_path:
         allocate_port=lambda: 2200,
     )
     provider._store_intent(intent)
-    request = AuthoritySystemMutationRequestV1(
-        system_id=intent.system_id,
-        allocation_id=intent.allocation_id,
-        resource_id=intent.resource_id,
-        provider_kind="local-libvirt",
-        resource_name="local-a",
-        authority_instance=intent.authority_instance,
-        profile_identity=_DIGEST,
-        root_identity=intent.root_identity,
-        operation=AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
-        operation_identity="teardown-a",
-        authority_id=uuid4(),
-        generation=1,
-        attempt_id=uuid4(),
-        operation_digest=_DIGEST,
-        bootstrap_identity=intent.bootstrap_identity,
-    )
-    context = AuthoritySystemCommitContextV1(
-        attempt_id=request.attempt_id,
-        operation=AuthoritySystemOperation.PREACTIVATION_TEARDOWN,
-        journal_sequence=1,
-        journal_digest=_DIGEST,
+    request, context = _teardown_inputs(intent.system_id, 1)
+    request = request.model_copy(
+        update={
+            "allocation_id": intent.allocation_id,
+            "resource_id": intent.resource_id,
+            "operation_digest": intent.operation_digest,
+        }
     )
 
-    with pytest.raises(LocalAuthoritySystemError, match="foreign overlay"):
+    error_type = LocalAuthoritySystemError if failure == "foreign" else PermissionError
+    message = "foreign overlay" if failure == "foreign" else "storage unreadable"
+    with pytest.raises(error_type, match=message):
         asyncio.run(provider.execute_preactivation_teardown(request, context))
 
-    assert events == ["xml", "close", "siblings", "close"]
+    expected_events = ["xml", "close", "siblings"]
+    if failure != "foreign":
+        expected_events.append("proof.close")
+    assert events == [*expected_events, "close"]
+    assert Path(intent.overlay).exists() and Path(intent.baseline).exists()
     assert (tmp_path / "intents" / f"{intent.system_id}.json").exists()
 
 

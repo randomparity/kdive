@@ -367,6 +367,201 @@ def test_authority_teardown_session_requires_no_activation_or_run(tmp_path: Path
     session.close()
 
 
+@pytest.mark.parametrize(
+    ("location", "kind"),
+    [
+        ("root", "permission"),
+        ("nested", "permission"),
+        ("root", "io"),
+        ("nested", "io"),
+        ("nested", "missing"),
+        ("root", "unknown"),
+        ("nested", "unknown"),
+        ("root", "wrong"),
+    ],
+)
+def test_storage_enumeration_rejects_directory_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str, kind: str
+) -> None:
+    overlay = tmp_path / "overlay"
+    overlay.touch()
+    baseline = tmp_path / "baseline"
+    nested = baseline / "nested"
+    nested.mkdir(parents=True)
+    (nested / "kernel").write_bytes(b"kernel")
+    denied = baseline if location == "root" else nested
+    fault: OSError
+    if kind == "permission":
+        fault = PermissionError(errno.EACCES, "storage unreadable", str(denied))
+    elif kind == "io":
+        fault = OSError(errno.EIO, "storage unreadable", str(denied))
+    elif kind == "missing":
+        fault = FileNotFoundError(errno.ENOENT, "directory vanished", str(denied))
+    elif kind == "unknown":
+        fault = FileNotFoundError(errno.ENOENT, "unknown directory vanished")
+    else:
+        fault = FileNotFoundError(errno.ENOENT, "different directory vanished", str(nested))
+    original = os.scandir
+
+    def scan(path: str):
+        if path == str(denied):
+            raise fault
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", scan)
+    with pytest.raises(type(fault)) as raised:
+        session_module._system_storage_paths(str(overlay), str(baseline))
+    assert raised.value is fault
+
+
+def test_storage_enumeration_rejects_a_directory_misclassified_after_metadata_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    overlay = tmp_path / "overlay"
+    overlay.touch()
+    baseline = tmp_path / "baseline"
+    nested = baseline / "nested"
+    nested.mkdir(parents=True)
+    (nested / "kernel").touch()
+    fault = OSError(errno.EIO, "directory metadata unreadable", str(nested))
+    original = os.scandir
+
+    class Entry:
+        name = nested.name
+
+        def is_dir(self) -> bool:
+            raise fault
+
+    @contextmanager
+    def scan(path: str):
+        if path == str(baseline):
+            yield iter([Entry()])
+        else:
+            with original(path) as entries:
+                yield entries
+
+    monkeypatch.setattr(os, "scandir", scan)
+    with pytest.raises(OSError) as raised:
+        session_module._system_storage_paths(str(overlay), str(baseline))
+    assert raised.value.errno == errno.EIO
+    assert raised.value.filename == str(nested)
+
+
+@pytest.mark.parametrize("overlay_present", [False, True])
+@pytest.mark.parametrize("baseline_present", [False, True])
+def test_storage_enumeration_accepts_absent_artifacts(
+    tmp_path: Path, overlay_present: bool, baseline_present: bool
+) -> None:
+    overlay = tmp_path / "overlay"
+    baseline = tmp_path / "baseline"
+    expected: set[str] = set()
+    if overlay_present:
+        overlay.touch()
+        expected.add(str(overlay))
+    if baseline_present:
+        baseline.mkdir()
+        kernel = baseline / "kernel"
+        kernel.touch()
+        expected.add(str(kernel))
+    assert session_module._system_storage_paths(str(overlay), str(baseline)) == expected
+
+
+@pytest.mark.parametrize("vanish_after", [0, 1])
+def test_storage_enumeration_continues_after_a_file_vanishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vanish_after: int
+) -> None:
+    overlay = tmp_path / "overlay"
+    overlay.touch()
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    files = {str(baseline / name) for name in ("one", "two", "three")}
+    for name in files:
+        Path(name).touch()
+    original = os.stat
+    seen: list[str] = []
+    vanished: set[str] = set()
+
+    def stat_file(path: str, *args, **kwargs):
+        if str(path) in files:
+            if not vanished and len(seen) == vanish_after:
+                vanished.add(str(path))
+                os.unlink(path)
+                raise FileNotFoundError(errno.ENOENT, "file vanished", path)
+            seen.append(str(path))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat_file)
+    observed = session_module._system_storage_paths(str(overlay), str(baseline))
+    assert len(vanished) == 1
+    assert observed == (files - vanished) | {str(overlay)}
+    assert all(Path(name).is_file() for name in files - vanished)
+
+
+def test_storage_enumeration_keeps_only_nonfollowing_regular_files(tmp_path: Path) -> None:
+    overlay = tmp_path / "overlay"
+    overlay.touch()
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    kernel = baseline / "kernel"
+    kernel.touch()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    payload = outside / "payload"
+    payload.touch()
+    (baseline / "file-link").symlink_to(payload)
+    (baseline / "directory-link").symlink_to(outside, target_is_directory=True)
+    os.mkfifo(baseline / "fifo")
+    assert session_module._system_storage_paths(str(overlay), str(baseline)) == {
+        str(overlay),
+        str(kernel),
+    }
+
+
+@pytest.mark.parametrize("file_count", [4095, 4096])
+def test_storage_enumeration_bounds_the_combined_regular_file_set(
+    tmp_path: Path, file_count: int
+) -> None:
+    overlay = tmp_path / "overlay"
+    overlay.touch()
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    for index in range(file_count):
+        (baseline / str(index)).touch()
+    if file_count == 4096:
+        with pytest.raises(ValueError, match="storage path set exceeds its bound"):
+            session_module._system_storage_paths(str(overlay), str(baseline))
+    else:
+        observed = session_module._system_storage_paths(str(overlay), str(baseline))
+        assert len(observed) == 4096
+        assert str(overlay) in observed
+
+
+@pytest.mark.parametrize("target", ["overlay", "kernel"])
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EIO])
+def test_storage_enumeration_preserves_file_stat_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str, code: int
+) -> None:
+    overlay = tmp_path / "overlay"
+    overlay.touch()
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    kernel = baseline / "kernel"
+    kernel.touch()
+    denied = overlay if target == "overlay" else kernel
+    fault = OSError(code, "file unreadable", str(denied))
+    original = os.stat
+
+    def stat_file(path: str, *args, **kwargs):
+        if str(path) == str(denied):
+            raise fault
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat_file)
+    with pytest.raises(type(fault)) as raised:
+        session_module._system_storage_paths(str(overlay), str(baseline))
+    assert raised.value is fault
+
+
 def test_authority_teardown_rejects_a_sibling_overlay_attachment(tmp_path: Path) -> None:
     events: list[str] = []
     owner = _TeardownDomain(events)
