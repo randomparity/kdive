@@ -28,6 +28,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
 from kdive.domain.external_boot_values import (
     AbsentComponentState,
+    ActivationOwnership,
     ComponentState,
     DebuginfoSource,
     ExternalBootActivationBinding,
@@ -50,6 +51,7 @@ from kdive.providers.external_boot_authority.teardown import (
     ProviderRecoveryRefusal,
     SystemTeardownSupersededError,
 )
+from kdive.providers.local_libvirt.lifecycle.boot import _artifact_staging as staging_module
 from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
 from kdive.providers.local_libvirt.lifecycle.boot import recovery as recovery_validation
 from kdive.providers.local_libvirt.lifecycle.boot import recovery_store as recovery_store_module
@@ -63,7 +65,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     RealLocalExternalBootIO,
     advance_absence_publication,
     advance_module_publication,
-    render_target_xml,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import (
     VMLINUX_HEADROOM_BYTES,
@@ -114,7 +115,9 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalOperationLeaseScope,
 )
 from kdive.providers.shared.external_boot_bounds import materialization_reservation_bytes
+from kdive.providers.shared.libvirt_external_boot import render_target_xml
 from kdive.providers.shared.runtime_paths import overlay_path
+from kdive.store.objectstore import ObjectStore
 from tests.providers.local_libvirt.external_boot_support import (
     _BINDING,
     _SOURCE_XML,
@@ -1743,18 +1746,18 @@ def test_exact_bundle_validation_discards_rebuilt_archive_output(
         assert name == "modules"
         return converted
 
-    monkeypatch.setattr(external_boot_module, "_stream_exact_version", stream_exact_version)
-    monkeypatch.setattr(external_boot_module, "convert_kernel_bundle_modules", convert)
-    monkeypatch.setattr(external_boot_module, "_descriptor_digest", digest)
-    monkeypatch.setattr(external_boot_module, "_installed_module_manifest", lambda _fd: "manifest")
+    monkeypatch.setattr(staging_module, "_stream_exact_version", stream_exact_version)
+    monkeypatch.setattr(staging_module, "convert_kernel_bundle_modules", convert)
+    monkeypatch.setattr(staging_module, "_descriptor_digest", digest)
+    monkeypatch.setattr(staging_module, "_installed_module_manifest", lambda _fd: "manifest")
     monkeypatch.setattr(
-        external_boot_module.RealLocalExternalBootMaterializer,
+        staging_module.RealLocalExternalBootMaterializer,
         "_validate_bundle_evidence",
         staticmethod(lambda _plan, _descriptor: {}),
     )
     try:
-        store = cast(external_boot_module.ObjectStore, object())
-        materializer = external_boot_module.RealLocalExternalBootMaterializer(store)
+        store = cast(ObjectStore, object())
+        materializer = staging_module.RealLocalExternalBootMaterializer(store)
         assert materializer._validate_local_bundle(plan, directory_fd) == ({}, "manifest")
         assert not (tmp_path / ".bundle.verify").exists()
     finally:
@@ -3329,9 +3332,7 @@ class _RestartSession(_RealSession):
         return os.open(self.artifact, flags)
 
     def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int:
-        owner = external_boot_module.ActivationOwnership(
-            system_id=_BINDING.system_id, run_id=_BINDING.run_id
-        )
+        owner = ActivationOwnership(system_id=_BINDING.system_id, run_id=_BINDING.run_id)
         recovery_store_module._artifact_ref_parts(artifact, owner, _BINDING.activation_id)
         return os.open(self.artifact, flags)
 
@@ -6703,7 +6704,7 @@ def _tombstone_residue_fixture(
     authority = OpaqueProviderRef(ref="authority/current")
     materialization = _materialization().model_copy(
         update={
-            "ownership": external_boot_module.ActivationOwnership(
+            "ownership": ActivationOwnership(
                 system_id=metadata.binding.system_id,
                 run_id=metadata.binding.run_id,
             ),
@@ -7211,14 +7212,14 @@ def _direct_root_plan(device: str = "/dev/vda") -> ExternalBootPlan:
 
 
 def test_projection_carries_the_root_uuid_a_direct_root_plan_must_prove() -> None:
-    assert external_boot_module._whole_disk_root_uuid(_direct_root_plan()) == "x"
+    assert staging_module._whole_disk_root_uuid(_direct_root_plan()) == "x"
     plan = external_boot_plan(UUID(_BINDING.system_id), UUID(_BINDING.run_id))
-    assert external_boot_module._whole_disk_root_uuid(plan) is None
+    assert staging_module._whole_disk_root_uuid(plan) is None
 
 
 def test_projection_refuses_a_direct_root_other_than_the_local_disk() -> None:
     with pytest.raises(ValueError, match="/dev/vda"):
-        external_boot_module._whole_disk_root_uuid(_direct_root_plan("/dev/vdb"))
+        staging_module._whole_disk_root_uuid(_direct_root_plan("/dev/vdb"))
 
 
 @pytest.mark.parametrize(("observed", "accepted"), [("x", True), ("y", False), (None, False)])

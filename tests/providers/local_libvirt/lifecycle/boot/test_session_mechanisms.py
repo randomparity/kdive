@@ -22,8 +22,7 @@ import pytest
 import kdive.providers.local_libvirt.lifecycle.boot.readiness as readiness_module
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_values import ExternalBootActivationBinding, OpaqueProviderRef
-from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
-    ModuleArchiveCapture,
+from kdive.providers.local_libvirt.lifecycle.boot._artifact_staging import (
     _cleanup_uncommitted_payloads,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
@@ -34,6 +33,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     _DomainExitProbe,
     prepare_console_readiness_window,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.recovery import ModuleArchiveCapture
 from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
     FinalizeCleanupProof,
     RecoveryMetadataStore,

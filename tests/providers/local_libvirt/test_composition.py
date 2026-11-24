@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ast
+import importlib
+import importlib.util
 import inspect
 import re
 import subprocess
@@ -614,3 +617,37 @@ def test_worker_mechanisms_keep_the_legacy_resolvers(
 
     assert seen["overlay_path_for"] is composition.overlay_path
     assert seen["baseline_dir_for"] is composition.baseline_dir
+
+
+def test_artifact_stager_has_one_independent_owner() -> None:
+    staging = importlib.import_module(
+        "kdive.providers.local_libvirt.lifecycle.boot._artifact_staging"
+    )
+    lifecycle = importlib.import_module(
+        "kdive.providers.local_libvirt.lifecycle.boot.external_boot"
+    )
+    store = cast(ObjectStore, object())
+    stager = composition.build_external_boot_artifact_stager(store)
+
+    assert type(stager) is staging.RealLocalExternalBootMaterializer
+    assert type(stager).__module__ == staging.__name__
+    assert cast(Any, stager)._object_store is store
+    assert not hasattr(lifecycle, "RealLocalExternalBootMaterializer")
+
+
+def test_artifact_staging_never_imports_lifecycle_orchestration() -> None:
+    package = "kdive.providers.local_libvirt.lifecycle.boot"
+    module = importlib.util.find_spec(package + "._artifact_staging")
+    assert module is not None and module.origin is not None
+    dependencies: set[str] = set()
+    for node in ast.walk(ast.parse(Path(module.origin).read_text())):
+        if isinstance(node, ast.Import):
+            dependencies.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            name = node.module or ""
+            if node.level:
+                name = importlib.util.resolve_name("." * node.level + name, package)
+            dependencies.add(name)
+            dependencies.update(name + "." + alias.name for alias in node.names)
+
+    assert package + ".external_boot" not in dependencies

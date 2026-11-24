@@ -51,11 +51,13 @@ from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreInt
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
+from kdive.providers.local_libvirt.lifecycle.boot._artifact_staging import (
+    RealLocalExternalBootMaterializer,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
     RealLocalExternalBootIO,
-    RealLocalExternalBootMaterializer,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     LocalExternalBootReadiness,

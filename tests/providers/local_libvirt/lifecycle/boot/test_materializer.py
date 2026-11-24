@@ -22,9 +22,9 @@ from kdive.domain.external_boot_values import (
     ExternalBootPlan,
     OpaqueProviderRef,
 )
-from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
+from kdive.providers.local_libvirt.lifecycle.boot import _artifact_staging as staging_module
 from kdive.providers.local_libvirt.lifecycle.boot import kernel_bundle as kernel_bundle_module
-from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+from kdive.providers.local_libvirt.lifecycle.boot._artifact_staging import (
     RealLocalExternalBootMaterializer,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
@@ -421,7 +421,7 @@ def test_interrupted_module_conversion_cleans_temporaries_for_new_session_retry(
     client = _Client({("build/kernel", "kernel-v1"): bundle})
     materializer = RealLocalExternalBootMaterializer(ObjectStore(client, "bucket"))
     session = _Session(tmp_path / "activation")
-    original = external_boot_module.convert_kernel_bundle_modules
+    original = staging_module.convert_kernel_bundle_modules
 
     def interrupt_conversion(
         source: BinaryIO,
@@ -434,14 +434,14 @@ def test_interrupted_module_conversion_cleans_temporaries_for_new_session_retry(
         destination.write(b"partial")
         raise OSError("injected module conversion interruption")
 
-    monkeypatch.setattr(external_boot_module, "convert_kernel_bundle_modules", interrupt_conversion)
+    monkeypatch.setattr(staging_module, "convert_kernel_bundle_modules", interrupt_conversion)
     with pytest.raises(OSError, match="conversion interruption"):
         materializer.materialize(plan, cast(LocalExternalBootSession, session))
 
     digest_dirs = [path for path in session.root.iterdir() if path.is_dir()]
     assert len(digest_dirs) == 1
     assert list(digest_dirs[0].iterdir()) == []
-    monkeypatch.setattr(external_boot_module, "convert_kernel_bundle_modules", original)
+    monkeypatch.setattr(staging_module, "convert_kernel_bundle_modules", original)
     result = materializer.materialize(plan, cast(LocalExternalBootSession, _Session(session.root)))
     assert result.plan_identity == plan.identity
 
@@ -586,7 +586,7 @@ def test_exact_retry_rejects_different_valid_canonical_module_archive(
     projection = session.reopen_projection(result.artifacts.kernel)
     modules = Path(session.projection_artifact_path(projection, "modules"))
     replacement = io.BytesIO()
-    external_boot_module.convert_kernel_bundle_modules(
+    kernel_bundle_module.convert_kernel_bundle_modules(
         io.BytesIO(_bundle(module_data=b"\x7fELFdifferent")),
         replacement,
         release="6.9.0",
