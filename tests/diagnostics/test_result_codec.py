@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Container
+
 import pytest
 
 from kdive.diagnostics.checks import (
@@ -248,3 +251,78 @@ def test_one_bad_id_does_not_poison_the_batch() -> None:
     assert good.detail == "ok"
     assert bad.check_id == "secret_ref"
     assert bad.status is CheckStatus.ERROR
+
+
+@pytest.mark.parametrize("check_id", [None, False, 7, [], {}])
+@pytest.mark.parametrize("allowed_ids", [(PROVIDER_TLS_ID,), frozenset({PROVIDER_TLS_ID})])
+def test_non_string_id_is_isolated_before_membership(
+    check_id: object, allowed_ids: Container[str]
+) -> None:
+    valid = CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "valid sibling")
+    payload = json.loads(serialize_results([valid]))
+    payload["results"].insert(0, {"check_id": check_id, "status": "pass", "detail": "bad"})
+
+    bad, good = _deserialize_results(json.dumps(payload), allowed_ids=allowed_ids)
+
+    assert bad.check_id == "unknown"
+    assert bad.status is CheckStatus.ERROR
+    assert bad.failure_category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "check_id must be a string" in bad.detail
+    assert good == valid
+
+
+@pytest.mark.parametrize("field", ["detail", "fix", "provider", "resource_id"])
+@pytest.mark.parametrize("value", [False, 7, 1.5, ["private-value"], {"private-value": "x"}])
+def test_non_string_field_is_isolated(field: str, value: object) -> None:
+    valid = CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "valid sibling")
+    payload = json.loads(serialize_results([valid]))
+    item: dict[str, object] = {
+        "check_id": GDBSTUB_ACL_ID,
+        "status": "fail",
+        "detail": "bad",
+        "fix": "repair",
+    }
+    item[field] = value
+    payload["results"].insert(0, item)
+
+    bad, good = deserialize_results(json.dumps(payload))
+
+    assert bad.check_id == GDBSTUB_ACL_ID
+    assert bad.status is CheckStatus.ERROR
+    assert bad.failure_category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert field in bad.detail
+    assert "must be a string" in bad.detail
+    assert "private-value" not in bad.detail
+    assert good == valid
+
+
+@pytest.mark.parametrize("remove_detail", [False, True])
+def test_missing_or_null_detail_is_isolated(remove_detail: bool) -> None:
+    valid = CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "valid sibling")
+    payload = json.loads(serialize_results([valid]))
+    item = {"check_id": GDBSTUB_ACL_ID, "status": "pass", "detail": None}
+    if remove_detail:
+        del item["detail"]
+    payload["results"].insert(0, item)
+    bad, good = deserialize_results(json.dumps(payload))
+    assert bad.status is CheckStatus.ERROR
+    assert bad.check_id == GDBSTUB_ACL_ID
+    assert good == valid
+
+
+@pytest.mark.parametrize("optional", [None, "", "value"])
+def test_optional_string_fields_and_empty_detail_still_roundtrip(optional: str | None) -> None:
+    valid = CheckResult(
+        PROVIDER_TLS_ID, CheckStatus.PASS, "", provider=optional, resource_id=optional
+    )
+    assert deserialize_results(serialize_results([valid])) == [valid]
+
+
+def test_missing_id_is_isolated_from_valid_sibling() -> None:
+    valid = CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "valid sibling")
+    payload = json.loads(serialize_results([valid]))
+    payload["results"].insert(0, {"status": "pass", "detail": "bad"})
+    bad, good = deserialize_results(json.dumps(payload))
+    assert bad.check_id == "unknown"
+    assert bad.status is CheckStatus.ERROR
+    assert good == valid

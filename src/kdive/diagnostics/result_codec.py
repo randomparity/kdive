@@ -83,9 +83,17 @@ def _reconstruct(item: Any, *, allowed_ids: Container[str]) -> CheckResult:
     if not isinstance(item, dict):
         raise ResultCodecError("diagnostics result item is not an object")
     check_id = item.get("check_id")
+    if not isinstance(check_id, str):
+        raise ResultCodecError("diagnostics result check_id must be a string")
     if check_id not in allowed_ids:
         raise ResultCodecError(f"unexpected worker-vantage check id {check_id!r}")
     try:
+        if not isinstance(item["detail"], str):
+            raise ResultCodecError("diagnostics result detail must be a string")
+        for field in ("fix", "provider", "resource_id"):
+            value = item.get(field)
+            if value is not None and not isinstance(value, str):
+                raise ResultCodecError(f"diagnostics result {field} must be a string or null")
         return CheckResult(
             check_id=check_id,
             status=CheckStatus(item["status"]),
