@@ -449,7 +449,7 @@ def test_post_provider_interruption_replays_without_a_second_mutation(
                 replayed,
                 incarnation_credential=SecretStr(case.credential),
             )
-            assert committed is not None
+            assert isinstance(committed, queue.ExternalBootCommitOutcome)
             before = await _durable_rows(seed, case.vehicle.activation_id)
 
             # Exact finalizer replay must not duplicate durable effects or leak a transition.
@@ -521,7 +521,8 @@ async def _run_to_terminal(
                 result,
                 incarnation_credential=SecretStr(case.credential),
             )
-            assert committed is not None
+            assert isinstance(committed, queue.ExternalBootCommitOutcome)
+            assert committed.continue_claim is True
             result = await handler(
                 worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker)
             )
@@ -590,7 +591,7 @@ def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
                     result,
                     incarnation_credential=SecretStr(case.credential),
                 )
-            assert committed is not None
+            assert isinstance(committed, queue.ExternalBootCommitOutcome)
         row = await _activation_row(seed, case.vehicle.activation_id)
         assert row["state"] == ("torn_down" if operation == "teardown" else spec["after"])
         if operation == "resolve-conflict":
@@ -1099,9 +1100,10 @@ def test_an_authority_superseded_commit_terminalizes_once_in_the_classifying_tra
                 worker, _job(case), stale, incarnation_credential=SecretStr(case.credential)
             )
 
-        assert isinstance(committed, Job)
-        assert committed.state.value == "failed"
-        assert committed.error_category == "stale_handle"
+        assert isinstance(committed, queue.ExternalBootCommitOutcome)
+        assert committed.job.state.value == "failed"
+        assert committed.continue_claim is False
+        assert committed.job.error_category == "stale_handle"
         assert await _job_state(seed, case.job_id) == "failed"
         async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
             replay = await queue.complete_external_boot(
@@ -1126,9 +1128,10 @@ def test_observed_identity_stale_terminalizes_once_in_the_classifying_transactio
                 worker, _job(case), stale, incarnation_credential=SecretStr(case.credential)
             )
 
-        assert isinstance(committed, Job)
-        assert committed.state.value == "failed"
-        assert committed.error_category == "stale_handle"
+        assert isinstance(committed, queue.ExternalBootCommitOutcome)
+        assert committed.job.state.value == "failed"
+        assert committed.continue_claim is False
+        assert committed.job.error_category == "stale_handle"
         assert await _job_state(seed, case.job_id) == "failed"
         async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
             replay = await queue.complete_external_boot(

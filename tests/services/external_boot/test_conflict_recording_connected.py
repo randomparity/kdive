@@ -244,9 +244,11 @@ async def _resolve(
     result = await handler(worker, claimed, marker)
     assert isinstance(result, ExternalBootAuthoritySuccessV1)
     assert result.result.operation == "recovery-attempt"
-    assert await queue.complete_external_boot(
+    checkpoint = await queue.complete_external_boot(
         worker, claimed, result, incarnation_credential=SecretStr(case.credential)
     )
+    assert isinstance(checkpoint, queue.ExternalBootCommitOutcome)
+    assert checkpoint.continue_claim is True
     result = await handler(worker, claimed, marker)
     if not restores:
         assert isinstance(result, ExternalBootAuthorityConflictV1)
@@ -259,7 +261,9 @@ async def _resolve(
     completed = await queue.complete_external_boot(
         worker, claimed, result, incarnation_credential=SecretStr(case.credential)
     )
-    assert isinstance(completed, Job) and completed.state.value == "succeeded"
+    assert isinstance(completed, queue.ExternalBootCommitOutcome)
+    assert completed.job.state.value == "succeeded"
+    assert completed.continue_claim is False
     return claimed.id
 
 
@@ -339,9 +343,11 @@ async def _run_marked(
     result = await handler(worker, job, marker)
     while isinstance(result, ExternalBootAuthoritySuccessV1):
         assert result.result.operation in {"recovery-attempt", "deadline"}
-        assert await queue.complete_external_boot(
+        checkpoint = await queue.complete_external_boot(
             worker, job, result, incarnation_credential=SecretStr(case.credential)
         )
+        assert isinstance(checkpoint, queue.ExternalBootCommitOutcome)
+        assert checkpoint.continue_claim is True
         result = await handler(worker, job, marker)
     assert isinstance(result, ExternalBootAuthorityConflictV1)
     return result

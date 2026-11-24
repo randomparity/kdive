@@ -1,4 +1,4 @@
-"""Recovery checkpoints continue through the real worker and PostgreSQL (ADR-0845)."""
+"""Authenticated checkpoints continue through the real worker and Postgres (ADR-0845, ADR-0853)."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from pydantic import SecretStr
 
 from kdive.db.repositories import JOBS
 from kdive.domain.capacity.state import JobState
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
@@ -32,8 +33,8 @@ from tests.jobs.handlers.external_boot.support import RecordingExecutor
 from tests.jobs.handlers.external_boot.vehicle import build_vehicle
 
 
-@pytest.mark.parametrize("operation", ["recover", "resolve-conflict"])
-def test_recovery_continues_in_same_worker_claim(
+@pytest.mark.parametrize("operation", ["activate", "recover", "resolve-conflict"])
+def test_checkpoint_continues_in_same_worker_claim(
     migrated_url: str,
     authority_role_dsns: Callable[[str], str],
     operation: str,
@@ -46,9 +47,13 @@ def test_recovery_continues_in_same_worker_claim(
                 vehicle,
                 purpose=operation,
                 operation=operation,
-                activation_state="active" if operation == "recover" else "recovery_conflict",
+                activation_state={
+                    "activate": "prepared",
+                    "recover": "active",
+                    "resolve-conflict": "recovery_conflict",
+                }[operation],
                 attempt_state="conflict" if operation == "resolve-conflict" else "recovering",
-                with_pre_recovery=True,
+                with_pre_recovery=operation != "activate",
             )
             job = await JOBS.get(seed, case.job_id)
         assert job is not None
@@ -60,24 +65,38 @@ def test_recovery_continues_in_same_worker_claim(
                     autocommit=True,
                 ) as observer:
                     current = await JOBS.get(observer, job.id)
-                    row = await (
-                        await observer.execute(
-                            "SELECT a.state,r.state FROM external_boot_activations a "
-                            "JOIN external_boot_recovery_attempts r "
-                            "ON r.attempt_id=a.current_attempt_id WHERE a.id=%s",
-                            (vehicle.activation_id,),
-                        )
-                    ).fetchone()
+                    if operation == "activate":
+                        row = await (
+                            await observer.execute(
+                                "SELECT state,activation_readiness_deadline "
+                                "FROM external_boot_activations WHERE id=%s",
+                                (vehicle.activation_id,),
+                            )
+                        ).fetchone()
+                        assert row is not None and row[0] == "activating" and row[1] is not None
+                    else:
+                        row = await (
+                            await observer.execute(
+                                "SELECT a.state,r.state FROM external_boot_activations a "
+                                "JOIN external_boot_recovery_attempts r "
+                                "ON r.attempt_id=a.current_attempt_id WHERE a.id=%s",
+                                (vehicle.activation_id,),
+                            )
+                        ).fetchone()
+                        assert row == ("recovering", "recovering")
                 assert current is not None and current.state is JobState.RUNNING
                 assert (current.id, current.attempt, current.worker_id) == (
                     job.id,
                     job.attempt,
                     job.worker_id,
                 )
-                assert row == ("recovering", "recovering")
+                if operation == "activate":
+                    vehicle.port.activate(
+                        vehicle.recovery_point, OpaqueProviderRef(ref="fixture/activated")
+                    )
                 return await super().execute(request)
 
-        executor = Executor("source")
+        executor = Executor("target" if operation == "activate" else "source")
         ports = ExternalBootHandlerPorts(
             resolver=resolver_for(vehicle),
             incarnation_credential=SecretStr(case.credential),
@@ -122,6 +141,6 @@ def test_recovery_continues_in_same_worker_claim(
             job.attempt,
             job.worker_id,
         )
-        assert activation == ("recovered",)
+        assert activation == (("active" if operation == "activate" else "recovered"),)
 
     asyncio.run(run())

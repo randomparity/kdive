@@ -15,7 +15,6 @@ from pydantic import SecretStr
 
 from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.external_boot_values import OpaqueProviderRef
-from kdive.domain.operations.jobs import Job
 from kdive.jobs import queue
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
@@ -230,7 +229,8 @@ def test_mcp_conflict_job_claims_and_converges_through_authority_service(
                         result,
                         incarnation_credential=SecretStr(case.credential),
                     )
-                    assert interim is not None
+                    assert isinstance(interim, queue.ExternalBootCommitOutcome)
+                    assert interim.continue_claim is True
                     result = await handler(worker, claimed, marker)
                 assert isinstance(result, ExternalBootAuthoritySuccessV1)
                 completed = await queue.complete_external_boot(
@@ -239,7 +239,9 @@ def test_mcp_conflict_job_claims_and_converges_through_authority_service(
                     result,
                     incarnation_credential=SecretStr(case.credential),
                 )
-                assert isinstance(completed, Job) and completed.state.value == "succeeded"
+                assert isinstance(completed, queue.ExternalBootCommitOutcome)
+                assert completed.job.state.value == "succeeded"
+                assert completed.continue_claim is False
             row = await seed.execute(
                 "SELECT state FROM external_boot_activations WHERE id=%s", (vehicle.activation_id,)
             )

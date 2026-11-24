@@ -4,6 +4,8 @@
 
 Accepted (2026-11-23)
 
+> **Superseded by [0853](0853-external-boot-commit-continuation-disposition.md)** (2026-11-23)
+
 ## Context
 
 External-boot handlers commit an intermediate success before invoking authority operations.

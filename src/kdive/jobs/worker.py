@@ -669,16 +669,12 @@ class Worker:
             else:
                 _log.warning("external boot job %s returned an untyped result variant", job.id)
                 return False
+        if isinstance(committed, queue.ExternalBootCommitOutcome):
+            return committed.continue_claim
         if not isinstance(committed, queue.ExternalBootCommitStatus):
             if committed is None:
                 _log.warning("external boot job %s was reclaimed; result dropped", job.id)
-                return False
-            return (
-                isinstance(committed, Job)
-                and isinstance(result, ExternalBootAuthoritySuccessV1)
-                and result.result.operation in {"deadline", "recovery-attempt"}
-                and committed.state is JobState.RUNNING
-            )
+            return False
         if committed is queue.ExternalBootCommitStatus.SUPERSEDED:
             await self._log_superseded_commit(job)
             return False

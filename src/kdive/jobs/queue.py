@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import TypedDict
@@ -37,10 +38,12 @@ from kdive.domain.operations.jobs import (
     dispatch_lane_for_kind,
 )
 from kdive.jobs.external_boot_models import (
+    DeadlineResult,
     ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthorityResultV1,
     ExternalBootAuthoritySuccessV1,
+    RecoveryAttemptResult,
 )
 from kdive.jobs.payloads import (
     ActivePayloadModel,
@@ -78,6 +81,14 @@ class ExternalBootCommitStatus(StrEnum):
     OBSERVED_IDENTITY_STALE = "observed_identity_stale"
     RESERVATION_NOT_READY = "reservation_not_ready"
     AUTHORITY_SUPERSEDED = "authority_superseded"
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalBootCommitOutcome:
+    """A committed/classified row and its same-claim continuation decision (ADR-0853)."""
+
+    job: Job
+    continue_claim: bool
 
 
 async def enqueue(
@@ -330,7 +341,7 @@ async def commit_external_boot_authority_result(
     result: ExternalBootAuthorityResultV1,
     *,
     incarnation_credential: SecretStr,
-) -> Job | ExternalBootCommitStatus:
+) -> ExternalBootCommitOutcome | ExternalBootCommitStatus:
     """Commit an authority result or return its database-classified losing outcome."""
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -365,12 +376,24 @@ async def commit_external_boot_authority_result(
             await cur.execute("SELECT * FROM jobs WHERE id = %s", (job.id,))
             classified_row = await cur.fetchone()
             if classified_row is not None:
-                return Job.model_validate(classified_row)
+                return ExternalBootCommitOutcome(
+                    Job.model_validate(classified_row), continue_claim=False
+                )
         if status_row["status"] != "applied":
             return ExternalBootCommitStatus(status_row["status"])
         await cur.execute("SELECT * FROM jobs WHERE id = %s", (job.id,))
         row = await cur.fetchone()
-    return ExternalBootCommitStatus.SUPERSEDED if row is None else Job.model_validate(row)
+    if row is None:
+        return ExternalBootCommitStatus.SUPERSEDED
+    committed = Job.model_validate(row)
+    return ExternalBootCommitOutcome(
+        committed,
+        continue_claim=(
+            isinstance(result, ExternalBootAuthoritySuccessV1)
+            and isinstance(result.result, (DeadlineResult, RecoveryAttemptResult))
+            and committed.state is JobState.RUNNING
+        ),
+    )
 
 
 async def complete_external_boot(
@@ -379,7 +402,7 @@ async def complete_external_boot(
     result: ExternalBootAuthoritySuccessV1,
     *,
     incarnation_credential: SecretStr,
-) -> Job | ExternalBootCommitStatus:
+) -> ExternalBootCommitOutcome | ExternalBootCommitStatus:
     """Complete an external boot only through its exact authority binding."""
     return await commit_external_boot_authority_result(
         conn, job, result, incarnation_credential=incarnation_credential
@@ -394,9 +417,10 @@ async def fail_external_boot(
     incarnation_credential: SecretStr,
 ) -> Job | ExternalBootCommitStatus:
     """Fail or requeue an external boot only through its exact authority binding."""
-    return await commit_external_boot_authority_result(
+    committed = await commit_external_boot_authority_result(
         conn, job, result, incarnation_credential=incarnation_credential
     )
+    return committed.job if isinstance(committed, ExternalBootCommitOutcome) else committed
 
 
 async def record_external_boot_conflict(
