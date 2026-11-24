@@ -19,6 +19,7 @@ from kdive.domain.external_boot_values import RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.local_libvirt.lifecycle.boot.owned_domain import owned_system_semantic_identity
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    LocalSystemTeardownInspection,
     prove_no_foreign_system_storage_references,
 )
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
@@ -55,16 +56,14 @@ class _Provisioner:
         raise AssertionError("intent-only tests must not provision")
 
 
-class _AbsentInspection:
-    domain_absent = True
-    domain_validated = False
-    overlay_absent = True
-    baseline_absent = True
-
-
 class _AbsentTeardown:
-    def inspect(self) -> _AbsentInspection:
-        return _AbsentInspection()
+    def inspect(self) -> LocalSystemTeardownInspection:
+        return LocalSystemTeardownInspection(
+            domain_absent=True,
+            domain_validated=False,
+            overlay_absent=True,
+            baseline_absent=True,
+        )
 
     def owned_xml(self) -> tuple[str, str]:
         raise AssertionError("absent domain has no XML")
@@ -318,13 +317,14 @@ def test_retry_rejects_divergent_live_xml_before_provisioner_mutation(tmp_path: 
         xml_digest=owned_system_semantic_identity(expected, intent.system_id, intent.overlay),
     )
 
-    class Inspection:
-        domain_absent = False
-        domain_validated = True
-
     class Teardown:
-        def inspect(self) -> Inspection:
-            return Inspection()
+        def inspect(self) -> LocalSystemTeardownInspection:
+            return LocalSystemTeardownInspection(
+                domain_absent=False,
+                domain_validated=True,
+                overlay_absent=False,
+                baseline_absent=False,
+            )
 
         def owned_xml(self) -> tuple[str, str]:
             return divergent, divergent
@@ -378,15 +378,14 @@ def test_teardown_checks_retained_identity_and_siblings_before_destroy(
     )
     events: list[str] = []
 
-    class Inspection:
-        domain_absent = False
-        domain_validated = True
-        overlay_absent = False
-        baseline_absent = False
-
     class Teardown:
-        def inspect(self) -> Inspection:
-            return Inspection()
+        def inspect(self) -> LocalSystemTeardownInspection:
+            return LocalSystemTeardownInspection(
+                domain_absent=False,
+                domain_validated=True,
+                overlay_absent=False,
+                baseline_absent=False,
+            )
 
         def owned_xml(self) -> tuple[str, str]:
             events.append("xml")
@@ -495,15 +494,15 @@ async def _cancel_and_drain(tmp_path: Path) -> None:
 def test_absent_teardown_replay_inspects_without_creating_or_deleting(tmp_path: Path) -> None:
     calls: list[str] = []
 
-    class Inspection:
-        domain_absent = True
-        overlay_absent = True
-        baseline_absent = True
-
     class Teardown:
-        def inspect(self) -> Inspection:
+        def inspect(self) -> LocalSystemTeardownInspection:
             calls.append("inspect")
-            return Inspection()
+            return LocalSystemTeardownInspection(
+                domain_absent=True,
+                domain_validated=False,
+                overlay_absent=True,
+                baseline_absent=True,
+            )
 
         def owned_xml(self) -> tuple[str, str]:
             raise AssertionError("absent replay must not read domain XML")
@@ -792,13 +791,14 @@ def test_later_generation_execute_resumes_a_present_domain(tmp_path: Path) -> No
         intent, xml_digest=owned_system_semantic_identity(xml, intent.system_id, intent.overlay)
     )
 
-    class Inspection(_AbsentInspection):
-        domain_absent = False
-        domain_validated = True
-
     class Teardown(_AbsentTeardown):
-        def inspect(self) -> Inspection:
-            return Inspection()
+        def inspect(self) -> LocalSystemTeardownInspection:
+            return LocalSystemTeardownInspection(
+                domain_absent=False,
+                domain_validated=True,
+                overlay_absent=True,
+                baseline_absent=True,
+            )
 
         def owned_xml(self) -> tuple[str, str]:
             return xml, xml

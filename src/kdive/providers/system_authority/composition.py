@@ -36,6 +36,8 @@ from kdive.providers.local_libvirt.lifecycle.provisioning import (
     LocalLibvirtProvisioning,
     _bind_probe_free_port,
 )
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
+from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import OverlayCustomizer
 from kdive.providers.local_libvirt.lifecycle.storage import ProvisioningFiles
 from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S
 from kdive.providers.local_libvirt.system_authority import (
@@ -272,11 +274,26 @@ class _AuthorityProvisioner:
         self._delegate = delegate
         self._expected_guest_arch = expected_guest_arch
 
-    def provision(self, system_id: UUID, profile: Any, **kwargs: Any) -> str:
-        if not isinstance(profile, ProvisioningProfile):
-            raise TypeError("authority System provisioning profile is invalid")
+    def provision(
+        self,
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        *,
+        overlay_customizers: tuple[OverlayCustomizer, ...] = (),
+        bootstrap_pubkey: str | None = None,
+        selected_gdb_port: int | None = None,
+        selected_ssh_port: int | None = None,
+        before_extract_baseline: Callable[[BaselineKernel], None] | None = None,
+    ) -> str:
         return self._delegate.provision(
-            system_id, profile, expected_guest_arch=self._expected_guest_arch, **kwargs
+            system_id,
+            profile,
+            overlay_customizers=overlay_customizers,
+            bootstrap_pubkey=bootstrap_pubkey,
+            selected_gdb_port=selected_gdb_port,
+            selected_ssh_port=selected_ssh_port,
+            before_extract_baseline=before_extract_baseline,
+            expected_guest_arch=self._expected_guest_arch,
         )
 
 

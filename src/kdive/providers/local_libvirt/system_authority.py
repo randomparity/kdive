@@ -19,12 +19,15 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Protocol, cast
 from uuid import UUID
 
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.boot.owned_domain import owned_system_semantic_identity
+from kdive.providers.local_libvirt.lifecycle.boot.session import LocalSystemTeardownInspection
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
 from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
+    OverlayCustomizer,
     authorized_key_customizer,
 )
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
@@ -52,11 +55,21 @@ class LocalAuthoritySystemError(RuntimeError):
 
 
 class _Provisioner(Protocol):
-    def provision(self, system_id: UUID, profile: Any, **kwargs: Any) -> str: ...
+    def provision(
+        self,
+        system_id: UUID,
+        profile: ProvisioningProfile,
+        *,
+        overlay_customizers: tuple[OverlayCustomizer, ...] = (),
+        bootstrap_pubkey: str | None = None,
+        selected_gdb_port: int | None = None,
+        selected_ssh_port: int | None = None,
+        before_extract_baseline: Callable[[BaselineKernel], None] | None = None,
+    ) -> str: ...
 
 
 class _SystemTeardown(Protocol):
-    def inspect(self) -> Any: ...
+    def inspect(self) -> LocalSystemTeardownInspection: ...
 
     def owned_xml(self) -> tuple[str, str]: ...
 
@@ -507,7 +520,7 @@ class LocalAuthoritySystemProvider:
     def _complete_absence_facts(
         self,
         request: AuthoritySystemMutationRequestV1,
-        inspection: Any,
+        inspection: LocalSystemTeardownInspection,
         *,
         create: bool,
     ) -> AuthoritySystemAbsenceFacts:
@@ -532,7 +545,7 @@ class LocalAuthoritySystemProvider:
             completed_at=completed_at,
         )
 
-    def _inspect_without_intent(self, system_id: UUID) -> Any:
+    def _inspect_without_intent(self, system_id: UUID) -> LocalSystemTeardownInspection:
         session = self._open_teardown(
             system_id,
             str(self._topology.overlay_for(system_id)),
