@@ -255,7 +255,7 @@ async def _reprovision_in_lock(
         if investigation is None or investigation.state in TERMINAL_INVESTIGATION_STATES:
             state = investigation.state.value if investigation is not None else "missing"
             return _config_error(str(system_id), data={"investigation_state": state})
-    if await _authority_system_binding(conn, system_id) is not None:
+    if await authority_system_binding(conn, system_id) is not None:
         return ToolResponse.failure(
             str(system_id),
             ErrorCategory.CONFLICT,
@@ -398,12 +398,6 @@ async def _settling_reprovision_job(conn: AsyncConnection, dedup_key: str) -> UU
         )
         row = await cur.fetchone()
     return None if row is None else row[0]
-
-
-async def _authority_system_binding(
-    conn: AsyncConnection, system_id: UUID
-) -> AuthoritySystemBinding | None:
-    return await authority_system_binding(conn, system_id)
 
 
 async def _admit_reprovision(
@@ -580,7 +574,7 @@ async def _teardown_locked(
                 suggested_next_actions=["systems.get"],
                 data={"current_status": system.state.value},
             )
-        authority_binding = await _authority_system_binding(conn, uid)
+        authority_binding = await authority_system_binding(conn, uid)
         if authority_binding is not None:
             return await _enqueue_preactivation_authority_teardown(
                 conn,
