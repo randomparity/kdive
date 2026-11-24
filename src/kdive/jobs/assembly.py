@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +14,7 @@ import kdive.config as config
 from kdive.assembly import ProcessAssembly, build_process_assembly
 from kdive.config.core_settings import BUILD_WORKSPACE
 from kdive.domain.operations.jobs import JobKind
+from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.capture_operations.launcher import GatedCaptureLauncher
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
 from kdive.jobs.external_boot_authority_client import (
@@ -37,15 +39,21 @@ from kdive.jobs.handlers.external_boot import orphan, stranded
 from kdive.jobs.handlers.runs import registrar as runs
 from kdive.jobs.handlers.system_authority import AuthoritySystemWorkerPorts
 from kdive.jobs.models import HandlerRegistry
-from kdive.providers.assembly.authority import (
-    authority_sender_factory,
-    local_authority_sender_factory,
-)
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.external_boot_authority.local_client import (
+    LocalAuthorityBinding,
+    _AuthorityUnixTransport,
+    local_authority_binding,
+)
+from kdive.providers.external_boot_authority.network_client import (
+    _AuthorityNetworkTransport,
+    _resolve_tls_material,
+)
 from kdive.providers.infra.reaping import ModuleVolumeReaper
+from kdive.providers.remote_libvirt.config import RemoteAuthorityBinding
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.security.secrets.secrets import secret_backend_from_env
+from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 from kdive.store.assembly import ObjectStoreAssembly
 
 
@@ -63,6 +71,38 @@ class WorkerHandlerAssembly:
     pool: AsyncConnectionPool | None = None
     external_boot_client_factory: ExternalBootClientFactory | None = None
     authority_system_sender_factory: AuthoritySystemSenderFactory | None = None
+
+
+def authority_sender_factory(
+    secret_backend: SecretBackend, borrow: Callable[[], SecretStr]
+) -> Callable[[RemoteAuthorityBinding], AuthorityRequestSender]:
+    """Capture the selected binding and existing owners; resolve no authority material."""
+
+    def build(binding: RemoteAuthorityBinding) -> AuthorityRequestSender:
+        return AuthorityRequestSender(
+            lambda: _AuthorityNetworkTransport(
+                binding, _resolve_tls_material(binding, secret_backend)
+            ),
+            borrow,
+        )
+
+    return build
+
+
+def local_authority_sender_factory(
+    secret_backend: SecretBackend,
+    borrow: Callable[[], SecretStr],
+    *,
+    binding: LocalAuthorityBinding | None = None,
+) -> AuthorityRequestSender | None:
+    """Build the configured worker-local sender without accepting a caller route."""
+    binding = binding if binding is not None else local_authority_binding()
+    if binding is None:
+        return None
+    return AuthorityRequestSender(
+        lambda: _AuthorityUnixTransport(binding, _resolve_tls_material(binding, secret_backend)),
+        borrow,
+    )
 
 
 def build_worker_handler_assembly(

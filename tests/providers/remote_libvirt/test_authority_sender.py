@@ -409,7 +409,7 @@ async def test_authority_material_failure_does_not_block_rebinding_power_or_tear
     material: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from kdive.domain.operations.jobs import PowerAction
-    from kdive.providers.assembly.authority import authority_sender_factory
+    from kdive.jobs.assembly import authority_sender_factory
     from kdive.providers.remote_libvirt.connection import transport as libvirt_transport
     from kdive.providers.remote_libvirt.diagnostics.authority import AuthorityReadinessCheck
     from kdive.providers.remote_libvirt.lifecycle import control
@@ -473,7 +473,7 @@ async def test_authority_material_failure_does_not_block_rebinding_power_or_tear
 async def test_standing_route_retains_only_references_and_materializes_each_typed_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from kdive.providers.assembly import authority as authority_sender
+    from kdive.jobs import assembly as authority_sender
 
     backend = FileRefBackend(tmp_path, SecretRegistry())
     binding = RemoteAuthorityBinding("authority-a", "192.0.2.1", 9443, "ca", "cert", "key")
