@@ -112,15 +112,23 @@ class WorkerVantageDispatchMode:
 
 @dataclass(frozen=True, slots=True)
 class _CompositeWorkerCheckDispatcher:
-    """Run several provider dispatchers as one worker-vantage dispatcher."""
+    """Run provider dispatchers concurrently, preserving result order (ADR-0865)."""
 
     dispatchers: Sequence[WorkerCheckDispatcher]
 
     async def run_worker_checks(self, *, deadline: float | None = None) -> list[CheckResult]:
-        results: list[CheckResult] = []
-        for dispatcher in self.dispatchers:
-            results.extend(await dispatcher.run_worker_checks(deadline=deadline))
-        return results
+        tasks = [
+            asyncio.create_task(dispatcher.run_worker_checks(deadline=deadline))
+            for dispatcher in self.dispatchers
+        ]
+        try:
+            batches = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        return [result for batch in batches for result in batch]
 
 
 type WorkerVantageMode = WorkerVantageSubstitutionMode | WorkerVantageDispatchMode

@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
+from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.diagnostics.checks import CheckResult, CheckStatus
 from kdive.diagnostics.result_codec import serialize_results
@@ -18,10 +20,14 @@ from kdive.diagnostics.service import (
 from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import Job, JobKind
-from kdive.jobs.payloads import Authorizing, DiagnosticsWorkerCheckPayload
+from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, Job, JobKind
+from kdive.jobs.models import HandlerRegistry
+from kdive.jobs.payloads import Authorizing, DiagnosticsWorkerCheckPayload, load_payload
+from kdive.jobs.worker import Worker
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.diagnostics.checks_support import FixedCheck as _Fixed
 from tests.diagnostics.checks_support import SlowCheck as _Slow
+from tests.support.worker_fence import register_worker
 
 
 class _Queue:
@@ -169,11 +175,11 @@ def test_composite_forwards_one_deadline_to_every_provider() -> None:
     asyncio.run(run())
 
 
-def test_shared_phase_keeps_completed_results_and_does_not_start_expired_provider() -> None:
+def test_shared_phase_keeps_healthy_later_provider_results() -> None:
     async def run() -> None:
         completed = _Queue("provider-a")
         hung = _Queue("provider-b", blocked="poll")
-        unstarted = _Queue("provider-c")
+        later = _Queue("provider-c")
         server = CheckResult("server", CheckStatus.PASS, "server checked")
         service = DiagnosticsService(
             checks=[_Fixed(server)],
@@ -181,7 +187,7 @@ def test_shared_phase_keeps_completed_results_and_does_not_start_expired_provide
             overall_timeout=0.04,
             worker_mode=WorkerVantageDispatchMode(
                 _CompositeWorkerCheckDispatcher(
-                    [queue.dispatcher(budget=30) for queue in (completed, hung, unstarted)]
+                    [queue.dispatcher(budget=30) for queue in (completed, hung, later)]
                 )
             ),
         )
@@ -189,8 +195,8 @@ def test_shared_phase_keeps_completed_results_and_does_not_start_expired_provide
             report = await service.run()
         assert report.results[:2] == [server, completed.result]
         _assert_unavailable(report.results[2:3], hung.provider)
-        _assert_unavailable(report.results[3:], unstarted.provider)
-        assert [queue.enqueues for queue in (completed, hung, unstarted)] == [1, 1, 0]
+        assert report.results[3:] == [later.result]
+        assert [queue.enqueues for queue in (completed, hung, later)] == [1, 1, 1]
 
     asyncio.run(run())
 
@@ -340,5 +346,155 @@ def test_injected_elapsed_budget_includes_enqueue_time() -> None:
         )
         _assert_unavailable(await dispatcher.run_worker_checks(), queue.provider)
         assert sleeps == []
+
+    asyncio.run(run())
+
+
+class _GatedDispatcher:
+    def __init__(self, provider: str, *, error: Exception | None = None) -> None:
+        self.result = CheckResult(
+            f"{provider}.check", CheckStatus.PASS, "checked", provider=provider
+        )
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.settled = asyncio.Event()
+        self.error = error
+
+    async def run_worker_checks(self, *, deadline: float | None = None) -> list[CheckResult]:
+        self.entered.set()
+        try:
+            await self.release.wait()
+            if self.error is not None:
+                raise self.error
+            return [self.result]
+        finally:
+            self.settled.set()
+
+
+def test_composite_starts_all_providers_and_keeps_registration_order() -> None:
+    async def run() -> None:
+        providers = [_GatedDispatcher(f"provider-{i}") for i in range(3)]
+        task = asyncio.create_task(_CompositeWorkerCheckDispatcher(providers).run_worker_checks())
+        try:
+            async with asyncio.timeout(2):
+                await asyncio.gather(*(provider.entered.wait() for provider in providers))
+                for provider in reversed(providers):
+                    provider.release.set()
+                    await provider.settled.wait()
+                assert await task == [provider.result for provider in providers]
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_composite_failure_settles_siblings_and_preserves_exception() -> None:
+    async def run() -> None:
+        error = RuntimeError("dispatch proof failure")
+        providers = [_GatedDispatcher("failed", error=error), _GatedDispatcher("blocked")]
+        task = asyncio.create_task(_CompositeWorkerCheckDispatcher(providers).run_worker_checks())
+        try:
+            async with asyncio.timeout(2):
+                await asyncio.gather(*(provider.entered.wait() for provider in providers))
+                providers[0].release.set()
+                with pytest.raises(RuntimeError) as caught:
+                    await task
+                assert caught.value is error
+                assert all(provider.settled.is_set() for provider in providers)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_composite_caller_cancellation_settles_every_child() -> None:
+    async def run() -> None:
+        providers = [_GatedDispatcher("first"), _GatedDispatcher("second")]
+        task = asyncio.create_task(_CompositeWorkerCheckDispatcher(providers).run_worker_checks())
+        try:
+            async with asyncio.timeout(2):
+                await asyncio.gather(*(provider.entered.wait() for provider in providers))
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert all(provider.settled.is_set() for provider in providers)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_composite_empty_selection_returns_no_results() -> None:
+    assert asyncio.run(_CompositeWorkerCheckDispatcher([]).run_worker_checks()) == []
+
+
+def test_composite_expired_deadline_never_enqueues() -> None:
+    async def run() -> None:
+        queues = [_Queue(f"provider-{i}") for i in range(3)]
+        results = await _CompositeWorkerCheckDispatcher(
+            [queue.dispatcher() for queue in queues]
+        ).run_worker_checks(deadline=asyncio.get_running_loop().time() - 1)
+        assert [queue.enqueues for queue in queues] == [0, 0, 0]
+        for index, queue in enumerate(queues):
+            _assert_unavailable(results[index : index + 1], queue.provider)
+
+    asyncio.run(run())
+
+
+def test_composite_dispatches_through_real_queue_and_worker(migrated_url: str) -> None:
+    async def run() -> None:
+        providers = ("provider-a", "provider-b")
+        expected = [
+            CheckResult(f"{provider}.check", CheckStatus.PASS, "worker checked", provider=provider)
+            for provider in providers
+        ]
+        by_provider = dict(zip(providers, expected, strict=True))
+
+        async def check(conn: AsyncConnection, job: Job) -> str:
+            payload = load_payload(job, DiagnosticsWorkerCheckPayload)
+            return serialize_results([by_provider[payload.provider]])
+
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=5) as pool:
+            registry = HandlerRegistry()
+            registry.register(JobKind.DIAGNOSTICS_WORKER_CHECK, check)
+            worker_id = "composite-diagnostics-worker"
+            async with pool.connection() as conn:
+                credential = await register_worker(conn, worker_id)
+            worker = Worker(
+                pool,
+                registry,
+                worker_id=worker_id,
+                incarnation_credential=credential,
+                secret_registry=SecretRegistry(),
+            )
+            dispatchers = [
+                JobWorkerCheckDispatcher(
+                    pool,
+                    provider=provider,
+                    worker_check_ids=(expected[index].check_id,),
+                    budget=5,
+                    poll_interval=0.01,
+                )
+                for index, provider in enumerate(providers)
+            ]
+            task = asyncio.create_task(
+                _CompositeWorkerCheckDispatcher(dispatchers).run_worker_checks()
+            )
+            try:
+                async with asyncio.timeout(10):
+                    completed = 0
+                    while completed < len(expected):
+                        if await worker.run_once(DEFAULT_JOB_DISPATCH_LANE):
+                            completed += 1
+                        else:
+                            # Wait for asynchronous enqueue without spinning on an empty queue.
+                            await asyncio.sleep(0.01)
+                    assert await task == expected
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(run())
