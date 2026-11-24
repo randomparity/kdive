@@ -103,6 +103,74 @@ def test_append_reopen_and_inventory_preserve_global_head(tmp_path: Path) -> Non
     assert inventory_authority_system_journals(root)[0].sequence == 2
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("authority_id", "20000000-0000-0000-0000-000000000003"),
+        ("generation", 2),
+        ("attempt_id", "20000000-0000-0000-0000-000000000004"),
+        ("operation", AuthoritySystemOperation.PREACTIVATION_TEARDOWN.value),
+        ("operation_identity", "provision-b"),
+        ("operation_digest", "sha256:" + "b" * 64),
+        ("bootstrap_identity", "sha256:" + "b" * 64),
+    ],
+    ids=[
+        "authority_id",
+        "generation",
+        "attempt_id",
+        "operation",
+        "operation_identity",
+        "operation_digest",
+        "bootstrap_identity",
+    ],
+)
+def test_operation_binding_changes_are_refused_on_append_and_replay(
+    tmp_path: Path, field: str, replacement: object
+) -> None:
+    root = _root(tmp_path)
+    system_id = uuid4()
+    path = root / "system-operations" / f"{system_id}.jsonl"
+    admitted = _record(
+        system_id,
+        sequence=1,
+        previous_digest=GENESIS_DIGEST,
+        phase=AuthoritySystemJournalPhase.ADMITTED,
+    )
+    with FileAuthoritySystemJournal(root, system_id) as journal:
+        first = journal.append(admitted)
+        started = _record(
+            system_id,
+            sequence=2,
+            previous_digest=first.digest,
+            phase=AuthoritySystemJournalPhase.MUTATION_STARTED,
+        )
+        fields = started.model_dump(mode="json", by_alias=True, exclude={"canonical_record"})
+        fields[field] = replacement
+        fields["canonical_record"] = canonical_system_record_payload(fields)
+        candidate = AuthoritySystemJournalRecordV1.model_validate_json(
+            json.dumps(fields), strict=True
+        )
+        before = path.read_bytes()
+        append_error = (
+            "append ownership binding changed"
+            if field == "bootstrap_identity"
+            else "append binding changed"
+        )
+        replay_error = (
+            "ownership binding changed"
+            if field == "bootstrap_identity"
+            else "operation binding changed"
+        )
+
+        with pytest.raises(ValueError, match=append_error):
+            journal.append(candidate)
+        assert path.read_bytes() == before
+
+        path.write_bytes(before + canonical_system_authority_bytes(candidate) + b"\n")
+        with pytest.raises(ValueError, match=replay_error):
+            journal.read()
+
+
 def test_noncanonical_or_partial_record_is_rejected_without_append(tmp_path: Path) -> None:
     root = _root(tmp_path)
     system_id = uuid4()

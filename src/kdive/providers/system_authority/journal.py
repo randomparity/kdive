@@ -89,6 +89,18 @@ def _ownership_binding(record: AuthoritySystemJournalRecordV1) -> tuple[object, 
     )
 
 
+def _operation_binding(record: AuthoritySystemJournalRecordV1) -> tuple[object, ...]:
+    return (
+        record.authority_id,
+        record.generation,
+        record.attempt_id,
+        record.operation,
+        record.operation_identity,
+        record.operation_digest,
+        record.bootstrap_identity,
+    )
+
+
 class AuthoritySystemJournalTornTailError(ValueError):
     """The journal's final line has no newline, so an append did not finish."""
 
@@ -268,15 +280,7 @@ class FileAuthoritySystemJournal:
                 ownership_binding = _ownership_binding(record)
             elif _ownership_binding(record) != ownership_binding:
                 raise ValueError("authority System journal ownership binding changed")
-            binding = (
-                record.authority_id,
-                record.generation,
-                record.attempt_id,
-                record.operation,
-                record.operation_identity,
-                record.operation_digest,
-                record.bootstrap_identity,
-            )
+            binding = _operation_binding(record)
             begins_operation = (
                 prior_phase is None
                 or prior_phase is AuthoritySystemJournalPhase.TERMINAL
@@ -456,27 +460,9 @@ class FileAuthoritySystemJournal:
             last is not None
             and last.phase is not AuthoritySystemJournalPhase.TERMINAL
             and record.phase is not AuthoritySystemJournalPhase.WATERMARK_INSTALLED
+            and _operation_binding(record) != _operation_binding(last)
         ):
-            prior_binding = (
-                last.authority_id,
-                last.generation,
-                last.attempt_id,
-                last.operation,
-                last.operation_identity,
-                last.operation_digest,
-                last.bootstrap_identity,
-            )
-            new_binding = (
-                record.authority_id,
-                record.generation,
-                record.attempt_id,
-                record.operation,
-                record.operation_identity,
-                record.operation_digest,
-                record.bootstrap_identity,
-            )
-            if new_binding != prior_binding:
-                raise ValueError("authority System journal append binding changed")
+            raise ValueError("authority System journal append binding changed")
         if (
             last is not None
             and last.phase is not AuthoritySystemJournalPhase.TERMINAL
