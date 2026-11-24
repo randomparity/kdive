@@ -240,7 +240,30 @@ def _decode_operation_request(operation: Operation, payload: bytes) -> object:
         return RemoteModuleVolumePreparationRequestV1.from_canonical_json(payload)
     if operation == "begin-remote-module-preparation":
         return RemoteModulePreparationBeginRequestV1.model_validate_json(payload)
-    return decode_authority_request(payload)
+    request = decode_authority_request(payload)
+    if operation == "acknowledge-takeover" and isinstance(request, AuthorityTakeoverRequestV1):
+        return request
+    if operation in {"execute-mutation", "observe-authority", "observe-running"} and isinstance(
+        request, AuthorityMutationRequestV1
+    ):
+        return request
+    if operation == "execute-conflict-resolution" and isinstance(
+        request, AuthorityConflictResolutionRequestV1
+    ):
+        return request
+    if operation == "execute-preparation" and isinstance(
+        request, AuthorityPreparationMutationRequestV1
+    ):
+        return request
+    if operation == "execute-teardown" and isinstance(request, AuthorityTeardownMutationRequestV1):
+        return request
+    if operation == "resolve-recovery-orphan" and isinstance(
+        request, AuthorityRecoveryOrphanDispositionRequestV1
+    ):
+        return request
+    if operation == "health" and isinstance(request, AuthorityHealthRequestV1):
+        return request
+    raise ValueError("invalid-request")
 
 
 def encode_request_envelope(
@@ -251,59 +274,7 @@ def encode_request_envelope(
     if not credential_bytes or len(credential_bytes) > MAX_CREDENTIAL_BYTES:
         raise ValueError("credential must contain 1 through 4096 UTF-8 bytes")
     request_bytes = _canonical_json(request)
-    decoded = _decode_operation_request(operation, request_bytes)
-    if operation == "acknowledge-takeover" and not isinstance(decoded, AuthorityTakeoverRequestV1):
-        raise ValueError("invalid-request")
-    if operation in {"execute-mutation", "observe-authority", "observe-running"} and not isinstance(
-        decoded, AuthorityMutationRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "execute-conflict-resolution" and not isinstance(
-        decoded, AuthorityConflictResolutionRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "execute-preparation" and not isinstance(
-        decoded, AuthorityPreparationMutationRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "execute-teardown" and not isinstance(
-        decoded, AuthorityTeardownMutationRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "begin-remote-module-preparation" and not isinstance(
-        decoded, RemoteModulePreparationBeginRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "execute-remote-module-preparation" and not isinstance(
-        decoded, RemoteModuleVolumePreparationRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "execute-remote-module-lifecycle" and not isinstance(
-        decoded, RemoteModuleLifecycleRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "resolve-recovery-orphan" and not isinstance(
-        decoded, AuthorityRecoveryOrphanDispositionRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "observe-stranded-activation" and not isinstance(
-        decoded, AuthorityStrandedObservationRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "health" and not isinstance(decoded, AuthorityHealthRequestV1):
-        raise ValueError("invalid-request")
-    if operation == "resolve-device-identity" and not isinstance(decoded, DeviceIdentityRequestV1):
-        raise ValueError("invalid-request")
-    if operation == "sweep-module-volumes" and not isinstance(decoded, ModuleVolumeSweepRequestV1):
-        raise ValueError("invalid-request")
-    if operation == "acknowledge-system-takeover" and not isinstance(
-        decoded, AuthoritySystemTakeoverRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "execute-system-operation" and not isinstance(
-        decoded, AuthoritySystemExecutionV1
-    ):
-        raise ValueError("invalid-request")
+    _decode_operation_request(operation, request_bytes)
     return _canonical_json({"credential": credential, "operation": operation, "request": request})
 
 
@@ -375,66 +346,6 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             raise ValueError
         request_bytes = _canonical_json(request_value)
         request = _decode_operation_request(operation, request_bytes)
-        if operation == "acknowledge-takeover" and not isinstance(
-            request, AuthorityTakeoverRequestV1
-        ):
-            raise ValueError
-        if operation in {
-            "execute-mutation",
-            "observe-authority",
-            "observe-running",
-        } and not isinstance(request, AuthorityMutationRequestV1):
-            raise ValueError
-        if operation == "execute-conflict-resolution" and not isinstance(
-            request, AuthorityConflictResolutionRequestV1
-        ):
-            raise ValueError
-        if operation == "execute-preparation" and not isinstance(
-            request, AuthorityPreparationMutationRequestV1
-        ):
-            raise ValueError
-        if operation == "execute-teardown" and not isinstance(
-            request, AuthorityTeardownMutationRequestV1
-        ):
-            raise ValueError
-        if operation == "begin-remote-module-preparation" and not isinstance(
-            request, RemoteModulePreparationBeginRequestV1
-        ):
-            raise ValueError
-        if operation == "execute-remote-module-preparation" and not isinstance(
-            request, RemoteModuleVolumePreparationRequestV1
-        ):
-            raise ValueError
-        if operation == "execute-remote-module-lifecycle" and not isinstance(
-            request, RemoteModuleLifecycleRequestV1
-        ):
-            raise ValueError
-        if operation == "resolve-recovery-orphan" and not isinstance(
-            request, AuthorityRecoveryOrphanDispositionRequestV1
-        ):
-            raise ValueError
-        if operation == "observe-stranded-activation" and not isinstance(
-            request, AuthorityStrandedObservationRequestV1
-        ):
-            raise ValueError
-        if operation == "health" and not isinstance(request, AuthorityHealthRequestV1):
-            raise ValueError
-        if operation == "resolve-device-identity" and not isinstance(
-            request, DeviceIdentityRequestV1
-        ):
-            raise ValueError
-        if operation == "sweep-module-volumes" and not isinstance(
-            request, ModuleVolumeSweepRequestV1
-        ):
-            raise ValueError
-        if operation == "acknowledge-system-takeover" and not isinstance(
-            request, AuthoritySystemTakeoverRequestV1
-        ):
-            raise ValueError
-        if operation == "execute-system-operation" and not isinstance(
-            request, AuthoritySystemExecutionV1
-        ):
-            raise ValueError
     except RecursionError, TypeError, UnicodeError, ValueError, json.JSONDecodeError:
         raise _TransportError("invalid-request") from None
     return operation, request, SecretStr(credential)

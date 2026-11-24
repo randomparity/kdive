@@ -1297,6 +1297,111 @@ def test_existing_operation_envelopes_keep_canonical_bytes(operation: Any) -> No
     assert encode_request_envelope(operation, request, "credential") == expected
 
 
+def _incompatible_request(operation: str) -> dict[str, Any]:
+    if operation == "health":
+        return _request()
+    if operation == "sweep-module-volumes":
+        return {"retained": "malformed"}
+    return protocol.AuthorityHealthRequestV1().model_dump(mode="json", by_alias=True)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "acknowledge-takeover",
+        "execute-mutation",
+        "observe-authority",
+        "observe-running",
+        "execute-conflict-resolution",
+        "execute-preparation",
+        "execute-teardown",
+        "resolve-recovery-orphan",
+        "health",
+    ],
+)
+def test_shared_decoder_rejects_incompatible_generic_model(operation: transport.Operation) -> None:
+    payload = transport._canonical_json(_incompatible_request(operation))
+    with pytest.raises(ValueError, match="invalid-request"):
+        transport._decode_operation_request(operation, payload)
+
+
+def test_shared_decoder_rejects_unknown_operation() -> None:
+    operation = cast(transport.Operation, "unknown-operation")
+    payload = transport._canonical_json(_incompatible_request(operation))
+    with pytest.raises(ValueError, match="invalid-request"):
+        transport._decode_operation_request(operation, payload)
+
+
+@pytest.mark.parametrize("direction", ["encode", "decode"])
+@pytest.mark.parametrize(
+    "operation", ["health", "execute-mutation", "sweep-module-volumes", "unknown-operation"]
+)
+def test_envelope_rejects_incompatible_request(operation: str, direction: str) -> None:
+    request = _incompatible_request(operation)
+    if direction == "encode":
+        with pytest.raises(ValueError):
+            encode_request_envelope(cast(transport.Operation, operation), request, "credential")
+    else:
+        payload = transport._canonical_json(
+            {"credential": "credential", "operation": operation, "request": request}
+        )
+        with pytest.raises(transport._TransportError) as caught:
+            transport._decode_envelope(payload)
+        assert caught.value.category == "invalid-request"
+
+
+@pytest.mark.parametrize(
+    "operation", ["health", "execute-mutation", "sweep-module-volumes", "unknown-operation"]
+)
+def test_listener_rejects_incompatible_request(tmp_path: Path, operation: str) -> None:
+    calls: list[str] = []
+
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        calls.append("authenticate")
+        return AuthenticatedPeer("worker")
+
+    class Service:
+        async def execute_mutation(
+            self, peer: AuthenticatedPeer, request: protocol.AuthorityMutationRequestV1
+        ) -> protocol.AuthorityObservationV1:
+            calls.append("execute-mutation")
+            raise AssertionError("incompatible request reached mutation")
+
+        async def sweep_module_volumes(
+            self, peer: AuthenticatedPeer, request: object
+        ) -> ModuleVolumeSweepResponseV1:
+            calls.append("sweep-module-volumes")
+            raise AssertionError("malformed request reached sweep")
+
+    async def run() -> None:
+        material = _tls_material(tmp_path, "authority-a")
+        config = _config(tmp_path, material)
+        service = Service()
+        listener = await serve_authority_transport(
+            config,
+            authenticate,
+            service=cast(Any, service),
+            remote_module_service=cast(Any, service),
+        )
+        await listener.start_serving()
+        try:
+            payload = transport._canonical_json(
+                {
+                    "credential": "credential",
+                    "operation": operation,
+                    "request": _incompatible_request(operation),
+                }
+            )
+            assert await _exchange(config, material, payload) == (
+                b'{"category":"invalid-request","status":"error"}'
+            )
+            assert calls == []
+        finally:
+            await listener.close()
+
+    asyncio.run(run())
+
+
 class _RecordingWriter:
     def __init__(self) -> None:
         self.written = bytearray()
