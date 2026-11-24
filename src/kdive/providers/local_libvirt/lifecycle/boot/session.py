@@ -1521,22 +1521,20 @@ class LocalExternalBootSessionFactory:
             )
         except BaseException as exc:
             errors: list[Exception] = []
-            for closer in (
-                (
-                    lambda: (
-                        self._close_overlay_descriptor(overlay_fd)
-                        if overlay_fd is not None
-                        else None
-                    )
-                ),
-                connection.close if connection is not None else None,
-                pin.close,
-            ):
-                if closer is not None:
-                    try:
-                        closer()
-                    except Exception as close_error:
-                        errors.append(close_error)
+            if overlay_fd is not None:
+                try:
+                    self._close_overlay_descriptor(overlay_fd)
+                except Exception as close_error:
+                    errors.append(close_error)
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception as close_error:
+                    errors.append(close_error)
+            try:
+                pin.close()
+            except Exception as close_error:
+                errors.append(close_error)
             for error in errors:
                 exc.add_note(f"cleanup failed: {error!r}")
             raise

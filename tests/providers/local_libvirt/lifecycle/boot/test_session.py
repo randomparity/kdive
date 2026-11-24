@@ -4419,3 +4419,132 @@ def test_session_libvirt_seams_name_only_methods_the_real_binding_has(
     }
     assert declared
     assert sorted(name for name in declared if not hasattr(binding, name)) == []
+
+
+@pytest.mark.parametrize("stage", ["before-connection", "after-connection", "after-overlay"])
+@pytest.mark.parametrize("primary_type", [RuntimeError, _CloseAbort])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_acquisition_cleanup_preserves_primary_and_independent_attempts(
+    stage: str, primary_type: type[BaseException], close_fails: bool
+) -> None:
+    events: list[str] = []
+    lease = _lease()
+    primary = primary_type("acquisition failed")
+    failures = {name: OSError(f"{name} failed") for name in ("overlay", "connection", "pin")}
+
+    def close(name: str) -> None:
+        events.append(f"close:{name}")
+        if close_fails:
+            raise failures[name]
+
+    class AcquisitionPin(FakePin):
+        def close(self) -> None:
+            super().close()
+            close("pin")
+
+    class AcquisitionConnection(Conn):
+        def lookupByName(self, name: str) -> Domain:  # noqa: N802
+            if stage == "after-connection":
+                raise primary
+            return super().lookupByName(name)
+
+        def close(self) -> None:
+            close("connection")
+
+    def connect() -> AcquisitionConnection:
+        events.append("connection.open")
+        if stage == "before-connection":
+            raise primary
+        return AcquisitionConnection(events, Domain(events))
+
+    def pin(candidate: LocalExternalBootOperationLease) -> PinnedOperationOwnership:
+        assert candidate is lease
+        return PinnedOperationOwnership(
+            OperationOwnership(SYSTEM_ID, BINDING), AcquisitionPin(lease)
+        )
+
+    def inspect_overlay(descriptor: int) -> tuple[int, int, int]:
+        assert descriptor == 40
+        raise primary
+
+    def close_overlay(descriptor: int) -> None:
+        assert descriptor == 40
+        close("overlay")
+
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=pin,
+        connect=connect,
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: Guest(events),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=inspect_overlay,
+        close_overlay_descriptor=close_overlay,
+    )
+    with pytest.raises(primary_type) as raised:
+        factory.open(lease, _expected())
+
+    assert raised.value is primary
+    expected = {
+        "before-connection": ["pin"],
+        "after-connection": ["connection", "pin"],
+        "after-overlay": ["overlay", "connection", "pin"],
+    }[stage]
+    assert [event for event in events if event.startswith("close:")] == [
+        f"close:{name}" for name in expected
+    ]
+    assert getattr(primary, "__notes__", []) == (
+        [f"cleanup failed: {failures[name]!r}" for name in expected] if close_fails else []
+    )
+    assert lease.pins == 0
+    lease.release()
+
+
+@pytest.mark.parametrize("abort_at", ["overlay", "connection", "pin"])
+def test_acquisition_cleanup_preserves_base_exception_interruption(abort_at: str) -> None:
+    events: list[str] = []
+    lease = _lease()
+    primary = RuntimeError("acquisition failed")
+    abort = _CloseAbort("cleanup interrupted")
+
+    def close(name: str) -> None:
+        events.append(name)
+        if name == abort_at:
+            raise abort
+        raise OSError(f"{name} failed")
+
+    class AcquisitionPin(FakePin):
+        def close(self) -> None:
+            super().close()
+            close("pin")
+
+    class AcquisitionConnection(Conn):
+        def close(self) -> None:
+            close("connection")
+
+    def pin(candidate: LocalExternalBootOperationLease) -> PinnedOperationOwnership:
+        assert candidate is lease
+        return PinnedOperationOwnership(
+            OperationOwnership(SYSTEM_ID, BINDING), AcquisitionPin(lease)
+        )
+
+    def inspect_overlay(_descriptor: int) -> tuple[int, int, int]:
+        raise primary
+
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=pin,
+        connect=lambda: AcquisitionConnection([], Domain([])),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: Guest([]),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=inspect_overlay,
+        close_overlay_descriptor=lambda _descriptor: close("overlay"),
+    )
+    with pytest.raises(_CloseAbort) as raised:
+        factory.open(lease, _expected())
+
+    assert raised.value is abort
+    assert abort.__context__ is primary
+    order = ["overlay", "connection", "pin"]
+    assert events == order[: order.index(abort_at) + 1]
+    assert getattr(primary, "__notes__", []) == []
+    assert lease.pins == (0 if abort_at == "pin" else 1)
