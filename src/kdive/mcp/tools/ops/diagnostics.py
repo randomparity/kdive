@@ -16,6 +16,7 @@ breakage must not emit a confident wrong fix when a backend was simply down.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated, Protocol
 
 from fastmcp import FastMCP
@@ -25,7 +26,11 @@ from pydantic import Field
 
 from kdive import version as service_version
 from kdive.diagnostics.checks import CheckResult, CheckStatus
-from kdive.diagnostics.service import DiagnosticsReport, DiagnosticsService
+from kdive.diagnostics.service import (
+    DEFAULT_REPORT_TIMEOUT_SECONDS,
+    DiagnosticsReport,
+    DiagnosticsService,
+)
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import (
@@ -229,10 +234,21 @@ def _verdict(results: list[CheckResult], has_failure: bool, has_error: bool) -> 
     )
 
 
+def _with_report_timeout[**P](
+    func: Callable[P, Awaitable[ToolResponse]],
+) -> Callable[P, Awaitable[ToolResponse]]:
+    """Interpolate the enforced report budget before FastMCP reads the wrapper docstring."""
+    if func.__doc__ is None:
+        raise AssertionError("ops.diagnostics wrapper must have a docstring")
+    func.__doc__ = func.__doc__.format(report_timeout=DEFAULT_REPORT_TIMEOUT_SECONDS)
+    return func
+
+
 def register(app: FastMCP, pool: AsyncConnectionPool, service_factory: ServiceFactory) -> None:
     """Register ``ops.diagnostics`` on ``app``, bound to ``pool`` and the ``service_factory``."""
 
     @app.tool(name=_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
+    @_with_report_timeout
     async def ops_diagnostics(
         provider: Annotated[
             str | None,
@@ -258,9 +274,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool, service_factory: ServiceFa
         ``error`` distinctly — it is not a contract failure. ``with_egress`` adds the mutating
         probe (off by default; the provisioning is audited distinctly).
 
-        The default report execution shares a 30-second budget measured from report start
-        by the server's monotonic clock, including worker queue waits. Unfinished checks
-        report ``error`` on expiry; retry ``ops.diagnostics`` after restoring readiness.
+        The default report execution shares a {report_timeout:g}-second budget measured from
+        report start by the server's monotonic clock, including worker queue waits.
+        Unfinished checks report ``error`` on expiry; retry ``ops.diagnostics`` after
+        restoring readiness.
         A timed-out report does not cancel a queued or running worker diagnostic job.
         """
         return await run_diagnostics(

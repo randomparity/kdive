@@ -1022,7 +1022,7 @@ def test_destructive_consequence_guard_bites() -> None:
 # polling — the out-of-band async contract (#941/jobs.wait): the description must name
 # `jobs.wait` as the poll tool, not merely "poll". This is a reviewed set (like
 # DESTRUCTIVE_TOOLS): lifecycle tools that enqueue a job to advance a durable entity
-# (images.publish, systems.provision/teardown, runs.boot) are tracked via that entity's read
+# (images.publish, systems.provision, runs.boot) are tracked via that entity's read
 # tool, not jobs.wait, and are deliberately excluded.
 _JOB_HANDLE_TOOLS = frozenset(
     {
@@ -1036,6 +1036,7 @@ _JOB_HANDLE_TOOLS = frozenset(
         "systems.resolve_external_boot_conflict",
         "systems.authorize_ssh_key",
         "systems.check_ssh_reachable",
+        "systems.teardown",
         "systems.snapshot",
         "systems.restore",
         "systems.delete_snapshot",

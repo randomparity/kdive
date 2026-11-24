@@ -53,7 +53,7 @@ _TRANSPORT_FAILURE = ErrorCategory.TRANSPORT_FAILURE
 _NOT_IMPLEMENTED = ErrorCategory.NOT_IMPLEMENTED
 
 _DEFAULT_PER_CHECK_TIMEOUT = 10.0
-_DEFAULT_OVERALL_TIMEOUT = 30.0
+DEFAULT_REPORT_TIMEOUT_SECONDS = 30.0
 
 
 class WorkerVantageSubstitution(StrEnum):
@@ -473,6 +473,6 @@ def default_service_factory(
     return DiagnosticsService(
         checks=checks,
         per_check_timeout=_DEFAULT_PER_CHECK_TIMEOUT,
-        overall_timeout=_DEFAULT_OVERALL_TIMEOUT,
+        overall_timeout=DEFAULT_REPORT_TIMEOUT_SECONDS,
         worker_mode=worker_mode,
     )
