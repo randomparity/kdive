@@ -301,6 +301,10 @@ def device_identity(identity_port: RemoteDeviceIdentityPort, path: str) -> Remot
     normalized = normalize_storage_path(path)
     try:
         identity = identity_port.identity(normalized)
+    except CategorizedError as exc:
+        raise CategorizedError(
+            "remote device identity lookup failed", category=exc.category, terminal=exc.terminal
+        ) from None
     except Exception:
         raise attachment_infrastructure("remote device identity lookup failed") from None
     if identity is None:

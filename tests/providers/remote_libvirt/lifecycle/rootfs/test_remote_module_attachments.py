@@ -9,12 +9,16 @@ import traceback
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, cast
+from typing import Literal, NoReturn, cast
 
 import libvirt
 import pytest
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
+from kdive.providers.external_boot_authority.device_identity import (
+    DeviceIdentityRequestV1,
+    RemoteAuthorityDeviceIdentity,
+)
 from kdive.providers.ports.module_operation import RemoteDeviceIdentity
 from kdive.providers.remote_libvirt.lifecycle.storage import render_volume_xml
 from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
@@ -806,6 +810,66 @@ def test_identity_operational_failure_is_redacted_infrastructure_failure() -> No
         traceback.format_exception(type(raised.value), raised.value, raised.value.__traceback__)
     )
     assert "private-host-path" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("category", "terminal"),
+    [
+        pytest.param(ErrorCategory.CONFLICT, False, id="conflict"),
+        pytest.param(ErrorCategory.CONFLICT, True, id="terminal-conflict"),
+        pytest.param(ErrorCategory.INFRASTRUCTURE_FAILURE, False, id="infrastructure"),
+        pytest.param(ErrorCategory.INFRASTRUCTURE_FAILURE, True, id="terminal-infrastructure"),
+    ],
+)
+@pytest.mark.parametrize("authority_adapter", [False, True], ids=["direct", "authority"])
+def test_typed_identity_failure_preserves_semantics_and_redaction(
+    category: ErrorCategory, terminal: bool, authority_adapter: bool
+) -> None:
+    failure = CategorizedError(
+        "private-host-path", category=category, details={"path": "/private/host"}, terminal=terminal
+    )
+
+    class Identity(IdentityPort):
+        def identity(self, path: str) -> NoReturn:
+            raise failure
+
+    class Sender:
+        async def resolve_device_identity(
+            self, request: DeviceIdentityRequestV1, *, deadline: float
+        ) -> NoReturn:
+            raise failure
+
+    port = (
+        RemoteAuthorityDeviceIdentity(Sender(), 110.0, clock=lambda: 100.0)
+        if authority_adapter
+        else Identity()
+    )
+    state = expected()
+    with pytest.raises(CategorizedError) as raised:
+        _inspect_module_attachments(Conn([Domain(system_xml(state.system_id))]), port, state)
+    error = raised.value
+    assert str(error) == "remote device identity lookup failed"
+    assert error.details == {}
+    assert error.__cause__ is None and error.__suppress_context__
+    rendered = "".join(traceback.format_exception(error))
+    assert "private-host-path" not in rendered and "/private/host" not in rendered
+    assert error.category is category
+    assert error.terminal is terminal
+    assert retryable_category(error.category) is (category is ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+
+@pytest.mark.parametrize("signal", [KeyboardInterrupt, SystemExit])
+def test_identity_control_interruption_remains_primary(signal: type[BaseException]) -> None:
+    failure = signal("identity interrupted")
+
+    class Identity(IdentityPort):
+        def identity(self, path: str) -> NoReturn:
+            raise failure
+
+    state = expected()
+    with pytest.raises(signal) as raised:
+        inspect_module_attachments(Conn([Domain(system_xml(state.system_id))]), state, Identity())
+    assert raised.value is failure
 
 
 def test_direct_path_identity_calls_are_bounded() -> None:
