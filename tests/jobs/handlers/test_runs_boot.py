@@ -739,15 +739,15 @@ def test_local_console_artifact_is_per_run_immutable(migrated_url: str) -> None:
 
 
 def test_mark_boot_window_local_is_zero_regardless_of_log_size(tmp_path, monkeypatch) -> None:
-    # Local (no snapshotter): no slice is taken. The serial <log> holds one boot window (the
-    # truncating it per power-cycle (ADR-0258), so the whole current file is this boot — the mark
-    # is always 0 even when a prior boot left bytes on disk.
+    # The explicit local snapshotter takes no slice: per-start truncation makes the file
+    # one boot window (ADR-0258), even when a previous boot left bytes on disk.
     system_id = uuid4()
     log = tmp_path / f"{system_id}.log"
     log.write_bytes(b"prior boot bytes\n")
     monkeypatch.setattr(console_evidence, "console_log_path", lambda sid: log)
 
-    assert asyncio.run(boot_evidence.mark_boot_window(system_id, None)) == 0
+    snapshotter = local_console.LocalLibvirtConsoleSnapshotter(secret_registry=SecretRegistry())
+    assert asyncio.run(boot_evidence.mark_boot_window(system_id, snapshotter)) == 0
 
 
 def test_mark_boot_window_remote_uses_snapshotter() -> None:
@@ -783,7 +783,8 @@ def test_local_capture_excludes_prior_boot_panic_via_truncation(tmp_path, monkey
     # prior panic is gone from disk, not merely sliced off by an offset.
     log.write_bytes(b"[run B] booted clean READY\n")
 
-    mark_b = asyncio.run(boot_evidence.mark_boot_window(system_id, None))
+    snapshotter = local_console.LocalLibvirtConsoleSnapshotter(secret_registry=SecretRegistry())
+    mark_b = asyncio.run(boot_evidence.mark_boot_window(system_id, snapshotter))
     assert mark_b == 0  # local takes no slice
 
     redacted_b = asyncio.run(console_evidence.read_redacted_console(system_id, SecretRegistry()))
