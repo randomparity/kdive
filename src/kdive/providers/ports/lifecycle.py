@@ -154,12 +154,12 @@ class Provisioner(Protocol):
         ``overlay_customizers`` (ADR-0289, #963), ``bootstrap_pubkey`` (ADR-0291, #966) and
         ``job_id`` (ADR-0522, #1740) are forwarded the same as :meth:`provision`.
 
+        Provision can fail after the prior domain has been removed; replacement is not atomic.
+
         Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` for invalid provider-specific profile
-                data, ``PROVISIONING_FAILURE`` for replacement-domain creation failures,
-                ``INFRASTRUCTURE_FAILURE`` for teardown/control-plane faults, or
-                ``TRANSPORT_FAILURE`` when a remote provider's control channel cannot
-                connect.
+            CategorizedError: as :meth:`teardown` and :meth:`provision`, including
+                ``MISSING_DEPENDENCY`` for unavailable provider tools or materialization seams
+                and ``CONFIGURATION_ERROR`` for invalid provider-specific profile data.
         """
         ...
 

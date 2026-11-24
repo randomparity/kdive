@@ -773,17 +773,16 @@ class LocalLibvirtProvisioning:
         defines+starts the new profile under the **same** deterministic domain name (the
         ``system_id`` is stable). Built from the idempotent ``teardown``/``provision``
         primitives — an absent prior domain is swallowed by ``teardown`` (so a retry after a
-        partial wipe still provisions), and a ``provision`` failure surfaces as
-        ``PROVISIONING_FAILURE`` (so the handler drives ``reprovisioning -> failed``).
+        partial wipe still provisions). Provision can fail after the prior domain has been
+        removed; its categorized failure propagates without restoring that domain.
 
         ``overlay_customizers`` (ADR-0289, #963) are forwarded to the internal ``provision``
         call: since ``teardown`` above always removes the prior overlay, ``provision`` always
         recreates it here, so the customizers always run.
 
         Raises:
-            CategorizedError: ``PROVISIONING_FAILURE`` if the new domain cannot be
-                defined/started or its first boot does not reach the readiness marker
-                (ADR-0680); ``INFRASTRUCTURE_FAILURE`` if the wipe cannot be completed.
+            CategorizedError: as :meth:`teardown` and :meth:`provision`, including missing
+                dependencies, invalid configuration, provisioning and infrastructure failures.
         """
         del bootstrap_pubkey  # local injects pre-boot via overlay_customizers (ADR-0291)
         self.teardown(domain_name_for(system_id))
