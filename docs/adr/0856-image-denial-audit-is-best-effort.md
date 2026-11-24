@@ -1,8 +1,8 @@
-# ADR 0856 — Image denial auditing is best effort
+# 0856 — Image denial auditing is best effort
 
 ## Status
 
-Accepted (2026-11-23). Extends the image denial path without changing role or mutation policy.
+Accepted (2026-11-23)
 
 ## Context
 
