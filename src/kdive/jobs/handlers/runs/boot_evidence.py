@@ -16,7 +16,7 @@ from kdive.db.repositories import SYSTEMS
 from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.crash_signatures import CONSOLE_CRASH_KINDS
-from kdive.domain.lifecycle.records import Run
+from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.lifecycle.run_steps import (
     BOOT_OUTCOME_CRASHED_HALTED_LIVE,
     BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED,
@@ -24,6 +24,7 @@ from kdive.domain.lifecycle.run_steps import (
 )
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
+from kdive.providers.core.runtime import SystemHandleResolver
 from kdive.providers.ports.console import (
     ConsoleSnapshot,
     ConsoleSnapshotReadError,
@@ -31,7 +32,6 @@ from kdive.providers.ports.console import (
 )
 from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.ports.lifecycle import Connector
-from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.security.artifacts.artifact_search import ArtifactSearchInputError, search_text
 from kdive.security.authz.context import RequestContext
@@ -144,10 +144,10 @@ def inert_capture(profile_policy: ProfilePolicy, profile: ProvisioningProfile) -
     return methods
 
 
-def gdbstub_reachable(connector: Connector, system_id: UUID) -> bool:
+def gdbstub_reachable(connector: Connector, system_handle: SystemHandle) -> bool:
     """Probe the gdbstub via the connector's read-only open path."""
     try:
-        connector.open_transport(SystemHandle(domain_name_for(system_id)), "gdbstub")
+        connector.open_transport(system_handle, "gdbstub")
     except CategorizedError as exc:
         if exc.category is not ErrorCategory.DEBUG_ATTACH_FAILURE:
             raise
@@ -160,6 +160,7 @@ async def record_crash_halted_live(
     job_ctx: RequestContext,
     run: Run,
     *,
+    system_handle: SystemHandleResolver,
     system_id: UUID,
     connector: Connector,
     profile_policy: ProfilePolicy,
@@ -182,7 +183,9 @@ async def record_crash_halted_live(
     )
     if artifact is None or not artifact.data or not generic_panic_matches(artifact.data):
         return None
-    if not await asyncio.to_thread(gdbstub_reachable, connector, system_id):
+    if not await asyncio.to_thread(
+        gdbstub_reachable, connector, system_handle(system.id, system.domain_name)
+    ):
         return None
     await record_boot_audit(conn, job_ctx, run)
     return {
@@ -199,6 +202,7 @@ async def _expected_crash_capture(
     system_id: UUID,
     profile_policy: ProfilePolicy,
     *,
+    system_handle: SystemHandleResolver,
     connector: Connector | None,
     panicked: bool,
 ) -> tuple[list[str], list[str]]:
@@ -229,7 +233,7 @@ async def _expected_crash_capture(
         connector is not None
         and panicked
         and profile_policy.gdbstub_provisioned(profile)
-        and await _gdbstub_answered(connector, system_id)
+        and await _gdbstub_answered(connector, system, system_handle)
     ):
         # gdbstub_provisioned gated the probe, so inert_capture listed it; a stub that answered
         # on the halted guest is available, not inert.
@@ -238,7 +242,9 @@ async def _expected_crash_capture(
     return available, inert
 
 
-async def _gdbstub_answered(connector: Connector, system_id: UUID) -> bool:
+async def _gdbstub_answered(
+    connector: Connector, system: System, system_handle: SystemHandleResolver
+) -> bool:
     """Probe the stub, failing closed on any fault (ADR-0628).
 
     ``gdbstub_reachable`` re-raises every ``CategorizedError`` that is not
@@ -250,9 +256,11 @@ async def _gdbstub_answered(connector: Connector, system_id: UUID) -> bool:
     stays inert, which is what an unknown answer must degrade to.
     """
     try:
-        return await asyncio.to_thread(gdbstub_reachable, connector, system_id)
+        return await asyncio.to_thread(
+            gdbstub_reachable, connector, system_handle(system.id, system.domain_name)
+        )
     except CategorizedError:
-        _log.warning("gdbstub probe failed for system %s; reporting the stub as inert", system_id)
+        _log.warning("gdbstub probe failed for system %s; reporting the stub as inert", system.id)
         return False
 
 
@@ -261,6 +269,7 @@ async def record_expected_crash(
     job_ctx: RequestContext,
     run: Run,
     *,
+    system_handle: SystemHandleResolver,
     system_id: UUID,
     profile_policy: ProfilePolicy,
     artifact: ConsoleSnapshot,
@@ -277,6 +286,7 @@ async def record_expected_crash(
         system_id,
         profile_policy,
         connector=connector,
+        system_handle=system_handle,
         panicked=generic_panic_matches(artifact.data),
     )
     await record_boot_audit(conn, job_ctx, run)
@@ -297,6 +307,7 @@ async def evaluate_expected_failure_after_ready(
     job_ctx: RequestContext,
     run: Run,
     *,
+    system_handle: SystemHandleResolver,
     system_id: UUID,
     profile_policy: ProfilePolicy,
     artifact: ConsoleSnapshot | None,
@@ -323,6 +334,7 @@ async def evaluate_expected_failure_after_ready(
         profile_policy=profile_policy,
         artifact=artifact,
         matched_line=matched_line,
+        system_handle=system_handle,
     )
 
 

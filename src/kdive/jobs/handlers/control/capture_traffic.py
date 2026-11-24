@@ -43,7 +43,6 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import CaptureTrafficPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.artifacts.bpf_filter import trim_pcap, validate_bpf
 from kdive.store.objectstore import ObjectStore
 
@@ -139,7 +138,7 @@ async def _snapshot(
             provider_kind=binding.kind.value,
             resource_id=resource.id,
             system_id=system.id,
-            domain_name=system.domain_name or domain_name_for(system.id),
+            domain_name=binding.runtime.system_handle(system.id, system.domain_name),
             project=run.project,
             write_remediation=capturer.write_remediation,
             configuration=lambda: operation_ports.configuration(resource.id),

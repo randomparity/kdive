@@ -6,6 +6,7 @@ import asyncio
 import copy
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -42,6 +43,7 @@ from kdive.mcp.tools.lifecycle.control import registrar as control_tools
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.ports.handles import SystemHandle
 from kdive.security.authz.rbac import AuthorizationError, Role
 from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
@@ -449,11 +451,15 @@ def test_power_handler_calls_provider_and_audits(migrated_url: str) -> None:
                     f"{sys_id}:power:reset:{uuid4()}",
                 )
             ctrl = _FakeControl()
+            resolver = provider_resolver(controller=ctrl)
+            runtime = replace(
+                resolver.resolve(ResourceKind.LOCAL_LIBVIRT),
+                system_handle=lambda _id, _name: SystemHandle("power-target"),
+            )
+            resolver = ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
             async with pool.connection() as conn:
-                await control_plane.power_handler(
-                    conn, job, resolver=provider_resolver(controller=ctrl)
-                )
-            assert ctrl.powered == [("kdive-x", "reset")]
+                await control_plane.power_handler(conn, job, resolver=resolver)
+            assert ctrl.powered == [("power-target", "reset")]
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
                 sys_row = await cur.fetchone()
@@ -1532,3 +1538,27 @@ def test_a_key_stored_under_the_bare_tool_name_conflicts_and_enqueues_nothing(
             assert await _job_count(pool) == 0
 
     asyncio.run(_run())
+
+
+def test_force_crash_refusing_target_leaves_ready_without_nmi(migrated_url: str) -> None:
+    def refuse(_id: UUID, _name: str | None) -> SystemHandle:
+        raise CategorizedError("target unavailable", category=ErrorCategory.NOT_IMPLEMENTED)
+
+    async def run() -> None:
+        async with _pool(migrated_url) as pool:
+            allocation_id = await _granted_allocation(pool)
+            system_id = await _seed_system(pool, allocation_id, SystemState.READY)
+            job = await _enqueue_crash(pool, system_id)
+            control = _FakeControl()
+            resolver = provider_resolver(controller=control)
+            runtime = replace(resolver.resolve(ResourceKind.LOCAL_LIBVIRT), system_handle=refuse)
+            resolver = ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as caught:
+                    await control_plane.force_crash_handler(conn, job, resolver=resolver)
+                assert caught.value.category is ErrorCategory.NOT_IMPLEMENTED
+                system = await SYSTEMS.get(conn, UUID(system_id))
+                assert system is not None and system.state is SystemState.READY
+            assert control.crashed == []
+
+    asyncio.run(run())

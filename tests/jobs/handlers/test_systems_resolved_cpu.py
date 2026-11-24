@@ -21,6 +21,7 @@ from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.jobs.handlers.systems import _persist_local_resolved_cpu
 from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.serialization import JsonValue
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -45,6 +46,7 @@ class _StubProvisioner:
 def _runtime(provisioner: object) -> ProviderRuntime:
     unused = cast(Any, object())
     return ProviderRuntime(
+        system_handle=libvirt_system_handle,
         profile_policy=unused,
         provisioner=cast(Any, provisioner),
         installer=unused,

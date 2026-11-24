@@ -43,6 +43,7 @@ from kdive.providers.remote_libvirt.resource_details import (
     StagedVolumeProbe,
     project_resource_details,
 )
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.allocation.release import ReleaseOutcome
 from tests.clock import STORE_MTIME
@@ -97,6 +98,7 @@ async def _list_resources(
 def _resolver_with_staged_projector(probe: StagedVolumeProbe) -> ProviderResolver:
     unused_port = cast(Any, object())
     runtime = ProviderRuntime(
+        system_handle=libvirt_system_handle,
         profile_policy=unused_port,
         provisioner=unused_port,
         installer=unused_port,
@@ -261,6 +263,7 @@ def _descriptor_runtime(
 ) -> ProviderRuntime:
     unused_port = cast(Any, object())
     return ProviderRuntime(
+        system_handle=libvirt_system_handle,
         profile_policy=unused_port,
         provisioner=unused_port,
         installer=unused_port,
@@ -527,6 +530,7 @@ def _resolver_with_rebound_staged_probe(
 
     def _runtime(probe: StagedVolumeProbe) -> ProviderRuntime:
         return ProviderRuntime(
+            system_handle=libvirt_system_handle,
             profile_policy=unused_port,
             provisioner=unused_port,
             installer=unused_port,

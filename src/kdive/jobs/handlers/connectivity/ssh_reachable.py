@@ -27,9 +27,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.payloads import CheckSshReachablePayload, load_payload
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.shared.console_evidence import redacted_console_tail
-from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
 
@@ -233,7 +231,7 @@ async def check_ssh_reachable_handler(
         )
     binding = await resolver.binding_for_system(conn, system_id)
     endpoint = binding.runtime.connector.recorded_ssh_endpoint(
-        SystemHandle(system.domain_name or domain_name_for(system_id)),
+        binding.runtime.system_handle(system.id, system.domain_name),
         ssh_forward_port=payload.ssh_forward_port,
     )
     if endpoint is None:

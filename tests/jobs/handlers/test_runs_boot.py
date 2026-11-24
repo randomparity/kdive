@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import cast
 from uuid import UUID, uuid4
@@ -29,11 +29,13 @@ from kdive.jobs.models import HandlerRegistry, JobHandlerResult
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import SystemHandleResolver
 from kdive.providers.local_libvirt import console as local_console
 from kdive.providers.ports.console import ConsoleSnapshot, ConsoleSnapshotter
+from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.ports.lifecycle import Booter, Connector
 from kdive.providers.shared import console_evidence
-from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.security.artifacts.artifact_search import (
     ArtifactSearchInputError,
     search_text,
@@ -351,24 +353,26 @@ def test_inert_capture_reports_fadump_for_a_fadump_system() -> None:
 
 def test_gdbstub_reachable_true_when_open_succeeds() -> None:
     conn = cast(Connector, _Connector(raises=False))
-    assert boot_evidence.gdbstub_reachable(conn, uuid4()) is True
+    assert boot_evidence.gdbstub_reachable(conn, SystemHandle("opaque-target")) is True
 
 
 def test_gdbstub_reachable_false_when_open_raises() -> None:
     conn = cast(Connector, _Connector(raises=True))
-    assert boot_evidence.gdbstub_reachable(conn, uuid4()) is False
+    assert boot_evidence.gdbstub_reachable(conn, SystemHandle("opaque-target")) is False
 
 
 def test_gdbstub_reachable_preserves_transport_failure_category() -> None:
     conn = cast(Connector, _Connector(raises=True, category=ErrorCategory.TRANSPORT_FAILURE))
     with pytest.raises(CategorizedError) as exc:
-        boot_evidence.gdbstub_reachable(conn, uuid4())
+        boot_evidence.gdbstub_reachable(conn, SystemHandle("opaque-target"))
     assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
 
 
 @dataclass
 class _FakeSystem:
     provisioning_profile: dict[str, object]
+    id: UUID = field(default_factory=uuid4)
+    domain_name: str | None = "boot-provider-target"
 
 
 def _record(
@@ -379,6 +383,7 @@ def _record(
     console: bytes | None,
     reachable: bool,
     failure_category: ErrorCategory = ErrorCategory.DEBUG_ATTACH_FAILURE,
+    system_handle: SystemHandleResolver = libvirt_system_handle,
 ) -> tuple[BootStepResult | None, list[object]]:
     audits: list[object] = []
 
@@ -407,6 +412,7 @@ def _record(
             profile_policy=cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump)),
             snapshotter=None,
             mark=0,
+            system_handle=system_handle,
         )
 
     return asyncio.run(_run()), audits
@@ -480,6 +486,7 @@ def _record_expected(
     system_present: bool,
     console: bytes = _PANIC_CONSOLE,
     connector: _Connector | None = None,
+    system_handle: SystemHandleResolver = libvirt_system_handle,
 ) -> tuple[BootStepResult | None, list[object]]:
     audits: list[object] = []
 
@@ -506,6 +513,7 @@ def _record_expected(
             artifact=artifact,
             matched_line="Kernel panic - not syncing: matched line",
             connector=None if connector is None else cast(Connector, connector),
+            system_handle=system_handle,
         )
 
     return asyncio.run(_run()), audits
@@ -873,6 +881,7 @@ def test_boot_and_capture_forwards_accel_to_booter(monkeypatch: pytest.MonkeyPat
             None,
             0,
             accel="tcg",
+            system_handle=libvirt_system_handle,
         )
     )
     assert spy.accel_seen == "tcg"
@@ -931,7 +940,9 @@ def test_ready_path_threads_collaborator_args_and_builds_result(
         system_id: object,
         profile_policy: object,
         artifact: object,
+        system_handle: object,
     ) -> object:
+        assert system_handle is libvirt_system_handle
         eval_calls.append((c, ctx, r, system_id, profile_policy, artifact))
         return None
 
@@ -953,6 +964,7 @@ def test_ready_path_threads_collaborator_args_and_builds_result(
             snapshotter,
             0,
             accel="kvm",
+            system_handle=libvirt_system_handle,
         )
     )
 
@@ -996,6 +1008,7 @@ def _run_ready_path(
     console: bytes,
     connector: _Connector | None = None,
     system_present: bool = False,
+    system_handle: SystemHandleResolver = libvirt_system_handle,
 ) -> tuple[BootStepResult, list[object]]:
     audits: list[object] = []
 
@@ -1027,6 +1040,7 @@ def _run_ready_path(
             None,
             0,
             accel=None,
+            system_handle=system_handle,
         )
 
     return asyncio.run(_go()), audits
@@ -1135,13 +1149,14 @@ class _RecordingConnector:
     def close_transport(self, _handle: object) -> None: ...
 
 
-def test_gdbstub_reachable_probes_derived_handle_and_kind() -> None:
+def test_gdbstub_reachable_preserves_opaque_handle_and_kind() -> None:
     conn = _RecordingConnector()
-    sid = uuid4()
-    assert boot_evidence.gdbstub_reachable(cast(Connector, conn), sid) is True
+    assert (
+        boot_evidence.gdbstub_reachable(cast(Connector, conn), SystemHandle("opaque-target"))
+        is True
+    )
     ((system, kind),) = conn.calls
-    # The handle is the id-derived domain name and the transport kind is exactly "gdbstub".
-    assert system == domain_name_for(sid)
+    assert system == "opaque-target"
     assert kind == "gdbstub"
 
 
@@ -1362,6 +1377,7 @@ def test_record_crash_halted_live_threads_args_and_pins_result(
             profile_policy=cast(ProfilePolicy, _Pol2()),
             snapshotter=cast(ConsoleSnapshotter, snap),
             mark=5,
+            system_handle=libvirt_system_handle,
         )
     )
     assert result == {
@@ -1373,7 +1389,7 @@ def test_record_crash_halted_live_threads_args_and_pins_result(
     }
     assert seen["get"] == (conn, sid)
     assert seen["cap"] == (conn, sid, run.id, snap, 5)
-    assert seen["reach"] == (connector, sid)
+    assert seen["reach"] == (connector, "boot-provider-target")
     assert seen["audit"] == (conn, ctx, run)
     assert None not in profiles_seen  # the parsed profile threads into every predicate
 
@@ -1400,6 +1416,7 @@ def test_record_crash_halted_live_returns_none_when_no_console(
             profile_policy=cast(ProfilePolicy, _Pol(gdbstub=True, host_dump=False)),
             snapshotter=None,
             mark=0,
+            system_handle=libvirt_system_handle,
         )
     )
     assert result is None  # a missing artifact short-circuits without dereferencing None.data
@@ -1415,7 +1432,8 @@ def test_record_expected_crash_threads_args_and_pins_result(
     artifact = ConsoleSnapshot(uuid4(), "k", _PANIC_CONSOLE)
     seen: dict[str, object] = {}
 
-    async def _capture(c, s, p, *, connector, panicked):
+    async def _capture(c, s, p, *, connector, panicked, system_handle):
+        assert system_handle is libvirt_system_handle
         seen["capture"] = (c, s, p, connector, panicked)
         return ["console"], ["gdbstub"]
 
@@ -1434,6 +1452,7 @@ def test_record_expected_crash_threads_args_and_pins_result(
             profile_policy=cast(ProfilePolicy, pol),
             artifact=artifact,
             matched_line="the panic line",
+            system_handle=libvirt_system_handle,
         )
     )
     assert result == {
@@ -1484,6 +1503,7 @@ def test_expected_crash_capture_threads_args(monkeypatch: pytest.MonkeyPatch) ->
             cast(ProfilePolicy, _Pol3()),
             connector=None,
             panicked=True,
+            system_handle=libvirt_system_handle,
         )
     )
     assert out == (["console"], ["gdbstub"])
@@ -1513,6 +1533,7 @@ def test_expected_crash_capture_omits_invalid_profile(
             cast(ProfilePolicy, object()),
             connector=None,
             panicked=True,
+            system_handle=libvirt_system_handle,
         )
     )
 
@@ -1539,6 +1560,7 @@ def test_expected_crash_capture_propagates_unexpected_parser_fault(
                 cast(ProfilePolicy, object()),
                 connector=None,
                 panicked=True,
+                system_handle=libvirt_system_handle,
             )
         )
 
@@ -1553,6 +1575,7 @@ def test_evaluate_expected_failure_none_when_artifact_missing() -> None:
             system_id=uuid4(),
             profile_policy=cast(ProfilePolicy, object()),
             artifact=None,
+            system_handle=libvirt_system_handle,
         )
     )
     assert out is None  # a declared expectation with no artifact must not deref None.data
@@ -1567,7 +1590,10 @@ def test_evaluate_expected_failure_threads_args_to_record(
     artifact = ConsoleSnapshot(uuid4(), "k", _PANIC_CONSOLE)
     seen: dict[str, object] = {}
 
-    async def _record_exp(c, x, r, *, system_id, profile_policy, artifact, matched_line):
+    async def _record_exp(
+        c, x, r, *, system_id, profile_policy, artifact, matched_line, system_handle
+    ):
+        assert system_handle is libvirt_system_handle
         seen.update(c=c, x=x, r=r, sid=system_id, pol=profile_policy, art=artifact, ml=matched_line)
         return {"ok": True}
 
@@ -1580,6 +1606,7 @@ def test_evaluate_expected_failure_threads_args_to_record(
             system_id=sid,
             profile_policy=cast(ProfilePolicy, pol),
             artifact=artifact,
+            system_handle=libvirt_system_handle,
         )
     )
     assert out == {"ok": True}
@@ -1592,3 +1619,70 @@ def test_evaluate_expected_failure_threads_args_to_record(
         "art": artifact,
         "ml": "[ 1.45] Kernel panic - not syncing: VFS: Unable to mount root fs",
     }
+
+
+@pytest.mark.parametrize(
+    "gdbstub,console,connector_present",
+    [
+        (False, _PANIC_CONSOLE, True),
+        (True, b"healthy boot", True),
+        (True, _PANIC_CONSOLE, False),
+        (True, _PANIC_CONSOLE, True),
+    ],
+)
+def test_expected_crash_target_refusal_respects_probe_gates(
+    monkeypatch: pytest.MonkeyPatch, gdbstub: bool, console: bytes, connector_present: bool
+) -> None:
+    calls: list[UUID] = []
+
+    def refuse(system_id: UUID, name: str | None) -> SystemHandle:
+        assert name == "boot-provider-target"
+        calls.append(system_id)
+        raise CategorizedError("target unavailable", category=ErrorCategory.NOT_IMPLEMENTED)
+
+    result, audits = _record_expected(
+        monkeypatch,
+        gdbstub=gdbstub,
+        host_dump=False,
+        kdump=False,
+        system_present=True,
+        console=console,
+        connector=_Connector(raises=False) if connector_present else None,
+        system_handle=refuse,
+    )
+    assert result is not None and result["available_capture"] == ["console"]
+    assert len(audits) == 1
+    assert len(calls) == int(gdbstub and connector_present and console == _PANIC_CONSOLE)
+
+
+def test_halted_crash_propagates_target_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(_id: UUID, _name: str | None) -> SystemHandle:
+        raise CategorizedError("target unavailable", category=ErrorCategory.NOT_IMPLEMENTED)
+
+    with pytest.raises(CategorizedError) as caught:
+        _record(
+            monkeypatch,
+            gdbstub=True,
+            host_dump=False,
+            console=_PANIC_CONSOLE,
+            reachable=True,
+            system_handle=refuse,
+        )
+    assert caught.value.category is ErrorCategory.NOT_IMPLEMENTED
+
+
+def test_ready_boot_never_resolves_an_operation_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(_id: UUID, _name: str | None) -> SystemHandle:
+        raise AssertionError("a ready guest must not be probed")
+
+    result, audits = _run_ready_path(
+        monkeypatch,
+        expected={"kind": "console_crash", "pattern": "Kernel panic"},
+        console=_PANIC_CONSOLE,
+        connector=_Connector(raises=False),
+        system_present=True,
+        system_handle=forbidden,
+    )
+    assert result["boot_outcome"] == "expected_crash_observed"
+    assert result["available_capture"] == ["console"]
+    assert len(audits) == 1

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -20,12 +20,14 @@ import pytest
 
 from kdive.db.repositories import SYSTEM_DEVICES, SYSTEMS
 from kdive.domain.capacity.state import SystemDeviceState, SystemState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import SystemDevice
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers.devices import plug_device_handler, unplug_device_handler
 from kdive.jobs.payloads import Authorizing, PlugDevicePayload, UnplugDevicePayload
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
 from kdive.providers.fault_inject.lifecycle.faulted import FaultedHotplug
@@ -34,6 +36,7 @@ from kdive.providers.fault_inject.lifecycle.hotplug import (
     FaultInjectHotplug,
     HotplugBehaviour,
 )
+from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.ports.lifecycle import DeviceHotplugger, DeviceSpec, HotplugDeviceKind
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -910,5 +913,39 @@ def test_only_a_forced_job_calls_force_unplug(
         await env.unplug(spy, device_id, kind=kind)
 
         assert spy.calls == [expected]
+
+    _run(migrated_url, authority_role_dsns, scenario)
+
+
+def test_plug_uses_provider_target_with_the_real_hotplug_port(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    async def scenario(env: _Env) -> None:
+        port = env.port()
+        target = "opaque-device-target"
+        env.inventory.forget(env.domain)
+        env.inventory.record(env.system_id, target)
+        device_id = await env.add_row(SystemDeviceState.PLUGGING)
+        resolver = provider_resolver(hotplugger=port)
+        runtime = replace(
+            resolver.resolve(ResourceKind.LOCAL_LIBVIRT),
+            system_handle=lambda _id, _name: SystemHandle(target),
+        )
+        result = await plug_device_handler(
+            env.worker,
+            await env.job(JobKind.PLUG_DEVICE, device_id),
+            resolver=ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime}),
+            secret_registry=env.secrets,
+            incarnation_credential=incarnation_credential("device-handler-worker"),
+            window_s=_WINDOW_S,
+            poll_interval_s=_POLL_S,
+        )
+        assert result == str(device_id)
+        row = await env.row(device_id)
+        assert row is not None and row.state is _ATTACHED
+        assert row.provider_handle is not None
+        assert port.is_attached(
+            target, str(device_id), row.provider_handle, kind=HotplugDeviceKind.NIC
+        )
 
     _run(migrated_url, authority_role_dsns, scenario)

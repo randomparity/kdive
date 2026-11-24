@@ -56,9 +56,8 @@ from kdive.jobs.payloads import (
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.core.runtime import ProviderRuntime, SystemHandleResolver
 from kdive.providers.ports.lifecycle import DeviceHotplugger, Snapshotter
-from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.providers.system_authority.protocol import AuthoritySystemResponseV1
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -405,7 +404,7 @@ async def provision_handler(
     if system.state is not SystemState.PROVISIONING:
         if system.state in PROVISION_SUPERSEDED_SYSTEM_STATES:
             await asyncio.to_thread(
-                provisioner.teardown, system.domain_name or domain_name_for(system_id)
+                provisioner.teardown, runtime.system_handle(system.id, system.domain_name)
             )
         return str(system_id)
     secret_registry = secret_registry or SecretRegistry()
@@ -458,12 +457,13 @@ async def reprovision_handler(
         return str(system_id)
     secret_registry = secret_registry or SecretRegistry()
     # The recreated domain has none of the hot-plugged devices; free their backing storage first.
-    await _best_effort_release_all(
-        None if runtime.device_hotplug is None else runtime.device_hotplug.release_all,
-        system_id,
-        system.domain_name or domain_name_for(system_id),
-        "device",
-    )
+    if runtime.device_hotplug is not None:
+        await _best_effort_release_all(
+            runtime.device_hotplug.release_all,
+            system_id,
+            runtime.system_handle(system.id, system.domain_name),
+            "device",
+        )
     return await _execute_system_lifecycle_call(
         conn,
         job,
@@ -490,13 +490,13 @@ def _require_snapshotter(runtime: ProviderRuntime, system_id: UUID) -> Snapshott
     return runtime.snapshot
 
 
-async def _bind_snapshotter(
+async def _snapshot_ports(
     conn: AsyncConnection, resolver: ProviderResolver, system_id: UUID
-) -> Snapshotter:
-    """Resolve the provider binding, set the worker provider kind, return its Snapshotter."""
+) -> tuple[Snapshotter, SystemHandleResolver]:
+    """Bind snapshot operations and target policy to the same resource."""
     binding = await resolver.binding_for_system(conn, system_id)
     set_provider_kind(binding.kind.value)
-    return _require_snapshotter(binding.runtime, system_id)
+    return _require_snapshotter(binding.runtime, system_id), binding.runtime.system_handle
 
 
 async def _fail_snapshot_row(conn: AsyncConnection, snapshot_id: UUID) -> None:
@@ -529,11 +529,11 @@ async def snapshot_handler(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
-    snapshotter = await _bind_snapshotter(conn, resolver, system_id)
+    snapshotter, system_handle = await _snapshot_ports(conn, resolver, system_id)
     if system.state is not SystemState.READY:  # Re-verify at start: a mid-flight teardown/revert.
         await _fail_snapshot_row(conn, snapshot_id)
         return str(snapshot_id)
-    domain = system.domain_name or domain_name_for(system_id)
+    domain = system_handle(system.id, system.domain_name)
     try:
         await asyncio.to_thread(
             functools.partial(
@@ -600,10 +600,10 @@ async def restore_handler(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
-    snapshotter = await _bind_snapshotter(conn, resolver, system_id)
+    snapshotter, system_handle = await _snapshot_ports(conn, resolver, system_id)
     if system.state is not SystemState.RESTORING:
         return str(system_id)
-    domain = system.domain_name or domain_name_for(system_id)
+    domain = system_handle(system.id, system.domain_name)
     try:
         await asyncio.to_thread(
             functools.partial(
@@ -655,14 +655,14 @@ async def snapshot_delete_handler(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
-    snapshotter = await _bind_snapshotter(conn, resolver, system_id)
+    snapshotter, system_handle = await _snapshot_ports(conn, resolver, system_id)
     # The still-present row holds the name, so no concurrent snapshot can reuse it until we delete
     # it (admission rejects an in-use name); if the id no longer matches, this delete already ran
     # and the name belongs to a newer snapshot — leave it alone.
     row = await snapshot_by_name(conn, system_id, payload.name)
     if row is None or row.id != snapshot_id:
         return str(system_id)
-    domain = system.domain_name or domain_name_for(system_id)
+    domain = system_handle(system.id, system.domain_name)
     await asyncio.to_thread(snapshotter.delete, domain, payload.name)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         row = await snapshot_by_name(conn, system_id, payload.name)
@@ -794,12 +794,12 @@ async def teardown_handler(
                 details={"current_status": system.state.value},
                 terminal=True,
             )
-        domain_name = system.domain_name or domain_name_for(system_id)
         if system.state not in {SystemState.TEARING_DOWN, *TERMINAL_SYSTEM_STATES}:
             await SYSTEMS.update_state(conn, system_id, SystemState.TEARING_DOWN)
     binding = await resolver.binding_for_system(conn, system_id)
     set_provider_kind(binding.kind.value)
     provisioner = binding.runtime.provisioner
+    domain_name = binding.runtime.system_handle(system.id, system.domain_name)
     await _reclaim_snapshots(conn, binding.runtime.snapshot, system_id, domain_name)
     await _reclaim_devices(conn, binding.runtime.device_hotplug, system_id, domain_name)
     await asyncio.to_thread(provisioner.teardown, domain_name)

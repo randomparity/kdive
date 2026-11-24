@@ -116,6 +116,7 @@ from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     real_module_debuginfo_resolver,
 )
 from kdive.providers.shared.debug_common.gdbmi.policy.hostpolicy import allow_acl_remote
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.providers.shared.traffic_capture.execution import CaptureExecutor
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -466,6 +467,7 @@ def build_runtime(
     )
 
     return ProviderRuntime(
+        system_handle=libvirt_system_handle,
         authority=_authority,
         profile_policy=RemoteLibvirtProfilePolicy(),
         provisioner=RemoteLibvirtProvisioning(

@@ -26,7 +26,8 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind, take_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.providers.core.runtime import SystemHandleResolver
+from kdive.providers.ports.lifecycle import Controller
 from kdive.security import audit
 from kdive.services.debug.detach import detach_audit_event, detach_system_debug_sessions
 
@@ -39,11 +40,7 @@ class _ControlTarget(NamedTuple):
     project: str
 
 
-def _resolved_domain_name(system: System) -> str:
-    return system.domain_name or domain_name_for(system.id)
-
-
-async def _power_target(conn: AsyncConnection, system_id: UUID) -> _ControlTarget:
+async def _power_target(conn: AsyncConnection, system_id: UUID) -> System:
     """Resolve a non-resume power job's domain/project, re-checking ``READY`` under the SYSTEM lock.
 
     Every non-resume action requires ``READY`` (ADR-0320): a power job admitted while READY may
@@ -68,21 +65,24 @@ async def _power_target(conn: AsyncConnection, system_id: UUID) -> _ControlTarge
                 details={"system_id": str(system_id), "current_status": system.state.value},
                 terminal=True,
             )
-        return _ControlTarget(_resolved_domain_name(system), system.project)
+        return system
 
 
-async def _controller(conn: AsyncConnection, system_id: UUID, resolver: ProviderResolver):
+async def _control_ports(
+    conn: AsyncConnection, system_id: UUID, resolver: ProviderResolver
+) -> tuple[Controller, SystemHandleResolver]:
     """Resolve the System's controller port and tag the provider kind for metrics."""
     binding = await resolver.binding_for_system(conn, system_id)
     set_provider_kind(binding.kind.value)
-    return binding.runtime.controller
+    return binding.runtime.controller, binding.runtime.system_handle
 
 
 async def _power_non_resume(
     conn: AsyncConnection, system_id: UUID, resolver: ProviderResolver, action: PowerAction
 ) -> _ControlTarget:
-    target = await _power_target(conn, system_id)
-    control = await _controller(conn, system_id, resolver)
+    system = await _power_target(conn, system_id)
+    control, system_handle = await _control_ports(conn, system_id, resolver)
+    target = _ControlTarget(system_handle(system.id, system.domain_name), system.project)
     await asyncio.to_thread(control.power, target.domain_name, action)
     return target
 
@@ -201,8 +201,8 @@ async def _resume_handler(
                 details={"system_id": str(system_id), "current_status": system.state.value},
                 terminal=True,
             )
-        target = _ControlTarget(_resolved_domain_name(system), system.project)
-    control = await _controller(conn, system_id, resolver)
+    control, system_handle = await _control_ports(conn, system_id, resolver)
+    target = _ControlTarget(system_handle(system.id, system.domain_name), system.project)
     await asyncio.to_thread(control.power, target.domain_name, PowerAction.RESUME)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
@@ -261,7 +261,9 @@ async def _force_crash_precheck(conn: AsyncConnection, system_id: UUID) -> _Cras
         )
 
 
-async def _enter_crashing(conn: AsyncConnection, system_id: UUID) -> _ControlTarget | None:
+async def _enter_crashing(
+    conn: AsyncConnection, system_id: UUID, system_handle: SystemHandleResolver
+) -> _ControlTarget | None:
     """Commit READY -> CRASHING under the lock, the last DB write before the NMI (ADR-0325).
 
     Returns ``None`` if the state moved out of READY between the precheck and here (a raced
@@ -271,8 +273,9 @@ async def _enter_crashing(conn: AsyncConnection, system_id: UUID) -> _ControlTar
         system = await SYSTEMS.get(conn, system_id)
         if system is None or system.state is not SystemState.READY:
             return None
+        target = _ControlTarget(system_handle(system.id, system.domain_name), system.project)
         await SYSTEMS.update_state(conn, system_id, SystemState.CRASHING)
-        return _ControlTarget(_resolved_domain_name(system), system.project)
+        return target
 
 
 async def force_crash_handler(
@@ -297,8 +300,8 @@ async def force_crash_handler(
         return str(system_id)
     # First attempt: resolve the controller while still READY (a failure here leaves READY),
     # then commit CRASHING as the last DB write before the NMI.
-    control = await _controller(conn, system_id, resolver)
-    target = await _enter_crashing(conn, system_id)
+    control, system_handle = await _control_ports(conn, system_id, resolver)
+    target = await _enter_crashing(conn, system_id, system_handle)
     if target is None:
         return str(system_id)  # raced out of READY; nothing physical to do
     await asyncio.to_thread(control.force_crash, target.domain_name)

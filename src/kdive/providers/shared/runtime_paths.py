@@ -13,6 +13,7 @@ from uuid import UUID
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.settings import LIBVIRT_CONSOLE_ROOT, LIBVIRT_ROOTFS_ROOT
+from kdive.providers.ports.handles import SystemHandle
 
 _log = logging.getLogger(__name__)
 
@@ -63,6 +64,10 @@ _SYSTEM_DOMAIN_RE = re.compile(
 
 def domain_name_for(system_id: UUID) -> str:
     return f"kdive-{system_id}"
+
+
+def libvirt_system_handle(system_id: UUID, recorded_name: str | None) -> SystemHandle:
+    return SystemHandle(recorded_name or domain_name_for(system_id))
 
 
 def build_domain_name(build_id: UUID) -> str:

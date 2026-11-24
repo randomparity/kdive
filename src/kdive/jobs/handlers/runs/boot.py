@@ -22,6 +22,7 @@ from kdive.jobs.payloads import BootPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import SystemHandleResolver
 from kdive.providers.ports.console import ConsoleSnapshotter
 from kdive.providers.ports.lifecycle import (
     Booter,
@@ -53,6 +54,7 @@ async def _run_boot_and_capture_outcome(
     mark: int,
     *,
     accel: str | None,
+    system_handle: SystemHandleResolver,
 ) -> BootStepResult:
     system_id = run.require_system_id()
     try:
@@ -82,6 +84,7 @@ async def _run_boot_and_capture_outcome(
                 run,
                 system_id=system_id,
                 profile_policy=profile_policy,
+                system_handle=system_handle,
                 artifact=artifact,
                 matched_line=matched_line,
                 # Only this call site probes the stub (ADR-0628): the boot raised
@@ -97,6 +100,7 @@ async def _run_boot_and_capture_outcome(
                 system_id=system_id,
                 connector=connector,
                 profile_policy=profile_policy,
+                system_handle=system_handle,
                 snapshotter=snapshotter,
                 mark=mark,
             )
@@ -116,6 +120,7 @@ async def _run_boot_and_capture_outcome(
         run,
         system_id=system_id,
         profile_policy=profile_policy,
+        system_handle=system_handle,
         artifact=artifact,
     )
     if downgraded is not None:
@@ -168,6 +173,7 @@ async def boot_handler(
             snapshotter,
             mark,
             accel=accel,
+            system_handle=binding.runtime.system_handle,
         )
     except CategorizedError:
         await abandon_run_step_best_effort(conn, run_id, "boot")

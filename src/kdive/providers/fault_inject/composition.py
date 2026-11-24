@@ -44,7 +44,10 @@ from kdive.providers.fault_inject.lifecycle.hotplug import (
     HotplugBehaviour,
 )
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
-from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
+from kdive.providers.fault_inject.lifecycle.provisioning import (
+    FaultInjectProvisioning,
+    fault_inject_system_handle,
+)
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.fault_inject.retrieve import FaultInjectRetrieve
 from kdive.providers.infra.reaping import InfraReaper
@@ -98,6 +101,7 @@ def build_runtime(
         faulted_install = FaultedInstall(install, engine) if engine is not None else install
         port = hotplug.with_behaviour(behaviour)
         return ProviderRuntime(
+            system_handle=fault_inject_system_handle,
             profile_policy=FaultInjectProfilePolicy(),
             provisioner=(
                 FaultedProvisioning(provisioner, engine) if engine is not None else provisioner

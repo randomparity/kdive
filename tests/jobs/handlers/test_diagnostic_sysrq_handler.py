@@ -13,6 +13,7 @@ import hashlib
 import threading
 from collections.abc import Callable, Iterator
 from contextvars import ContextVar
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -32,15 +33,18 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, JobState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.control import diagnostic_sysrq
 from kdive.jobs.provider_context import take_provider_kind
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.local_libvirt import console as local_console
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.ports.console import ConsoleWindowRead
+from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.audit import args_digest
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -257,6 +261,11 @@ def test_captures_redacted_artifact_and_returns_its_id(
             system_id = await _seed_ready_system(pool, SystemState.READY)
             job = _job(system_id, "show_blocked_tasks")
             resolver = provider_resolver(controller=control)
+            runtime = replace(
+                resolver.resolve(ResourceKind.LOCAL_LIBVIRT),
+                system_handle=lambda _id, _name: SystemHandle("sysrq-target"),
+            )
+            resolver = ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
             async with pool.connection() as conn:
                 result_ref = await diagnostic_sysrq.diagnostic_sysrq_handler(
                     conn,
@@ -282,7 +291,7 @@ def test_captures_redacted_artifact_and_returns_its_id(
     out = asyncio.run(_go())
     system_id = out["system_id"]
 
-    assert out["calls"] == [("kdive-x", "w")]  # show_blocked_tasks -> trigger 'w'
+    assert out["calls"] == [("sysrq-target", "w")]  # show_blocked_tasks -> trigger 'w'
     assert out["provider_kind"] == "local-libvirt"
     rows = cast(list[tuple[str, str, str]], out["rows"])
     assert len(rows) == 1

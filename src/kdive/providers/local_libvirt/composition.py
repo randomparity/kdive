@@ -129,6 +129,7 @@ from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     real_module_debuginfo_resolver,
 )
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.providers.shared.traffic_capture.execution import CaptureExecutor
 from kdive.providers.system_authority.manifest import (
     LocalAuthoritySystemManifestV1,
@@ -485,6 +486,7 @@ def build_runtime(
     live_introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=secret_registry)
     external_boot = build_external_boot(external_boot_io)
     return ProviderRuntime(
+        system_handle=libvirt_system_handle,
         console=ConsoleCapabilities(
             snapshotter=LocalLibvirtConsoleSnapshotter(store, secret_registry=secret_registry),
             reader_factory=LocalLibvirtConsoleReader,

@@ -11,12 +11,14 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.providers.core.runtime import ProviderRuntime, ProviderSupport
 from kdive.providers.ports.lifecycle import DeviceHotplugger, HotplugDeviceKind
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 def _bare_runtime() -> ProviderRuntime:
     port = cast(Any, object())
     return ProviderRuntime(
+        system_handle=libvirt_system_handle,
         profile_policy=port,
         provisioner=port,
         installer=port,

@@ -33,7 +33,6 @@ from kdive.db.repositories import ARTIFACTS, SYSTEMS, ArtifactClaimConflict
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.domain.operations.sysrq import SysRqCommand
 from kdive.jobs.context import context_from_job as job_context_from_job
@@ -43,9 +42,6 @@ from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.console import ConsoleReader
 from kdive.providers.ports.lifecycle import Controller
-from kdive.providers.shared.runtime_paths import (
-    domain_name_for,
-)
 from kdive.security import audit
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -175,10 +171,6 @@ def _console_reader(
     return _read
 
 
-def _resolved_domain_name(system: System) -> str:
-    return system.domain_name or domain_name_for(system.id)
-
-
 def _changed_state_error(system_id: UUID) -> CategorizedError:
     return CategorizedError(
         "system left the ready local-libvirt state during SysRq capture",
@@ -217,7 +209,7 @@ async def _snapshot(
             else None
         )
         return _Snapshot(
-            domain_name=_resolved_domain_name(system),
+            domain_name=binding.runtime.system_handle(system.id, system.domain_name),
             project=system.project,
             controller=binding.runtime.controller,
             reader=reader,

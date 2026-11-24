@@ -21,6 +21,7 @@ from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.local_libvirt import console
 from kdive.providers.ports.console import ConsoleSnapshot, ConsoleSnapshotReadError
 from kdive.providers.shared import console_evidence
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
 
@@ -192,6 +193,7 @@ def test_registration_failure_is_best_effort_even_with_source_diagnostic(
 def test_controls_reject_absent_reader_without_local_fallback() -> None:
     port = cast(Any, object())
     runtime = ProviderRuntime(
+        system_handle=libvirt_system_handle,
         profile_policy=port,
         provisioner=port,
         installer=port,

@@ -16,6 +16,7 @@ import shutil
 import struct
 from collections.abc import Callable, Iterator
 from contextvars import ContextVar
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,11 +38,14 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS
 from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.control import capture_traffic
 from kdive.jobs.provider_context import clear_provider_kind, take_provider_kind
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.security.audit import args_digest
@@ -719,3 +723,21 @@ def test_unlink_quietly_suppresses_oserror(tmp_path) -> None:
     # Unlinking a directory raises IsADirectoryError (an OSError); the helper must suppress it.
     capture_traffic._unlink_quietly(tmp_path)  # tmp_path is a directory, so unlink() raises
     assert tmp_path.exists()  # helper returned without raising and did not remove the directory
+
+
+def test_capture_snapshot_uses_provider_operation_target(migrated_url: str, tmp_path: Path) -> None:
+    async def run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id, system_id = await _seed_ready_run(pool)
+            resolver = provider_resolver(traffic_capturer=_FakeCapturer(tmp_path))
+            runtime = replace(
+                resolver.resolve(ResourceKind.LOCAL_LIBVIRT),
+                system_handle=lambda _id, _name: SystemHandle("traffic-target"),
+            )
+            resolver = ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
+        async with _pool(_WORKER_DSN.get()) as worker_pool, worker_pool.connection() as conn:
+            snapshot = await capture_traffic._snapshot(conn, UUID(run_id), resolver)
+            assert snapshot.domain_name == "traffic-target"
+            assert snapshot.system_id == UUID(system_id)
+
+    asyncio.run(run())

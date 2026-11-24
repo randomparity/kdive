@@ -54,6 +54,7 @@ from kdive.providers.ports.lifecycle import (
     IntrospectionMode,
 )
 from kdive.providers.ports.traffic import TrafficCaptureOperationPorts
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
@@ -211,6 +212,7 @@ def provider_resolver(
     from kdive.providers.local_libvirt.composition import build_authority_capability
 
     runtime = ProviderRuntime(
+        system_handle=libvirt_system_handle,
         authority=build_authority_capability(cast(Any, authority_sender)),
         profile_policy=cast(
             Any, profile_policy if profile_policy is not None else TEST_PROFILE_POLICY

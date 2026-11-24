@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -15,6 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import ExternalBootActivationState, SystemState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job
@@ -185,11 +187,14 @@ def test_ssh_info_resolves_endpoint_by_domain_name(migrated_url: str) -> None:
             )
             connector = _FakeConnector(("127.0.0.1", 22022))
             resolver = _provider_resolver(connector=connector)
+            runtime = replace(
+                resolver.resolve(ResourceKind.LOCAL_LIBVIRT),
+                system_handle=lambda _id, _name: SystemHandle("ssh-provider-target"),
+            )
+            resolver = ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
             resp = await ssh_info(pool, _ctx(), sys_id, resolver=resolver)
         assert resp.status == "ok"
-        # The connector looks up the live libvirt domain by name, so it must receive the System's
-        # domain name (`kdive-…`), not the bare system_id.
-        assert connector.seen_handles == ["kdive-vm-xyz"]
+        assert connector.seen_handles == ["ssh-provider-target"]
 
     asyncio.run(_run())
 

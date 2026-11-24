@@ -7,11 +7,16 @@ from uuid import UUID
 
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
+from kdive.providers.ports.handles import SystemHandle
 from kdive.serialization import JsonValue
 
 
 def domain_name(system_id: UUID) -> str:
     return f"fault-inject-{system_id}"
+
+
+def fault_inject_system_handle(system_id: UUID, recorded_name: str | None) -> SystemHandle:
+    return SystemHandle(recorded_name or domain_name(system_id))
 
 
 class FaultInjectProvisioning:

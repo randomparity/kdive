@@ -55,6 +55,7 @@ from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePo
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
 from kdive.providers.remote_libvirt.retrieve.provider import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
 from tests.db.conftest import (  # noqa: F401 -- pytest fixture re-exports
@@ -238,6 +239,7 @@ def test_provider_runtime_returns_typed_provider_ports_directly() -> None:
     retrieve = _RetrieveProvider()
     introspect = _IntrospectorProvider()
     runtime = ProviderRuntime(
+        system_handle=libvirt_system_handle,
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=_ProvisionProvider(),
         installer=install,
@@ -289,6 +291,7 @@ def test_provider_runtime_discovery_hook_is_optional() -> None:
         calls.append(pool)
 
     runtime = ProviderRuntime(
+        system_handle=libvirt_system_handle,
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=_ProvisionProvider(),
         installer=install,
@@ -313,6 +316,7 @@ def test_provider_runtime_discovery_hook_noops_when_absent() -> None:
     retrieve = _RetrieveProvider()
     introspect = _IntrospectorProvider()
     runtime = ProviderRuntime(
+        system_handle=libvirt_system_handle,
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=_ProvisionProvider(),
         installer=install,

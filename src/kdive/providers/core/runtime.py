@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
+from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -30,6 +31,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootRecoveryObjectPorts,
 )
 from kdive.providers.ports.fault_injection import FaultInjectionInspector
+from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.ports.lifecycle import (
     Booter,
     Connector,
@@ -51,6 +53,7 @@ from kdive.providers.ports.retrieve import (
 from kdive.providers.ports.traffic import TrafficCaptureOperationPorts, TrafficCapturer
 from kdive.serialization import JsonValue
 
+type SystemHandleResolver = Callable[[UUID, str | None], SystemHandle]
 type DiscoveryRegistrar = Callable[[AsyncConnectionPool], Awaitable[None]]
 type RootfsValidator = Callable[[RootfsSource], None]
 type StagedVolumeProbe = Callable[[list[str]], Awaitable[dict[str, str]]]
@@ -179,6 +182,7 @@ class ProviderRuntime:
     crash_postmortem: CrashPostmortem
     vmcore_introspector: VmcoreIntrospector
     live_introspector: LiveIntrospector
+    system_handle: SystemHandleResolver
     # The platform-owned root device cmdline (ADR-0183). ``"root=/dev/vda"`` for direct-kernel
     # boot (local-libvirt's whole-disk-ext4 overlay); ``None`` when the in-guest bootloader owns
     # the root device (remote-libvirt inherits ``root=UUID=…`` via ``grubby --copy-default``).

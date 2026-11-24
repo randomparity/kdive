@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -44,6 +45,8 @@ from kdive.jobs.handlers.systems import (
 )
 from kdive.jobs.provider_context import clear_provider_kind, take_provider_kind
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.audit import args_digest
 from tests.mcp.systems_support import (
@@ -242,6 +245,11 @@ def test_snapshot_success_drives_row_available_and_leaves_system_ready(migrated_
             snap_id = await _seed_snapshot(pool, sid, "before-bug", SnapshotState.CREATING)
             snapshotter = _FakeSnapshotter()
             resolver = provider_resolver(snapshotter=snapshotter)
+            runtime = replace(
+                resolver.resolve(ResourceKind.LOCAL_LIBVIRT),
+                system_handle=lambda _id, _name: SystemHandle("snapshot-target"),
+            )
+            resolver = ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
             async with pool.connection() as conn:
                 await snapshot_handler(
                     conn,
@@ -258,7 +266,7 @@ def test_snapshot_success_drives_row_available_and_leaves_system_ready(migrated_
                 )
                 assert await _snap_state(conn, snap_id) is SnapshotState.AVAILABLE
                 assert await _sys_state(conn, sid) is SystemState.READY
-            assert snapshotter.created == [("kdive-x", "before-bug", True)]
+            assert snapshotter.created == [("snapshot-target", "before-bug", True)]
         finally:
             await pool.close()
 

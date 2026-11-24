@@ -60,8 +60,8 @@ from kdive.observability.debug_session_telemetry import (
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import SystemHandleResolver
 from kdive.providers.ports.handles import (
-    SystemHandle,
     TransportHandle,
 )
 from kdive.providers.ports.lifecycle import (
@@ -127,6 +127,7 @@ class _AttachResources:
     supported_debug_transports: frozenset[DebugTransportKind]
     provider: str
     live_introspector: LiveIntrospector
+    system_handle: SystemHandleResolver
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +149,7 @@ class _AttachPlan:
     """A prepared attach plus the optional post-open runtime probe (ADR-0335)."""
 
     request: debug_lifecycle.AttachRequest
+    system_handle: SystemHandleResolver
     probe: _RuntimeProbe | None = None
     #: The loopback SSH port a local authority-owned System reported (ADR-0811); ``None`` for every
     #: other System, whose provider resolves the endpoint itself.
@@ -180,6 +182,7 @@ def _resolved_connector_for_run(resolver: ProviderResolver) -> _ConnectorForRun:
             return ToolResponse.failure_from_error(str(run.id), exc)
         return _AttachResources(
             connector=runtime.connector,
+            system_handle=runtime.system_handle,
             profile_policy=runtime.profile_policy,
             supported_debug_transports=runtime.support.debug_transports,
             provider=runtime.support.component_sources.provider,
@@ -243,15 +246,19 @@ async def _open_transport(
     system: System,
     transport: DebugTransportKind,
     ssh_forward_port: int | None = None,
+    *,
+    system_handle: SystemHandleResolver,
 ) -> TransportHandle | ToolResponse:
     """Open the transport outside any lock; map a provider failure to an envelope."""
-    handle_name = system.domain_name or str(system.id)
     # The keyword is passed only for an authority-owned System, so every other connector keeps the
     # call shape it always had.
     extra = {} if ssh_forward_port is None else {"ssh_forward_port": ssh_forward_port}
     try:
         return await asyncio.to_thread(
-            connector.open_transport, SystemHandle(handle_name), transport, **extra
+            connector.open_transport,
+            system_handle(system.id, system.domain_name),
+            transport,
+            **extra,
         )
     except CategorizedError as exc:
         category = (
@@ -399,7 +406,12 @@ class DebugSessionHandlers:
         forward = await self._authority_ssh_forward(conn, system, transport)
         if isinstance(forward, ToolResponse):
             return forward
-        return _AttachPlan(request=request, probe=probe, ssh_forward_port=forward)
+        return _AttachPlan(
+            request=request,
+            system_handle=resources.system_handle,
+            probe=probe,
+            ssh_forward_port=forward,
+        )
 
     @staticmethod
     async def _authority_ssh_forward(
@@ -573,6 +585,7 @@ async def _attach_debug_session(
             plan.request.system,
             plan.request.transport,
             plan.ssh_forward_port,
+            system_handle=plan.system_handle,
         )
         if isinstance(opened, ToolResponse):
             return opened

@@ -41,14 +41,14 @@ from kdive.db.repositories import (
 )
 from kdive.domain.capacity.state import IllegalTransition, SystemDeviceState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle.records import SystemDevice
+from kdive.domain.lifecycle.records import System, SystemDevice
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PlugDevicePayload, UnplugDevicePayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind, take_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import SystemHandleResolver
 from kdive.providers.ports.lifecycle import DeviceHotplugger, DeviceSpec, HotplugDeviceKind
-from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -243,9 +243,7 @@ async def _device_row(
     return row if row is not None and row.system_id == system_id else None
 
 
-async def _system_domain_and_state(
-    conn: AsyncConnection, system_id: UUID
-) -> tuple[str, SystemState]:
+async def _device_system(conn: AsyncConnection, system_id: UUID) -> System:
     system = await SYSTEMS.get(conn, system_id)
     if system is None:
         raise CategorizedError(
@@ -254,12 +252,12 @@ async def _system_domain_and_state(
             details={"system_id": str(system_id)},
             terminal=True,
         )
-    return system.domain_name or domain_name_for(system_id), system.state
+    return system
 
 
-async def _hotplugger(
+async def _hotplug_ports(
     conn: AsyncConnection, resolver: ProviderResolver, system_id: UUID
-) -> DeviceHotplugger:
+) -> tuple[DeviceHotplugger, SystemHandleResolver]:
     binding = await resolver.binding_for_system(conn, system_id)
     set_provider_kind(binding.kind.value)
     if (
@@ -270,7 +268,7 @@ async def _hotplugger(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"system_id": str(system_id)},
         )
-    return binding.runtime.device_hotplug
+    return binding.runtime.device_hotplug, binding.runtime.system_handle
 
 
 def _not_ready(system_id: UUID, state: SystemState) -> CategorizedError:
@@ -332,11 +330,12 @@ async def _plug_device(
     if row is None or row.state is not SystemDeviceState.PLUGGING:
         return str(device_id)
     redactor = Redactor(registry=secret_registry)
-    domain, state = await _system_domain_and_state(conn, system_id)
+    system = await _device_system(conn, system_id)
     try:
-        if state is not SystemState.READY:  # Re-verify at start: a mid-flight teardown or revert.
-            raise _not_ready(system_id, state)
-        hotplugger = await _hotplugger(conn, resolver, system_id)
+        if system.state is not SystemState.READY:  # Protect raced teardown or restore.
+            raise _not_ready(system_id, system.state)
+        hotplugger, system_handle = await _hotplug_ports(conn, resolver, system_id)
+        domain = system_handle(system.id, system.domain_name)
         spec = DeviceSpec(HotplugDeviceKind(row.kind), str(device_id), row.network, row.size_gb)
         await _drive_plug(attempt, hotplugger, domain, spec, window_s, poll_interval_s)
     except CategorizedError as exc:
@@ -445,14 +444,15 @@ async def _unplug_device(
     if row is None or row.state is SystemDeviceState.PLUGGING:
         return str(device_id)
     redactor = Redactor(registry=secret_registry)
-    domain, state = await _system_domain_and_state(conn, system_id)
+    system = await _device_system(conn, system_id)
     try:
-        if state is not SystemState.READY:  # Re-verify at start: a mid-flight teardown or revert.
-            raise _not_ready(system_id, state)
+        if system.state is not SystemState.READY:  # Protect raced teardown or restore.
+            raise _not_ready(system_id, system.state)
         if row.state is not SystemDeviceState.UNPLUGGING:
             async with attempt.write():
                 await settle_device(conn, device_id, SystemDeviceState.UNPLUGGING)
-        hotplugger = await _hotplugger(conn, resolver, system_id)
+        hotplugger, system_handle = await _hotplug_ports(conn, resolver, system_id)
+        domain = system_handle(system.id, system.domain_name)
         await _drive_unplug(
             attempt, hotplugger, domain, row, window_s, poll_interval_s, forced=forced
         )

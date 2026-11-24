@@ -21,6 +21,7 @@ class _RefusingPorts:
             category=ErrorCategory.NOT_IMPLEMENTED,
         )
 
+    system_handle = _unavailable
     provision = _unavailable
     reprovision = _unavailable
     teardown = _unavailable
@@ -51,6 +52,7 @@ class _RefusingPorts:
 def build_runtime() -> ProviderRuntime:
     ports = _RefusingPorts()
     return ProviderRuntime(
+        system_handle=ports.system_handle,
         profile_policy=ports,
         provisioner=ports,
         installer=ports,

@@ -32,7 +32,6 @@ from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools.lifecycle.support._idempotency import dedup_replay
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports.handles import SystemHandle
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.ssh_authorized_key import validate_authorized_public_key
@@ -69,7 +68,7 @@ async def recorded_endpoint(
     forward = await authority_ssh_forward_port(conn, system.id)
     binding = await resolver.binding_for_system(conn, system.id)
     endpoint = binding.runtime.connector.recorded_ssh_endpoint(
-        SystemHandle(system.domain_name or str(system.id)), ssh_forward_port=forward
+        binding.runtime.system_handle(system.id, system.domain_name), ssh_forward_port=forward
     )
     return endpoint, forward
 
