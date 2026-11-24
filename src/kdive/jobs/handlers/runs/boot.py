@@ -28,9 +28,7 @@ from kdive.providers.ports.lifecycle import (
     Connector,
 )
 from kdive.security.authz.context import RequestContext
-from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
-from kdive.store.objectstore import ObjectStore
 
 
 async def _resolve_system_accel(conn: AsyncConnection, system_id: UUID) -> str | None:
@@ -51,8 +49,6 @@ async def _run_boot_and_capture_outcome(
     booter: Booter,
     connector: Connector,
     profile_policy: ProfilePolicy,
-    secret_registry: SecretRegistry,
-    artifact_store: ObjectStore,
     snapshotter: ConsoleSnapshotter | None,
     mark: int,
     *,
@@ -71,8 +67,6 @@ async def _run_boot_and_capture_outcome(
                 conn,
                 system_id,
                 run.id,
-                secret_registry=secret_registry,
-                artifact_store=artifact_store,
                 snapshotter=snapshotter,
                 mark=mark,
             )
@@ -103,8 +97,6 @@ async def _run_boot_and_capture_outcome(
                 system_id=system_id,
                 connector=connector,
                 profile_policy=profile_policy,
-                secret_registry=secret_registry,
-                artifact_store=artifact_store,
                 snapshotter=snapshotter,
                 mark=mark,
             )
@@ -115,8 +107,6 @@ async def _run_boot_and_capture_outcome(
         conn,
         system_id,
         run.id,
-        secret_registry=secret_registry,
-        artifact_store=artifact_store,
         snapshotter=snapshotter,
         mark=mark,
     )
@@ -145,8 +135,6 @@ async def boot_handler(
     job: Job,
     *,
     resolver: ProviderResolver,
-    secret_registry: SecretRegistry,
-    artifact_store: ObjectStore,
 ) -> str | None:
     """Boot the installed kernel and confirm run-readiness, recording the `boot` step."""
     run_id = UUID(load_payload(job, BootPayload).run_id)
@@ -177,8 +165,6 @@ async def boot_handler(
             booter,
             binding.runtime.connector,
             binding.runtime.profile_policy,
-            secret_registry,
-            artifact_store,
             snapshotter,
             mark,
             accel=accel,
@@ -190,8 +176,6 @@ async def boot_handler(
                 conn,
                 system_id,
                 run_id,
-                secret_registry=secret_registry,
-                artifact_store=artifact_store,
                 snapshotter=snapshotter,
                 mark=mark,
             )

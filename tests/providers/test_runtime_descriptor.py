@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import pytest
 
-from kdive.providers.core.runtime import ProviderRuntime, ProviderSupport
+from kdive.providers.core.runtime import ConsoleCapabilities, ProviderRuntime, ProviderSupport
 
 
 def _unconfigured_runtime() -> ProviderRuntime:
@@ -45,6 +45,17 @@ def test_runtime_rejects_advertised_snapshots_without_snapshotter() -> None:
 
     with pytest.raises(ValueError, match=r"support\.supports_snapshots.*snapshot"):
         replace(_unconfigured_runtime(), support=support)
+
+
+@pytest.mark.parametrize("capability", ["supports_diagnostic_sysrq", "supports_crash_watch"])
+@pytest.mark.parametrize("missing_bundle", [False, True])
+def test_runtime_rejects_advertised_console_operation_without_reader(
+    capability: str, missing_bundle: bool
+) -> None:
+    support = replace(ProviderSupport(), **{capability: True})
+    console = None if missing_bundle else ConsoleCapabilities(snapshotter=cast(Any, object()))
+    with pytest.raises(ValueError, match="console.*reader"):
+        replace(_unconfigured_runtime(), support=support, console=console)
 
 
 def test_runtime_rejects_snapshotter_without_advertised_snapshots() -> None:

@@ -37,6 +37,10 @@ from kdive.providers.core.runtime import (
     ProviderSupport,
     RootfsCapabilities,
 )
+from kdive.providers.local_libvirt.console import (
+    LocalLibvirtConsoleReader,
+    LocalLibvirtConsoleSnapshotter,
+)
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
     authorized_key_customizer,
@@ -51,6 +55,7 @@ from kdive.providers.ports.lifecycle import (
 )
 from kdive.providers.ports.traffic import TrafficCaptureOperationPorts
 from kdive.security.authz.rbac import Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
@@ -175,6 +180,7 @@ def provider_resolver(
     supports_diagnostic_sysrq: bool = True,
     supports_crash_watch: bool = True,
     console_reader: object | None = None,
+    console_snapshotter: object | None = None,
     external_boot: object | None = None,
     external_boot_preparation: object | None = None,
     external_boot_recovery_objects: object | None = None,
@@ -273,15 +279,16 @@ def provider_resolver(
             if supports_traffic_capture
             else None
         ),
-        # ``console_reader`` models a provider (remote-libvirt) whose console is read through the
-        # ADR-0429 strict read seam rather than a worker-local file; the control handlers pick the
-        # remote path when ``console.reader_factory`` is set (ADR-0433, #1435).
-        console=(
-            None
-            if console_reader is None
-            else ConsoleCapabilities(
-                snapshotter=unused_port, reader_factory=lambda: cast(Any, console_reader)
-            )
+        console=ConsoleCapabilities(
+            snapshotter=cast(
+                Any,
+                console_snapshotter
+                if console_snapshotter is not None
+                else LocalLibvirtConsoleSnapshotter(secret_registry=SecretRegistry()),
+            ),
+            reader_factory=lambda: cast(
+                Any, console_reader if console_reader is not None else LocalLibvirtConsoleReader()
+            ),
         ),
         external_boot=cast(Any, external_boot) if external_boot is not None else None,
         external_boot_preparation=(

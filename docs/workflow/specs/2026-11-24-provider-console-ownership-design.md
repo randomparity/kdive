@@ -54,6 +54,7 @@ tests/providers/remote_libvirt/console/test_console_read.py
 tests/providers/remote_libvirt/console/test_console_snapshot.py
 tests/jobs/handlers/test_diagnostic_sysrq_handler.py tests/jobs/handlers/control/test_watch_for_crash.py
 tests/jobs/handlers/test_runs_boot.py tests/jobs/handlers/test_boot_evidence_run_id.py
+tests/jobs/handlers/runs/test_ports.py tests/mcp/lifecycle/test_runs_tools.py
 Use controlled faults for capability admission, absent-port local fallback and typed-failure routing;
 observe meaningful failures, restore exact bytes and rerun affected cases. Independent code/security
 review precedes a conventional local source commit; no extra test is needed for a pure import move.

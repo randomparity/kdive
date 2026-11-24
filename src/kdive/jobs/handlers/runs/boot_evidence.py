@@ -8,17 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import LiteralString, NamedTuple
 from uuid import UUID
 
 from psycopg import AsyncConnection
-from psycopg.rows import dict_row
 
-from kdive.artifacts.catalog.registration import register_artifact_row
-from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
-from kdive.db.repositories import ARTIFACTS, SYSTEMS
+from kdive.db.repositories import SYSTEMS
 from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
-from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.crash_signatures import CONSOLE_CRASH_KINDS
 from kdive.domain.lifecycle.records import Run
@@ -29,77 +24,21 @@ from kdive.domain.lifecycle.run_steps import (
 )
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.ports.console import ConsoleSnapshotter
+from kdive.providers.ports.console import (
+    ConsoleSnapshot,
+    ConsoleSnapshotReadError,
+    ConsoleSnapshotter,
+)
 from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.ports.lifecycle import Connector
-from kdive.providers.shared.console_evidence import read_redacted_console
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.security.artifacts.artifact_search import ArtifactSearchInputError, search_text
 from kdive.security.authz.context import RequestContext
-from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.objectstore import ObjectStore
 
 _log = logging.getLogger(__name__)
 
-_CONSOLE_ROW_SQL: LiteralString = (
-    "SELECT id, etag FROM artifacts "
-    "WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
-)
-
-_REFRESH_CONSOLE_ETAG_SQL: LiteralString = "UPDATE artifacts SET etag = %s WHERE id = %s"
 _GENERIC_PANIC_PATTERN = "Kernel panic - not syncing"
-
-
-class _ConsoleRow(NamedTuple):
-    id: UUID
-    etag: str
-
-
-class ConsoleArtifact(NamedTuple):
-    id: UUID
-    object_key: str
-    data: bytes
-
-
-async def _existing_console_row(
-    conn: AsyncConnection, system_id: UUID, object_key: str
-) -> _ConsoleRow | None:
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(_CONSOLE_ROW_SQL, (system_id, object_key))
-        row = await cur.fetchone()
-    return None if row is None else _ConsoleRow(row["id"], str(row["etag"]))
-
-
-async def _capture_console_artifact(
-    conn: AsyncConnection,
-    system_id: UUID,
-    run_id: UUID,
-    secret_registry: SecretRegistry,
-    artifact_store: ObjectStore,
-) -> ConsoleArtifact | None:
-    try:
-        redacted = await read_redacted_console(system_id, secret_registry)
-        if redacted is None:
-            return None
-        stored = await _store_console_artifact(artifact_store, system_id, run_id, redacted)
-        return await _upsert_console_artifact_row(conn, system_id, run_id, stored, redacted)
-    except CategorizedError as exc:
-        if exc.details.get("operation") == "read_console_log":
-            raise
-        _log.warning(
-            "console artifact registration failed for system %s; boot outcome unaffected",
-            system_id,
-            exc_info=True,
-        )
-        return None
-    except Exception:
-        _log.warning(
-            "console artifact registration failed for system %s; boot outcome unaffected",
-            system_id,
-            exc_info=True,
-        )
-        return None
 
 
 async def capture_run_console(
@@ -107,25 +46,24 @@ async def capture_run_console(
     system_id: UUID,
     run_id: UUID,
     *,
-    secret_registry: SecretRegistry,
-    artifact_store: ObjectStore,
     snapshotter: ConsoleSnapshotter | None,
     mark: int,
-) -> ConsoleArtifact | None:
+) -> ConsoleSnapshot | None:
     """Persist this Run's boot-window console, dispatching to the provider."""
-    if snapshotter is not None:
-        try:
-            snap = await snapshotter.snapshot(conn, system_id, run_id, mark)
-        except Exception:
-            _log.warning(
-                "console snapshot failed for system %s run %s; boot outcome unaffected",
-                system_id,
-                run_id,
-                exc_info=True,
-            )
-            return None
-        return None if snap is None else ConsoleArtifact(snap.id, snap.object_key, snap.data)
-    return await _capture_console_artifact(conn, system_id, run_id, secret_registry, artifact_store)
+    if snapshotter is None:
+        return None
+    try:
+        return await snapshotter.snapshot(conn, system_id, run_id, mark)
+    except ConsoleSnapshotReadError:
+        raise
+    except Exception:
+        _log.warning(
+            "console snapshot failed for system %s run %s; boot outcome unaffected",
+            system_id,
+            run_id,
+            exc_info=True,
+        )
+        return None
 
 
 async def mark_boot_window(system_id: UUID, snapshotter: ConsoleSnapshotter | None) -> int:
@@ -142,47 +80,6 @@ async def mark_boot_window(system_id: UUID, snapshotter: ConsoleSnapshotter | No
             exc_info=True,
         )
         return 0
-
-
-async def _store_console_artifact(
-    artifact_store: ObjectStore, system_id: UUID, run_id: UUID, redacted: bytes
-) -> StoredArtifact:
-    def _put() -> StoredArtifact:
-        return artifact_store.put_artifact(
-            ArtifactWriteRequest(
-                tenant="local",
-                owner_kind="systems",
-                owner_id=str(system_id),
-                name=f"console-{run_id}",
-                data=redacted,
-                sensitivity=Sensitivity.REDACTED,
-                retention_class="console",
-            )
-        )
-
-    return await asyncio.to_thread(_put)
-
-
-async def _upsert_console_artifact_row(
-    conn: AsyncConnection,
-    system_id: UUID,
-    run_id: UUID,
-    stored: StoredArtifact,
-    redacted: bytes,
-) -> ConsoleArtifact:
-    async with conn.transaction():
-        existing = await _existing_console_row(conn, system_id, stored.key)
-        if existing is None:
-            inserted = await ARTIFACTS.insert(
-                conn,
-                register_artifact_row(
-                    stored, owner_kind="systems", owner_id=system_id, run_id=run_id
-                ),
-            )
-            return ConsoleArtifact(inserted.id, inserted.object_key, redacted)
-        if existing.etag != stored.etag:
-            await conn.execute(_REFRESH_CONSOLE_ETAG_SQL, (stored.etag, existing.id))
-        return ConsoleArtifact(existing.id, stored.key, redacted)
 
 
 def expected_crash_matched_line(run: Run, redacted_console: bytes) -> str | None:
@@ -266,8 +163,6 @@ async def record_crash_halted_live(
     system_id: UUID,
     connector: Connector,
     profile_policy: ProfilePolicy,
-    secret_registry: SecretRegistry,
-    artifact_store: ObjectStore,
     snapshotter: ConsoleSnapshotter | None,
     mark: int,
 ) -> BootStepResult | None:
@@ -282,8 +177,6 @@ async def record_crash_halted_live(
         conn,
         system_id,
         run.id,
-        secret_registry=secret_registry,
-        artifact_store=artifact_store,
         snapshotter=snapshotter,
         mark=mark,
     )
@@ -370,7 +263,7 @@ async def record_expected_crash(
     *,
     system_id: UUID,
     profile_policy: ProfilePolicy,
-    artifact: ConsoleArtifact,
+    artifact: ConsoleSnapshot,
     matched_line: str,
     connector: Connector | None = None,
 ) -> BootStepResult:
@@ -406,7 +299,7 @@ async def evaluate_expected_failure_after_ready(
     *,
     system_id: UUID,
     profile_policy: ProfilePolicy,
-    artifact: ConsoleArtifact | None,
+    artifact: ConsoleSnapshot | None,
 ) -> BootStepResult | None:
     """Downgrade a ready boot to ``expected_crash_observed`` iff the declared failure is present.
 

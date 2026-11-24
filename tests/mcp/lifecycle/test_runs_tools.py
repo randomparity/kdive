@@ -62,6 +62,7 @@ from kdive.mcp.tools.lifecycle.runs.steps import (
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.mcp.tools.lifecycle.support._runtime_resolution import with_runtime_for_run_target_kind
 from kdive.mcp.tools.lifecycle.vmcore import view as vmcore_view
+from kdive.providers.local_libvirt.console import LocalLibvirtConsoleSnapshotter
 from kdive.providers.shared import console_evidence
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -5617,9 +5618,12 @@ def test_boot_handler_records_step_run_stays_succeeded(migrated_url: str) -> Non
                 result = await runs_handlers.boot_handler(
                     conn,
                     job,
-                    resolver=provider_resolver(booter=booter),
-                    secret_registry=SecretRegistry(),
-                    artifact_store=INERT_OBJECT_STORE,
+                    resolver=provider_resolver(
+                        booter=booter,
+                        console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                            INERT_OBJECT_STORE, secret_registry=SecretRegistry()
+                        ),
+                    ),
                 )
             assert result == run_id
             assert len(booter.calls) == 1
@@ -5644,17 +5648,23 @@ def test_boot_handler_replay_does_not_reboot(migrated_url: str) -> None:
                 await runs_handlers.boot_handler(
                     conn,
                     job,
-                    resolver=provider_resolver(booter=booter),
-                    secret_registry=SecretRegistry(),
-                    artifact_store=INERT_OBJECT_STORE,
+                    resolver=provider_resolver(
+                        booter=booter,
+                        console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                            INERT_OBJECT_STORE, secret_registry=SecretRegistry()
+                        ),
+                    ),
                 )
             async with pool.connection() as conn:
                 await runs_handlers.boot_handler(
                     conn,
                     job,
-                    resolver=provider_resolver(booter=booter),
-                    secret_registry=SecretRegistry(),
-                    artifact_store=INERT_OBJECT_STORE,
+                    resolver=provider_resolver(
+                        booter=booter,
+                        console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                            INERT_OBJECT_STORE, secret_registry=SecretRegistry()
+                        ),
+                    ),
                 )
         assert len(booter.calls) == 1
 
@@ -5674,9 +5684,12 @@ def test_boot_handler_failure_records_no_step(migrated_url: str, category: Error
                     await runs_handlers.boot_handler(
                         conn,
                         job,
-                        resolver=provider_resolver(booter=booter),
-                        secret_registry=SecretRegistry(),
-                        artifact_store=INERT_OBJECT_STORE,
+                        resolver=provider_resolver(
+                            booter=booter,
+                            console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                                INERT_OBJECT_STORE, secret_registry=SecretRegistry()
+                            ),
+                        ),
                     )
             assert caught.value.category is category
             nsteps = await _count(
@@ -5707,9 +5720,12 @@ def test_boot_handler_cleanup_failure_preserves_provider_category(
                     await runs_handlers.boot_handler(
                         conn,
                         job,
-                        resolver=provider_resolver(booter=booter),
-                        secret_registry=SecretRegistry(),
-                        artifact_store=INERT_OBJECT_STORE,
+                        resolver=provider_resolver(
+                            booter=booter,
+                            console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                                INERT_OBJECT_STORE, secret_registry=SecretRegistry()
+                            ),
+                        ),
                     )
 
         assert caught.value.category is ErrorCategory.BOOT_TIMEOUT
@@ -5728,8 +5744,6 @@ def test_register_handlers_binds_install_and_boot() -> None:
                 profile_policy=LOCAL_PROFILE_POLICY,
             ),
             incarnation_credential=_INSTALL_CREDENTIAL,
-            secret_registry=SecretRegistry(),
-            artifact_store=cast(Any, object()),
         ),
         external_boot=ExternalBootOperations(),
     )
@@ -5762,9 +5776,12 @@ def test_boot_handler_registers_console_on_success(
                 result = await runs_handlers.boot_handler(
                     conn,
                     job,
-                    resolver=provider_resolver(booter=booter),
-                    secret_registry=SecretRegistry(),
-                    artifact_store=minio_store,
+                    resolver=provider_resolver(
+                        booter=booter,
+                        console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                            minio_store, secret_registry=SecretRegistry()
+                        ),
+                    ),
                 )
             assert result == run_id
             nsteps = await _count(
@@ -5807,9 +5824,12 @@ def test_boot_handler_registers_console_even_on_failure(
                     await runs_handlers.boot_handler(
                         conn,
                         job,
-                        resolver=provider_resolver(booter=booter),
-                        secret_registry=SecretRegistry(),
-                        artifact_store=minio_store,
+                        resolver=provider_resolver(
+                            booter=booter,
+                            console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                                minio_store, secret_registry=SecretRegistry()
+                            ),
+                        ),
                     )
             n = await _count(
                 pool,
@@ -5844,9 +5864,12 @@ def test_boot_handler_records_expected_crash_observed(
                 result = await runs_handlers.boot_handler(
                     conn,
                     job,
-                    resolver=provider_resolver(booter=booter),
-                    secret_registry=SecretRegistry(),
-                    artifact_store=minio_store,
+                    resolver=provider_resolver(
+                        booter=booter,
+                        console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                            minio_store, secret_registry=SecretRegistry()
+                        ),
+                    ),
                 )
             assert result == run_id
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -5892,9 +5915,12 @@ def test_expected_crash_observed_system_can_host_next_run(
                 await runs_handlers.boot_handler(
                     conn,
                     job,
-                    resolver=provider_resolver(booter=booter),
-                    secret_registry=SecretRegistry(),
-                    artifact_store=minio_store,
+                    resolver=provider_resolver(
+                        booter=booter,
+                        console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                            minio_store, secret_registry=SecretRegistry()
+                        ),
+                    ),
                 )
 
             inv_id = await seed_investigation(pool)
@@ -5933,9 +5959,12 @@ def test_boot_handler_expected_crash_requires_matching_console(
                     await runs_handlers.boot_handler(
                         conn,
                         job,
-                        resolver=provider_resolver(booter=booter),
-                        secret_registry=SecretRegistry(),
-                        artifact_store=minio_store,
+                        resolver=provider_resolver(
+                            booter=booter,
+                            console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                                minio_store, secret_registry=SecretRegistry()
+                            ),
+                        ),
                     )
             nsteps = await _count(
                 pool,
@@ -5969,9 +5998,12 @@ def test_boot_handler_skips_empty_console(
                 result = await runs_handlers.boot_handler(
                     conn,
                     job,
-                    resolver=provider_resolver(booter=booter),
-                    secret_registry=SecretRegistry(),
-                    artifact_store=minio_store,
+                    resolver=provider_resolver(
+                        booter=booter,
+                        console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                            minio_store, secret_registry=SecretRegistry()
+                        ),
+                    ),
                 )
             assert result == run_id
             nsteps = await _count(
@@ -6020,9 +6052,12 @@ def test_boot_handler_preserves_console_read_failure(
                     await runs_handlers.boot_handler(
                         conn,
                         job,
-                        resolver=provider_resolver(booter=booter),
-                        secret_registry=SecretRegistry(),
-                        artifact_store=minio_store,
+                        resolver=provider_resolver(
+                            booter=booter,
+                            console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                                minio_store, secret_registry=SecretRegistry()
+                            ),
+                        ),
                     )
             nsteps = await _count(
                 pool,
@@ -6064,9 +6099,12 @@ def test_boot_handler_console_is_readable_via_artifacts(
                 result = await runs_handlers.boot_handler(
                     conn,
                     job,
-                    resolver=provider_resolver(booter=booter),
-                    secret_registry=SecretRegistry(),
-                    artifact_store=minio_store,
+                    resolver=provider_resolver(
+                        booter=booter,
+                        console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                            minio_store, secret_registry=SecretRegistry()
+                        ),
+                    ),
                 )
             assert result == run_id
 
@@ -6115,9 +6153,12 @@ def test_boot_handler_reboot_preserves_prior_run_console(
                 await runs_handlers.boot_handler(
                     conn,
                     job1,
-                    resolver=provider_resolver(booter=first_boot),
-                    secret_registry=SecretRegistry(),
-                    artifact_store=minio_store,
+                    resolver=provider_resolver(
+                        booter=first_boot,
+                        console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                            minio_store, secret_registry=SecretRegistry()
+                        ),
+                    ),
                 )
 
             # Second boot of the SAME System (new Run): the per-boot console reset (ADR-0576)
@@ -6133,9 +6174,12 @@ def test_boot_handler_reboot_preserves_prior_run_console(
                 await runs_handlers.boot_handler(
                     conn,
                     job2,
-                    resolver=provider_resolver(booter=second_boot),
-                    secret_registry=SecretRegistry(),
-                    artifact_store=minio_store,
+                    resolver=provider_resolver(
+                        booter=second_boot,
+                        console_snapshotter=LocalLibvirtConsoleSnapshotter(
+                            minio_store, secret_registry=SecretRegistry()
+                        ),
+                    ),
                 )
 
             n = await _count(

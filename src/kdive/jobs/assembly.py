@@ -234,8 +234,6 @@ def register_all_handlers(registry: HandlerRegistry, assembly: WorkerHandlerAsse
         ports=runs.RunHandlerPorts(
             resolver=assembly.resolver,
             incarnation_credential=assembly.incarnation_credential,
-            secret_registry=assembly.secret_registry,
-            artifact_store=assembly.object_stores.store,
         ),
         external_boot=operations,
     )

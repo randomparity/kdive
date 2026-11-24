@@ -26,6 +26,7 @@ from kdive.providers.core.discovery_registration import (
 )
 from kdive.providers.core.runtime import (
     BootstrapKeyCapabilities,
+    ConsoleCapabilities,
     DebugCapabilities,
     ProviderRuntime,
     ProviderSupport,
@@ -45,6 +46,10 @@ from kdive.providers.external_boot_authority.settings import (
 )
 from kdive.providers.infra.reaping import CaptureReaper, InfraReaper
 from kdive.providers.local_libvirt.config import local_guest_egress_for_resource
+from kdive.providers.local_libvirt.console import (
+    LocalLibvirtConsoleReader,
+    LocalLibvirtConsoleSnapshotter,
+)
 from kdive.providers.local_libvirt.debug.fault_inject import LocalLibvirtFaultInjection
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
@@ -480,6 +485,10 @@ def build_runtime(
     live_introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=secret_registry)
     external_boot = build_external_boot(external_boot_io)
     return ProviderRuntime(
+        console=ConsoleCapabilities(
+            snapshotter=LocalLibvirtConsoleSnapshotter(store, secret_registry=secret_registry),
+            reader_factory=LocalLibvirtConsoleReader,
+        ),
         authority=build_authority_capability(authority_sender),
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=provisioner,

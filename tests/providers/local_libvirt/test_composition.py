@@ -19,6 +19,10 @@ from kdive.components.references import ROOTFS_COMPONENT
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.providers.local_libvirt import composition
+from kdive.providers.local_libvirt.console import (
+    LocalLibvirtConsoleReader,
+    LocalLibvirtConsoleSnapshotter,
+)
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
@@ -651,3 +655,16 @@ def test_artifact_staging_never_imports_lifecycle_orchestration() -> None:
             dependencies.update(name + "." + alias.name for alias in node.names)
 
     assert package + ".external_boot" not in dependencies
+
+
+def test_runtime_owns_console_collaborators_and_injected_dependencies() -> None:
+    registry = SecretRegistry()
+    store = cast(ObjectStore, object())
+    runtime = composition.build_runtime(secret_registry=registry, store=store)
+    assert runtime.console is not None
+    assert runtime.console.reader_factory is not None
+    assert isinstance(runtime.console.reader_factory(), LocalLibvirtConsoleReader)
+    snapshotter = runtime.console.snapshotter
+    assert isinstance(snapshotter, LocalLibvirtConsoleSnapshotter)
+    assert snapshotter._store is store
+    assert snapshotter._secret_registry is registry

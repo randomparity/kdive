@@ -38,6 +38,7 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.control import diagnostic_sysrq
 from kdive.jobs.provider_context import take_provider_kind
 from kdive.providers.core.resource_registration import register_discovered_resource
+from kdive.providers.local_libvirt import console as local_console
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.ports.console import ConsoleWindowRead
 from kdive.providers.shared.runtime_paths import domain_name_for
@@ -125,7 +126,7 @@ class _RecordingControl:
 
 
 class _SeqReader:
-    """A RemoteConsoleReader returning each window in turn, then repeating the last (ADR-0429)."""
+    """A ConsoleReader returning each window in turn, then repeating the last (ADR-0429)."""
 
     def __init__(self, windows: list[ConsoleWindowRead]) -> None:
         self._windows = windows
@@ -247,7 +248,7 @@ def test_captures_redacted_artifact_and_returns_its_id(
     monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot log\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
 
     async def _go() -> dict[str, object]:
@@ -312,7 +313,7 @@ def test_handler_uses_derived_domain_when_system_unnamed(
     monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot log\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"SysRq : Show Memory\n dump\n")
 
     async def _go() -> tuple[list[tuple[str, str]], UUID]:
@@ -332,7 +333,7 @@ def test_dump_secret_is_redacted_in_the_stored_object(
     monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"dump password=hunter2 more\n")
     store = _FakeStore()
 
@@ -357,7 +358,7 @@ def test_dump_with_invalid_utf8_is_decoded_with_replacement(
     monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"SysRq dump \xff garbage \xfe end\n")
     store = _FakeStore()
 
@@ -380,7 +381,7 @@ def test_no_console_output_fails_configuration_error(
     monkeypatch.setattr(diagnostic_sysrq, "MAX_POLLS", 2)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"")  # guest emits nothing
 
     async def _go() -> None:
@@ -409,7 +410,7 @@ def test_disabled_sysrq_fails_configuration_error_and_stores_nothing(
     monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     # kernel.sysrq restricted: the op is rejected but the console still grows.
     control = _FakeControl(log, b"sysrq: This sysrq operation is disabled.\n")
     store = _FakeStore()
@@ -443,7 +444,7 @@ def test_replayed_handler_run_does_not_duplicate_the_row(
     monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"dump\n")
 
     async def _go() -> tuple[str | None, str | None, list[tuple[str, str, str]]]:
@@ -469,7 +470,7 @@ def test_system_not_ready_fails_system_changed_state(
     monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"dump\n")
 
     seen: dict[str, UUID] = {}
@@ -502,7 +503,7 @@ def test_handler_reads_console_for_its_own_system(
         seen.append(sid)
         return log
 
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", _console_path)
+    monkeypatch.setattr(local_console, "console_log_path", _console_path)
     control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
 
     async def _go() -> UUID:
@@ -606,7 +607,7 @@ def test_unsupported_provider_fails_capability_configuration_error(
     monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"dump\n")
 
     async def _go() -> None:
@@ -739,7 +740,7 @@ def test_put_artifact_holds_no_advisory_lock(
     monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot log\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
     store = _LockProbingStore(migrated_url)
 
@@ -772,7 +773,7 @@ def test_teardown_during_put_discards_the_unregistered_object(
     monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot log\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
     seen: dict[str, object] = {}
 
@@ -805,7 +806,7 @@ def test_discard_failure_does_not_mask_the_changed_state_error(
     monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot log\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
 
     class _UndeletableStore(_TearingDownStore):
@@ -914,7 +915,7 @@ def test_concurrent_attempt_registering_the_key_survives_the_discard(
     monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot log\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
     seen: dict[str, object] = {}
 
@@ -985,7 +986,7 @@ def test_etag_repair_survives_the_changed_state_raise(
     monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"boot log\n")
-    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
     store = _StallingSysrqStore()
     seen: dict[str, object] = {}

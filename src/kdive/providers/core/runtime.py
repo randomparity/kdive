@@ -19,7 +19,7 @@ from kdive.images.planes.base import RootfsBuildPlane
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import RootfsSource
 from kdive.providers.ports.authority import AuthorityCapability
-from kdive.providers.ports.console import ConsoleSnapshotter, RemoteConsoleReader
+from kdive.providers.ports.console import ConsoleReader, ConsoleSnapshotter
 from kdive.providers.ports.debug import (
     AttachSeam,
     GdbMiEngine,
@@ -57,7 +57,7 @@ type StagedVolumeProbe = Callable[[list[str]], Awaitable[dict[str, str]]]
 type ResourceDetailProjector = Callable[
     [AsyncConnectionPool, tuple[str, ...]], Awaitable[dict[str, JsonValue]]
 ]
-type ConsoleReaderFactory = Callable[[], RemoteConsoleReader]
+type ConsoleReaderFactory = Callable[[], ConsoleReader]
 
 
 def _unconfigured_component_sources() -> ComponentSourceCapabilities:
@@ -126,14 +126,11 @@ class ResourceDetailCapabilities:
 
 @dataclass(frozen=True, slots=True)
 class ConsoleCapabilities:
-    """Provider-managed console artifact capture support."""
+    """Provider-managed console reads and artifact snapshots."""
 
     snapshotter: ConsoleSnapshotter
-    # Strict worker-side console read for a running System, used by tools whose whole output is the
-    # console they just read (post-SysRq capture, crash watch) — remote-libvirt only (ADR-0429/0433,
-    # #1435). A factory so the reader (which reaches the S3 object store) is built lazily at job
-    # time, keeping composition buildable without S3 config (ADR-0076); a provider whose console is
-    # a worker-local file (local-libvirt) leaves it None and the handler reads the file directly.
+    # Construct readers lazily so assembly needs no configured object store (ADR-0076).
+    # Required when SysRq or crash-watch is advertised; absence never selects local storage.
     reader_factory: ConsoleReaderFactory | None = None
 
 
@@ -222,6 +219,10 @@ class ProviderRuntime:
     fault_injection: FaultInjectionInspector | None = None
 
     def __post_init__(self) -> None:
+        if (self.support.supports_diagnostic_sysrq or self.support.supports_crash_watch) and (
+            self.console is None or self.console.reader_factory is None
+        ):
+            raise ValueError("advertised console operations require a console reader")
         _require_capability_port_parity(
             advertised=self.support.supports_snapshots,
             port=self.snapshot,

@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from pydantic import SecretStr
 
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.objectstore import ObjectStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,5 +15,3 @@ class RunHandlerPorts:
 
     resolver: ProviderResolver
     incarnation_credential: SecretStr
-    secret_registry: SecretRegistry
-    artifact_store: ObjectStore

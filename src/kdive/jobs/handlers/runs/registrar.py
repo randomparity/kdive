@@ -47,8 +47,6 @@ def register_handlers(
                 conn,
                 job,
                 resolver=ports.resolver,
-                secret_registry=ports.secret_registry,
-                artifact_store=ports.artifact_store,
             ),
         ),
     )
