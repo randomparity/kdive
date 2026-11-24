@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import errno
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -241,16 +242,32 @@ def test_discover_netdev_on_malformed_xml_is_configuration_error() -> None:
         ('<!DOCTYPE domain [<!ENTITY uid "107">]><domain>&uid;</domain>', EntitiesForbidden),
     ],
 )
-def test_dac_parser_failure_preserves_cause(xml: str, cause: type[Exception]) -> None:
+@pytest.mark.parametrize(
+    "discover, details, operation",
+    [
+        (discover_dac_identity, {"reason": "dac_xml_parse_failed"}, "DAC"),
+        (discover_netdev_id, {}, "netdev"),
+    ],
+)
+def test_domain_parser_failure_preserves_cause(
+    xml: str,
+    cause: type[Exception],
+    discover: Callable[[str], object],
+    details: dict[str, str],
+    operation: str,
+) -> None:
     with pytest.raises(CategorizedError) as caught:
-        discover_dac_identity(xml)
+        discover(xml)
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert caught.value.details == {"reason": "dac_xml_parse_failed"}
+    assert caught.value.details == details
     assert isinstance(caught.value.__cause__, cause)
-    assert "XML" in str(caught.value) and "DAC" in str(caught.value)
+    assert "XML" in str(caught.value) and operation in str(caught.value)
 
 
-def test_dac_discovery_does_not_swallow_programming_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("discover", [discover_dac_identity, discover_netdev_id])
+def test_domain_discovery_does_not_swallow_programming_errors(
+    monkeypatch: pytest.MonkeyPatch, discover: Callable[[str], object]
+) -> None:
     from kdive.providers.remote_libvirt.lifecycle import traffic_capture
 
     error = RuntimeError("parser implementation defect")
@@ -260,8 +277,32 @@ def test_dac_discovery_does_not_swallow_programming_errors(monkeypatch: pytest.M
 
     monkeypatch.setattr(traffic_capture, "_safe_fromstring", fail_parse)
     with pytest.raises(RuntimeError) as caught:
-        discover_dac_identity(_IFACE_XML)
+        discover(_IFACE_XML)
     assert caught.value is error
+
+
+def test_attach_parser_fault_propagates_without_capture_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kdive.providers.remote_libvirt.lifecycle import traffic_capture
+
+    domain = _FakeDomain()
+    pool = _FakePool()
+    conn = _FakeConn(domain=domain, pool=pool)
+    error = RuntimeError("parser implementation defect")
+
+    def fail_parse(xml: str) -> ET.Element:
+        raise error
+
+    monkeypatch.setattr(traffic_capture, "_safe_fromstring", fail_parse)
+    with pytest.raises(RuntimeError) as caught:
+        _capturer(conn, tmp_path).attach(
+            _DOMAIN, qom_id="kdive-dump-J", dest_path=_DEST, snaplen=128
+        )
+    assert caught.value is error
+    assert conn.closed
+    assert domain.commands == []
+    assert pool.created == []
 
 
 # --- attach / detach --------------------------------------------------------------------------

@@ -195,7 +195,7 @@ def discover_netdev_id(domain_xml: str) -> str:
     """
     try:
         root = _safe_fromstring(domain_xml)
-    except Exception as exc:  # noqa: BLE001 - host-emitted XML; a parse failure reads as config
+    except (ET.ParseError, DefusedXmlException) as exc:
         raise CategorizedError(
             "remote domain XML could not be parsed for netdev discovery",
             category=ErrorCategory.CONFIGURATION_ERROR,
