@@ -25,6 +25,7 @@
     {"path": "tests/jobs/handlers/test_boot_evidence_run_id.py", "classification": "worker-act", "evidence": "authority_role_dsns"},
     {"path": "tests/jobs/handlers/test_console_rotate.py", "classification": "worker-act", "evidence": "_WORKER_DSN"},
     {"path": "tests/jobs/handlers/test_console_rotate_teardown.py", "classification": "worker-act", "evidence": "authority_role_dsns"},
+    {"path": "tests/jobs/handlers/test_device_attempt_ownership.py", "classification": "worker-act", "evidence": "role_dsns(\"kdive_worker\")"},
     {"path": "tests/jobs/handlers/test_device_handlers.py", "classification": "worker-act", "evidence": "authority_role_dsns"},
     {"path": "tests/jobs/handlers/test_device_ledger_hooks.py", "classification": "worker-act", "evidence": "authority_role_dsns"},
     {"path": "tests/jobs/handlers/test_diagnostic_sysrq_handler.py", "classification": "worker-act", "evidence": "_WORKER_DSN"},
