@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import IO, cast
+from typing import IO, Literal, cast, overload
 from xml.etree.ElementTree import ParseError
 from xml.etree.ElementTree import fromstring as _xml_fromstring  # noqa: S405  # nosec B405
 
@@ -315,12 +315,71 @@ def inspect_root_boot(
 DEFAULT_ROOT_BOOT_INSPECT: RootBootProbeSeam = inspect_root_boot
 
 
+@overload
+def _run_readonly_guestfish(
+    qcow2_path: Path,
+    command: str,
+    guest_path: str,
+    *,
+    budget_s: float,
+    text: Literal[True],
+    missing_message: str,
+    timeout_message: str,
+) -> subprocess.CompletedProcess[str]: ...
+
+
+@overload
+def _run_readonly_guestfish(
+    qcow2_path: Path,
+    command: str,
+    guest_path: str,
+    *,
+    budget_s: float,
+    text: Literal[False],
+    missing_message: str,
+    timeout_message: str,
+) -> subprocess.CompletedProcess[bytes]: ...
+
+
+def _run_readonly_guestfish(
+    qcow2_path: Path,
+    command: str,
+    guest_path: str,
+    *,
+    budget_s: float,
+    text: bool,
+    missing_message: str,
+    timeout_message: str,
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", command, guest_path]
+    try:
+        return subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
+            argv,
+            capture_output=True,
+            text=text,
+            timeout=budget_s,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise CategorizedError(
+            missing_message,
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details={"tool": "guestfish"},
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CategorizedError(
+            timeout_message,
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"timeout_s": budget_s},
+        ) from exc
+
+
 def probe_makedumpfile_marker(qcow2_path: Path) -> str | None:  # pragma: no cover - live_vm
     """Read the build-written ``makedumpfile --version`` marker from ``qcow2_path``, read-only.
 
     The debug build records the in-guest ``makedumpfile --version`` banner into
     :data:`MAKEDUMPFILE_MARKER_GUEST_PATH`; this reads it back with a read-only ``guestfish``
-    ``download`` so the version is the binary's own report (authoritative on EL8/EL9, where
+    ``cat`` so the version is the binary's own report (authoritative on EL8/EL9, where
     makedumpfile is bundled in ``kexec-tools`` and invisible to ``virt-inspector``).
 
     Returns:
@@ -332,27 +391,15 @@ def probe_makedumpfile_marker(qcow2_path: Path) -> str | None:  # pragma: no cov
             ``INFRASTRUCTURE_FAILURE`` on timeout.
     """
     budget_s = appliance_budget_s(_GUESTFISH_TIMEOUT_S)
-    argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", MAKEDUMPFILE_MARKER_GUEST_PATH]
-    try:
-        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=budget_s,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise CategorizedError(
-            "guestfish is not installed; cannot read the makedumpfile-version marker",
-            category=ErrorCategory.MISSING_DEPENDENCY,
-            details={"tool": "guestfish"},
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise CategorizedError(
-            "guestfish exceeded its timeout reading the makedumpfile-version marker",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"timeout_s": budget_s},
-        ) from exc
+    result = _run_readonly_guestfish(
+        qcow2_path,
+        "cat",
+        MAKEDUMPFILE_MARKER_GUEST_PATH,
+        budget_s=budget_s,
+        text=True,
+        missing_message="guestfish is not installed; cannot read the makedumpfile-version marker",
+        timeout_message="guestfish exceeded its timeout reading the makedumpfile-version marker",
+    )
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
@@ -378,27 +425,15 @@ def probe_drgn_marker(qcow2_path: Path) -> str | None:  # pragma: no cover - liv
             ``INFRASTRUCTURE_FAILURE`` on timeout.
     """
     budget_s = appliance_budget_s(_GUESTFISH_TIMEOUT_S)
-    argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", DRGN_MARKER_GUEST_PATH]
-    try:
-        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=budget_s,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise CategorizedError(
-            "guestfish is not installed; cannot read the drgn-version marker",
-            category=ErrorCategory.MISSING_DEPENDENCY,
-            details={"tool": "guestfish"},
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise CategorizedError(
-            "guestfish exceeded its timeout reading the drgn-version marker",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"timeout_s": budget_s},
-        ) from exc
+    result = _run_readonly_guestfish(
+        qcow2_path,
+        "cat",
+        DRGN_MARKER_GUEST_PATH,
+        budget_s=budget_s,
+        text=True,
+        missing_message="guestfish is not installed; cannot read the drgn-version marker",
+        timeout_message="guestfish exceeded its timeout reading the drgn-version marker",
+    )
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
@@ -430,26 +465,15 @@ def probe_kernel_config(  # pragma: no cover - live_vm
     """
     guest_path = f"/boot/config-{version}"
     budget_s = appliance_budget_s(_GUESTFISH_TIMEOUT_S)
-    argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", guest_path]
-    try:
-        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
-            argv,
-            capture_output=True,
-            timeout=budget_s,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise CategorizedError(
-            "guestfish is not installed; cannot read the kernel config",
-            category=ErrorCategory.MISSING_DEPENDENCY,
-            details={"tool": "guestfish"},
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise CategorizedError(
-            "guestfish exceeded its timeout reading the kernel config",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"timeout_s": budget_s},
-        ) from exc
+    result = _run_readonly_guestfish(
+        qcow2_path,
+        "cat",
+        guest_path,
+        budget_s=budget_s,
+        text=False,
+        missing_message="guestfish is not installed; cannot read the kernel config",
+        timeout_message="guestfish exceeded its timeout reading the kernel config",
+    )
     if result.returncode != 0:
         return None
     return result.stdout or None
@@ -478,27 +502,15 @@ def probe_boot_entries(qcow2_path: Path) -> list[str] | None:  # pragma: no cove
             degrade to an omitted operand, so a probe failure never fails a build.
     """
     budget_s = appliance_budget_s(_GUESTFISH_TIMEOUT_S)
-    argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "ls", "/boot"]
-    try:
-        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=budget_s,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise CategorizedError(
-            "guestfish is not installed; cannot list /boot to count baseline kernels",
-            category=ErrorCategory.MISSING_DEPENDENCY,
-            details={"tool": "guestfish"},
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise CategorizedError(
-            "guestfish exceeded its timeout listing /boot",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"timeout_s": budget_s},
-        ) from exc
+    result = _run_readonly_guestfish(
+        qcow2_path,
+        "ls",
+        "/boot",
+        budget_s=budget_s,
+        text=True,
+        missing_message="guestfish is not installed; cannot list /boot to count baseline kernels",
+        timeout_message="guestfish exceeded its timeout listing /boot",
+    )
     if result.returncode != 0:
         return None
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -528,27 +540,15 @@ def probe_os_release(qcow2_path: Path) -> str | None:  # pragma: no cover - live
     """
     budget_s = appliance_budget_s(_GUESTFISH_TIMEOUT_S)
     for guest_path in ("/etc/os-release", "/usr/lib/os-release"):
-        argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i", "cat", guest_path]
-        try:
-            result = subprocess.run(  # noqa: S603 - fixed guestfish argv; path is data  # nosec B603
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=budget_s,
-                check=False,
-            )
-        except FileNotFoundError as exc:
-            raise CategorizedError(
-                "guestfish is not installed; cannot read /etc/os-release",
-                category=ErrorCategory.MISSING_DEPENDENCY,
-                details={"tool": "guestfish"},
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise CategorizedError(
-                "guestfish exceeded its timeout reading os-release",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"timeout_s": budget_s},
-            ) from exc
+        result = _run_readonly_guestfish(
+            qcow2_path,
+            "cat",
+            guest_path,
+            budget_s=budget_s,
+            text=True,
+            missing_message="guestfish is not installed; cannot read /etc/os-release",
+            timeout_message="guestfish exceeded its timeout reading os-release",
+        )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout
     return None
