@@ -1162,7 +1162,7 @@ def test_artifact_root_is_created_on_first_artifact_use_only(recovery_root: Path
     )
 
     session = factory.open(lease, expected)
-    session.inspect_closed()
+    session.inspect_persistent_definition()
     session.close()
     assert opened == []
     assert list(recovery_root.iterdir()) == []

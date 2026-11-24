@@ -80,7 +80,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.selinux_policy import (
     guest_policy,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
-    ClosedDomainInspection,
     ExpectedOperationOwnership,
     InactiveGuest,
     LocalExternalBootOperationLease,
@@ -88,6 +87,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootSessionFactory,
     LocalSystemTeardownInspection,
     LocalSystemTeardownSession,
+    PersistentDomainInspection,
     StopMode,
     TreeCursor,
 )
@@ -487,7 +487,7 @@ class LocalExternalBootMaterializer(Protocol):
         self,
         materialization: ExternalBootMaterialization,
         binding: ExternalBootActivationBinding,
-        inspection: ClosedDomainInspection,
+        inspection: PersistentDomainInspection,
         session: LocalExternalBootSession,
     ) -> LocalPreStopIntentV1: ...
 
@@ -957,7 +957,7 @@ class _RealLocalExternalBootOperation:
             try:
                 intent = store.reopen_pre_stop(reference, binding)
             except FileNotFoundError:
-                inspection = self._session.inspect_closed()
+                inspection = self._session.inspect_persistent_definition()
                 intent = self._materializer.inspect_prepare(
                     materialization, binding, inspection, self._session
                 )
@@ -966,7 +966,9 @@ class _RealLocalExternalBootOperation:
                 store.publish_pre_stop(intent)
             else:
                 _validate_preparation_owner(intent, materialization, binding)
-                _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
+                _validate_preparation_inspection(
+                    intent, self._session.inspect_persistent_definition(), retry=True
+                )
         self._session.stop_and_require_inactive(mode="clean")
         with RecoveryMetadataStore(self._recovery_root) as store:
             owned_sink = store.recovery_archive_sink(reference, intent)
@@ -1065,7 +1067,7 @@ class _RealLocalExternalBootOperation:
         # exception: the caller must be able to name "unreadable" as an outcome, and no
         # libvirt or libguestfs message may cross this boundary (ADR-0584).
         try:
-            inspection = self._session.inspect_closed(projected=True)
+            inspection = self._session.inspect_persistent_definition(projected=True)
         except Exception:  # noqa: BLE001 - an unreadable definition is a classification
             return LocalObservedState(definition=None, modules=None, active=None)
         modules: ComponentState | None = metadata.inactive_modules
@@ -1431,7 +1433,9 @@ class _RealLocalExternalBootOperation:
                     != expected_identities
                 ):
                     raise ValueError("recovery partial identity conflicts with teardown request")
-                _validate_preparation_inspection(intent, self._session.inspect_closed(), retry=True)
+                _validate_preparation_inspection(
+                    intent, self._session.inspect_persistent_definition(), retry=True
+                )
                 if restore_power and intent.prior_power == "running":
                     self._session.restore_power()
                     readiness = self._session.readiness()
@@ -1513,7 +1517,7 @@ class _RealLocalExternalBootOperation:
         self, metadata: LocalRecoveryMetadataV1, acknowledged: LocalObservedState | None = None
     ) -> tuple[Literal["source", "target", "acknowledged"], bool]:
         """Classify the domain definition; a third one only when it is the acknowledged one."""
-        inspection = self._session.inspect_closed(projected=True)
+        inspection = self._session.inspect_persistent_definition(projected=True)
         if inspection.xml == metadata.source_xml.encode():
             return "source", inspection.active
         if _same_domain_definition(inspection.xml.decode(), metadata.target_xml):
@@ -1874,7 +1878,7 @@ def _complete_preparation_metadata(
 
 def _validate_preparation_inspection(
     intent: LocalPreStopIntentV1,
-    inspection: ClosedDomainInspection,
+    inspection: PersistentDomainInspection,
     *,
     retry: bool,
 ) -> None:
@@ -1885,7 +1889,7 @@ def _validate_preparation_inspection(
         or intent.source_boot != inspection.source_boot_identity
         or (not retry and intent.prior_power != expected_prior)
     ):
-        raise ValueError("closed domain inspection does not match pre-stop intent")
+        raise ValueError("persistent domain inspection does not match pre-stop intent")
 
 
 class LocalLibvirtExternalBoot:

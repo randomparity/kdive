@@ -87,8 +87,8 @@ class _BoundOverlay:
 
 
 @dataclass(frozen=True)
-class ClosedDomainInspection:
-    """Immutable facts derived from one persistent/inactive domain definition."""
+class PersistentDomainInspection:
+    """Immutable persistent domain definition and observed power state."""
 
     xml: bytes
     active: bool
@@ -229,7 +229,9 @@ class LocalExternalBootSession(Protocol):
     def reopen_projection(self, artifact: OpaqueProviderRef) -> TargetProjectionV1: ...
     def projection_artifact_path(self, projection: TargetProjectionV1, name: str) -> str: ...
     def boot_identity(self, xml: str) -> str: ...
-    def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection: ...
+    def inspect_persistent_definition(
+        self, *, projected: bool = False
+    ) -> PersistentDomainInspection: ...
     def require_inactive(self) -> None: ...
     def stop_and_require_inactive(self, *, mode: StopMode) -> None: ...
     def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int: ...
@@ -1004,7 +1006,9 @@ class _ConcreteSession:
         root = parse_owned_xml(xml, self._system_id, self._overlay.path, projected=True)
         return _boot_identity(root)
 
-    def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
+    def inspect_persistent_definition(
+        self, *, projected: bool = False
+    ) -> PersistentDomainInspection:
         domain = self._require_open_domain()
         # The persistent definition: a running domain's live XML adds runtime-only facts
         # (id, aliases, pty paths) that disappear when it stops, so it cannot be compared across
@@ -1012,7 +1016,7 @@ class _ConcreteSession:
         xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
         root = parse_owned_xml(xml, self._system_id, self._overlay.path, projected=projected)
         active = _active(domain)
-        return ClosedDomainInspection(
+        return PersistentDomainInspection(
             xml=xml.encode(),
             active=active,
             definition_identity=_preserved_identity(root),

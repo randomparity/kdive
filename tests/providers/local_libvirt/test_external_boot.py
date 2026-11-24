@@ -101,13 +101,13 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
 )
 from kdive.providers.local_libvirt.lifecycle.boot.selinux_policy import ModuleLabelPolicy
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
-    ClosedDomainInspection,
     ExpectedOperationOwnership,
     InactiveGuestDirectoryEntry,
     LocalExternalBootOperationLease,
     LocalExternalBootSessionFactory,
     LocalSystemTeardownInspection,
     OverlayIdentity,
+    PersistentDomainInspection,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalArtifactRoot,
@@ -2743,7 +2743,7 @@ class _RealPreparation:
         self,
         materialization: ExternalBootMaterialization,
         binding: ExternalBootActivationBinding,
-        inspection: ClosedDomainInspection,
+        inspection: PersistentDomainInspection,
         session: object,
     ) -> LocalPreStopIntentV1:
         del materialization, binding, inspection, session
@@ -2760,7 +2760,7 @@ class _RealSession:
         self.close_fault = False
         self.guest_fault = False
         self.stops: list[str] = []
-        self.inspection = ClosedDomainInspection(
+        self.inspection = PersistentDomainInspection(
             xml=preparation.metadata.source_xml.encode(),
             active=preparation.metadata.prior_power == "running",
             definition_identity=preparation.metadata.source_definition,
@@ -2775,7 +2775,9 @@ class _RealSession:
         del artifact
         return self.projection
 
-    def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
+    def inspect_persistent_definition(
+        self, *, projected: bool = False
+    ) -> PersistentDomainInspection:
         del projected
         return self.inspection
 
@@ -3310,7 +3312,9 @@ class _RestartSession(_RealSession):
             expected_cmdline=b"root=UUID=x",
         )
 
-    def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
+    def inspect_persistent_definition(
+        self, *, projected: bool = False
+    ) -> PersistentDomainInspection:
         del projected
         return replace(
             self.inspection,
@@ -5372,7 +5376,7 @@ def test_real_adapter_rejects_wrong_domain_state_before_stop(tmp_path: Path) -> 
         definition_identity="sha256:" + "f" * 64,
     )
 
-    with pytest.raises(ValueError, match="closed domain inspection"):
+    with pytest.raises(ValueError, match="persistent domain inspection"):
         _real_prepare(io, materialization)
 
     assert preparation.actions == ["inspect"]

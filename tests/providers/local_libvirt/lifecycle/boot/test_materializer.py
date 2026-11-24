@@ -33,9 +33,9 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
     TargetProjectionV1,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
-    ClosedDomainInspection,
     LocalExternalBootSession,
     OverlayIdentity,
+    PersistentDomainInspection,
     _boot_identity,
 )
 from kdive.store.objectstore import ObjectStore
@@ -503,7 +503,7 @@ def test_inspect_prepare_uses_reopened_bytes_and_preserves_source(tmp_path: Path
     materializer = RealLocalExternalBootMaterializer(ObjectStore(client, "bucket"))
     session = _Session(tmp_path / "activation")
     result = materializer.materialize(plan, cast(LocalExternalBootSession, session))
-    inspection = ClosedDomainInspection(
+    inspection = PersistentDomainInspection(
         xml=_SOURCE_XML.encode(),
         active=True,
         definition_identity="sha256:" + "b" * 64,
@@ -540,7 +540,7 @@ def test_inspect_prepare_preserves_a_decomposed_command_line(tmp_path: Path) -> 
     )
     session = _Session(tmp_path / "activation")
     result = materializer.materialize(plan, cast(LocalExternalBootSession, session))
-    inspection = ClosedDomainInspection(
+    inspection = PersistentDomainInspection(
         xml=_SOURCE_XML.encode(),
         active=True,
         definition_identity="sha256:" + "b" * 64,

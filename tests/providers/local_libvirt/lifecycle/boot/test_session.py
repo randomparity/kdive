@@ -3443,16 +3443,20 @@ def test_inspection_reads_the_persistent_definition_of_a_running_domain() -> Non
     domain.active = True
     session = _factory(events, domain).open(_lease(), _expected())
 
-    assert session.inspect_closed().xml == inactive.encode()
+    running = session.inspect_persistent_definition()
+    assert running.xml == inactive.encode()
+    assert running.active
     domain.active = False
-    assert session.inspect_closed().xml == inactive.encode()
+    stopped = session.inspect_persistent_definition()
+    assert stopped.xml == inactive.encode()
+    assert not stopped.active
     session.close()
 
 
 def test_inspection_is_exact_immutable_and_validates_ownership() -> None:
     events: list[str] = []
     session = _factory(events).open(_lease(), _expected())
-    inspection = session.inspect_closed()
+    inspection = session.inspect_persistent_definition()
     assert inspection.xml == _xml().encode()
     assert inspection.domain_name == f"kdive-{SYSTEM_ID}"
     assert inspection.overlay.device == 8 and inspection.overlay.inode == 9
@@ -3492,7 +3496,7 @@ def test_define_xml_preserves_a_decomposed_target_command_line() -> None:
     session.define_xml(target, projected=True)
 
     assert domain.xml == target
-    assert session.inspect_closed(projected=True).xml == target.encode()
+    assert session.inspect_persistent_definition(projected=True).xml == target.encode()
     session.close()
 
 
@@ -3503,7 +3507,7 @@ def test_factory_reopens_a_target_with_a_decomposed_command_line() -> None:
 
     session = _factory(events, domain).open(_lease(), _expected())
 
-    assert session.inspect_closed(projected=True).xml == target.encode()
+    assert session.inspect_persistent_definition(projected=True).xml == target.encode()
     session.close()
 
 
@@ -3523,7 +3527,7 @@ def test_source_inspection_keeps_the_strict_nfc_contract() -> None:
     domain.xml = _xml().replace("root=x", "root=x debug=cafe\u0301")
 
     with pytest.raises(ValueError, match="domain XML must be NFC"):
-        session.inspect_closed()
+        session.inspect_persistent_definition()
 
     session.close()
 
@@ -3863,7 +3867,7 @@ def test_close_poisons_wrappers_and_releases_pin_last() -> None:
         "connection.close",
     ]
     lease.release()
-    for call in (session.inspect_closed, lambda: guest.exists("/etc/os-release")):
+    for call in (session.inspect_persistent_definition, lambda: guest.exists("/etc/os-release")):
         with pytest.raises(RuntimeError, match="closed"):
             call()
 
@@ -4153,7 +4157,7 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
     assert domain.active
     session.stop_and_require_inactive(mode="destroy")
     assert not domain.active
-    assert not hasattr(session.inspect_closed().overlay, "path")
+    assert not hasattr(session.inspect_persistent_definition().overlay, "path")
     assert not hasattr(session, "artifact_root_descriptor")
     with pytest.raises(ValueError, match="relative"):
         session.open_artifact("../escape", 0)
@@ -4208,7 +4212,7 @@ def test_session_snapshots_ownership_after_lane_pin() -> None:
         run_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         activation_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     )
-    assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
+    assert session.inspect_persistent_definition().domain_name == f"kdive-{SYSTEM_ID}"
     session.start()
     session.readiness()
     session.observe_running()
@@ -4250,7 +4254,7 @@ def test_pinner_mutation_cannot_change_atomic_ownership_snapshot() -> None:
         close_descriptor=lambda _fd: None,
     )
     session = _with_artifact_root(factory.open(lease, _expected()))
-    assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
+    assert session.inspect_persistent_definition().domain_name == f"kdive-{SYSTEM_ID}"
     assert events.count(f"domain.open:kdive-{SYSTEM_ID}") == 1
     assert events.count(f"artifact-owner:{SYSTEM_ID}:{BINDING.activation_id}") == 1
     session.close()
@@ -4284,7 +4288,7 @@ def test_artifact_callback_cannot_redirect_snapshot_by_mutating_caller_lease() -
     session = _with_artifact_root(factory.open(lease, _expected()))
     assert received[0].system_id == SYSTEM_ID
     assert received[0].binding == BINDING
-    assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
+    assert session.inspect_persistent_definition().domain_name == f"kdive-{SYSTEM_ID}"
     session.close()
 
 

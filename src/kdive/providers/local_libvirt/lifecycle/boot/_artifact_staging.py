@@ -36,8 +36,8 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
     _read_private_file,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
-    ClosedDomainInspection,
     LocalExternalBootSession,
+    PersistentDomainInspection,
 )
 from kdive.providers.ports.external_boot import ExternalBootArtifactStager
 from kdive.providers.shared.directory_listing import list_directory_descriptor
@@ -169,7 +169,7 @@ class RealLocalExternalBootMaterializer(ExternalBootArtifactStager):
         self,
         materialization: ExternalBootMaterialization,
         binding: ExternalBootActivationBinding,
-        inspection: ClosedDomainInspection,
+        inspection: PersistentDomainInspection,
         session: LocalExternalBootSession,
     ) -> LocalPreStopIntentV1:
         if binding != session.binding or materialization.ownership != ActivationOwnership(
