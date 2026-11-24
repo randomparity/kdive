@@ -1,10 +1,9 @@
 """Live-stack proof that the *generated* kdivectl verb surface drives a real lifecycle (#1453).
 
-The break-glass boundary test (``test_kdivectl_boundary.py``) drives ``ops force-release`` — a
-*curated* :class:`kdive.cli.commands.registry.Verb` whose hand-written handler runs directly. Its
-canonical path never reaches the generic generated-verb seam
-(:func:`kdive.cli.dispatch.invoke_generated_verb`): :func:`~kdive.cli.commands.registry.run_verb`
-resolves a curated verb first and only falls through to the seam for a *non-curated* path. So a
+The break-glass boundary test (``test_kdivectl_boundary.py``) drives ``ops force-release`` through
+a handler override. Its canonical path never reaches the generic generated-verb seam
+(:func:`kdive.cli.dispatch.invoke_generated_verb`): the registry selects its descriptor and
+override, then dispatch executes the override or falls through to the generic seam. So a
 green boundary test says nothing about whether a schema-generated verb assembles a correct payload,
 whether the server accepts it, or whether its response renders.
 
@@ -29,8 +28,8 @@ instead *raise* on a role denial, so this exposure-driven refusal is the seam's 
 boundary.
 
 Gated ``live_stack`` (ADR-0035 §4): it needs a running kdive stack plus a reachable OIDC issuer, so
-it skips cleanly in normal CI and runs only against a brought-up stack (``just stack-backends`` +
-``just test-live-stack``). See ``docs/operating/runbooks/kdivectl.md``.
+it skips cleanly in normal CI and runs only against a brought-up stack. See
+``docs/operating/runbooks/live-testing.md`` and ``docs/operating/runbooks/kdivectl.md``.
 """
 
 from __future__ import annotations
@@ -70,7 +69,7 @@ async def _run_kdivectl(argv: list[str], *, token: str, server_url: str) -> tupl
     """Run the real ``kdivectl`` entry point as a subprocess; return ``(exit_code, stdout)``.
 
     Driving the actual entry point (not the in-process handler) is the boundary #1453 prescribes:
-    it exercises argparse -> ``run_verb`` -> ``invoke_generated_verb`` -> transport exactly as an
+    it exercises argparse -> dispatch -> ``invoke_generated_verb`` -> transport exactly as an
     operator would, with the token and server URL supplied via the environment. stdout is captured
     (not discarded) so the caller can assert the rendered response, and stderr is surfaced so a
     non-zero exit self-diagnoses.

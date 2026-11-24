@@ -5,7 +5,7 @@ requested one into a mutation tier, admits it only when the caller opted in to t
 (``--allow-mutating`` / ``--allow-destructive``), runs the token-``exp`` preflight for mutating
 tiers, confirms a destructive call (typed ``yes`` on a TTY, or ``--yes``), calls the tool, prints
 the structured result, and derives the exit code from the response envelope. ``login`` mints and
-caches a bearer token; descriptor-owned MCP verbs route through ``commands.run_verb``.
+caches a bearer token; descriptor-owned MCP verbs execute here after registry selection (ADR-0866).
 
 Every MCP command path and parser shape comes from a :class:`GeneratedVerb` descriptor.
 ``HANDLER_OVERRIDES`` selects specialised rendering or payload assembly after the descriptor
@@ -93,7 +93,10 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return _completion(args)
     if args.command == "doctor":
         return await commands.doctor.doctor(args)
-    return await commands.run_verb(args)
+    generated, handler = commands.select_verb(args)
+    if handler is not None:
+        return await handler(args)
+    return await invoke_generated_verb(generated, args)
 
 
 def _completion(args: argparse.Namespace) -> int:

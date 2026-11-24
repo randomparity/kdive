@@ -47,6 +47,7 @@ from jsonschema import Draft202012Validator
 
 import kdive.cli.commands.mutations as mutations
 import kdive.cli.commands.reads as reads
+from kdive.cli import dispatch
 from kdive.cli.__main__ import build_parser
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
 from kdive.cli.commands.generated_args import GENERATED_ARG_PREFIX
@@ -256,9 +257,7 @@ def _payloads_for(
         except SystemExit:
             continue
         with contextlib.suppress(SystemExit), contextlib.redirect_stdout(io.StringIO()):
-            from kdive.cli.commands import registry
-
-            asyncio.run(registry.run_verb(args))
+            asyncio.run(dispatch.run(args))
         captured += [(argv, name, payload) for name, payload in client.calls]
     return captured
 

@@ -1,4 +1,4 @@
-"""Build and dispatch the schema-generated ``kdivectl`` command surface.
+"""Build and select the schema-generated ``kdivectl`` command surface (ADR-0866).
 
 The committed generated descriptors own every MCP command path and parser shape.  This module
 only keeps the small tool-keyed handler map for commands with specialised rendering or payload
@@ -26,7 +26,7 @@ __all__ = [
     "add_subparsers",
     "doctor",
     "images",
-    "run_verb",
+    "select_verb",
 ]
 
 
@@ -300,8 +300,8 @@ def _doctor_parser(sub: argparse._SubParsersAction, parent: argparse.ArgumentPar
     parser.add_argument("--with-egress", dest="with_egress", action="store_true")
 
 
-async def run_verb(args: argparse.Namespace) -> int:
-    """Resolve the generated command path, then select custom execution by its MCP tool.
+def select_verb(args: argparse.Namespace) -> tuple[GeneratedVerb, Handler | None]:
+    """Resolve a generated path and its optional handler without executing either.
 
     A handler override changes rendering or payload shaping only.  It never participates in path
     resolution or parser construction.
@@ -313,10 +313,5 @@ async def run_verb(args: argparse.Namespace) -> int:
     key = (args.command, subcommand)
     generated = _GENERATED_BY_PATH.get(key)
     if generated is not None:
-        handler = HANDLER_OVERRIDES.get(generated.tool)
-        if handler is not None:
-            return await handler(args)
-        from kdive.cli import dispatch
-
-        return await dispatch.invoke_generated_verb(generated, args)
+        return generated, HANDLER_OVERRIDES.get(generated.tool)
     raise SystemExit(f"unknown command: {args.command} {subcommand or ''}".rstrip())
