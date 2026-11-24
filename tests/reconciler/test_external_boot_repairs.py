@@ -60,6 +60,9 @@ def test_repair_rebinds_successor_to_current_authority(monkeypatch: pytest.Monke
         marker.plan_identity,
         source.authorizing["project"],
         "activate",
+        state="prepared",
+        current_attempt_id=None,
+        readiness_deadline=None,
     )
     build = AsyncMock(return_value=(source.kind, payload))
     enqueue = AsyncMock(return_value=(source, True))
@@ -87,7 +90,15 @@ def test_repair_rebinds_successor_to_current_authority(monkeypatch: pytest.Monke
 
 def test_live_successor_suppresses_enqueue(monkeypatch: pytest.MonkeyPatch) -> None:
     candidate = external_boot._Candidate(
-        uuid4(), uuid4(), uuid4(), "sha256:" + "a" * 64, "kernel-team", "cleanup"
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        "sha256:" + "a" * 64,
+        "kernel-team",
+        "cleanup",
+        state="recovered",
+        current_attempt_id=None,
+        readiness_deadline=None,
     )
     source = marked_job(
         "cleanup",
@@ -129,7 +140,15 @@ def test_commit_failure_is_not_counted_and_next_candidate_continues(
 ) -> None:
     candidates = tuple(
         external_boot._Candidate(
-            uuid4(), uuid4(), uuid4(), "sha256:" + "a" * 64, "kernel-team", "activate"
+            uuid4(),
+            uuid4(),
+            uuid4(),
+            "sha256:" + "a" * 64,
+            "kernel-team",
+            "activate",
+            state="prepared",
+            current_attempt_id=None,
+            readiness_deadline=None,
         )
         for _index in range(2)
     )
@@ -423,7 +442,15 @@ def test_repair_failures_keep_safe_diagnostics_and_transaction_isolation(
     failure = failures[failure_kind]
     candidates = tuple(
         external_boot._Candidate(
-            uuid4(), uuid4(), uuid4(), "sha256:" + "a" * 64, secret, "activate"
+            uuid4(),
+            uuid4(),
+            uuid4(),
+            "sha256:" + "a" * 64,
+            secret,
+            "activate",
+            state="prepared",
+            current_attempt_id=None,
+            readiness_deadline=None,
         )
         for _ in range(2)
     )

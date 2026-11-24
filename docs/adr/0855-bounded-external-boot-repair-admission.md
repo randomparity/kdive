@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (2026-11-23)
 
 Builds on [ADR-0839](0839-external-boot-repair-keyset-progress.md), retaining its lane cursors,
 and [ADR-0596](0596-allocation-release-waits-for-external-boot-cleanup.md).
