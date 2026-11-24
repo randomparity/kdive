@@ -66,12 +66,15 @@ class JobKind(StrEnum):
     FORCE_UNPLUG_DEVICE = "force_unplug_device"
 
 
-_RUN_FAILURE_STATES = frozenset({RunState.CREATED, RunState.RUNNING})
+_RUN_FAILURE_STATES = frozenset({RunState.RUNNING})
 _INSTALL_RUN_FAILURE_STATES = _RUN_FAILURE_STATES | {RunState.SUCCEEDED}
 
 
 def run_failure_eligible_states(kind: JobKind) -> frozenset[RunState]:
-    """INSTALL may fail a build-succeeded Run; BOOT preserves it (ADR-0230)."""
+    """Fail running Runs, plus build-succeeded Runs for INSTALL (ADR-0230).
+
+    Unstarted Runs cannot transition to failed; preserve them while finalizing the job.
+    """
     return _INSTALL_RUN_FAILURE_STATES if kind is JobKind.INSTALL else _RUN_FAILURE_STATES
 
 
