@@ -131,7 +131,6 @@ def render_domain_xml(
     amendment): the backing base carries a ``relabel='no'`` seclabel so a domain start leaves its
     metadata unchanged. Every ordinary render keeps libvirt's relabel.
     """
-    _ensure_namespaces_registered()
     if profile.provider.remote_libvirt_section is None:
         raise CategorizedError(
             "provisioning profile has no remote-libvirt provider section",
@@ -186,6 +185,7 @@ def render_domain_xml(
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=f"tcp:{gdb_addr}:{gdb_port}")
     if ssh_addr is not None and ssh_port is not None:
         _append_ssh_forward(commandline, ssh_addr, ssh_port, guest_egress=guest_egress)
+    _ensure_namespaces_registered()
     return ET.tostring(domain, encoding="unicode")
 
 

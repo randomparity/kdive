@@ -111,7 +111,6 @@ def render_domain_xml(
             profile rendered without ``gdb_port``, any domain rendered without ``ssh_port``, or a
             TCG domain (``accel != "kvm"``) rendered without an ``emulator``.
     """
-    _ensure_namespaces_registered()
     _PROFILE_POLICY.validate_profile(profile)
     require_concrete_sizing(profile)
     section = profile.provider.local_libvirt
@@ -145,6 +144,7 @@ def render_domain_xml(
         domain, ssh_port, guest_egress=guest_egress, pin_nic_slot=traits.pin_nic_slot
     )
 
+    _ensure_namespaces_registered()
     return ET.tostring(domain, encoding="unicode")
 
 
@@ -480,7 +480,6 @@ def render_customization_domain_xml(
         CategorizedError: ``CONFIGURATION_ERROR`` for an unknown ``arch``, a missing
             ``kernel_path``, or a TCG domain (``accel != "kvm"``) rendered without an ``emulator``.
     """
-    _ensure_namespaces_registered()
     traits = arch_traits(arch)
     is_kvm = accel == "kvm"
     domain = ET.Element("domain", type="kvm" if is_kvm else "qemu")
@@ -501,6 +500,7 @@ def render_customization_domain_xml(
     _append_serial_console(devices, build_id)
     _append_guest_agent_channel(devices)
     _append_egress_nic(domain, pin_nic_slot=traits.pin_nic_slot)
+    _ensure_namespaces_registered()
     return ET.tostring(domain, encoding="unicode")
 
 

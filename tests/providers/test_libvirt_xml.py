@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 
 import pytest
 
@@ -21,6 +22,7 @@ from kdive.providers.shared.libvirt_xml import (
     recorded_gdb_port,
     recorded_ssh_port,
     register_kdive_namespace,
+    register_qemu_namespace,
 )
 
 _SUPPORTED = frozenset({"x86_64", "ppc64le"})
@@ -288,17 +290,24 @@ def test_recorded_ssh_port_coexists_with_a_gdb_arg() -> None:
     assert recorded_ssh_port(both) == 40022
 
 
-def test_register_kdive_namespace_is_idempotent(monkeypatch) -> None:
-    calls: list[tuple[str, str]] = []
-
-    def fake_register_namespace(prefix: str, uri: str) -> None:
-        calls.append((prefix, uri))
-
-    monkeypatch.setattr("kdive.providers.shared.libvirt_xml._kdive_namespace_registered", False)
-    monkeypatch.setattr(ET, "register_namespace", fake_register_namespace)
-    register_kdive_namespace()
-    register_kdive_namespace()
-    assert calls == [("kdive", KDIVE_METADATA_NS)]
+@pytest.mark.parametrize(
+    ("prefix", "uri", "register"),
+    [
+        ("kdive", KDIVE_METADATA_NS, register_kdive_namespace),
+        ("qemu", QEMU_NS, register_qemu_namespace),
+    ],
+)
+def test_registration_restores_replaced_prefix(
+    prefix: str, uri: str, register: Callable[[], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ET, "_namespace_map", vars(ET)["_namespace_map"].copy())
+    register()
+    for replacement in ("foreign", "another"):
+        ET.register_namespace(replacement, uri)
+        register()
+        xml = ET.tostring(ET.Element(f"{{{uri}}}domain"), encoding="unicode")
+        assert xml.startswith(f"<{prefix}:domain ")
+        assert f'xmlns:{prefix}="{uri}"' in xml
 
 
 _DOMCAPS_HOST_MODEL = """

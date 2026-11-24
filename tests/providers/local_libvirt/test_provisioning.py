@@ -46,7 +46,6 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
 )
 from kdive.providers.local_libvirt.lifecycle.rootfs.upload_acquisition import UploadObjectStore
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
-from kdive.providers.shared import libvirt_xml as libvirt_xml_contract
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
     QEMU_NS,
@@ -120,23 +119,32 @@ def test_import_does_not_register_elementtree_namespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, str]] = []
-    monkeypatch.setattr(libvirt_xml_contract, "_kdive_namespace_registered", False)
 
     def fake_register_namespace(prefix: str, uri: str) -> None:
         calls.append((prefix, uri))
 
-    monkeypatch.setattr(libvirt_xml_contract, "_qemu_namespace_registered", False)
     monkeypatch.setattr(ET, "register_namespace", fake_register_namespace)
-    reloaded = importlib.reload(provisioning_module)
+    importlib.reload(provisioning_module)
 
     assert calls == []
 
-    reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL, ssh_port=22)
-    reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK, kernel_path=_KERNEL, ssh_port=22)
 
-    # Rendering registers both the kdive metadata prefix and the qemu passthrough prefix
-    # (the latter is needed for the always-rendered SSH forward's <qemu:commandline>), each once.
-    assert calls == [("kdive", KDIVE_METADATA_NS), ("qemu", QEMU_NS)]
+def test_render_restores_replaced_namespace_prefixes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ET, "_namespace_map", vars(ET)["_namespace_map"].copy())
+    profile = _profile(debug={"gdbstub": True})
+    for replacement in ("foreign", "another"):
+        _render()
+        ET.register_namespace(f"{replacement}_metadata", KDIVE_METADATA_NS)
+        ET.register_namespace(f"{replacement}_qemu", QEMU_NS)
+        xml = render_domain_xml(
+            _SYS, profile, disk_path=_DISK, kernel_path=_KERNEL, ssh_port=40022, gdb_port=4444
+        )
+        assert "<kdive:system>" in xml and "<qemu:commandline>" in xml
+        assert _safe_fromstring(xml).findtext(f"./metadata/{{{KDIVE_METADATA_NS}}}system") == str(
+            _SYS
+        )
+        assert recorded_gdb_port(xml) == 4444
+        assert recorded_ssh_port(xml) == 40022
 
 
 def test_render_carries_name_memory_vcpu_machine_and_rootfs() -> None:
