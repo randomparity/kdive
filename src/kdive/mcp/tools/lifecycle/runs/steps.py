@@ -679,16 +679,11 @@ async def _has_step_row(conn: AsyncConnection, run_id: UUID, step: str) -> bool:
         return await cur.fetchone() is not None
 
 
-# The job states ``JobRecyclePolicy.TERMINAL`` resets in place; must match its
-# ``state IN ('failed','succeeded')`` fence so the ``replayed`` marker tracks the actual reset.
-_RECYCLABLE_JOB_STATES = frozenset({JobState.FAILED, JobState.SUCCEEDED})
-
-
 async def _step_recycle(conn: AsyncConnection, run_id: UUID, step: str) -> queue.JobRecyclePolicy:
     """The recycle policy this step's enqueue uses — ledger-driven, per ADR-0299.
 
-    One expression, read by both :func:`_locked_enqueue` (which passes it to ``queue.enqueue``)
-    and :func:`_in_flight_job` (which asks what a repeat call would return under it). They must
+    One expression, read by :func:`_locked_enqueue` for ``queue.enqueue_with_status`` and
+    :func:`_settled_replay` to ask what a repeat call would return under it. They must
     not drift: a probe narrower than the policy turns an idempotent replay into a refusal, which
     is what a hand-listed state set did here.
     """
@@ -714,19 +709,15 @@ async def _locked_enqueue(
     job is returned); a ``failed`` step's row was deleted by ``abandon_run_step`` so a retry
     recycles it; a re-stage (which deletes the row) likewise recycles, carrying the new payload.
 
-    Returns the enqueued/returned :class:`Job` and ``replayed`` — ``True`` when ``queue.enqueue``
-    returned a pre-existing job unchanged (no fresh work enqueued or recycled), ``False`` for a
-    brand-new insert or an in-place terminal recycle. The boot path surfaces this as
-    ``data.replayed`` (#1063). It reads the pre-existing job by dedup key rather than the
-    ``run_steps`` row, because the row is written only when a **worker claims** the job — so a
-    boot that is enqueued but not yet claimed (``queued``, no row) is a replay on a repeat call,
-    which a row-presence proxy would miss.
+    Returns the enqueued/returned :class:`Job` and ``replayed`` — ``True`` when admission
+    returned a pre-existing job unchanged, ``False`` for a new insert or terminal recycle.
+    The boot path surfaces this as ``data.replayed`` (#1063). Use the actual admission result:
+    the ledger is written only when a worker claims a job, so an unclaimed queued job with
+    no step row is still a replay on a repeat call.
     """
     dedup_key = f"{run.id}:{step}"
     policy = await _step_recycle(conn, run.id, step)
-    recycle = policy is queue.JobRecyclePolicy.TERMINAL
-    prior = await queue.get_by_dedup_key(conn, dedup_key)
-    job = await queue.enqueue(
+    job, admitted = await queue.enqueue_with_status(
         conn,
         kind,
         payload,
@@ -734,9 +725,6 @@ async def _locked_enqueue(
         dedup_key,
         recycle=policy,
     )
-    # A prior job is reset in place only when ``recycle`` fires on a recyclable (terminal) state;
-    # otherwise a prior job is returned unchanged (a replay) and an absent prior is a fresh insert.
-    replayed = prior is not None and not (recycle and prior.state in _RECYCLABLE_JOB_STATES)
     await audit.record(
         conn,
         ctx,
@@ -749,7 +737,7 @@ async def _locked_enqueue(
             project=run.project,
         ),
     )
-    return job, replayed
+    return job, not admitted
 
 
 async def _enqueue_step(

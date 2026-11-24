@@ -38,6 +38,7 @@ from kdive.jobs.payloads import (
     SystemPayload,
     UnplugDevicePayload,
 )
+from kdive.mcp.tools.lifecycle.support import _idempotency
 from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
@@ -1010,6 +1011,71 @@ def test_enqueue_recycle_failed_resets_only_a_failed_job(migrated_url: str) -> N
                 )
                 assert kept.id == job.id and kept.state is settled
             assert await _count_jobs(conn) == 3
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("entrypoint", ["queue", "mcp"])
+@pytest.mark.parametrize("state", [None, *JobState])
+@pytest.mark.parametrize(
+    ("policy", "recycled_states"),
+    [
+        (queue.JobRecyclePolicy.NEVER, ()),
+        (queue.JobRecyclePolicy.FAILED, (JobState.FAILED,)),
+        (queue.JobRecyclePolicy.TERMINAL, (JobState.FAILED, JobState.SUCCEEDED)),
+        (
+            queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+            (JobState.FAILED, JobState.SUCCEEDED, JobState.CANCELED),
+        ),
+    ],
+)
+def test_dedup_replay_matches_admission(
+    migrated_url: str,
+    entrypoint: str,
+    state: JobState | None,
+    policy: queue.JobRecyclePolicy,
+    recycled_states: tuple[JobState, ...],
+) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            key = "replay-matrix"
+            if state is JobState.RUNNING:
+                await _job_in(
+                    conn,
+                    key,
+                    "state = 'running', attempt = 1, worker_id = 'w-live', "
+                    "lease_expires_at = clock_timestamp() + interval '5 minutes', "
+                    "heartbeat_at = now()",
+                )
+            elif state is not None:
+                job = await queue.enqueue(
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, key
+                )
+                await conn.execute(
+                    "UPDATE jobs SET state = %s WHERE id = %s", (state.value, job.id)
+                )
+            before = await queue.get_by_dedup_key(conn, key)
+            replay = queue.dedup_replay if entrypoint == "queue" else _idempotency.dedup_replay
+            predicted = await replay(conn, key, recycle=policy)
+            should_admit = state is None or state in recycled_states
+            assert predicted == (None if should_admit else before)
+            assert await queue.get_by_dedup_key(conn, key) == before
+
+            payload = _build_payload()
+            admitted_job, admitted = await queue.enqueue_with_status(
+                conn, JobKind.INSTALL, payload, _AUTHORIZING, key, recycle=policy
+            )
+            assert admitted is should_admit
+            if before is not None:
+                assert admitted_job.id == before.id
+            if admitted:
+                assert admitted_job.state is JobState.QUEUED
+                assert admitted_job.payload == payload.model_dump(
+                    mode="json", exclude_none=True, by_alias=True
+                )
+            else:
+                assert admitted_job == predicted == before
+            assert await _count_jobs(conn) == 1
 
     asyncio.run(_run())
 

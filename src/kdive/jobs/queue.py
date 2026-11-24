@@ -1,4 +1,6 @@
-"""Connection-scoped operations over the durable ``jobs`` queue (ADR-0018, ADR-0533, ADR-0550).
+"""Connection-scoped operations over the durable ``jobs`` queue.
+
+Implements ADR-0018, ADR-0533, ADR-0550 and ADR-0858.
 
 ``enqueue`` admits a job idempotently on ``dedup_key``; ``dequeue`` claims the oldest
 eligible job with ``FOR UPDATE SKIP LOCKED``, charging an attempt and reclaiming a
@@ -72,6 +74,18 @@ class JobRecyclePolicy(StrEnum):
     TERMINAL = "terminal"
     TERMINAL_OR_CANCELED = "terminal_or_canceled"
     FAILED_OR_LAPSED_EXHAUSTED = "failed_or_lapsed_exhausted"
+
+
+# Running lease eligibility remains exclusively in enqueue's database-clock predicate.
+_RECYCLED_STATES: dict[JobRecyclePolicy, frozenset[JobState]] = {
+    JobRecyclePolicy.NEVER: frozenset(),
+    JobRecyclePolicy.FAILED: frozenset({JobState.FAILED}),
+    JobRecyclePolicy.TERMINAL: frozenset({JobState.FAILED, JobState.SUCCEEDED}),
+    JobRecyclePolicy.TERMINAL_OR_CANCELED: frozenset(
+        {JobState.FAILED, JobState.SUCCEEDED, JobState.CANCELED}
+    ),
+    JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED: frozenset({JobState.FAILED}),
+}
 
 
 class ExternalBootCommitStatus(StrEnum):
@@ -168,11 +182,7 @@ async def enqueue_with_status(
         )
         inserted = await cur.fetchone() is not None
         if recycle is not JobRecyclePolicy.NEVER:
-            recyclable = [JobState.FAILED.value]
-            if recycle in (JobRecyclePolicy.TERMINAL, JobRecyclePolicy.TERMINAL_OR_CANCELED):
-                recyclable.append(JobState.SUCCEEDED.value)
-            if recycle is JobRecyclePolicy.TERMINAL_OR_CANCELED:
-                recyclable.append(JobState.CANCELED.value)
+            recyclable = [state.value for state in _RECYCLED_STATES[recycle]]
             await cur.execute(
                 "UPDATE jobs SET state = %s, payload = %s, "
                 "    attempt = CASE WHEN state = %s THEN attempt ELSE 0 END, "
@@ -225,6 +235,41 @@ async def get_by_dedup_key(conn: AsyncConnection, dedup_key: str) -> Job | None:
         await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
         row = await cur.fetchone()
     return None if row is None else Job.model_validate(row)
+
+
+async def dedup_replay(
+    conn: AsyncConnection,
+    dedup_key: str,
+    *,
+    recycle: JobRecyclePolicy = JobRecyclePolicy.NEVER,
+) -> Job | None:
+    """The job a repeat ``enqueue`` on ``dedup_key`` would return unchanged, else ``None``.
+
+    ``None`` means the call would commit fresh work — a new row, or a recycled terminal one.
+
+    This is what an unkeyed repeat call replays on. ``keyed_mutation`` short-circuits to
+    ``do_work()`` when ``idempotency_key is None``, so on that path there is no stored envelope
+    and the dedup key is the only replay there is. Sites that admit against the external-boot
+    matrix (ADR-0583) must consult this *before* their guard, or an activation that appeared
+    after the work was enqueued turns an agent's poll into a refusal while the job it is
+    polling stays queued and runs.
+
+    This observes the current row; a concurrent update may change a later enqueue outcome.
+
+    Pass the same ``recycle`` the site's own ``enqueue`` passes; the states are derived from it.
+
+    Raises:
+        ValueError: ``recycle`` depends on the database clock (``FAILED_OR_LAPSED_EXHAUSTED``).
+    """
+    if recycle is JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED:
+        raise ValueError(
+            f"recycle policy {recycle.value!r} is decided on the database clock at enqueue; "
+            "read the prior row with queue.get_by_dedup_key instead"
+        )
+    prior = await get_by_dedup_key(conn, dedup_key)
+    if prior is None or prior.state in _RECYCLED_STATES[recycle]:
+        return None
+    return prior
 
 
 async def dequeue(
