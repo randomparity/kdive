@@ -9,6 +9,7 @@ store-layer tests do.
 from __future__ import annotations
 
 import logging
+from io import BytesIO
 from uuid import uuid4
 
 import pytest
@@ -225,3 +226,46 @@ def test_wrong_typed_field_returns_zero(
     )
     result = read_sidecar(minio_store, key_ns, system_id)
     assert result == ZERO
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {},
+        {"Metadata": None},
+        {"Metadata": []},
+        {"Metadata": {"sensitivity": "redacted", "retention-class": None}},
+    ],
+)
+def test_malformed_get_metadata_does_not_reset_rotation(reply: dict[str, object]) -> None:
+    with BytesIO(
+        b'{"plaintext_offset":17,"carry":"","next_index":3,"boot_gen":2,"boot_id":"b1"}'
+    ) as body:
+
+        class Client:
+            def get_object(self, **_kwargs: object) -> dict[str, object]:
+                return {**reply, "Body": body}
+
+        store = ObjectStore(Client(), "the-bucket")
+        with pytest.raises(CategorizedError) as excinfo:
+            read_sidecar(store, "tenant", uuid4())
+        assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        assert body.closed
+
+
+def test_valid_get_metadata_preserves_nonzero_rotation() -> None:
+    with BytesIO(
+        b'{"plaintext_offset":17,"carry":"","next_index":3,"boot_gen":2,"boot_id":"b1"}'
+    ) as body:
+
+        class Client:
+            def get_object(self, **_kwargs: object) -> dict[str, object]:
+                return {
+                    "Metadata": {"sensitivity": "redacted", "retention-class": "console"},
+                    "Body": body,
+                }
+
+        store = ObjectStore(Client(), "the-bucket")
+        assert read_sidecar(store, "tenant", uuid4()) == RotationState(
+            plaintext_offset=17, carry=b"", next_index=3, boot_gen=2, boot_id="b1"
+        )

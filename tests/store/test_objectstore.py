@@ -1033,10 +1033,13 @@ def test_get_artifact_client_error_without_response_metadata_is_infrastructure_f
     assert str(excinfo.value) == "object-store get_object for 'k' failed: boom"
 
 
-def test_get_artifact_invalid_metadata_is_infrastructure_failure() -> None:
+def test_get_artifact_invalid_sensitivity_is_infrastructure_failure() -> None:
     class _BadMetaClient:
         def get_object(self, **_kwargs: object) -> dict[str, object]:
-            return {"Metadata": {}, "Body": _StaticBody(b"x")}
+            return {
+                "Metadata": {"sensitivity": "invalid", "retention-class": "vmcore"},
+                "Body": _StaticBody(b"x"),
+            }
 
     store = ObjectStore(_BadMetaClient(), "bucket")
     with pytest.raises(CategorizedError) as excinfo:
@@ -1325,8 +1328,11 @@ def test_get_artifact_stream_transport_error_is_infrastructure_failure() -> None
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
-def test_get_artifact_stream_invalid_metadata_is_infrastructure_failure() -> None:
-    store = ObjectStore(_StreamingClient(b"x", metadata={}), "bucket")
+def test_get_artifact_stream_invalid_sensitivity_is_infrastructure_failure() -> None:
+    store = ObjectStore(
+        _StreamingClient(b"x", metadata={"sensitivity": "invalid", "retention-class": "vmcore"}),
+        "bucket",
+    )
     with (
         pytest.raises(CategorizedError) as excinfo,
         store.get_artifact_stream("t/vmcore/oid/core", None),

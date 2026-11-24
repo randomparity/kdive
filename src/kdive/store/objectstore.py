@@ -578,16 +578,30 @@ class ObjectStore:
             raise _infrastructure_error("get_object", key, err) from err
         except BotoCoreError as err:
             raise _infrastructure_error("get_object", key, err) from err
-        metadata = resp["Metadata"]
         try:
-            sensitivity = Sensitivity(metadata["sensitivity"])
-            retention_class = metadata["retention-class"]
-        except (KeyError, ValueError) as err:
-            raise CategorizedError(
-                f"artifact {key!r} has absent or invalid sensitivity metadata",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"key": key},
-            ) from err
+            reply = _StoreReply("get_object", self._bucket, key, resp)
+            metadata = _StoreReply(
+                "get_object", self._bucket, key, reply.required("Metadata", dict)
+            )
+            try:
+                sensitivity = Sensitivity(metadata.required("sensitivity", str))
+            except ValueError as err:
+                raise CategorizedError(
+                    f"artifact {key!r} has absent or invalid sensitivity metadata",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={"key": key},
+                ) from err
+            retention_class = metadata.required("retention-class", str)
+        except CategorizedError as err:
+            # Rejected metadata prevents either read caller from taking body ownership.
+            try:
+                resp["Body"].close()
+            except Exception as close_error:
+                err.add_note(
+                    "object-store get_object rejected-body close failed: "
+                    + type(close_error).__name__
+                )
+            raise
         return resp, sensitivity, retention_class
 
     @contextmanager
