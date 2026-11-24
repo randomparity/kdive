@@ -862,12 +862,6 @@ class _ConcreteSession:
         fstat_overlay: Callable[[int], tuple[int, int, int]],
         close_descriptor: Callable[[int], None],
         close_overlay_descriptor: Callable[[int], None],
-        close_transfer_descriptor: Callable[[int], None],
-        open_relative: Callable[[int, str, int, int], int],
-        unlink_relative: Callable[[int, str], None],
-        replace_relative: Callable[[int, str, str], None],
-        fsync_descriptor: Callable[[int], None],
-        temporary_artifact_name: Callable[[str], str],
         worker_pid: int,
         prepare_console: PrepareConsole,
         readiness: ReadinessProbe,
@@ -890,12 +884,6 @@ class _ConcreteSession:
         self._fstat_overlay = fstat_overlay
         self._close_descriptor = close_descriptor
         self._close_overlay_descriptor = close_overlay_descriptor
-        self._close_transfer_descriptor = close_transfer_descriptor
-        self._open_relative = open_relative
-        self._unlink_relative = unlink_relative
-        self._replace_relative = replace_relative
-        self._fsync_descriptor = fsync_descriptor
-        self._temporary_artifact_name = temporary_artifact_name
         self._worker_pid = worker_pid
         self._prepare_console = prepare_console
         self._console_window_s = console_window_s
@@ -935,10 +923,10 @@ class _ConcreteSession:
             raise ValueError("activation already contains a different target projection")
         try:
             os.mkdir(digest_name, mode=0o700, dir_fd=artifact_fd)
-            self._fsync_descriptor(artifact_fd)
+            os.fsync(artifact_fd)
         except FileExistsError:
             pass
-        descriptor = self._open_relative(
+        descriptor = _open_relative(
             artifact_fd,
             digest_name,
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -968,14 +956,14 @@ class _ConcreteSession:
         reference = artifact
         owner = ActivationOwnership(system_id=self._binding.system_id, run_id=self._binding.run_id)
         parts = _artifact_ref_parts(reference, owner, self._binding.activation_id)
-        descriptor = self._open_relative(
+        descriptor = _open_relative(
             self._artifact_root(),
             parts[4],
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
             0,
         )
         try:
-            projection_file = self._open_relative(
+            projection_file = _open_relative(
                 descriptor, "target-projection.json", os.O_RDONLY | os.O_NOFOLLOW, 0
             )
             try:
@@ -1044,7 +1032,7 @@ class _ConcreteSession:
 
     def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int:
         self._require_open_domain()
-        return self._open_relative(self._artifact_root(), _relative_name(name), flags, mode)
+        return _open_relative(self._artifact_root(), _relative_name(name), flags, mode)
 
     def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int:
         """Open one payload inside its owner-checked projection digest directory."""
@@ -1054,17 +1042,17 @@ class _ConcreteSession:
         self._require_open_domain()
         owner = ActivationOwnership(system_id=self._binding.system_id, run_id=self._binding.run_id)
         parts = _artifact_ref_parts(artifact, owner, self._binding.activation_id)
-        directory = self._open_relative(
+        directory = _open_relative(
             self._artifact_root(), parts[4], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, 0
         )
         try:
-            return self._open_relative(directory, parts[5], flags, 0)
+            return _open_relative(directory, parts[5], flags, 0)
         finally:
             self._close_descriptor(directory)
 
     def unlink_artifact(self, name: str) -> None:
         self._require_open_domain()
-        self._unlink_relative(self._artifact_root(), _relative_name(name))
+        _unlink_relative(self._artifact_root(), _relative_name(name))
 
     def guest(self) -> _GuestContext:
         self._require_open_domain()
@@ -1251,24 +1239,24 @@ class _ConcreteSession:
     ) -> None:
         self._guard_guest_operation(wrapper)
         final_name = _relative_name(artifact_name)
-        temporary_name = _relative_name(self._temporary_artifact_name(final_name))
+        temporary_name = _relative_name(_temporary_artifact_name(final_name))
         if temporary_name == final_name:
             raise ValueError("temporary artifact name must differ from final artifact name")
         descriptor = self.open_artifact(temporary_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         try:
             guest.download(guest_source, f"/proc/self/fd/{descriptor}")
-            self._fsync_descriptor(descriptor)
+            os.fsync(descriptor)
             closing, descriptor = descriptor, None
-            self._close_transfer_descriptor(closing)
-            self._replace_relative(self._artifact_root(), temporary_name, final_name)
+            os.close(closing)
+            _replace_relative(self._artifact_root(), temporary_name, final_name)
         except BaseException as exc:
             if descriptor is not None:
                 try:
-                    self._close_transfer_descriptor(descriptor)
+                    os.close(descriptor)
                 except Exception as close_error:
                     exc.add_note(f"cleanup failed: {close_error!r}")
             try:
-                self._unlink_relative(self._artifact_root(), temporary_name)
+                _unlink_relative(self._artifact_root(), temporary_name)
             except FileNotFoundError:
                 pass
             except Exception as unlink_error:
@@ -1331,11 +1319,11 @@ class _ConcreteSession:
             transfer(f"/proc/self/fd/{descriptor}")
         except BaseException as exc:
             try:
-                self._close_transfer_descriptor(descriptor)
+                os.close(descriptor)
             except Exception as close_error:
                 exc.add_note(f"cleanup failed: {close_error!r}")
             raise
-        self._close_transfer_descriptor(descriptor)
+        os.close(descriptor)
 
     def _guard_guest_operation(self, guest: _GuestContext) -> None:
         if guest not in self._guests:
@@ -1380,12 +1368,6 @@ class LocalExternalBootSessionFactory:
         fstat_overlay: Callable[[int], tuple[int, int, int]] | None = None,
         close_descriptor: Callable[[int], None] = os.close,
         close_overlay_descriptor: Callable[[int], None] = os.close,
-        close_transfer_descriptor: Callable[[int], None] = os.close,
-        open_relative: Callable[[int, str, int, int], int] | None = None,
-        unlink_relative: Callable[[int, str], None] | None = None,
-        replace_relative: Callable[[int, str, str], None] | None = None,
-        fsync_descriptor: Callable[[int], None] = os.fsync,
-        temporary_artifact_name: Callable[[str], str] | None = None,
         worker_pid: int | None = None,
         prepare_console: PrepareConsole | None = None,
         readiness: ReadinessProbe | None = None,
@@ -1404,12 +1386,6 @@ class LocalExternalBootSessionFactory:
         self._fstat_overlay = fstat_overlay or _fstat_identity
         self._close_descriptor = close_descriptor
         self._close_overlay_descriptor = close_overlay_descriptor
-        self._close_transfer_descriptor = close_transfer_descriptor
-        self._open_relative = open_relative or _open_relative
-        self._unlink_relative = unlink_relative or _unlink_relative
-        self._replace_relative = replace_relative or _replace_relative
-        self._fsync_descriptor = fsync_descriptor
-        self._temporary_artifact_name = temporary_artifact_name or _temporary_artifact_name
         self._worker_pid = worker_pid if worker_pid is not None else os.getpid()
         self._prepare_console = prepare_console or _unconfigured_prepare_console
         self._readiness = readiness or _unconfigured_readiness
@@ -1501,12 +1477,6 @@ class LocalExternalBootSessionFactory:
                 fstat_overlay=self._fstat_overlay,
                 close_descriptor=self._close_descriptor,
                 close_overlay_descriptor=self._close_overlay_descriptor,
-                close_transfer_descriptor=self._close_transfer_descriptor,
-                open_relative=self._open_relative,
-                unlink_relative=self._unlink_relative,
-                replace_relative=self._replace_relative,
-                fsync_descriptor=self._fsync_descriptor,
-                temporary_artifact_name=self._temporary_artifact_name,
                 worker_pid=self._worker_pid,
                 prepare_console=self._prepare_console,
                 readiness=self._readiness,

@@ -3669,7 +3669,10 @@ def test_guest_rechecks_inactive_and_overlay_before_every_operation() -> None:
 
 
 @pytest.mark.parametrize("name", ["/etc/passwd", "../escape", "a/b", ".", "..", ""])
-def test_guest_artifact_transfer_rejects_host_path_escape_before_open(name: str) -> None:
+def test_guest_artifact_transfer_rejects_host_path_escape_before_open(
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
     factory = LocalExternalBootSessionFactory(
         pin_lease=LANE.pin,
@@ -3680,22 +3683,33 @@ def test_guest_artifact_transfer_rejects_host_path_escape_before_open(name: str)
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
-        open_relative=lambda *_args: events.append("artifact.child.open") or 42,
-        close_transfer_descriptor=lambda _fd: events.append("artifact.child.close"),
     )
     session = factory.open(_lease(), _expected())
-    with session.guest() as guest:
-        assert not hasattr(guest, "upload")
-        assert not hasattr(guest, "download")
-        with pytest.raises(ValueError, match="canonical relative"):
-            guest.upload_artifact(name, "/guest/destination")
-        with pytest.raises(ValueError, match="canonical relative"):
-            guest.download_artifact("/guest/source", name)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_module,
+            "_open_relative",
+            lambda *_args: events.append("artifact.child.open") or 42,
+        )
+        patch.setattr(
+            os,
+            "close",
+            lambda _fd: events.append("artifact.child.close"),
+        )
+        with session.guest() as guest:
+            assert not hasattr(guest, "upload")
+            assert not hasattr(guest, "download")
+            with pytest.raises(ValueError, match="canonical relative"):
+                guest.upload_artifact(name, "/guest/destination")
+            with pytest.raises(ValueError, match="canonical relative"):
+                guest.download_artifact("/guest/source", name)
     assert "artifact.child.open" not in events
     session.close()
 
 
-def test_guest_artifact_transfers_use_owned_fds_and_close_each() -> None:
+def test_guest_artifact_transfers_use_owned_fds_and_close_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
     factory = LocalExternalBootSessionFactory(
         pin_lease=LANE.pin,
@@ -3706,27 +3720,50 @@ def test_guest_artifact_transfers_use_owned_fds_and_close_each() -> None:
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
-        open_relative=lambda root, name, flags, mode: (
-            events.append(f"artifact.child.open:{root}:{name}:{flags}:{mode}") or 42
-        ),
-        close_transfer_descriptor=lambda fd: events.append(f"artifact.child.close:{fd}"),
-        fsync_descriptor=lambda fd: events.append(f"artifact.child.fsync:{fd}"),
-        replace_relative=lambda root, source, target: events.append(
-            f"artifact.replace:{root}:{source}:{target}"
-        ),
-        temporary_artifact_name=lambda name: f".{name}.tmp",
     )
     session = factory.open(_lease(), _expected())
-    with session.guest() as guest:
-        guest.upload_artifact("input.tar", "/guest/input.tar")
-        guest.download_artifact("/guest/output.tar", "output.tar")
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_module,
+            "_open_relative",
+            lambda root, name, flags, mode: (
+                events.append(f"artifact.child.open:{root}:{name}:{flags}:{mode}") or 42
+            ),
+        )
+        patch.setattr(
+            os,
+            "close",
+            lambda fd: events.append(f"artifact.child.close:{fd}"),
+        )
+        patch.setattr(
+            os,
+            "fsync",
+            lambda fd: events.append(f"artifact.child.fsync:{fd}"),
+        )
+        patch.setattr(
+            session_module,
+            "_replace_relative",
+            lambda root, source, target: events.append(
+                f"artifact.replace:{root}:{source}:{target}"
+            ),
+        )
+        patch.setattr(
+            session_module,
+            "_temporary_artifact_name",
+            lambda name: f".{name}.tmp",
+        )
+        with session.guest() as guest:
+            guest.upload_artifact("input.tar", "/guest/input.tar")
+            guest.download_artifact("/guest/output.tar", "output.tar")
     assert "upload:/proc/self/fd/42:/guest/input.tar" in events
     assert "download:/guest/output.tar:/proc/self/fd/42" in events
     assert events.count("artifact.child.close:42") == 2
     session.close()
 
 
-def test_download_publishes_atomically_after_fsync_and_close() -> None:
+def test_download_publishes_atomically_after_fsync_and_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
     factory = LocalExternalBootSessionFactory(
         pin_lease=LANE.pin,
@@ -3737,19 +3774,38 @@ def test_download_publishes_atomically_after_fsync_and_close() -> None:
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
-        open_relative=lambda root, name, flags, mode: (
-            events.append(f"open:{root}:{name}:{flags}:{mode}") or 42
-        ),
-        close_transfer_descriptor=lambda fd: events.append(f"close:{fd}"),
-        fsync_descriptor=lambda fd: events.append(f"fsync:{fd}"),
-        replace_relative=lambda root, source, target: events.append(
-            f"replace:{root}:{source}:{target}"
-        ),
-        temporary_artifact_name=lambda name: f".{name}.tmp",
     )
     session = factory.open(_lease(), _expected())
-    with session.guest() as guest:
-        guest.download_artifact("/guest/output.tar", "output.tar")
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_module,
+            "_open_relative",
+            lambda root, name, flags, mode: (
+                events.append(f"open:{root}:{name}:{flags}:{mode}") or 42
+            ),
+        )
+        patch.setattr(
+            os,
+            "close",
+            lambda fd: events.append(f"close:{fd}"),
+        )
+        patch.setattr(
+            os,
+            "fsync",
+            lambda fd: events.append(f"fsync:{fd}"),
+        )
+        patch.setattr(
+            session_module,
+            "_replace_relative",
+            lambda root, source, target: events.append(f"replace:{root}:{source}:{target}"),
+        )
+        patch.setattr(
+            session_module,
+            "_temporary_artifact_name",
+            lambda name: f".{name}.tmp",
+        )
+        with session.guest() as guest:
+            guest.download_artifact("/guest/output.tar", "output.tar")
     open_event = next(event for event in events if event.startswith("open:"))
     assert f":{os.O_WRONLY | os.O_CREAT | os.O_EXCL}:" in open_event
     assert events.index("download:/guest/output.tar:/proc/self/fd/42") < events.index("fsync:42")
@@ -3758,7 +3814,9 @@ def test_download_publishes_atomically_after_fsync_and_close() -> None:
     session.close()
 
 
-def test_failed_download_removes_temp_and_preserves_existing_final() -> None:
+def test_failed_download_removes_temp_and_preserves_existing_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
 
     class PartialDownloadGuest(Guest):
@@ -3775,25 +3833,50 @@ def test_failed_download_removes_temp_and_preserves_existing_final() -> None:
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
-        open_relative=lambda *_args: 42,
-        close_transfer_descriptor=lambda fd: events.append(f"close:{fd}"),
-        fsync_descriptor=lambda fd: events.append(f"fsync:{fd}"),
-        replace_relative=lambda root, source, target: events.append(
-            f"replace:{root}:{source}:{target}"
-        ),
-        unlink_relative=lambda root, name: events.append(f"unlink:{root}:{name}"),
-        temporary_artifact_name=lambda name: f".{name}.tmp",
     )
     session = factory.open(_lease(), _expected())
-    with session.guest() as guest, pytest.raises(OSError, match="partial download"):
-        guest.download_artifact("/guest/output.tar", "output.tar")
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_module,
+            "_open_relative",
+            lambda *_args: 42,
+        )
+        patch.setattr(
+            os,
+            "close",
+            lambda fd: events.append(f"close:{fd}"),
+        )
+        patch.setattr(
+            os,
+            "fsync",
+            lambda fd: events.append(f"fsync:{fd}"),
+        )
+        patch.setattr(
+            session_module,
+            "_replace_relative",
+            lambda root, source, target: events.append(f"replace:{root}:{source}:{target}"),
+        )
+        patch.setattr(
+            session_module,
+            "_unlink_relative",
+            lambda root, name: events.append(f"unlink:{root}:{name}"),
+        )
+        patch.setattr(
+            session_module,
+            "_temporary_artifact_name",
+            lambda name: f".{name}.tmp",
+        )
+        with session.guest() as guest, pytest.raises(OSError, match="partial download"):
+            guest.download_artifact("/guest/output.tar", "output.tar")
     assert "close:42" in events
     assert "unlink:41:.output.tar.tmp" in events
     assert not any(event.startswith("replace:") for event in events)
     session.close()
 
 
-def test_guest_transfer_preserves_primary_and_attempts_faulting_fd_close() -> None:
+def test_guest_transfer_preserves_primary_and_attempts_faulting_fd_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
 
     class TransferFaultGuest(Guest):
@@ -3814,15 +3897,24 @@ def test_guest_transfer_preserves_primary_and_attempts_faulting_fd_close() -> No
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
-        open_relative=lambda *_args: 42,
-        close_transfer_descriptor=close_fault,
     )
     session = factory.open(_lease(), _expected())
-    with (
-        session.guest() as guest,
-        pytest.raises(LookupError, match="transfer primary") as raised,
-    ):
-        guest.upload_artifact("input.tar", "/guest/input.tar")
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_module,
+            "_open_relative",
+            lambda *_args: 42,
+        )
+        patch.setattr(
+            os,
+            "close",
+            close_fault,
+        )
+        with (
+            session.guest() as guest,
+            pytest.raises(LookupError, match="transfer primary") as raised,
+        ):
+            guest.upload_artifact("input.tar", "/guest/input.tar")
     assert raised.value.__notes__ == ["cleanup failed: OSError('close secondary')"]
     assert events.count("artifact.child.close:42") == 1
     session.close()
@@ -4114,7 +4206,9 @@ def test_failed_boot_teardown_removes_an_authority_owned_system(tmp_path: Path) 
     assert not baseline.exists()
 
 
-def test_narrow_injected_primitives_keep_host_authority_private() -> None:
+def test_narrow_injected_primitives_keep_host_authority_private(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
     domain = Domain(events)
     observation = RunningKernelObservation(
@@ -4131,10 +4225,6 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
-        open_relative=lambda root, name, flags, mode: (
-            events.append(f"openat:{root}:{name}:{flags}:{mode}") or 42
-        ),
-        unlink_relative=lambda root, name: events.append(f"unlinkat:{root}:{name}"),
         prepare_console=lambda _sid: cast(ConsoleReadinessWindow, _Window(events, "authority")),
         readiness=lambda _system_id, _window: ReadinessResult(True, True),
         observe_running=lambda _system_id, _domain: observation,
@@ -4143,24 +4233,37 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
         ),
     )
     session = factory.open(_lease(), _expected())
-    assert session.open_artifact("point.json", 0) == 42
-    session.unlink_artifact("point.json")
-    session.start()
-    assert session.readiness() == ReadinessResult(True, True)
-    assert session.observe_running() == observation
-    creates = events.count("domain.create")
-    session.restore_power()
-    assert events.count("domain.create") == creates
-    session.stop_and_require_inactive(mode="destroy")
-    session.cleanup_payloads(_metadata().model_copy(update={"binding": BINDING}))
-    session.restore_power()
-    assert domain.active
-    session.stop_and_require_inactive(mode="destroy")
-    assert not domain.active
-    assert not hasattr(session.inspect_persistent_definition().overlay, "path")
-    assert not hasattr(session, "artifact_root_descriptor")
-    with pytest.raises(ValueError, match="relative"):
-        session.open_artifact("../escape", 0)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_module,
+            "_open_relative",
+            lambda root, name, flags, mode: (
+                events.append(f"openat:{root}:{name}:{flags}:{mode}") or 42
+            ),
+        )
+        patch.setattr(
+            session_module,
+            "_unlink_relative",
+            lambda root, name: events.append(f"unlinkat:{root}:{name}"),
+        )
+        assert session.open_artifact("point.json", 0) == 42
+        session.unlink_artifact("point.json")
+        session.start()
+        assert session.readiness() == ReadinessResult(True, True)
+        assert session.observe_running() == observation
+        creates = events.count("domain.create")
+        session.restore_power()
+        assert events.count("domain.create") == creates
+        session.stop_and_require_inactive(mode="destroy")
+        session.cleanup_payloads(_metadata().model_copy(update={"binding": BINDING}))
+        session.restore_power()
+        assert domain.active
+        session.stop_and_require_inactive(mode="destroy")
+        assert not domain.active
+        assert not hasattr(session.inspect_persistent_definition().overlay, "path")
+        assert not hasattr(session, "artifact_root_descriptor")
+        with pytest.raises(ValueError, match="relative"):
+            session.open_artifact("../escape", 0)
     session.close()
     for call in (
         session.readiness,
@@ -4548,3 +4651,139 @@ def test_acquisition_cleanup_preserves_base_exception_interruption(abort_at: str
     assert events == order[: order.index(abort_at) + 1]
     assert getattr(primary, "__notes__", []) == []
     assert lease.pins == (0 if abort_at == "pin" else 1)
+
+
+@pytest.fixture
+def artifact_transfer_session(
+    tmp_path: Path,
+) -> Iterator[tuple[LocalExternalBootSession, Path, Guest]]:
+    activation = tmp_path / "activation"
+    activation.mkdir(mode=0o700)
+    overlay = tmp_path / "overlay"
+    overlay.write_bytes(b"qcow")
+    events: list[str] = []
+
+    class DownloadGuest(Guest):
+        def download(self, remotefilename: str, filename: str) -> None:
+            super().download(remotefilename, filename)
+            Path(filename).write_bytes(b"downloaded payload")
+
+    transfer_guest = DownloadGuest(events)
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events, _xml(overlay=str(overlay)))),
+        open_artifact_root=lambda _ownership: os.open(
+            activation, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        ),
+        open_guest=lambda: transfer_guest,
+        overlay_path_for=lambda _system_id: str(overlay),
+    )
+    lease = _lease()
+    session = factory.open(lease, _expected())
+    try:
+        yield session, activation, transfer_guest
+    finally:
+        session.close()
+        assert lease.pins == 0
+
+
+def test_default_filesystem_operations_publish_real_download(
+    artifact_transfer_session: tuple[LocalExternalBootSession, Path, Guest],
+) -> None:
+    session, activation, _ = artifact_transfer_session
+    final = activation / "output.tar"
+    final.write_bytes(b"previous payload")
+    with session.guest() as guest:
+        guest.download_artifact("/guest/output.tar", "output.tar")
+    assert final.read_bytes() == b"downloaded payload"
+    assert stat.S_IMODE(final.stat().st_mode) == 0o600
+    assert list(activation.iterdir()) == [final]
+
+
+@pytest.mark.parametrize("operation", ["open", "sync", "close", "replace"])
+def test_download_fault_at_filesystem_operation_preserves_final_and_closes_transfer(
+    artifact_transfer_session: tuple[LocalExternalBootSession, Path, Guest],
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    session, activation, _ = artifact_transfer_session
+    final = activation / "output.tar"
+    final.write_bytes(b"previous payload")
+    fault = OSError(errno.EIO, f"injected {operation} failure")
+    real_close = os.close
+    closed: list[int] = []
+
+    def close(descriptor: int) -> None:
+        real_close(descriptor)
+        closed.append(descriptor)
+        if operation == "close":
+            raise fault
+
+    def refuse(*_args: object) -> None:
+        raise fault
+
+    with session.guest() as guest, monkeypatch.context() as patch:
+        patch.setattr(os, "close", close)
+        if operation == "open":
+            patch.setattr(session_module, "_open_relative", refuse)
+        elif operation == "sync":
+            patch.setattr(os, "fsync", refuse)
+        elif operation == "replace":
+            patch.setattr(session_module, "_replace_relative", refuse)
+        with pytest.raises(OSError) as raised:
+            guest.download_artifact("/guest/output.tar", "output.tar")
+
+    assert raised.value is fault
+    assert final.read_bytes() == b"previous payload"
+    assert list(activation.iterdir()) == [final]
+    assert len(closed) == (0 if operation == "open" else 1)
+    for descriptor in closed:
+        with pytest.raises(OSError) as closed_error:
+            os.fstat(descriptor)
+        assert closed_error.value.errno == errno.EBADF
+
+
+def test_download_validates_temporary_name_at_operation_boundary(
+    artifact_transfer_session: tuple[LocalExternalBootSession, Path, Guest],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, activation, _ = artifact_transfer_session
+    final = activation / "output.tar"
+    final.write_bytes(b"previous payload")
+    with session.guest() as guest, monkeypatch.context() as patch:
+        patch.setattr(session_module, "_temporary_artifact_name", lambda name: name)
+        with pytest.raises(ValueError, match="temporary artifact name must differ"):
+            guest.download_artifact("/guest/output.tar", "output.tar")
+    assert final.read_bytes() == b"previous payload"
+    assert list(activation.iterdir()) == [final]
+
+
+def test_failed_download_keeps_primary_when_filesystem_unlink_fails(
+    artifact_transfer_session: tuple[LocalExternalBootSession, Path, Guest],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, activation, transfer_guest = artifact_transfer_session
+    final = activation / "output.tar"
+    final.write_bytes(b"previous payload")
+    primary = LookupError("partial download")
+    secondary = OSError("unlink failed")
+    download = transfer_guest.download
+
+    def partial_download(source: str, destination: str) -> None:
+        download(source, destination)
+        raise primary
+
+    def refuse_unlink(_descriptor: int, _name: str) -> None:
+        raise secondary
+
+    with session.guest() as guest, monkeypatch.context() as patch:
+        patch.setattr(transfer_guest, "download", partial_download)
+        patch.setattr(session_module, "_unlink_relative", refuse_unlink)
+        with pytest.raises(LookupError) as raised:
+            guest.download_artifact("/guest/output.tar", "output.tar")
+    assert raised.value is primary
+    assert raised.value.__notes__ == [f"cleanup failed: {secondary!r}"]
+    assert final.read_bytes() == b"previous payload"
+    remaining = [path for path in activation.iterdir() if path != final]
+    assert len(remaining) == 1
+    assert remaining[0].read_bytes() == b"downloaded payload"
