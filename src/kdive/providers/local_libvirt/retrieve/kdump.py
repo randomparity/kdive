@@ -119,9 +119,9 @@ def read_via_tempfile[T](data: bytes, path_reader: Callable[[Path], T]) -> T:
 def extract_dmesg_or_sentinel(core: Path, extractor: Callable[[Path], bytes]) -> bytes:
     """Extract dmesg from the core file; degrade to the sentinel, but never hide a missing drgn.
 
-    Mirrors remote host_dump: a ``MISSING_DEPENDENCY`` (drgn absent) is an operator fault that
-    must surface; any other failure (printk needs debuginfo) degrades to ``DMESG_UNAVAILABLE``
-    so the core + build-id still get captured.
+    ``MISSING_DEPENDENCY`` (drgn absent) is an operator fault that must surface. Other
+    categorized extraction failures degrade to ``DMESG_UNAVAILABLE`` so the core + build-id
+    still get captured. Uncategorized implementation faults propagate.
     """
     try:
         return extractor(core)
