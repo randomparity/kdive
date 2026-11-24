@@ -14,8 +14,11 @@ from psycopg_pool import AsyncConnectionPool
 import kdive.config as config
 from kdive.artifacts.storage import StoredArtifact
 from kdive.components.references import ROOTFS_COMPONENT
+from kdive.domain.capacity.state import ResourceStatus
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.catalog.discovery import ResourceRecord
+from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -50,6 +53,11 @@ from kdive.providers.remote_libvirt.retrieve.provider import RemoteLibvirtRetrie
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
+from tests.db.conftest import (  # noqa: F401 -- pytest fixture re-exports
+    _migrated_db,
+    migrated_url,
+    postgres_url,
+)
 
 _REMOTE_INVENTORY = """
 schema_version = 2
@@ -345,7 +353,8 @@ def test_fault_inject_runtime_advertises_its_provider_identity() -> None:
 
     assert isinstance(runtime.profile_policy, FaultInjectProfilePolicy)
     assert runtime.support.component_sources.provider == "fault-inject"
-    assert runtime.discovery_registrar is not None
+    registrar = runtime.discovery_registrar
+    assert registrar is None
 
 
 def test_fault_inject_runtime_provision_is_visible_to_a_reaper_on_the_same_inventory() -> None:
@@ -665,8 +674,8 @@ def test_disabled_local_libvirt_does_not_compose_local_discovery(
 ) -> None:
     # The local-libvirt discovery registration (creates=True) builds a LocalLibvirtDiscovery,
     # which opens the libvirt socket. With local disabled its runtime is not composed, so
-    # register_all_discovery must never construct that target. (Remote discovery is bind-only,
-    # creates=False, so it cannot be the failing sibling — see test_resolver.py for the
+    # register_all_discovery must never construct that target. (Remote registration is absent,
+    # so it cannot be the failing sibling — see test_resolver.py for the
     # raise-isolation property over synthetic creates=True runtimes.)
     constructed: list[str] = []
     monkeypatch.setattr(
@@ -859,24 +868,130 @@ def test_remote_runtime_buildable_without_operator_config(
 ) -> None:
     monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)
 
-    # Buildability gates only construction (ADR-0076); config gates discovery/connection.
+    # Construction stays independent of operator connection config (ADR-0076).
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
-    assert runtime.discovery_registrar is not None
+    registrar = runtime.discovery_registrar
+    assert registrar is None
 
 
-def test_remote_discovery_registration_is_bind_only() -> None:
-    registration = composition.remote_composition.discovery_registration(
-        secret_registry=SecretRegistry()
+def test_remote_provider_runtime_has_no_discovery_registrar() -> None:
+    runtime = composition.remote_composition.build_runtime(secret_registry=SecretRegistry())
+    registrar = runtime.discovery_registrar
+    assert registrar is None
+
+
+def test_descriptor_without_registration_builds_its_runtime_once() -> None:
+    runtime = composition.fault_inject_composition.build_runtime()
+    calls = 0
+
+    def build() -> ProviderRuntime:
+        nonlocal calls
+        calls += 1
+        return runtime
+
+    descriptor = composition._RuntimeDescriptor(
+        kind=ResourceKind.FAULT_INJECT, enabled=lambda: True, runtime_factory=build
     )
+    built = descriptor.build_runtime()
+    assert calls == 1
+    assert built.discovery_registrar is None
+    assert built.provisioner is runtime.provisioner
 
-    assert registration.kind is ResourceKind.REMOTE_LIBVIRT
-    assert registration.creates is False
+
+@pytest.mark.parametrize("kind", [ResourceKind.FAULT_INJECT, ResourceKind.REMOTE_LIBVIRT])
+def test_inventory_owned_direct_helpers_have_no_registrar(kind: ResourceKind) -> None:
+    runtime = (
+        composition.build_fault_inject_runtime()
+        if kind is ResourceKind.FAULT_INJECT
+        else composition.build_remote_runtime(secret_registry=SecretRegistry())
+    )
+    registrar = runtime.discovery_registrar
+    assert registrar is None
+
+
+@pytest.mark.parametrize(
+    "kind", [ResourceKind.BYO_HOST, ResourceKind.FAULT_INJECT, ResourceKind.REMOTE_LIBVIRT]
+)
+def test_inventory_owned_resolver_never_registers_discovery(
+    kind: ResourceKind, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[object] = []
+
+    async def register(*args: object, **kwargs: object) -> None:
+        calls.append(args)
+        raise AssertionError("inventory-owned provider attempted discovery registration")
+
+    monkeypatch.setattr(composition, "register_or_refresh_discovered_resource", register)
+    resolver = composition.ProviderComposition().build_provider_resolver(
+        enable_local_libvirt=False,
+        enable_remote_libvirt=kind is ResourceKind.REMOTE_LIBVIRT,
+        enable_fault_inject=kind is ResourceKind.FAULT_INJECT,
+        enable_byo_host=kind is ResourceKind.BYO_HOST,
+    )
+    assert resolver.registered_kinds() == frozenset({kind})
+    registrar = resolver.resolve(kind).discovery_registrar
+    assert registrar is None
+    asyncio.run(resolver.register_all_discovery(cast(AsyncConnectionPool, object())))
+    assert calls == []
+
+
+def test_local_resolver_discovery_registers_one_stable_row(
+    migrated_url: str,  # noqa: F811 -- pytest resolves the re-exported fixture
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Discovery:
+        def list_resources(self) -> list[ResourceRecord]:
+            return [
+                ResourceRecord(
+                    resource_id="qemu:///system",
+                    kind=ResourceKind.LOCAL_LIBVIRT,
+                    capabilities={
+                        "arch": "x86_64",
+                        "vcpus": 8,
+                        "memory_mb": 16384,
+                        CONCURRENT_ALLOCATION_CAP_KEY: 2,
+                    },
+                    status=ResourceStatus.AVAILABLE,
+                )
+            ]
+
+    monkeypatch.setattr(
+        composition.local_composition,
+        "_discovery_target",
+        lambda: DiscoveryRegistrationTarget(discovery=Discovery(), resource_id="qemu:///system"),
+    )
+    resolver = composition.ProviderComposition().build_provider_resolver(
+        enable_local_libvirt=True,
+        enable_remote_libvirt=False,
+        enable_fault_inject=False,
+        enable_byo_host=False,
+    )
+    assert resolver.resolve(ResourceKind.LOCAL_LIBVIRT).discovery_registrar is not None
+
+    async def run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await resolver.register_all_discovery(pool)
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id,kind,host_uri FROM resources WHERE kind='local-libvirt'"
+                )
+                before = await cur.fetchall()
+            assert len(before) == 1
+            assert before[0][1:] == ("local-libvirt", "qemu:///system")
+            await resolver.register_all_discovery(pool)
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id,kind,host_uri FROM resources WHERE kind='local-libvirt'"
+                )
+                assert await cur.fetchall() == before
+
+    asyncio.run(run())
 
 
 def test_creates_false_registrar_never_resolves_target_or_writes() -> None:
     # The creates=False early return in _discovery_registrar must fire before the discovery
-    # target is resolved, so remote/fault-inject stay bind-only no-ops and never reach
+    # target is resolved, so explicit bind-only metadata never reaches
     # register_or_refresh_discovered_resource (preserving the no-remote-connect safety, ADR-0384).
     resolved = False
 
@@ -898,13 +1013,10 @@ def test_creates_false_registrar_never_resolves_target_or_writes() -> None:
     assert resolved is False
 
 
-def test_build_runtime_helpers_thread_registry_and_real_discovery_registration(
+def test_build_runtime_helpers_thread_registry_and_local_discovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The module-level build_*_runtime helpers must (a) pass the caller's registry to the
-    # provider runtime builder and (b) attach the provider's *real* discovery registration
-    # (not None) — a None registration crashes register_all_discovery at reconcile time.
-    captured: list[object] = []
+    captured: list[ProviderDiscoveryRegistration] = []
     real_with = composition._with_discovery_registration
 
     def _spy_with(
@@ -915,7 +1027,6 @@ def test_build_runtime_helpers_thread_registry_and_real_discovery_registration(
         return real_with(runtime, registration)
 
     monkeypatch.setattr(composition, "_with_discovery_registration", _spy_with)
-
     seen: dict[str, object] = {}
     real_local = composition.local_composition.build_runtime
     real_remote = composition.remote_composition.build_runtime
@@ -928,40 +1039,29 @@ def test_build_runtime_helpers_thread_registry_and_real_discovery_registration(
         seen["remote"] = secret_registry
         return real_remote(secret_registry=secret_registry, store=store)
 
-    real_remote_disc = composition.remote_composition.discovery_registration
-
-    def _remote_disc(*, secret_registry: SecretRegistry) -> object:
-        seen["remote_disc"] = secret_registry
-        return real_remote_disc(secret_registry=secret_registry)
-
     monkeypatch.setattr(composition.local_composition, "build_runtime", _local)
     monkeypatch.setattr(composition.remote_composition, "build_runtime", _remote)
-    monkeypatch.setattr(composition.remote_composition, "discovery_registration", _remote_disc)
-
     local_registry = SecretRegistry()
     remote_registry = SecretRegistry()
-    composition.build_local_runtime(secret_registry=local_registry)
-    composition.build_fault_inject_runtime()
-    composition.build_remote_runtime(secret_registry=remote_registry)
+    local = composition.build_local_runtime(secret_registry=local_registry)
+    fault = composition.build_fault_inject_runtime()
+    remote = composition.build_remote_runtime(secret_registry=remote_registry)
 
     assert seen["local"] is local_registry
     assert seen["remote"] is remote_registry
-    assert seen["remote_disc"] is remote_registry
-    # Each helper attached a real, non-None discovery registration (asserted in the spy).
-    assert len(captured) == 3
-    assert all(reg is not None for reg in captured)
+    assert len(captured) == 1
+    assert captured[0].kind is ResourceKind.LOCAL_LIBVIRT
+    assert local.discovery_registrar is not None
+    assert fault.discovery_registrar is None
+    assert remote.discovery_registrar is None
 
 
 def test_resolver_threads_shared_registry_into_provider_runtimes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The resolver builds each provider runtime (and the remote discovery registration) with
-    # the composition's shared secret registry; a null registry would disable redaction in
-    # the constructed ports. Patch the underlying builders to capture the registry threaded.
     seen: dict[str, object] = {}
     real_local = composition.local_composition.build_runtime
     real_remote = composition.remote_composition.build_runtime
-    real_remote_disc = composition.remote_composition.discovery_registration
 
     def _local(
         *, secret_registry: SecretRegistry, store: ObjectStore, authority_sender: object
@@ -977,21 +1077,14 @@ def test_resolver_threads_shared_registry_into_provider_runtimes(
         seen["remote"] = secret_registry
         return real_remote(secret_registry=secret_registry, store=store)
 
-    def _remote_disc(*, secret_registry: SecretRegistry) -> object:
-        seen["remote_disc"] = secret_registry
-        return real_remote_disc(secret_registry=secret_registry)
-
     monkeypatch.setattr(composition.local_composition, "build_runtime", _local)
     monkeypatch.setattr(composition.remote_composition, "build_runtime", _remote)
-    monkeypatch.setattr(composition.remote_composition, "discovery_registration", _remote_disc)
-
     _declare_remote(tmp_path, monkeypatch)
     expected_registry = SecretRegistry()
     composition.ProviderComposition(secret_registry=expected_registry).build_provider_resolver()
 
     assert seen["local"] is expected_registry
     assert seen["remote"] is expected_registry
-    assert seen["remote_disc"] is expected_registry
 
 
 def test_remote_factory_builders_thread_the_shared_registry(

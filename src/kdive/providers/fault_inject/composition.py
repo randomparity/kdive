@@ -12,10 +12,6 @@ from kdive.components.references import (
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.providers.core.discovery_registration import (
-    DiscoveryRegistrationTarget,
-    ProviderDiscoveryRegistration,
-)
 from kdive.providers.core.runtime import (
     DebugCapabilities,
     ProviderRuntime,
@@ -32,7 +28,6 @@ from kdive.providers.fault_inject.debug.gdb import (
     fault_inject_attach_seam,
 )
 from kdive.providers.fault_inject.debug.introspect import FaultInjectIntrospect
-from kdive.providers.fault_inject.discovery import FaultInjectDiscovery
 from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper
 from kdive.providers.fault_inject.lifecycle.connect import FaultInjectConnect
@@ -56,10 +51,6 @@ from kdive.providers.infra.reaping import InfraReaper
 from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
 from kdive.store.objectstore import ObjectStore
 
-_POOL = "fault-inject"
-# Synthetic provider cost reuses seeded `local`; unseeded classes fail closed in accounting.
-_COST_CLASS = "local"
-
 
 def _component_sources() -> ComponentSourceCapabilities:
     # ROOTFS only, mirroring local-libvirt: it is the one kind a caller can supply, and the one
@@ -75,25 +66,6 @@ def _component_sources() -> ComponentSourceCapabilities:
         provider=ResourceKind.FAULT_INJECT.value,
         accepted_component_sources=accepted,
     )
-
-
-def discovery_registration() -> ProviderDiscoveryRegistration:
-    # Bind-only (creates=False): fault-inject has no host to enumerate, so its row exists only
-    # when declared in systems.toml. reconcile_resources is the sole creator (ADR-0112 #393);
-    # the config overlay supplies the vcpus/memory_mb #385 needed. Letting discovery also insert
-    # would produce a second, sizing-less row that collides on the (kind, name) identity.
-    return ProviderDiscoveryRegistration(
-        target_factory=_discovery_target,
-        kind=ResourceKind.FAULT_INJECT,
-        pool_name=_POOL,
-        cost_class=_COST_CLASS,
-        creates=False,
-    )
-
-
-def _discovery_target() -> DiscoveryRegistrationTarget:
-    discovery = FaultInjectDiscovery.from_env()
-    return DiscoveryRegistrationTarget(discovery=discovery, resource_id=discovery.host_uri)
 
 
 def build_reaper(inventory: FaultInjectInventory) -> InfraReaper:

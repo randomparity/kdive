@@ -58,5 +58,5 @@ for idempotency; run existing real-PG inventory/adoption cases. A fake host prev
 Use controlled reintroduced no-op, missing local attachment and missing generic false guard faults;
 restore exact bytes. Preserve all unchanged producer/assembly functions, core/local/inventory code,
 MCP/schema contracts and SQL by AST/byte checks. Verify actual built/installed runtime metadata,
-module bytes/origins and focused cases. Run lint, whole-tree types, docs/hooks and bounded fresh
+module bytes/origins and focused cases. Run lint, whole-tree types, documentation checks and commit hooks and bounded fresh
 code/security reviews before local commit and exact finding attribution.

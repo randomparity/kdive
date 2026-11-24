@@ -9,7 +9,6 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.path import systems_toml_path
-from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
 from kdive.providers.core.runtime import ProviderRuntime
 
 
@@ -63,16 +62,6 @@ def build_runtime() -> ProviderRuntime:
         vmcore_introspector=ports,
         live_introspector=ports,
         platform_root_cmdline=None,
-    )
-
-
-def discovery_registration() -> ProviderDiscoveryRegistration:
-    return ProviderDiscoveryRegistration(
-        target_factory=_RefusingPorts().provision,
-        kind=ResourceKind.BYO_HOST,
-        pool_name="default",
-        cost_class="byo",
-        creates=False,
     )
 
 

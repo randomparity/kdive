@@ -141,7 +141,7 @@ class _RuntimeDescriptor:
     kind: ResourceKind
     enabled: Callable[[], bool]
     runtime_factory: Callable[[], ProviderRuntime]
-    discovery_registration_factory: Callable[[], ProviderDiscoveryRegistration]
+    discovery_registration_factory: Callable[[], ProviderDiscoveryRegistration] | None = None
     infra_reaper_factory: Callable[[], InfraReaper] | None = None
     transport_resetter_factory: Callable[[], TransportResetter] | None = None
     dump_volume_reaper_factory: Callable[[], DumpVolumeReaper] | None = None
@@ -150,9 +150,10 @@ class _RuntimeDescriptor:
     console_hosting_factory: _ConsoleHostingBuilder | None = None
 
     def build_runtime(self) -> ProviderRuntime:
-        return _with_discovery_registration(
-            self.runtime_factory(), self.discovery_registration_factory()
-        )
+        runtime = self.runtime_factory()
+        if self.discovery_registration_factory is None:
+            return runtime
+        return _with_discovery_registration(runtime, self.discovery_registration_factory())
 
 
 def _discovery_registrar(registration: ProviderDiscoveryRegistration) -> DiscoveryRegistrar:
@@ -199,19 +200,15 @@ def build_fault_inject_runtime(
     hotplug_behaviour: HotplugBehaviour | None = None,
     store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
 ) -> ProviderRuntime:
-    runtime = fault_inject_composition.build_runtime(
+    return fault_inject_composition.build_runtime(
         inventory=inventory, engine=engine, hotplug_behaviour=hotplug_behaviour, store=store
     )
-    return _with_discovery_registration(runtime, fault_inject_composition.discovery_registration())
 
 
 def build_remote_runtime(
     *, secret_registry: SecretRegistry, store: ObjectStore = UNCONFIGURED_OBJECT_STORE
 ) -> ProviderRuntime:
-    runtime = remote_composition.build_runtime(secret_registry=secret_registry, store=store)
-    return _with_discovery_registration(
-        runtime, remote_composition.discovery_registration(secret_registry=secret_registry)
-    )
+    return remote_composition.build_runtime(secret_registry=secret_registry, store=store)
 
 
 async def ensure_local_host_registered(pool: AsyncConnectionPool) -> None:
@@ -356,7 +353,6 @@ class ProviderComposition:
                     else byo_composition.is_configured()
                 ),
                 runtime_factory=byo_composition.build_runtime,
-                discovery_registration_factory=byo_composition.discovery_registration,
             ),
             _RuntimeDescriptor(
                 kind=ResourceKind.LOCAL_LIBVIRT,
@@ -376,7 +372,6 @@ class ProviderComposition:
                 runtime_factory=lambda: fault_inject_composition.build_runtime(
                     inventory=self._fault_inject_inventory, store=self._object_store
                 ),
-                discovery_registration_factory=fault_inject_composition.discovery_registration,
                 infra_reaper_factory=lambda: fault_inject_composition.build_reaper(
                     self._fault_inject_inventory
                 ),
@@ -388,9 +383,6 @@ class ProviderComposition:
                     secret_registry=self._secret_registry,
                     store=self._object_store,
                     authority_sender_factory=authority_sender_factory,
-                ),
-                discovery_registration_factory=lambda: remote_composition.discovery_registration(
-                    secret_registry=self._secret_registry
                 ),
                 infra_reaper_factory=lambda: remote_composition.build_infra_reaper(
                     secret_registry=self._secret_registry

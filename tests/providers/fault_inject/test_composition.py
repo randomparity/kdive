@@ -26,7 +26,6 @@ from kdive.providers.fault_inject.debug.gdb import (
     fault_inject_attach_seam,
 )
 from kdive.providers.fault_inject.debug.introspect import FaultInjectIntrospect
-from kdive.providers.fault_inject.discovery import FaultInjectDiscovery
 from kdive.providers.fault_inject.faulting.engine import FaultEngine, FaultPlane
 from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper
 from kdive.providers.fault_inject.lifecycle.connect import FaultInjectConnect, synthetic_port
@@ -46,17 +45,11 @@ from kdive.providers.ports.lifecycle import (
 from kdive.security.artifacts.crash_commands import validate_crash_commands
 
 
-def test_discovery_registration_is_bind_only_and_targets_synthetic_host() -> None:
-    registration = composition.discovery_registration()
-    target = registration.target_factory()
-
-    assert registration.kind is ResourceKind.FAULT_INJECT
-    assert registration.pool_name == "fault-inject"
-    assert registration.cost_class == "local"
-    assert registration.creates is False
-    assert target.resource_id == "fault-inject://local"
-    assert isinstance(target.discovery, FaultInjectDiscovery)
-    assert target.discovery.host_uri == "fault-inject://local"
+def test_inventory_owned_runtime_has_no_discovery_registrar() -> None:
+    runtime = composition.build_runtime()
+    assert runtime.profile_policy.kind is ResourceKind.FAULT_INJECT
+    registrar = runtime.discovery_registrar
+    assert registrar is None
 
 
 def test_build_reaper_wraps_the_supplied_inventory() -> None:
