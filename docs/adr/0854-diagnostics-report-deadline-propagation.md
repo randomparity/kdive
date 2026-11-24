@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed
+Accepted (2026-11-23)
+
 Builds on [ADR-0164](0164-diagnostics-worker-vantage-dispatch.md), retaining its reserved
 worker-phase requirement, and [ADR-0091](0091-doctor-diagnostics-model.md).
 

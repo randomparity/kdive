@@ -257,6 +257,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool, service_factory: ServiceFa
         A check that could not be run (a down dependency) reports an
         ``error`` distinctly — it is not a contract failure. ``with_egress`` adds the mutating
         probe (off by default; the provisioning is audited distinctly).
+
+        The default report execution shares a 30-second budget measured from report start
+        by the server's monotonic clock, including worker queue waits. Unfinished checks
+        report ``error`` on expiry; retry ``ops.diagnostics`` after restoring readiness.
+        A timed-out report does not cancel a queued or running worker diagnostic job.
         """
         return await run_diagnostics(
             pool,

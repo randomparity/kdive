@@ -227,7 +227,7 @@ class _FakeDispatcher:
     def __init__(self, results: list[CheckResult]) -> None:
         self._results = results
 
-    async def run_worker_checks(self) -> list[CheckResult]:
+    async def run_worker_checks(self, *, deadline: float | None = None) -> list[CheckResult]:
         return self._results
 
 

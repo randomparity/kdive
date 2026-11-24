@@ -1,4 +1,4 @@
-"""The aggregating diagnostics service (ADR-0091 §1, §2).
+"""The aggregating diagnostics service (ADR-0091 §1, §2; deadline partition ADR-0854).
 
 `DiagnosticsService` runs an assembled set of checks — each bounded by the per-check
 timeout via :func:`kdive.diagnostics.checks.run_check` — and aggregates them into one
@@ -37,7 +37,7 @@ from kdive.diagnostics.provider_contracts import (
     WorkerVantageDescriptor,
 )
 from kdive.diagnostics.secret_ref import SecretRefCheck
-from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
+from kdive.diagnostics.worker_dispatch import WORKER_DISPATCH_BUDGET, JobWorkerCheckDispatcher
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import read_secret_file
@@ -116,10 +116,10 @@ class _CompositeWorkerCheckDispatcher:
 
     dispatchers: Sequence[WorkerCheckDispatcher]
 
-    async def run_worker_checks(self) -> list[CheckResult]:
+    async def run_worker_checks(self, *, deadline: float | None = None) -> list[CheckResult]:
         results: list[CheckResult] = []
         for dispatcher in self.dispatchers:
-            results.extend(await dispatcher.run_worker_checks())
+            results.extend(await dispatcher.run_worker_checks(deadline=deadline))
         return results
 
 
@@ -187,7 +187,9 @@ class DiagnosticsService:
             overall_timeout: The deadline across the whole run (ADR-0091 §2). Once it is
                 exhausted, every not-yet-run check is reported ``error`` instead of being
                 run, so used as a gate ``doctor`` reports a clean ``error`` rather than
-                hanging on a black-holed host. ``None`` bounds the run only per check.
+                hanging on a black-holed host. Dispatch mode reserves up to half of this
+                budget (at most 15 seconds) for all worker providers together (ADR-0164).
+                ``None`` retains per-check and local worker-dispatch bounds.
             worker_mode: How worker-vantage checks are handled. ``None`` runs worker-vantage
                 ``Check`` objects directly when they are in ``checks``. Substitution mode reports
                 skipped worker checks and declared unavailable checks as explicit errors with a
@@ -209,11 +211,28 @@ class DiagnosticsService:
         """
         runnable = [c for c in self._checks if self._can_run(c)]
         skipped = [c for c in self._checks if not self._can_run(c)]
-        results = await self._run_within_budget(runnable)
+        report_deadline = self._deadline()
+        server_deadline = report_deadline
+        worker_budget = None
+        if (
+            report_deadline is not None
+            and self._overall_timeout is not None
+            and isinstance(self._worker_mode, WorkerVantageDispatchMode)
+        ):
+            worker_budget = min(WORKER_DISPATCH_BUDGET, max(0.0, self._overall_timeout / 2))
+            server_deadline = report_deadline - worker_budget
+        results = await self._run_within_budget(runnable, deadline=server_deadline)
         if isinstance(self._worker_mode, WorkerVantageDispatchMode):
             # The dispatcher owns the entire worker-vantage outcome (run on the worker, or a
             # substituted error on a worker that does not pick the job up in time) — ADR-0164.
-            results.extend(await self._worker_mode.dispatcher.run_worker_checks())
+            worker_deadline = None
+            if report_deadline is not None and worker_budget is not None:
+                worker_deadline = min(
+                    report_deadline, asyncio.get_running_loop().time() + worker_budget
+                )
+            results.extend(
+                await self._worker_mode.dispatcher.run_worker_checks(deadline=worker_deadline)
+            )
         elif isinstance(self._worker_mode, WorkerVantageSubstitutionMode):
             results.extend(worker_unavailable_results(skipped, self._worker_mode.reason))
             results.extend(
@@ -224,8 +243,9 @@ class DiagnosticsService:
             )
         return DiagnosticsReport(results=results)
 
-    async def _run_within_budget(self, checks: Sequence[Check]) -> list[CheckResult]:
-        deadline = self._deadline()
+    async def _run_within_budget(
+        self, checks: Sequence[Check], *, deadline: float | None
+    ) -> list[CheckResult]:
         results: list[CheckResult] = []
         for index, check in enumerate(checks):
             remaining = self._remaining(deadline)
@@ -247,12 +267,17 @@ class DiagnosticsService:
         return deadline - asyncio.get_running_loop().time()
 
     def _deadline_exceeded(self, checks: Sequence[Check]) -> list[CheckResult]:
+        detail = (
+            "server diagnostics deadline exhausted before this check ran; worker time is reserved"
+            if isinstance(self._worker_mode, WorkerVantageDispatchMode)
+            else f"overall diagnostics deadline ({self._overall_timeout:g}s) exhausted "
+            "before this check ran"
+        )
         return [
             CheckResult(
                 check_id=check.id,
                 status=CheckStatus.ERROR,
-                detail=f"overall diagnostics deadline ({self._overall_timeout:g}s) exhausted "
-                "before this check ran",
+                detail=detail,
             )
             for check in checks
         ]

@@ -638,7 +638,7 @@ def test_factory_dispatches_selected_worker_contributions_with_pool(
             self.worker_check_ids = worker_check_ids
             created.append((provider, worker_check_ids))
 
-        async def run_worker_checks(self) -> list[CheckResult]:
+        async def run_worker_checks(self, *, deadline: float | None = None) -> list[CheckResult]:
             return [
                 CheckResult(
                     check_id=check_id,
