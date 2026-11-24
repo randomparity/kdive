@@ -28,6 +28,9 @@ lifecycle as a multi-user MCP service. It is Python 3.14, managed with `uv`.
 - **lifecycle-witness** — Kubernetes worker-termination evidence and credential delivery.
   The portable Compose and systemd core uses the first three roles with operator-side gates.
 
+An optional provider-side [external-boot authority host](docs/design/top-level-design.md#system-topology)
+serves authenticated worker requests for explicitly provisioned provider mutations.
+
 State of record is **Postgres**; bulk artifacts (vmcores, build outputs,
 console/gdb transcripts) live in an **S3-compatible object store**, referenced by
 row. Postgres advisory locks serialize per-Allocation and per-System work.
