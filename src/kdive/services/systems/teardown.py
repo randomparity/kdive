@@ -18,7 +18,6 @@ from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.payloads import Authorizing, TeardownPayload, dump_payload
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.services.external_boot import (
@@ -26,6 +25,7 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
+from kdive.services.external_boot.payloads import build_external_boot_payload
 from kdive.services.systems.authority_owned import _teardown_dedup_key
 
 _LIVE_JOB_STATES = frozenset({JobState.QUEUED, JobState.RUNNING})

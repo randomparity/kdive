@@ -16,7 +16,7 @@ import pytest
 from psycopg.sql import SQL
 from psycopg.sql import Literal as SqlLiteral
 
-import kdive.jobs.handlers.system_reclaim as core_reclaim
+import kdive.services.systems.reclaim as core_reclaim
 from kdive.db import migrate
 from kdive.reconciler.repairs.jobs import repair_terminal_authority_system_attempts
 from tests.conftest import _RoleDsns

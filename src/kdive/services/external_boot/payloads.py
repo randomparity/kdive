@@ -1,6 +1,6 @@
-"""Build an authority-marked payload whose identity comes from the activation row, not the caller.
+"""Build activation-derived external-boot payloads for enqueueing surfaces (ADR-0851).
 
-This is charter criterion 3's home: the marker's ``provider_kind`` and ``authority_instance`` are
+The marker's ``provider_kind`` and ``authority_instance`` are
 carried by neither ``ExternalBootActivation`` nor ``ExternalBootReservation``, so the enqueueing
 caller must supply them — and a ``provider_kind`` disagreeing with the resolved
 ``ProviderRuntime.external_boot`` port has to be rejected here, at validation, rather than at

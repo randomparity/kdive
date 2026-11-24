@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import ast
+import json
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 _SERVICES = Path(__file__).resolve().parents[2] / "src" / "kdive" / "services"
 
@@ -43,3 +48,40 @@ def test_breakglass_teardown_imports_policy_from_services() -> None:
     imports = _imported_modules(path)
     assert "kdive.mcp.tools.lifecycle.systems.admin" not in imports
     assert "kdive.services.systems.teardown" in imports
+
+
+@pytest.mark.parametrize(
+    ("consumer", "name", "expected"),
+    [
+        (
+            "kdive.services.systems.teardown",
+            "build_external_boot_payload",
+            "kdive.services.external_boot.payloads",
+        ),
+        (
+            "kdive.reconciler.repairs.jobs",
+            "reclaim_system_core_after_provider_teardown",
+            "kdive.services.systems.reclaim",
+        ),
+    ],
+)
+def test_shared_lifecycle_consumer_does_not_load_worker_handlers(
+    consumer: str, name: str, expected: str
+) -> None:
+    code = f"""
+import importlib,json,sys
+module=importlib.import_module({consumer!r})
+print(json.dumps({{'owner':getattr(module,{name!r}).__module__,
+ 'handlers':sorted(n for n in sys.modules
+                   if n=='kdive.jobs.handlers' or n.startswith('kdive.jobs.handlers.'))}}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+    observed = json.loads(result.stdout)
+    assert observed["owner"] == expected, observed
+    assert observed["handlers"] == [], observed

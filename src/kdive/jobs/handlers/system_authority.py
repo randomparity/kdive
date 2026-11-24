@@ -16,10 +16,6 @@ from pydantic import SecretStr
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.external_boot_authority_client import AuthoritySystemSenderFactory
-from kdive.jobs.handlers.system_reclaim import (
-    RetiredKeyBatchDeleter,
-    reclaim_system_core_after_provider_teardown,
-)
 from kdive.jobs.payloads import SystemPayload, TeardownPayload, load_payload
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.authority import AuthorityRequestSender
@@ -34,6 +30,10 @@ from kdive.providers.system_authority.protocol import (
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import ensure_system_bootstrap_key
+from kdive.services.systems.reclaim import (
+    RetiredKeyBatchDeleter,
+    reclaim_system_core_after_provider_teardown,
+)
 
 
 @dataclass(frozen=True, slots=True)

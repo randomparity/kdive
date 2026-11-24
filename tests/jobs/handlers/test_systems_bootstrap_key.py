@@ -35,7 +35,6 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers import system_reclaim
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.handlers.module_volume_reaping import remote_module_volume_reap_handler
 from kdive.jobs.payloads import (
@@ -50,6 +49,7 @@ from kdive.providers.infra.reaping import ModuleVolumeKey
 from kdive.security.audit import args_digest
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import ensure_system_bootstrap_key
+from kdive.services.systems import reclaim as system_reclaim
 from tests.mcp.systems_support import PROVISIONING_PROFILE, provider_resolver
 from tests.support.object_store import INERT_OBJECT_STORE
 

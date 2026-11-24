@@ -28,11 +28,11 @@ from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import JobKind
-from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.payloads import BootPayload, TeardownPayload, dump_payload, load_payload
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import Purpose
 from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
+from kdive.services.external_boot.payloads import build_external_boot_payload
 from tests.db.remote_module_attempt_obligations_support import _evidence
 from tests.jobs.handlers.external_boot.conftest import resolver_for
 from tests.jobs.handlers.external_boot.seeding import AUTHORITY_INSTANCE, seed_case

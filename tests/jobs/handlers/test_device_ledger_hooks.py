@@ -23,10 +23,10 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import SystemDevice
 from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs.handlers.control.control import power_handler
-from kdive.jobs.handlers.system_reclaim import reclaim_system_core_after_provider_teardown
 from kdive.jobs.handlers.systems import reprovision_handler, restore_handler, teardown_handler
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.services.systems.reclaim import reclaim_system_core_after_provider_teardown
 from tests.conftest import _RoleDsns
 from tests.db.system_ledger_support import connect, seed_system
 from tests.mcp.systems_support import PROVISIONING_PROFILE, FakeProvisioning, provider_resolver

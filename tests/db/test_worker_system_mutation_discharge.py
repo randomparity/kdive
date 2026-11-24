@@ -28,7 +28,7 @@ from psycopg.errors import InsufficientPrivilege
 from psycopg.sql import SQL, Identifier, Literal
 
 from kdive.db.remote_module_attempt_obligations import RemoteModuleAttemptObligationRepository
-from kdive.jobs.handlers.system_reclaim import reclaim_system_core_after_provider_teardown
+from kdive.services.systems.reclaim import reclaim_system_core_after_provider_teardown
 from tests.db.external_boot_authority_support import _RoleDsns
 from tests.db.remote_module_attempt_obligations_support import _attempt, _seed
 

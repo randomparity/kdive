@@ -30,7 +30,6 @@ from kdive.domain.lifecycle.records import Run
 from kdive.domain.lifecycle.run_steps import RUN_STEP_RUNNING, RUN_STEP_SUCCEEDED
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.payloads import BootPayload, InstallPayload, RunPayload
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
@@ -50,6 +49,7 @@ from kdive.services.external_boot import (
     ExternalBootOperation,
     check_external_boot_admission,
 )
+from kdive.services.external_boot.payloads import build_external_boot_payload
 from kdive.services.external_boot.plan import (
     construct_external_boot_plan,
     external_boot_root_arguments,

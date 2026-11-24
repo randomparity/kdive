@@ -1,4 +1,4 @@
-"""Provider-neutral core cleanup after a System provider proves physical absence."""
+"""Provider-neutral core cleanup after proved physical System absence (ADR-0851)."""
 
 from __future__ import annotations
 

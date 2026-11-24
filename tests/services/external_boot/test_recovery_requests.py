@@ -963,7 +963,7 @@ _REVIEWED_FIRST_PARTY_IMPORTS = frozenset(
         "kdive.domain.errors:ErrorCategory",
         "kdive.domain.external_boot_activation:Digest",
         "kdive.domain.lifecycle.records:Run",
-        "kdive.jobs.handlers.external_boot.admission:build_external_boot_payload",
+        "kdive.services.external_boot.payloads:build_external_boot_payload",
         "kdive.jobs.payloads:ResolveRecoveryOrphanPayload",
         "kdive.domain.operations.jobs:JobKind",
         "kdive.jobs:queue",

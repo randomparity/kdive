@@ -43,10 +43,6 @@ from kdive.jobs.handlers.system_authority import (
     AuthoritySystemWorkerPorts,
     execute_authority_system_job,
 )
-from kdive.jobs.handlers.system_reclaim import (
-    RetiredKeyBatchDeleter,
-    reclaim_system_core_after_provider_teardown,
-)
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import (
     ReprovisionPayload,
@@ -68,6 +64,10 @@ from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import (
     ensure_system_bootstrap_key,
+)
+from kdive.services.systems.reclaim import (
+    RetiredKeyBatchDeleter,
+    reclaim_system_core_after_provider_teardown,
 )
 
 _log = logging.getLogger(__name__)

@@ -66,7 +66,6 @@ from kdive.jobs.handlers.external_boot.runner import (
     run_operation,
     starts_fresh_readiness_budget,
 )
-from kdive.jobs.handlers.system_reclaim import reclaim_system_core_after_provider_teardown
 from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityConflictResolutionRequestV1,
@@ -78,6 +77,7 @@ from kdive.providers.external_boot_authority.protocol import (
     canonical_teardown_proof_bytes,
 )
 from kdive.providers.ports.module_operation import ModuleAuthority, ModuleCompletion
+from kdive.services.systems.reclaim import reclaim_system_core_after_provider_teardown
 
 __all__ = [
     "activate_handler",

@@ -15,7 +15,6 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
-from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.payloads import (
     Authorizing,
     BootPayload,
@@ -25,6 +24,7 @@ from kdive.jobs.payloads import (
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import Purpose
+from kdive.services.external_boot.payloads import build_external_boot_payload
 
 _log = logging.getLogger(__name__)
 

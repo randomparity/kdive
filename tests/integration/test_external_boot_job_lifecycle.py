@@ -38,7 +38,6 @@ from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.handlers.external_boot.router import route_marked
@@ -58,6 +57,7 @@ from kdive.providers.external_boot_authority.repository import DatabaseAuthority
 from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.external_boot.payloads import build_external_boot_payload
 from tests.integration.external_boot_support import (
     CREDENTIAL,
     PreparingProvider,

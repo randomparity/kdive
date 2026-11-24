@@ -15,11 +15,11 @@ from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import JobKind, run_failure_eligible_states
-from kdive.jobs.handlers.system_reclaim import (
+from kdive.jobs.payloads import PayloadValidationError, run_id_from_payload
+from kdive.services.systems.reclaim import (
     RetiredKeyBatchDeleter,
     reclaim_system_core_after_provider_teardown,
 )
-from kdive.jobs.payloads import PayloadValidationError, run_id_from_payload
 
 _log = logging.getLogger(__name__)
 
