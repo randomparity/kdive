@@ -1,4 +1,4 @@
-"""Closed provider-neutral authority and journal values (ADR-0584)."""
+"""Closed provider-neutral authority and journal values (ADR-0584; ADR-0868)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import json
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 from uuid import UUID
@@ -32,6 +33,14 @@ from kdive.domain.external_boot_values import (
     KernelIdentity,
     RunningKernelObservation,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedPeer:
+    """Identity established by the hosting authentication boundary."""
+
+    incarnation_id: UUID | str
+
 
 MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807
 MAX_MESSAGE_BYTES = 1_048_576

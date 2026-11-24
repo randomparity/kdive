@@ -24,7 +24,6 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from pydantic import SecretStr
 
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.providers.external_boot_authority import host, protocol, transport
 from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityInodeV1,
@@ -39,6 +38,7 @@ from kdive.providers.external_boot_authority.module_volume_sweep import (
     ModuleVolumeSweepResponseV1,
 )
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityServiceError,
     AuthorityStrandedObservationResponseV1,
 )

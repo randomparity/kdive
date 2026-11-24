@@ -15,7 +15,6 @@ from psycopg.types.json import Jsonb
 
 from kdive.db.external_boot_authority_journal import (
     AdvanceStatus,
-    AuthenticatedPeer,
     AuthorityBinding,
     JournalHead,
     PrestopHolders,
@@ -37,6 +36,7 @@ from kdive.domain.external_boot_values import (
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import record_digest
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityAcknowledgementV1,
     AuthorityCleanupEvidenceContextV1,
     AuthorityMutationRequestV1,

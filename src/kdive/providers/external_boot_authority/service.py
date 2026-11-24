@@ -14,12 +14,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, runtime_checkable
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from kdive.db.external_boot_authority_journal import (
-    AuthenticatedPeer,
-    AuthorityBinding,
-    JournalHead,
-    PrestopHolders,
-)
+from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead, PrestopHolders
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_values import (
     ExternalBootPreparationObservation,
@@ -44,6 +39,7 @@ from kdive.providers.external_boot_authority.module_volume_sweep import (
 from kdive.providers.external_boot_authority.protocol import (
     _TAKEOVER_PHASES,
     GENESIS_DIGEST,
+    AuthenticatedPeer,
     AuthorityAcknowledgementV1,
     AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,

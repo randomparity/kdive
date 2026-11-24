@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import SecretStr
 
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError
 from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityRequestV1,
@@ -41,6 +40,7 @@ from kdive.providers.external_boot_authority.module_volume_sweep import (
 )
 from kdive.providers.external_boot_authority.protocol import (
     MAX_ENVELOPE_BYTES,
+    AuthenticatedPeer,
     AuthorityAcknowledgementV1,
     AuthorityConflictResolutionRequestV1,
     AuthorityHealthAcknowledgementV1,
@@ -67,9 +67,9 @@ from kdive.providers.system_authority.protocol import (
     AuthoritySystemExecutionV1,
     AuthoritySystemMutationRequestV1,
     AuthoritySystemResponseV1,
+    AuthoritySystemServiceError,
     AuthoritySystemTakeoverRequestV1,
 )
-from kdive.providers.system_authority.service import AuthoritySystemServiceError
 
 if TYPE_CHECKING:
     from kdive.providers.external_boot_authority.host import AuthorityHostConfig

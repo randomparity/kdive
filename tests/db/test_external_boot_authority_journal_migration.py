@@ -15,10 +15,11 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer, _suspended
+from kdive.db.external_boot_authority_journal import _suspended
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
+    AuthenticatedPeer,
     AuthorityAcknowledgementV1,
     AuthorityMutationRequestV1,
     AuthorityOperation,

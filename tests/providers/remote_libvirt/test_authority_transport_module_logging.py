@@ -8,7 +8,6 @@ from typing import Any, Literal, cast
 import pytest
 from pydantic import SecretStr
 
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.external_boot_authority import transport
 from kdive.providers.external_boot_authority.module_protocol import (
@@ -17,6 +16,7 @@ from kdive.providers.external_boot_authority.module_protocol import (
     RemoteModuleVolumePreparationRequestV1,
 )
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityInstallRefusalV1,
     AuthorityMutationRequestV1,
     AuthorityServiceError,

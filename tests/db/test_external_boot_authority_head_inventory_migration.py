@@ -13,9 +13,8 @@ from pydantic import SecretStr
 
 from kdive.db import external_boot_authority_journal as journal_repository
 from kdive.db import migrate
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.providers.external_boot_authority.host import HostReadinessError, check_database_role
-from kdive.providers.external_boot_authority.protocol import JournalPhase
+from kdive.providers.external_boot_authority.protocol import AuthenticatedPeer, JournalPhase
 from tests.db.external_boot_authority_support import _RoleDsns
 
 _DIGEST = "sha256:" + "d" * 64
@@ -362,6 +361,8 @@ def test_typed_readers_return_bounded_heads_and_hash_secret_before_sql(
         for head in heads
     )
     assert peer == AuthenticatedPeer(incarnation_id="docker:typed-reader")
+    assert type(peer) is AuthenticatedPeer
+    assert type(peer).__module__ == "kdive.providers.external_boot_authority.protocol"
 
 
 def test_host_role_shape_rejects_effective_grants_and_application_object_ownership(

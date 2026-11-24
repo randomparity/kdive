@@ -34,7 +34,6 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
@@ -47,6 +46,7 @@ from kdive.jobs.worker import Worker
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,

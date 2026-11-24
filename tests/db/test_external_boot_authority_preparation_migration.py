@@ -13,7 +13,6 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.external_boot_values import (
     DebuginfoSource,
     ExternalBootActivationBinding,
@@ -22,6 +21,7 @@ from kdive.domain.external_boot_values import (
 )
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     JournalPhase,

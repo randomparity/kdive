@@ -36,7 +36,6 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr, ValidationError
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import ExternalBootActivationState, JobState
 from kdive.domain.catalog.resources import ResourceKind
@@ -73,6 +72,7 @@ from kdive.providers.external_boot_authority.module_protocol import (
     RemoteModuleTerminalPreparationResponseV1,
 )
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityAcknowledgementV1,
     AuthorityInstallRefusalV1,
     AuthorityObservationV1,

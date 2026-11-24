@@ -14,6 +14,7 @@ from pydantic import SecretStr
 
 from kdive.domain.external_boot_values import ExternalBootPlan
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
@@ -25,13 +26,6 @@ from kdive.serialization import validate_stored
 
 type AdvanceStatus = Literal["advanced", "superseded", "conflict"]
 type PreparationCommitStatus = Literal["applied", "superseded", "conflict"]
-
-
-@dataclass(frozen=True, slots=True)
-class AuthenticatedPeer:
-    """Identity established by the hosting authentication boundary."""
-
-    incarnation_id: UUID | str
 
 
 def _uuid(value: object) -> UUID:

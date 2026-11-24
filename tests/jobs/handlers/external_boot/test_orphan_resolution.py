@@ -16,7 +16,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer, AuthorityBinding
+from kdive.db.external_boot_authority_journal import AuthorityBinding
 from kdive.db.external_boot_recovery_quarantine import record_cleanup_quarantine
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError
@@ -36,6 +36,7 @@ from kdive.mcp.tools.external_boot.recovery_requests import resolve_recovery_orp
 from kdive.providers.external_boot_authority.journal import record_digest
 from kdive.providers.external_boot_authority.orphan import RecoveryOrphanAuthorityService
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,

@@ -1,4 +1,4 @@
-"""Closed provider-neutral System authority values (ADR-0623)."""
+"""Closed provider-neutral System authority values (ADR-0623; ADR-0868)."""
 
 from __future__ import annotations
 
@@ -16,6 +16,15 @@ from kdive.domain.external_boot_activation import UtcDateTime
 from kdive.domain.external_boot_values import RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.security.ssh_authorized_key import validate_authorized_public_key
+
+
+class AuthoritySystemServiceError(RuntimeError):
+    """A request failed closed before returning an authority receipt."""
+
+    def __init__(self, category: Literal["unauthenticated", "superseded", "journal-conflict"]):
+        super().__init__(category)
+        self.category = category
+
 
 MAX_MESSAGE_BYTES = 1_048_576
 MAX_SIGNED_BIGINT = 9_223_372_036_854_775_807

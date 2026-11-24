@@ -11,10 +11,12 @@ import pytest
 from psycopg import AsyncConnection
 from pydantic import ValidationError
 
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.external_boot_activation import ExternalBootReleaseEvidenceV1
 from kdive.domain.external_boot_values import OpaqueProviderRef
-from kdive.providers.external_boot_authority.protocol import AuthorityTeardownMutationRequestV1
+from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
+    AuthorityTeardownMutationRequestV1,
+)
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,

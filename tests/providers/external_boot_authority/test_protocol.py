@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import json
+import subprocess
+import sys
+from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -772,3 +776,53 @@ def test_stranded_response_bounds_its_objects() -> None:
         AuthorityStrandedObservationResponseV1(
             disposition="objects_present", objects=tuple(f"ref-{n}" for n in range(33))
         )
+
+
+def test_boundary_values_have_protocol_owners() -> None:
+    owners = {
+        "AuthenticatedPeer": "src/kdive/providers/external_boot_authority/protocol.py",
+        "AuthoritySystemServiceError": "src/kdive/providers/system_authority/protocol.py",
+    }
+    old = {
+        "kdive.db.external_boot_authority_journal": "AuthenticatedPeer",
+        "kdive.providers.system_authority.service": "AuthoritySystemServiceError",
+    }
+    definitions: dict[str, list[str]] = {name: [] for name in owners}
+    offenders: list[str] = []
+    for root in (Path("src/kdive"), Path("tests")):
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef) and node.name in owners:
+                    definitions[node.name].append(str(path))
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module in old
+                    and any(alias.name == old[node.module] for alias in node.names)
+                ):
+                    offenders.append(f"{path}:{node.lineno}")
+    assert definitions == {name: [path] for name, path in owners.items()}
+    assert offenders == []
+
+
+def test_peer_protocol_import_does_not_load_authentication_repository() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            "\n".join(
+                [
+                    "import importlib, sys",
+                    "p = importlib.import_module("
+                    "'kdive.providers.external_boot_authority.protocol')",
+                    "assert p.AuthenticatedPeer.__module__ == p.__name__",
+                    "assert 'kdive.db.external_boot_authority_journal' not in sys.modules",
+                ]
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

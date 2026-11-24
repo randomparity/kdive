@@ -43,8 +43,8 @@ pytestmark = pytest.mark.anyio
 async def test_typed_unix_mutation_replays_after_lost_terminal_response(
     short_socket_dir: Path,
 ) -> None:
-    from kdive.db.external_boot_authority_journal import AuthenticatedPeer
     from kdive.jobs.authority_sender import AuthorityRequestSender
+    from kdive.providers.external_boot_authority.protocol import AuthenticatedPeer
     from kdive.providers.external_boot_authority.transport import _dispatch
 
     service, repository, adapter, peer, takeover = _service(short_socket_dir)

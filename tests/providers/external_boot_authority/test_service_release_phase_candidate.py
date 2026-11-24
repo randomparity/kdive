@@ -9,13 +9,14 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer, AuthorityBinding
+from kdive.db.external_boot_authority_journal import AuthorityBinding
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.module_protocol import (
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
 )
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityMutationRequestV1,
     AuthorityOperation,
     AuthorityServiceError,

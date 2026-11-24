@@ -13,7 +13,6 @@ import psycopg
 from psycopg import AsyncConnection
 from pydantic import SecretStr
 
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.jobs import queue
 from kdive.jobs.authority_sender import AuthorityRequestSender
@@ -27,6 +26,7 @@ from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.mcp.tools.external_boot.recovery_requests import resolve_conflict
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityCommitContextV1,
     AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,

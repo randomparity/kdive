@@ -17,7 +17,6 @@ import pytest
 from pydantic import SecretStr
 
 import kdive.config as runtime_config
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError
 from kdive.domain.external_boot_values import (
     AbsentComponentState,
@@ -44,6 +43,7 @@ from kdive.providers.external_boot_authority.local_client import (
 from kdive.providers.external_boot_authority.network_client import _resolve_tls_material
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
+    AuthenticatedPeer,
     AuthorityMutationRequestV1,
     AuthorityServiceError,
     AuthorityStrandedObservationRequestV1,

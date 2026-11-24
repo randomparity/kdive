@@ -11,12 +11,12 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind, JobState
 from kdive.jobs.handlers.external_boot.orphan import resolve_recovery_orphan_handler
 from kdive.providers.external_boot_authority.orphan import RecoveryOrphanAuthorityService
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityServiceError,

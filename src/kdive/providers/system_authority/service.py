@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Protocol
 from uuid import UUID
 
 from kdive.providers.system_authority.journal import (
@@ -32,6 +32,7 @@ from kdive.providers.system_authority.protocol import (
     AuthoritySystemProvisionReadyV1,
     AuthoritySystemResponseV1,
     AuthoritySystemRetainedQuarantineV1,
+    AuthoritySystemServiceError,
     AuthoritySystemTakeoverRequestV1,
     authority_system_record_digest,
     make_authority_system_record,
@@ -44,14 +45,6 @@ from kdive.providers.system_authority.repository import (
 )
 
 _log = logging.getLogger(__name__)
-
-
-class AuthoritySystemServiceError(RuntimeError):
-    """A request failed closed before returning an authority receipt."""
-
-    def __init__(self, category: Literal["unauthenticated", "superseded", "journal-conflict"]):
-        super().__init__(category)
-        self.category = category
 
 
 class AuthoritySystemRepository(Protocol):

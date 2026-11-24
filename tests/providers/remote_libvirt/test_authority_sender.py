@@ -17,7 +17,6 @@ from uuid import uuid4
 import pytest
 from pydantic import SecretStr
 
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_values import (
     ExternalBootActivationBinding,
@@ -43,6 +42,7 @@ from kdive.providers.external_boot_authority.module_volume_sweep import (
 )
 from kdive.providers.external_boot_authority.network_client import _AuthorityNetworkTransport
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,

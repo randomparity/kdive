@@ -34,6 +34,7 @@ from kdive.providers.system_authority.protocol import (
     AuthoritySystemProofV1,
     AuthoritySystemProvisionFacts,
     AuthoritySystemProvisionSnapshot,
+    AuthoritySystemServiceError,
     AuthoritySystemTakeoverRequestV1,
     authority_system_record_digest,
 )
@@ -43,10 +44,7 @@ from kdive.providers.system_authority.repository import (
     AuthoritySystemJournalHead,
     ResolvedAuthoritySystemOperation,
 )
-from kdive.providers.system_authority.service import (
-    AuthoritySystemService,
-    AuthoritySystemServiceError,
-)
+from kdive.providers.system_authority.service import AuthoritySystemService
 
 _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64

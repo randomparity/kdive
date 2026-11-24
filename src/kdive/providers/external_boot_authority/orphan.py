@@ -13,7 +13,6 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.db.external_boot_authority_journal import AuthenticatedPeer
 from kdive.domain.external_boot_values import (
     ExternalBootActivationBinding,
     OpaqueProviderRef,
@@ -21,6 +20,7 @@ from kdive.domain.external_boot_values import (
     RecoveryObjectObservation,
 )
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityServiceError,
