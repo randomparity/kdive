@@ -10,6 +10,7 @@ capture remains ``live_vm``-gated.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -309,17 +310,29 @@ def test_harvest_stops_on_native_failure(
     reader.assert_not_called()
 
 
-@pytest.mark.parametrize("phase", ["launch", "mount", "list", "download", "binding"])
+@pytest.mark.parametrize(
+    ("phase", "fault_type"),
+    [
+        ("launch", OSError),
+        ("mount", OSError),
+        ("list", OSError),
+        ("download", OSError),
+        ("binding", OSError),
+        ("constructor", OSError),
+        ("constructor", RuntimeError),
+    ],
+)
 @pytest.mark.parametrize("close_fails", [False, True])
 def test_failed_capture_releases_spool_and_preserves_reader_error(
     phase: str,
+    fault_type: type[Exception],
     close_fails: bool,
     tmp_path: Path,
     retrieve_uri: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sdk = Mock(spec=guestfs._GuestfsHandle)
-    fault = OSError("guest storage unavailable")
+    fault = fault_type("guest storage unavailable")
     sdk.inspect_os.return_value = ["/dev/root"]
     sdk.inspect_get_mountpoints.return_value = {"/": "/dev/root", "/var": "/dev/var"}
     sdk.glob_expand.side_effect = lambda pattern: (
@@ -344,10 +357,13 @@ def test_failed_capture_releases_spool_and_preserves_reader_error(
         sdk.launch.side_effect = fault
     if phase == "list":
         sdk.glob_expand.side_effect = fault
+    factory = Mock(return_value=sdk)
+    if phase == "constructor":
+        factory.side_effect = fault
     monkeypatch.setitem(
         sys.modules,
         "guestfs",
-        None if phase == "binding" else SimpleNamespace(GuestFS=lambda **_kwargs: sdk),
+        None if phase == "binding" else SimpleNamespace(GuestFS=factory),
     )
     monkeypatch.setattr(libvirt, "open", lambda _uri: FakeLibvirtConn())
     monkeypatch.setattr(guestfs, "overlay_path", lambda _system: "overlay.qcow2")
@@ -369,7 +385,11 @@ def test_failed_capture_releases_spool_and_preserves_reader_error(
     else:
         assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
         assert caught.value.__cause__ is fault
-        sdk.close.assert_called_once_with()
+        assert caught.value.details == {"overlay": "overlay.qcow2", "error": fault_type.__name__}
+        if phase == "constructor":
+            sdk.close.assert_not_called()
+        else:
+            sdk.close.assert_called_once_with()
 
 
 @pytest.mark.parametrize("capture", ["vmcore", "vmcore-incomplete", None])
@@ -405,3 +425,18 @@ def test_coordinator_hands_off_only_complete_core_spool(
     else:
         sdk.download.assert_not_called()
     sdk.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "fault_type", [KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError]
+)
+def test_guestfs_constructor_preserves_control_exceptions(
+    fault_type: type[BaseException], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fault = fault_type("constructor interrupted")
+    factory = Mock(side_effect=fault)
+    monkeypatch.setitem(sys.modules, "guestfs", SimpleNamespace(GuestFS=factory))
+    with pytest.raises(fault_type) as caught:
+        guestfs._LibguestfsCoreReader("overlay.qcow2")
+    assert caught.value is fault
+    factory.assert_called_once_with(python_return_dict=True)

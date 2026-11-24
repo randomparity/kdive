@@ -157,15 +157,17 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
                 "libguestfs (the guestfs Python binding) is required for local kdump capture",
                 category=ErrorCategory.MISSING_DEPENDENCY,
             ) from exc
-        guest = cast("_GuestfsHandle", guestfs.GuestFS(python_return_dict=True))
+        guest: _GuestfsHandle | None = None
         try:
+            guest = cast("_GuestfsHandle", guestfs.GuestFS(python_return_dict=True))
             guest.add_drive_opts(overlay, readonly=True)
             guest.launch()
             roots = guest.inspect_os()
             if roots:
                 _mount_guest_filesystems(guest, roots[0])
         except Exception as exc:
-            _close_guestfs_handle(guest, "after failed read-only overlay open")
+            if guest is not None:
+                _close_guestfs_handle(guest, "after failed read-only overlay open")
             raise CategorizedError(
                 "libguestfs failed to open the System overlay",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
