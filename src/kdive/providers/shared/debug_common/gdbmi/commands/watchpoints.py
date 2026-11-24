@@ -116,6 +116,13 @@ def _watchpoint_ref(host: _WatchpointHost, records: list[MiRecord]) -> GdbWatchp
 
 
 def _watchpoint_ref_from(host: _WatchpointHost, entry: dict[str, Any]) -> GdbWatchpointRef:
+    number = entry.get("number")
+    if not isinstance(number, str) or re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", number) is None:
+        raise CategorizedError(
+            "gdb/MI watchpoint response has no usable number; "
+            "inspect debugger state before retrying",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+        )
     expression = entry.get("exp") if isinstance(entry.get("exp"), str) else None
     if expression is None and isinstance(entry.get("what"), str):
         expression = entry.get("what")
@@ -124,7 +131,7 @@ def _watchpoint_ref_from(host: _WatchpointHost, entry: dict[str, Any]) -> GdbWat
     return GdbWatchpointRef.model_validate(
         host._redactor().redact_value(
             {
-                "number": str(entry.get("number")),
+                "number": number,
                 "type": entry.get("type") if isinstance(entry.get("type"), str) else None,
                 "expr": expression,
                 "addr": entry.get("addr") if isinstance(entry.get("addr"), str) else None,

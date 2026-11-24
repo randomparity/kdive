@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -10,7 +10,7 @@ from typing import Any, cast
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports.debug import GdbMiAttachment
+from kdive.providers.ports.debug import GdbBreakpointRef, GdbMiAttachment, GdbWatchpointRef
 from kdive.providers.shared.debug_common.gdbmi.commands.breakpoints import (
     GdbMiBreakpointCommands,
 )
@@ -535,3 +535,88 @@ def test_module_listing_redacts_registered_name() -> None:
 
     assert len(result.modules) == 1
     assert result.modules[0].name == REDACTION
+
+
+_MISSING_REFERENCE_NUMBER = object()
+
+
+@pytest.mark.parametrize("family", ["breakpoint", "watchpoint"])
+@pytest.mark.parametrize("shape", ["insert", "wrapped", "bare"])
+@pytest.mark.parametrize(
+    ("number", "usable"),
+    [
+        pytest.param("0", True, id="zero"),
+        pytest.param("1", True, id="numeric"),
+        pytest.param("001", True, id="leading-zero"),
+        pytest.param("1.2", True, id="location"),
+        pytest.param("001.02", True, id="zero-location"),
+        pytest.param(_MISSING_REFERENCE_NUMBER, False, id="missing"),
+        pytest.param(None, False, id="null"),
+        pytest.param(1, False, id="integer"),
+        pytest.param(True, False, id="boolean"),
+        pytest.param([], False, id="list"),
+        pytest.param({}, False, id="mapping"),
+        pytest.param("", False, id="empty"),
+        pytest.param("None", False, id="fabricated-none"),
+        pytest.param("private_number", False, id="untrusted-text"),
+        pytest.param(" 1", False, id="leading-space"),
+        pytest.param("1 ", False, id="trailing-space"),
+        pytest.param("1\n", False, id="trailing-newline"),
+        pytest.param("١", False, id="non-ascii-digit"),
+        pytest.param("1.2.3", False, id="multiple-dots"),
+        pytest.param(".1", False, id="missing-major"),
+        pytest.param("1.", False, id="missing-minor"),
+    ],
+)
+def test_reference_number_contract(family: str, shape: str, number: object, usable: bool) -> None:
+    host = _CommandHost()
+    attachment = _attachment()
+    host._redactor_value = Redactor(secret_values=["private_target"], registry=SecretRegistry())
+    kind = "breakpoint" if family == "breakpoint" else "hw watchpoint"
+    entry: dict[str, object] = {
+        "type": kind,
+        "addr": "0x1234",
+        "func": "private_target",
+        "what": "private_target",
+        "exp": "private_target",
+        "enabled": "y",
+    }
+    if number is not _MISSING_REFERENCE_NUMBER:
+        entry["number"] = number
+    if shape == "insert":
+        command = (
+            "-break-insert panic" if family == "breakpoint" else "-break-watch *(char(*)[8])0x0"
+        )
+        host.responses[command] = _done({"bkpt" if family == "breakpoint" else "wpt": entry})
+    else:
+        row = {"bkpt": entry} if shape == "wrapped" else entry
+        host.responses["-break-list"] = _done(
+            {"BreakpointTable": {"body": [{"bkpt": {"number": "7", "type": kind}}, row]}}
+        )
+
+    def read() -> Sequence[GdbBreakpointRef | GdbWatchpointRef]:
+        if shape == "insert":
+            if family == "breakpoint":
+                return [host.set_breakpoint(attachment, "panic")]
+            return [host.set_watchpoint(attachment, address=0)]
+        if family == "breakpoint":
+            return host.list_breakpoints(attachment)
+        return host.list_watchpoints(attachment)
+
+    if shape == "bare" and number is _MISSING_REFERENCE_NUMBER:
+        assert [ref.number for ref in read()] == ["7"]
+    elif usable:
+        refs = read()
+        assert [ref.number for ref in refs] == ([number] if shape == "insert" else ["7", number])
+        ref = refs[-1]
+        assert ref.type == kind and ref.addr == "0x1234"
+        if isinstance(ref, GdbBreakpointRef):
+            assert ref.func == REDACTION and ref.what == REDACTION and ref.enabled is None
+        else:
+            assert ref.expr == REDACTION and ref.enabled is True
+    else:
+        with pytest.raises(CategorizedError) as exc:
+            read()
+        assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+        assert exc.value.details == {}
+        assert "private_number" not in str(exc.value)

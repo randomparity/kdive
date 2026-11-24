@@ -77,10 +77,17 @@ def _breakpoint_ref(
 
 
 def _breakpoint_ref_from(host: _BreakpointHost, entry: dict[str, Any]) -> GdbBreakpointRef:
+    number = entry.get("number")
+    if not isinstance(number, str) or re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", number) is None:
+        raise CategorizedError(
+            "gdb/MI breakpoint response has no usable number; "
+            "inspect debugger state before retrying",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+        )
     return GdbBreakpointRef.model_validate(
         host._redactor().redact_value(
             {
-                "number": str(entry.get("number")),
+                "number": number,
                 "type": entry.get("type") if isinstance(entry.get("type"), str) else None,
                 "addr": entry.get("addr") if isinstance(entry.get("addr"), str) else None,
                 "func": entry.get("func") if isinstance(entry.get("func"), str) else None,
