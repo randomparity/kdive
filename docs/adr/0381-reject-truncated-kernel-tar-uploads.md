@@ -1,6 +1,8 @@
 # ADR-0381: Reject truncated / trailer-corrupt kernel-tar uploads at upload time (#1273)
 
 - Status: Accepted
+
+> The over-prefix-cap trailer-verification residual is superseded by [ADR-0869](0869-bounded-gzip-archive-completion.md) (2026-11-24).
 - Date: 2026-07-17
 
 ## Context

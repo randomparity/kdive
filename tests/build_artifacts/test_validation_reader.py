@@ -382,3 +382,66 @@ def test_guarded_tar_reader_propagates_source_failure() -> None:
         validation._GuardedTarReader(_FailedSource()).read(tarfile.BLOCKSIZE)
 
     assert exc.value is failure
+
+
+@pytest.mark.parametrize("bound", ["exact", "one-byte-over", "framing-over"])
+def test_guarded_tar_completion_accounts_for_tail_and_bounds_reads(
+    bound: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    framed = _tar_record(b"x") + bytes(tarfile.BLOCKSIZE)
+    tail = b"trailing data"
+    cap = len(framed) + len(tail)
+    if bound == "one-byte-over":
+        cap -= 1
+    elif bound == "framing-over":
+        cap = len(framed) - 1
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_ARCHIVE_MAX_BYTES", cap)
+    monkeypatch.setattr(validation, "_DECODE_CHUNK_BYTES", 5)
+
+    class _RecordingSource(io.BytesIO):
+        def __init__(self) -> None:
+            super().__init__(framed + tail)
+            self.requests: list[tuple[int, int]] = []
+
+        def read(self, size: int | None = -1, /) -> bytes:
+            assert size is not None and size > 0, "completion must never make an unlimited read"
+            self.requests.append((self.tell(), size))
+            return super().read(size)
+
+    source = _RecordingSource()
+    reader = validation._GuardedTarReader(source)
+    while reader.read(257):
+        pass
+    assert source.tell() == len(framed)
+    source.requests.clear()
+    if bound == "exact":
+        reader.finish()
+        assert source.tell() == cap
+    else:
+        with pytest.raises(CategorizedError, match="raw tar byte limit") as exc:
+            reader.finish()
+        assert exc.value.category is ErrorCategory.BUILD_FAILURE
+        assert source.tell() <= cap + 1
+    if bound == "framing-over":
+        assert source.requests == []
+    else:
+        assert source.requests
+        assert all(0 < size <= min(5, cap - offset + 1) for offset, size in source.requests)
+
+
+def test_guarded_tar_completion_preserves_operational_failure_identity() -> None:
+    framed = _tar_record(b"x") + bytes(tarfile.BLOCKSIZE)
+    failure = CategorizedError("store unavailable", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    class _FailingTail(io.BytesIO):
+        def read(self, size: int | None = -1, /) -> bytes:
+            if self.tell() >= len(framed):
+                raise failure
+            return super().read(size)
+
+    reader = validation._GuardedTarReader(_FailingTail(framed))
+    while reader.read(257):
+        pass
+    with pytest.raises(CategorizedError) as exc:
+        reader.finish()
+    assert exc.value is failure

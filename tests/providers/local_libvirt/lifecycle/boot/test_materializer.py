@@ -17,6 +17,7 @@ from botocore.exceptions import ReadTimeoutError
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.build_artifacts import validation
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_values import (
     ExternalBootActivationBinding,
     ExternalBootPlan,
@@ -654,3 +655,34 @@ def test_corrupt_final_payload_publishes_no_sidecar_and_clean_retry_succeeds(
     monkeypatch.setattr(materializer, "_validate_local_bundle", original)
     result = materializer.materialize(plan, cast(LocalExternalBootSession, _Session(session.root)))
     assert result.plan_identity == plan.identity
+
+
+@pytest.mark.parametrize("damage", ["missing-trailer", "crc"])
+def test_materialize_rejects_incomplete_gzip_before_publication(
+    damage: str, tmp_path: Path
+) -> None:
+    valid = _bundle(module_data=b"x" * 20000)
+    plan = _plan(valid)
+    if damage == "missing-trailer":
+        corrupt = valid[:-8]
+    else:
+        corrupt = valid[:-8] + bytes([valid[-8] ^ 1]) + valid[-7:]
+    plan = plan.model_copy(
+        update={
+            "bundle": plan.bundle.model_copy(
+                update={"sha256": "sha256:" + hashlib.sha256(corrupt).hexdigest()}
+            )
+        }
+    )
+    client = _Client({("build/kernel", "kernel-v1"): corrupt})
+    materializer = RealLocalExternalBootMaterializer(ObjectStore(client, "bucket"))
+    session = _Session(tmp_path / "activation")
+
+    with pytest.raises(CategorizedError, match="complete readable gzip tar") as exc:
+        materializer.materialize(plan, cast(LocalExternalBootSession, session))
+
+    assert exc.value.category is ErrorCategory.BUILD_FAILURE
+    assert not list(session.root.rglob("target-projection.json"))
+    assert not list(session.root.rglob("kernel"))
+    assert not list(session.root.rglob("modules"))
+    assert all(body.closed_by_store for body in client.bodies)

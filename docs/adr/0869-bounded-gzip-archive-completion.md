@@ -2,9 +2,9 @@
 
 ## Status
 
-Proposed
+Accepted (2026-11-24)
 
-On implementation, supersedes only the over-prefix-cap trailer-verification
+Supersedes only the over-prefix-cap trailer-verification
 residual in [ADR-0381](0381-reject-truncated-kernel-tar-uploads.md).
 
 ## Context

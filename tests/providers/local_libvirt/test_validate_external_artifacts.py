@@ -1758,3 +1758,91 @@ def test_scan_without_a_requested_debuginfo_reports_no_staged_manifest() -> None
     )
 
     assert "staged_module_source_manifest" not in evidence
+
+
+def _damage_gzip_completion(blob: bytes, damage: str) -> bytes:
+    if damage == "missing-trailer":
+        return blob[:-8]
+    if damage == "deflate-tail":
+        return blob + gzip.compress(b"")[:10] + b"\x07"
+    assert damage in {"crc", "isize"}
+    corrupt = bytearray(blob)
+    corrupt[-8 if damage == "crc" else -4] ^= 1
+    return bytes(corrupt)
+
+
+@pytest.mark.parametrize("arch", ["x86_64", "ppc64le"])
+@pytest.mark.parametrize("damage", ["missing-trailer", "crc", "isize", "deflate-tail"])
+def test_archive_scanner_requires_gzip_completion_after_tar_eof(arch: str, damage: str) -> None:
+    boot = _BZIMAGE_BODY if arch == "x86_64" else _boot_elf()
+    blob = _damage_gzip_completion(
+        _combined_kernel_tar(boot=boot, module_data=b"x" * 20000), damage
+    )
+    store = _FakeStore({"k": blob}, {})
+
+    with pytest.raises(CategorizedError, match="complete readable gzip tar") as exc:
+        validation._scan_external_boot_archive(store, "k", len(blob), arch)  # noqa: SLF001
+
+    assert exc.value.category is ErrorCategory.BUILD_FAILURE
+
+
+@pytest.mark.parametrize("arch", ["x86_64", "ppc64le"])
+@pytest.mark.parametrize("damage", ["missing-trailer", "crc", "isize", "deflate-tail"])
+def test_public_validation_requires_gzip_completion_after_prefix_cap(
+    arch: str, damage: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(validation, "_KERNEL_TAR_SCAN_MAX_BYTES", 8192)
+    boot = _BZIMAGE_BODY if arch == "x86_64" else _boot_elf()
+    blob = _damage_gzip_completion(
+        _combined_kernel_tar(boot=boot, module_data=b"x" * 20000), damage
+    )
+
+    with pytest.raises(CategorizedError, match="complete readable gzip tar") as exc:
+        _validate_kernel_blob(blob, arch=arch)
+
+    assert exc.value.category is ErrorCategory.BUILD_FAILURE
+
+
+@pytest.mark.parametrize("arch", ["x86_64", "ppc64le"])
+@pytest.mark.parametrize("tail", [b"", bytes(20), gzip.compress(b"decoded trailing data")])
+def test_archive_completion_preserves_valid_trailing_data(arch: str, tail: bytes) -> None:
+    boot = _BZIMAGE_BODY if arch == "x86_64" else _boot_elf()
+    original = _combined_kernel_tar(boot=boot, module_data=b"x" * 20000)
+    blob = original + tail
+    expected = validation._scan_external_boot_archive(  # noqa: SLF001
+        _FakeStore({"k": original}, {}), "k", len(original), arch
+    )
+    actual = validation._scan_external_boot_archive(  # noqa: SLF001
+        _FakeStore({"k": blob}, {}), "k", len(blob), arch
+    )
+    assert actual == expected
+    _validate_kernel_blob(blob, arch=arch)
+
+
+def test_archive_member_failure_precedes_gzip_completion_failure() -> None:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        _tar_add(archive, "../escape", b"x" * 20000)
+    blob = _damage_gzip_completion(buffer.getvalue(), "missing-trailer")
+
+    with pytest.raises(CategorizedError, match="noncanonical member path") as exc:
+        validation._scan_external_boot_archive(  # noqa: SLF001
+            _FakeStore({"k": blob}, {}), "k", len(blob), "x86_64"
+        )
+    assert exc.value.category is ErrorCategory.BUILD_FAILURE
+
+
+def test_archive_completion_bounds_trailing_compressed_expansion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = _combined_kernel_tar(module_data=b"x" * 20000)
+    cap = len(gzip.decompress(original)) + 128
+    monkeypatch.setattr(validation, "_EXTERNAL_BOOT_ARCHIVE_MAX_BYTES", cap)
+    monkeypatch.setattr(validation, "_DECODE_CHUNK_BYTES", 1024)
+    blob = original + gzip.compress(bytes(100000))
+
+    with pytest.raises(CategorizedError, match="raw tar byte limit") as exc:
+        validation._scan_external_boot_archive(  # noqa: SLF001
+            _FakeStore({"k": blob}, {}), "k", len(blob), "x86_64"
+        )
+    assert exc.value.category is ErrorCategory.BUILD_FAILURE
