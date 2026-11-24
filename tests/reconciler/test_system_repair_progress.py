@@ -277,12 +277,8 @@ def test_cancellation_retries_the_interrupted_system(
 def test_guarded_skip_advances_after_a_real_job_arrives_under_the_lock(
     migrated_url: str, lane: Lane, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tests.reconciler.test_leaked_mutation_obligation_repair import (
-        _seed_teardown_job,  # noqa: PLC2701 - reuse the existing blocking-job fixture
-    )
-    from tests.reconciler.test_stalled_reprovision_recovery import (
-        _seed_job,  # noqa: PLC2701 - reuse the existing blocking-job fixture
-    )
+    from tests.reconciler.recovery_support import seed_aged_teardown_job as _seed_teardown_job
+    from tests.reconciler.recovery_support import seed_reprovision_job as _seed_job
 
     monkeypatch.setattr(repairs, _LIMITS[lane], 1)
     original_lock = repairs.advisory_xact_lock

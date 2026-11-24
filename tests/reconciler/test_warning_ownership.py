@@ -30,9 +30,7 @@ from tests.db.conftest import (
 )
 from tests.reconcile_helpers import make_reconcile_config
 from tests.reconciler.conftest import FakeReaper, connect, run_repair, seed_system
-from tests.reconciler.test_stalled_teardown_recovery import (
-    _seed_teardown_job,  # noqa: PLC2701 - reuse the existing terminal-job fixture
-)
+from tests.reconciler.recovery_support import seed_teardown_job as _seed_teardown_job
 
 type WarningFamily = Literal["stranded", "stalled"]
 

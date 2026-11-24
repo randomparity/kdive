@@ -247,7 +247,7 @@ def test_succeeded_keeps_item_errors_and_adds_only_absent_checks(item: object) -
 
 
 def test_partial_worker_report_keeps_server_and_worker_verdicts() -> None:
-    from tests.diagnostics.test_service import _Fixed
+    from tests.diagnostics.checks_support import FixedCheck as _Fixed
 
     server = CheckResult("server_check", CheckStatus.PASS, "server checked")
     worker = CheckResult(

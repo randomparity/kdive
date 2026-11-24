@@ -21,6 +21,7 @@ from kdive.mcp.tools import gateway
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_registrar
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.rbac import Role
+from tests.mcp.middleware.binding_support import wrap_validation_error
 from tests.mcp.systems_support import ctx, provider_resolver
 
 
@@ -72,13 +73,6 @@ def test_curated_location_does_not_establish_caller_provenance(
             assert envelope["suggested_next_actions"] == []
 
     asyncio.run(run())
-
-
-def wrap_validation_error(cause: Exception | None) -> FastMCPValidationError:
-    """Build the exact framework wrapper/cause identity for focused provenance fixtures."""
-    error = FastMCPValidationError("caller validation")
-    error.__cause__ = cause
-    return error
 
 
 @pytest.mark.parametrize("shape", ["bare", "missing", "wrong", "deep", "other-outer", "context"])

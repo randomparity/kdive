@@ -35,13 +35,11 @@ from kdive.reconciler.repairs.systems import (
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
-from tests.jobs.test_worker import (
-    _registered_worker,  # noqa: PLC2701 - reuse credential-bound worker registration
-)
 from tests.mcp.systems_support import FakeProvisioning, ctx, provider_resolver
 from tests.reconcile_helpers import make_reconcile_config
 from tests.reconciler.conftest import FakeReaper, connect, seed_system
 from tests.support.object_store import INERT_OBJECT_STORE
+from tests.support.worker_fence import register_worker
 
 _MARKER = "automatic_teardown_replay_v1"
 _REASON = "teardown_recovery_reason"
@@ -133,7 +131,16 @@ async def scenario(
             await conn.execute(
                 "UPDATE jobs SET max_attempts=%s WHERE id=%s", (max_attempts, response.object_id)
             )
-        worker = await _registered_worker(pool, registry, worker_id="bounded-replay-worker")
+        worker_id = "bounded-replay-worker"
+        async with pool.connection() as conn:
+            credential = await register_worker(conn, worker_id)
+        worker = Worker(
+            pool,
+            registry,
+            worker_id=worker_id,
+            incarnation_credential=credential,
+            secret_registry=SecretRegistry(),
+        )
         yield Scenario(pool, worker, system_id, failing)
 
 

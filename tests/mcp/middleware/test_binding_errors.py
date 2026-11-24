@@ -21,7 +21,7 @@ from kdive.mcp.middleware.binding_errors import (
     _shape_xor_envelope,
 )
 from kdive.mcp.schema.tool_payloads import ShapeXorCustomError
-from tests.mcp.middleware.test_binding_provenance import wrap_validation_error
+from tests.mcp.middleware.binding_support import wrap_validation_error
 
 
 class _Errs(Exception):

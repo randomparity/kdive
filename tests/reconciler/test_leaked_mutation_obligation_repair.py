@@ -29,7 +29,6 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 from psycopg.pq import TransactionStatus
-from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.external_boot_activations import ExternalBootActivationRepository
@@ -48,9 +47,9 @@ from kdive.domain.external_boot_activation import ExternalBootActivation, Extern
 from kdive.reconciler import loop
 from kdive.reconciler.repairs import systems as repairs_systems
 from kdive.reconciler.repairs.systems import repair_leaked_mutation_obligations
-from kdive.services.systems.authority_owned import _teardown_dedup_key
 from tests.db.external_boot_authority_support import _RoleDsns
 from tests.reconciler.conftest import connect, run_repair, seed_run, seed_system
+from tests.reconciler.recovery_support import seed_aged_teardown_job as _seed_teardown_job
 
 _NONCE = "0" * 32
 _SECOND_NONCE = "1" * 32
@@ -71,33 +70,6 @@ async def _seed_open_obligation(
             conn, ModuleAttempt(system_id=system_id, run_id=run_id, operation_nonce=nonce)
         )
     return system_id
-
-
-async def _seed_teardown_job(
-    conn: psycopg.AsyncConnection, system_id: UUID, *, state: str, age_seconds: int = 0
-) -> None:
-    """A teardown job at the dedup key both teardown families use, in ``state``.
-
-    Keyed through the production `_teardown_dedup_key`, which the lane rebuilds by hand in Python
-    and again in SQL: a change to that convention then fails the deferral arms below rather than
-    silently stopping the lane from deferring.
-
-    ``age_seconds`` backdates ``updated_at`` so an arm can put a terminal job outside the settle
-    window. It goes in the INSERT because `jobs_set_updated_at` is a BEFORE UPDATE trigger that
-    reassigns the column unconditionally, so a later UPDATE that backdates it is overwritten.
-    """
-    await conn.execute(
-        "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, authorizing, dedup_key, "
-        "    updated_at) "
-        "VALUES ('teardown', %s, %s, 1, 3, %s, %s, now() - make_interval(secs => %s))",
-        (
-            Jsonb({"system_id": str(system_id)}),
-            state,
-            Jsonb({"principal": "alice", "project": "proj"}),
-            _teardown_dedup_key(system_id),
-            age_seconds,
-        ),
-    )
 
 
 async def _seed_restricting_activation(conn: psycopg.AsyncConnection, system_id: UUID) -> UUID:

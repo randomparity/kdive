@@ -20,11 +20,11 @@ from kdive.reconciler import loop
 from kdive.reconciler.repairs import systems as system_repairs
 from tests.reconcile_helpers import make_reconcile_config
 from tests.reconciler.conftest import FakeReaper, connect, seed_system
-from tests.reconciler.test_stalled_teardown_recovery import (
-    _seed_completed_activation,  # noqa: PLC2701 - reuse existing activation fixture
-    _seed_teardown_job,  # noqa: PLC2701 - reuse existing terminal-job fixture
-    _teardown_job,  # noqa: PLC2701 - reuse existing durable-row assertion helper
+from tests.reconciler.recovery_support import (
+    seed_completed_activation as _seed_completed_activation,
 )
+from tests.reconciler.recovery_support import seed_teardown_job as _seed_teardown_job
+from tests.reconciler.recovery_support import teardown_job as _teardown_job
 
 type Blocker = Literal["authority_system_v1", "external_boot_authority_v1", "unsettled_activation"]
 _KIND = "stalled_tearing_down_systems"

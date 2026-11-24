@@ -20,7 +20,8 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.payloads import Authorizing, DiagnosticsWorkerCheckPayload
-from tests.diagnostics.test_service import _Fixed, _Slow
+from tests.diagnostics.checks_support import FixedCheck as _Fixed
+from tests.diagnostics.checks_support import SlowCheck as _Slow
 
 
 class _Queue:

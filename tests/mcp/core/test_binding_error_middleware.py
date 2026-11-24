@@ -26,7 +26,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
-from tests.mcp.middleware.test_binding_provenance import wrap_validation_error
+from tests.mcp.middleware.binding_support import wrap_validation_error
 
 
 def _envelope(result: ToolResult) -> dict[str, Any]:
