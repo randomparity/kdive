@@ -10,8 +10,10 @@ capture remains ``live_vm``-gated.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NoReturn
 from unittest.mock import Mock
 from uuid import UUID, uuid4
@@ -305,3 +307,101 @@ def test_harvest_stops_on_native_failure(
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.__cause__ is fault
     reader.assert_not_called()
+
+
+@pytest.mark.parametrize("phase", ["launch", "mount", "list", "download", "binding"])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_failed_capture_releases_spool_and_preserves_reader_error(
+    phase: str,
+    close_fails: bool,
+    tmp_path: Path,
+    retrieve_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdk = Mock(spec=guestfs._GuestfsHandle)
+    fault = OSError("guest storage unavailable")
+    sdk.inspect_os.return_value = ["/dev/root"]
+    sdk.inspect_get_mountpoints.return_value = {"/": "/dev/root", "/var": "/dev/var"}
+    sdk.glob_expand.side_effect = lambda pattern: (
+        ["/var/crash/boot/vmcore"] if pattern == guestfs._VAR_CRASH_GLOB else []
+    )
+    sdk.statns.return_value = {"st_mtime_sec": 1, "st_size": 4}
+    if close_fails:
+        sdk.close.side_effect = RuntimeError("cleanup unavailable")
+
+    def mount(_device: str, mountpoint: str) -> None:
+        if phase == "mount" and mountpoint == "/var":
+            raise fault
+
+    def download(_path: str, dest: str) -> None:
+        Path(dest).write_bytes(b"partial")
+        if phase == "download":
+            raise fault
+
+    sdk.mount_ro.side_effect = mount
+    sdk.download.side_effect = download
+    if phase == "launch":
+        sdk.launch.side_effect = fault
+    if phase == "list":
+        sdk.glob_expand.side_effect = fault
+    monkeypatch.setitem(
+        sys.modules,
+        "guestfs",
+        None if phase == "binding" else SimpleNamespace(GuestFS=lambda **_kwargs: sdk),
+    )
+    monkeypatch.setattr(libvirt, "open", lambda _uri: FakeLibvirtConn())
+    monkeypatch.setattr(guestfs, "overlay_path", lambda _system: "overlay.qcow2")
+    spool = tmp_path / "spool"
+
+    def allocate(*, prefix: str) -> str:
+        assert prefix == "kdive-kdump-"
+        spool.mkdir()
+        return str(spool)
+
+    monkeypatch.setattr(guestfs.tempfile, "mkdtemp", allocate)
+    with pytest.raises(CategorizedError) as caught:
+        guestfs._real_wait_for_vmcore(uuid4())
+    assert not spool.exists()
+    if phase == "binding":
+        assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+        assert isinstance(caught.value.__cause__, ImportError)
+        sdk.close.assert_not_called()
+    else:
+        assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        assert caught.value.__cause__ is fault
+        sdk.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("capture", ["vmcore", "vmcore-incomplete", None])
+def test_coordinator_hands_off_only_complete_core_spool(
+    capture: str | None, tmp_path: Path, retrieve_uri: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdk = Mock(spec=guestfs._GuestfsHandle)
+    sdk.inspect_os.return_value = ["/dev/root"]
+    sdk.inspect_get_mountpoints.return_value = {"/": "/dev/root"}
+    paths = [] if capture is None else [f"/var/crash/boot/{capture}"]
+    sdk.glob_expand.side_effect = lambda pattern: [
+        path for path in paths if path.endswith(pattern.rsplit("/", 1)[1])
+    ]
+    sdk.statns.return_value = {"st_mtime_sec": 1, "st_size": 4}
+    sdk.download.side_effect = lambda _path, dest: Path(dest).write_bytes(b"CORE")
+    monkeypatch.setitem(sys.modules, "guestfs", SimpleNamespace(GuestFS=lambda **_kwargs: sdk))
+    monkeypatch.setattr(libvirt, "open", lambda _uri: FakeLibvirtConn())
+    monkeypatch.setattr(guestfs, "overlay_path", lambda _system: "overlay.qcow2")
+    spool = tmp_path / "spool"
+
+    def allocate(*, prefix: str) -> str:
+        spool.mkdir()
+        return str(spool)
+
+    monkeypatch.setattr(guestfs.tempfile, "mkdtemp", allocate)
+    outcome = guestfs._real_wait_for_vmcore(uuid4())
+    assert outcome.core == (spool / "vmcore" if capture == "vmcore" else None)
+    assert outcome.incomplete_found is (capture == "vmcore-incomplete")
+    assert spool.exists() is (capture == "vmcore")
+    if outcome.core is not None:
+        assert outcome.core.read_bytes() == b"CORE"
+        sdk.download.assert_called_once_with("/var/crash/boot/vmcore", str(outcome.core))
+    else:
+        sdk.download.assert_not_called()
+    sdk.close.assert_called_once_with()

@@ -9,7 +9,7 @@ import tempfile
 import time
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol, cast
 from uuid import UUID
 
@@ -193,8 +193,10 @@ def _mount_guest_filesystems(guest: _GuestfsHandle, root: str) -> None:
     Mountpoints are mounted shortest-path first so a parent is in place before its child.
     The ROOT mount stays fatal — an overlay whose root will not mount is unreadable, and the
     caller turns that into a typed INFRASTRUCTURE_FAILURE rather than an empty core list that
-    would read as "the guest never dumped". Every other filesystem is best-effort: one
-    unreadable /home must not deny a core sitting on a healthy /var.
+    would read as "the guest never dumped". Ancestors of /var/crash and its direct capture
+    directories are required for the fixed one-directory-deep core globs too (ADR-0861).
+    Other directory mounts remain best-effort: an unreadable /home or deeper non-capture
+    directory must not deny a core sitting on healthy capture storage.
     """
     mountpoints = guest.inspect_get_mountpoints(root)
     guest.mount_ro(mountpoints.get("/", root), "/")
@@ -204,6 +206,10 @@ def _mount_guest_filesystems(guest: _GuestfsHandle, root: str) -> None:
         try:
             guest.mount_ro(device, mountpoint)
         except Exception:
+            crash_root = PurePosixPath("/var/crash")
+            path = PurePosixPath(mountpoint)
+            if crash_root.is_relative_to(path) or path.parent == crash_root:
+                raise
             _log.warning(
                 "libguestfs could not mount %s (%s) read-only; continuing without it",
                 mountpoint,
@@ -292,8 +298,8 @@ def _real_wait_for_vmcore(system_id: UUID) -> HarvestOutcome:  # pragma: no cove
     ``vmcore-incomplete`` was seen so ``capture`` can disclose an incomplete-core readiness
     failure (ADR-0251). Owns the spool's lifecycle only up to a complete core: it creates a
     private temp directory, streams the chosen core into it, and removes the directory when no
-    complete core is found or the harvest raises. On a complete core the caller (``capture``)
-    owns cleanup, so the file survives this function's ``finally``.
+    complete core is found or opening/harvesting raises (ADR-0861). On a complete core the
+    caller (``capture``) owns cleanup, so the file survives this function's ``finally``.
     """
     _poll_until_settled(
         lambda: _real_domain_settled(system_id),
@@ -305,13 +311,15 @@ def _real_wait_for_vmcore(system_id: UUID) -> HarvestOutcome:  # pragma: no cove
     overlay = overlay_path(system_id)
     spool_dir = Path(tempfile.mkdtemp(prefix="kdive-kdump-"))
     dest = spool_dir / "vmcore"
-    reader = _LibguestfsCoreReader(overlay)
+    reader: _LibguestfsCoreReader | None = None
     outcome = HarvestOutcome(core=None, incomplete_found=False)
     try:
+        reader = _LibguestfsCoreReader(overlay)
         outcome = harvest_vmcore(reader, overlay, dest=dest, max_bytes=MAX_CORE_BYTES)
         return outcome
     finally:
-        reader.close()
+        if reader is not None:
+            reader.close()
         if outcome.core is None:
             _remove_spool(dest)
 

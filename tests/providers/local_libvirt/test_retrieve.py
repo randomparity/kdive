@@ -7,6 +7,7 @@ import hashlib
 import re
 import sys
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
@@ -31,7 +32,7 @@ from kdive.providers.local_libvirt.retrieve.guestfs import (
     _LibguestfsCoreReader,
     _mount_guest_filesystems,
 )
-from kdive.providers.local_libvirt.retrieve.kdump import HarvestOutcome
+from kdive.providers.local_libvirt.retrieve.kdump import HarvestOutcome, harvest_vmcore
 from kdive.providers.local_libvirt.retrieve.provider import LocalLibvirtRetrieve
 from kdive.providers.ports.retrieve import (
     CaptureOutput,
@@ -644,3 +645,131 @@ def test_local_retrieve_from_env_wires_real_crash_runner() -> None:
 
     retriever = LocalLibvirtRetrieve.from_env(secret_registry=SecretRegistry())
     assert retriever._run_crash is _real_run_crash
+
+
+@dataclass
+class _CrashMountGuest:
+    mountpoints: dict[str, str]
+    failed_mount: str | None = None
+    fault: BaseException = field(default_factory=lambda: OSError("mount unavailable"))
+    files: dict[str, bytes] = field(default_factory=lambda: {"/var/crash/boot/vmcore": b"CORE"})
+    mounted: list[tuple[str, str]] = field(default_factory=list)
+    downloads: list[str] = field(default_factory=list)
+    listed: bool = False
+    closes: int = 0
+
+    def add_drive_opts(self, filename: str, *, readonly: bool) -> None:
+        assert filename == "overlay.qcow2"
+        assert readonly is True
+
+    def launch(self) -> None:
+        pass
+
+    def inspect_os(self) -> list[str]:
+        return ["/dev/root"]
+
+    def inspect_get_mountpoints(self, root: str) -> dict[str, str]:
+        assert root == "/dev/root"
+        return self.mountpoints
+
+    def mount_ro(self, device: str, mountpoint: str) -> None:
+        self.mounted.append((mountpoint, device))
+        if mountpoint == self.failed_mount:
+            raise self.fault
+
+    def glob_expand(self, pattern: str) -> list[str]:
+        self.listed = True
+        return [path for path in self.files if fnmatch(path, pattern)]
+
+    def statns(self, path: str) -> dict[str, int]:
+        return {"st_mtime_sec": 1, "st_size": len(self.files[path])}
+
+    def download(self, path: str, dest: str) -> None:
+        self.downloads.append(path)
+        Path(dest).write_bytes(self.files[path])
+
+    def close(self) -> None:
+        self.closes += 1
+
+
+@pytest.mark.parametrize(
+    "mountpoint",
+    ["/", "/var", "/var/", "/var/crash", "/var/crash/", "/var/crash/boot", "/var/crash/boot/"],
+)
+@pytest.mark.parametrize("fault_type", [OSError, RuntimeError])
+def test_required_crash_mount_failure_is_not_dump_absence(
+    mountpoint: str, fault_type: type[Exception], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guest = _CrashMountGuest(
+        {"/": "/dev/root", mountpoint: "/dev/crash"},
+        mountpoint,
+        fault_type("required mount unavailable"),
+    )
+    monkeypatch.setitem(sys.modules, "guestfs", SimpleNamespace(GuestFS=lambda **_kwargs: guest))
+    dest = tmp_path / "vmcore"
+    with (
+        pytest.raises(CategorizedError) as caught,
+        closing(_LibguestfsCoreReader("overlay.qcow2")) as reader,
+    ):
+        harvest_vmcore(reader, "overlay.qcow2", dest=dest, max_bytes=1024)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.__cause__ is guest.fault
+    assert caught.value.details == {"overlay": "overlay.qcow2", "error": fault_type.__name__}
+    assert guest.closes == 1
+    assert not guest.listed
+    assert guest.downloads == []
+    assert not dest.exists()
+
+
+@pytest.mark.parametrize(
+    "mountpoint",
+    ["/home", "/var/log", "/var/crash-old", "/var/crash-old/boot", "/var/crash/boot/aux"],
+)
+def test_unrelated_mount_fault_still_allows_actual_core_harvest(
+    mountpoint: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guest = _CrashMountGuest(
+        {
+            mountpoint: "/dev/other",
+            "/var/crash/boot": "/dev/capture",
+            "/var": "/dev/var",
+            "/": "/dev/root",
+        },
+        mountpoint,
+    )
+    monkeypatch.setitem(sys.modules, "guestfs", SimpleNamespace(GuestFS=lambda **_kwargs: guest))
+    dest = tmp_path / "vmcore"
+    with closing(_LibguestfsCoreReader("overlay.qcow2")) as reader:
+        outcome = harvest_vmcore(reader, "overlay.qcow2", dest=dest, max_bytes=1024)
+    assert outcome == HarvestOutcome(core=dest, incomplete_found=False)
+    assert dest.read_bytes() == b"CORE"
+    assert guest.closes == 1
+    assert guest.mounted == sorted(guest.mountpoints.items())
+    assert guest.downloads == ["/var/crash/boot/vmcore"]
+
+
+@pytest.mark.parametrize("include_root", [True, False])
+@pytest.mark.parametrize("capture", ["vmcore", "vmcore-incomplete", None])
+def test_healthy_crash_mount_observation_and_root_fallback(
+    include_root: bool, capture: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mounts = {"/var/crash/boot": "/dev/capture", "/var": "/dev/var", "/var/crash": "/dev/crash"}
+    if include_root:
+        mounts["/"] = "/dev/root"
+    files = {} if capture is None else {f"/var/crash/boot/{capture}": b"CORE"}
+    guest = _CrashMountGuest(mounts, files=files)
+    monkeypatch.setitem(sys.modules, "guestfs", SimpleNamespace(GuestFS=lambda **_kwargs: guest))
+    dest = tmp_path / "vmcore"
+    with closing(_LibguestfsCoreReader("overlay.qcow2")) as reader:
+        outcome = harvest_vmcore(reader, "overlay.qcow2", dest=dest, max_bytes=1024)
+    assert outcome == HarvestOutcome(
+        dest if capture == "vmcore" else None, capture == "vmcore-incomplete"
+    )
+    assert guest.closes == 1
+    assert guest.mounted == [
+        ("/", "/dev/root"),
+        ("/var", "/dev/var"),
+        ("/var/crash", "/dev/crash"),
+        ("/var/crash/boot", "/dev/capture"),
+    ]
+    assert dest.exists() is (capture == "vmcore")
