@@ -7,7 +7,8 @@ import math
 import shutil
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol, cast
 from uuid import UUID
@@ -61,6 +62,37 @@ class _GuestfsHandle(Protocol):  # pragma: no cover - live_vm (libguestfs bindin
 def _libvirt_uri() -> str:
     """The provider's configured libvirt URI (``KDIVE_LIBVIRT_URI``, default ``qemu:///system``)."""
     return config.require(LIBVIRT_URI)
+
+
+@contextmanager
+def _retrieve_domain(system_id: UUID, *, operation: str) -> Generator[libvirt.virDomain | None]:
+    """Own native retrieval calls; only lookup NO_DOMAIN means absence (ADR-0859)."""
+    connection: libvirt.virConnect | None = None
+    try:
+        connection = libvirt.open(_libvirt_uri())
+        try:
+            domain = connection.lookupByName(domain_name_for(system_id))
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
+                raise
+            domain = None
+        yield domain
+    except libvirt.libvirtError as exc:
+        raise CategorizedError(
+            "local retrieve native operation failed; verify libvirt connectivity and retry",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"system_id": str(system_id), "operation": operation},
+        ) from exc
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception as exc:
+                _log.warning(
+                    "local retrieve close failed: operation=%s type=%s",
+                    operation,
+                    type(exc).__name__,
+                )
 
 
 class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
@@ -223,17 +255,12 @@ def _force_off_domain(system_id: UUID) -> None:  # pragma: no cover - live_vm (l
     never finished — libguestfs reads of a disk a running guest is mutating are unsafe
     (ADR-0203/0217).
     """
-    conn = libvirt.open(_libvirt_uri())
-    try:
-        try:
-            domain = conn.lookupByName(domain_name_for(system_id))
-        except libvirt.libvirtError:
-            return  # already gone — nothing running to quiesce
+    with _retrieve_domain(system_id, operation="force_off_domain") as domain:
+        if domain is None:
+            return
         # Hard by design (ADR-0679): the kdump wait is over, so a clean request only adds delay.
         if domain.isActive():
             domain.destroy()
-    finally:
-        conn.close()
 
 
 def _real_domain_settled(system_id: UUID) -> bool:  # pragma: no cover - live_vm (libvirt)
@@ -243,16 +270,11 @@ def _real_domain_settled(system_id: UUID) -> bool:  # pragma: no cover - live_vm
     a domain that has been undefined/removed is also "settled". Any other state (running, the
     crash kernel still booting/dumping) is not settled, so the poll keeps waiting.
     """
-    conn = libvirt.open(_libvirt_uri())
-    try:
-        try:
-            domain = conn.lookupByName(domain_name_for(system_id))
-        except libvirt.libvirtError:
-            return True  # gone — nothing left running, treat as settled
+    with _retrieve_domain(system_id, operation="check_domain_settled") as domain:
+        if domain is None:
+            return True
         state, _reason = domain.state()
         return state == libvirt.VIR_DOMAIN_SHUTOFF
-    finally:
-        conn.close()
 
 
 def _real_wait_for_vmcore(system_id: UUID) -> HarvestOutcome:  # pragma: no cover - live_vm

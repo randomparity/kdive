@@ -7,12 +7,19 @@ import os
 import stat
 import struct
 from pathlib import Path
+from typing import NoReturn
+from unittest.mock import create_autospec
 from uuid import uuid4
 
+import libvirt
 import pytest
 
+from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.retrieve import host_dump_capture
+from kdive.providers.local_libvirt.retrieve import host_dump_capture, provider
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.objectstore import ObjectStore
+from tests.providers.local_libvirt.fakes import FakeLibvirtConn, libvirt_error
 
 
 def test_inactive_domain_has_no_live_host_dump(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,23 +165,42 @@ def test_prepare_spool_refuses_unsafe_setup(
         host_dump_capture._prepare_host_dump()
 
 
-@pytest.mark.parametrize("failure", [None, "dump", "stat", "ceiling", "configuration"])
+@pytest.mark.parametrize(
+    ("failure", "expected_category"),
+    [
+        (None, None),
+        ("dump", ErrorCategory.INFRASTRUCTURE_FAILURE),
+        ("stat", ErrorCategory.INFRASTRUCTURE_FAILURE),
+        ("ceiling", ErrorCategory.CONFIGURATION_ERROR),
+        ("configuration", ErrorCategory.CONFIGURATION_ERROR),
+    ],
+)
+@pytest.mark.parametrize("close_exception", [None, libvirt.libvirtError, RuntimeError])
 def test_active_capture_preserves_bytes_cleanup_and_connection(
-    spool_root: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
+    spool_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str | None,
+    expected_category: ErrorCategory | None,
+    close_exception: type[Exception] | None,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-
     paths: list[Path] = []
+    system_id = uuid4()
+    dump_fault = libvirt_error(libvirt.VIR_ERR_RPC)
+    close_fault = close_exception("private close diagnostic") if close_exception else None
 
     class Domain:
         def isActive(self) -> bool:
             return True
 
-        def coreDumpWithFormat(self, name: str, _format: int, _flags: int) -> None:
+        def coreDumpWithFormat(self, name: str, format_: int, flags: int) -> None:
+            assert format_ == libvirt.VIR_DOMAIN_CORE_DUMP_FORMAT_RAW
+            assert flags == libvirt.VIR_DUMP_MEMORY_ONLY
             core = Path(name)
             paths.append(core)
             assert core.exists()
             if failure == "dump":
-                raise host_dump_capture.libvirt.libvirtError("dump failed")
+                raise dump_fault
             if failure == "stat":
                 core.unlink()
             else:
@@ -188,31 +214,39 @@ def test_active_capture_preserves_bytes_cleanup_and_connection(
 
         def close(self) -> None:
             self.closed = True
+            if close_fault is not None:
+                raise close_fault
 
     connection = Connection()
-    monkeypatch.setattr(host_dump_capture.libvirt, "open", lambda _: connection)
+    monkeypatch.setattr(libvirt, "open", lambda _: connection)
     if failure == "configuration":
         spool_root.rmdir()
     if failure == "ceiling":
         monkeypatch.setattr(host_dump_capture, "MAX_CORE_BYTES", 1)
     try:
-        if failure is None:
-            core = host_dump_capture._real_host_dump_capture(uuid4())
+        if expected_category is None:
+            core = host_dump_capture._real_host_dump_capture(system_id)
             assert core is not None and core.read_bytes() == b"vmcore"
         else:
-            with pytest.raises(
-                FileNotFoundError if failure == "stat" else CategorizedError
-            ) as error:
-                host_dump_capture._real_host_dump_capture(uuid4())
-            if isinstance(error.value, CategorizedError):
-                expected = (
-                    ErrorCategory.INFRASTRUCTURE_FAILURE
-                    if failure == "dump"
-                    else ErrorCategory.CONFIGURATION_ERROR
-                )
-                assert error.value.category == expected
+            with pytest.raises(CategorizedError) as error:
+                host_dump_capture._real_host_dump_capture(system_id)
+            assert error.value.category == expected_category
+            if failure == "dump":
+                assert error.value.__cause__ is dump_fault
+                assert str(error.value) == "local host_dump core-dump failed"
+            elif failure == "stat":
+                assert isinstance(error.value.__cause__, FileNotFoundError)
+                assert error.value.__cause__.filename == str(paths[0])
+                assert error.value.details["system_id"] == str(system_id)
+                assert error.value.details["operation"] == "stat_host_dump"
             assert not spool_root.exists() or list(spool_root.iterdir()) == []
         assert connection.closed
+        if close_fault is not None:
+            assert str(close_fault) not in caplog.text
+            assert any(
+                r.levelname == "WARNING" and "host_dump_capture" in r.getMessage()
+                for r in caplog.records
+            )
     finally:
         for core in paths:
             host_dump_capture._remove_spool(core)
@@ -280,3 +314,73 @@ def test_prepare_spool_exclusively_creates_core(
         host_dump_capture._prepare_host_dump()
     assert observed == [b"existing"]
     assert list(spool_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("signal", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("failure_phase", ["dump", "close"])
+def test_host_dump_close_control_cleans_undelivered_core(
+    signal: type[BaseException],
+    failure_phase: str,
+    spool_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    control = signal("capture interrupted")
+    paths: list[Path] = []
+
+    class Domain:
+        def isActive(self) -> bool:
+            return True
+
+        def coreDumpWithFormat(self, name: str, _format: int, _flags: int) -> None:
+            core = Path(name)
+            paths.append(core)
+            core.write_bytes(b"vmcore")
+            if failure_phase == "dump":
+                raise control
+
+    class Connection:
+        def lookupByName(self, _name: str) -> Domain:
+            return Domain()
+
+        def close(self) -> NoReturn:
+            if failure_phase == "close":
+                raise control
+            raise RuntimeError("private close diagnostic")
+
+    monkeypatch.setattr(libvirt, "open", lambda _uri: Connection())
+    try:
+        with pytest.raises(signal) as caught:
+            host_dump_capture._real_host_dump_capture(uuid4())
+        assert caught.value is control
+        assert list(spool_root.iterdir()) == []
+        assert "private close diagnostic" not in caplog.text
+    finally:
+        for core in paths:
+            host_dump_capture._remove_spool(core)
+
+
+@pytest.mark.parametrize("code", [libvirt.VIR_ERR_NO_DOMAIN, libvirt.VIR_ERR_RPC, None])
+def test_host_dump_provider_preserves_native_failure(
+    code: int | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fault = libvirt_error(code if code is not None else libvirt.VIR_ERR_INTERNAL_ERROR)
+    if code is None:
+        fault.err = None
+    connection = FakeLibvirtConn()
+
+    def lookup(_name: str) -> NoReturn:
+        raise fault
+
+    monkeypatch.setattr(connection, "lookupByName", lookup)
+    monkeypatch.setattr(libvirt, "open", lambda _uri: connection)
+    store = create_autospec(ObjectStore, instance=True)
+    retrieve = provider.LocalLibvirtRetrieve.from_env(secret_registry=SecretRegistry(), store=store)
+    with pytest.raises(CategorizedError) as caught:
+        retrieve.capture(uuid4(), uuid4(), CaptureMethod.HOST_DUMP, execution_id=uuid4())
+    if code == libvirt.VIR_ERR_NO_DOMAIN:
+        assert caught.value.category is ErrorCategory.READINESS_FAILURE
+    else:
+        assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        assert caught.value.__cause__ is fault
+    assert store.mock_calls == []
