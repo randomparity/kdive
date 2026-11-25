@@ -28,6 +28,7 @@ from kdive.jobs.provider_context import clear_provider_kind
 from kdive.jobs.worker_telemetry import WorkerTelemetry
 from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from tests.support.object_store import INERT_OBJECT_STORE
 from tests.support.otel import tracer_provider
 
@@ -49,6 +50,8 @@ class _FakeTeardown:
 
 
 class _FakeRuntime:
+    system_handle = staticmethod(libvirt_system_handle)
+
     def __init__(self) -> None:
         self.provisioner = _FakeTeardown()
         self.snapshot = None  # no snapshot port; teardown skips delete_all
@@ -192,15 +195,14 @@ def test_teardown_handler_tags_provider_kind_and_metric_is_emitted() -> None:
     assert lock_calls[0].args[1] == (expected_key,)
     # The binding is resolved with the same connection and system id.
     assert fake_resolver.binding_calls == [(fake_conn, _SYSTEM_ID)]
-    # An already-torn-down System keeps its stored domain name (the ``or`` left operand),
-    # which is passed verbatim to the provisioner teardown.
+    # The provider's target policy retains the stored name for teardown.
     assert runtime.provisioner.teardown_calls == [_DOMAIN]
     # The handler returns the system id as a string.
     assert result == [str(_SYSTEM_ID)]
 
 
 def test_teardown_handler_falls_back_to_derived_domain_when_unnamed() -> None:
-    """When the System has no stored domain_name, teardown uses ``domain_name_for``."""
+    """The libvirt target policy derives a name when the System has none stored."""
     runtime = _FakeRuntime()
     resolver = cast(ProviderResolver, _FakeResolver(runtime))
     system = _make_system(domain_name=None)
