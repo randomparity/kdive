@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.context import authorizing, context_from_job
 from kdive.mcp.exposure import visible_next_actions
@@ -338,6 +338,18 @@ def external_boot_denial(
     )
 
 
+def teardown_routing_failure(
+    object_id: str, exc: CategorizedError, ctx: RequestContext
+) -> ToolResponse:
+    """Render a deliberate teardown-routing refusal using the existing MCP contract."""
+    if isinstance(exc, ExternalBootDenied):
+        return external_boot_denial(object_id, exc, ctx)
+    actions = (
+        ["jobs.wait", "systems.get"] if exc.category is ErrorCategory.CONFLICT else ["systems.get"]
+    )
+    return ToolResponse.failure_from_error(object_id, exc, suggested_next_actions=actions)
+
+
 def job_envelope(job: Job, object_key: str, object_id: UUID) -> ToolResponse:
     base = ToolResponse.from_job(job)
     return base.model_copy(update={"data": {**base.data, object_key: str(object_id)}})
@@ -370,4 +382,5 @@ __all__ = [
     "not_found",
     "paginate",
     "stale_handle",
+    "teardown_routing_failure",
 ]

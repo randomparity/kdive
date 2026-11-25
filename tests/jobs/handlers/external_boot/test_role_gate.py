@@ -38,8 +38,8 @@ from psycopg.sql import SQL, Identifier, Literal
 from pydantic import SecretStr
 
 from kdive.domain.operations.jobs import JobKind
+from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
 from kdive.jobs.handlers.external_boot.authority import allocate_authority
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1
 from tests.jobs.handlers.external_boot.conftest import role_connection
 from tests.jobs.handlers.external_boot.seeding import SeededCase, seed_case
 from tests.jobs.handlers.external_boot.support import build_job

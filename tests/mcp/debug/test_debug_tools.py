@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+from dataclasses import replace
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -24,6 +25,7 @@ from kdive.domain.capacity.state import (
     RunState,
     SystemState,
 )
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.mcp.auth import RequestContext
@@ -1976,3 +1978,44 @@ def test_start_session_gdbstub_on_an_authority_system_does_not_forward_a_port(
             assert connector.forwards == [None]
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("refusing", [False, True])
+def test_start_session_uses_bound_target_policy(migrated_url: str, refusing: bool) -> None:
+    async def run() -> None:
+        async with open_pool(migrated_url) as pool:
+            allocation_id = await granted_allocation(pool)
+            system_id = await seed_system(pool, allocation_id, SystemState.READY)
+            run_id = await seed_run(pool, system_id)
+            connector = _FakeConnector()
+            resolver = provider_resolver(connector=connector)
+            calls: list[tuple[UUID, str | None]] = []
+
+            def target(system: UUID, name: str | None) -> SystemHandle:
+                calls.append((system, name))
+                if refusing:
+                    raise CategorizedError(
+                        "unavailable target", category=ErrorCategory.NOT_IMPLEMENTED
+                    )
+                return SystemHandle("debug-provider-target")
+
+            runtime = replace(resolver.resolve(ResourceKind.LOCAL_LIBVIRT), system_handle=target)
+            handlers = debug_tools.DebugSessionHandlers.from_resolver(
+                ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime}),
+                runtime_resolver=None,
+                secret_registry=SecretRegistry(),
+            )
+            response = await handlers.start_session(
+                pool, request_context(), run_id=run_id, transport="gdbstub"
+            )
+            assert calls == [(UUID(system_id), "kdive-x")]
+            if refusing:
+                assert response.status == "error"
+                assert response.error_category == ErrorCategory.NOT_IMPLEMENTED
+                assert connector.opened == []
+                assert await _session_count(pool) == 0
+            else:
+                assert response.status == "live"
+                assert connector.opened == [("debug-provider-target", "gdbstub")]
+
+    asyncio.run(run())

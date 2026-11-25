@@ -6,15 +6,56 @@ import argparse
 import ast
 import asyncio
 import inspect
+from importlib.util import resolve_name
 
 import pytest
 
 from kdive.cli import dispatch
 from kdive.cli.__main__ import build_parser
+from kdive.cli.commands import registry
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS, GeneratedVerb
 from kdive.cli.commands.registry import HANDLER_OVERRIDES
 from tests.ansi import strip_ansi
 from tests.cli.verb_argv import required_argv_for_generated
+
+
+def test_registry_does_not_import_dispatch_at_any_scope() -> None:
+    imports: list[str] = []
+    for node in ast.walk(ast.parse(inspect.getsource(registry))):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                module = resolve_name(
+                    "." * node.level + module, registry.__name__.rpartition(".")[0]
+                )
+            imports.extend([module, *(f"{module}.{alias.name}" for alias in node.names)])
+    offenders = [
+        name
+        for name in imports
+        if name == "kdive.cli.dispatch" or name.startswith("kdive.cli.dispatch.")
+    ]
+    assert not offenders, offenders
+
+
+def test_registry_selects_override_without_executing_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def handler(args: argparse.Namespace) -> int:
+        raise AssertionError("selection must not execute the handler")
+
+    monkeypatch.setitem(registry.HANDLER_OVERRIDES, "jobs.wait", handler)
+    args = build_parser().parse_args(["jobs", "wait", "job-1"])
+    verb, selected = registry.select_verb(args)
+    assert verb is next(v for v in GENERATED_VERBS if v.tool == "jobs.wait")
+    assert selected is handler
+
+
+def test_registry_selects_generic_descriptor_without_handler() -> None:
+    verb = next(v for v in GENERATED_VERBS if v.tool == "accounting.estimate")
+    args = build_parser().parse_args([verb.group, verb.sub, *required_argv_for_generated(verb)])
+    selected, handler = registry.select_verb(args)
+    assert selected is verb
+    assert handler is None
 
 
 def test_descriptor_verb_is_a_known_subcommand() -> None:
@@ -82,7 +123,7 @@ def test_generated_positional_uses_descriptor_and_routes_to_tool_handler(
     monkeypatch.setitem(registry.HANDLER_OVERRIDES, "jobs.wait", _handler)
     args = build_parser().parse_args(["jobs", "wait", "job-1"])
     assert args.genarg_job_id == "job-1"
-    assert asyncio.run(registry.run_verb(args)) == 0
+    assert asyncio.run(dispatch.run(args)) == 0
     assert seen == [args]
 
 
@@ -200,14 +241,14 @@ def test_images_list_carries_the_scope_flag() -> None:
     assert build_parser().parse_args(["images", "list"]).genarg_scope is None
 
 
-def test_dispatch_routes_descriptor_verb_to_run_verb(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dispatch_routes_descriptor_verb_to_override(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[argparse.Namespace] = []
 
-    async def _fake_run_verb(args: argparse.Namespace) -> int:
+    async def handler(args: argparse.Namespace) -> int:
         seen.append(args)
         return 0
 
-    monkeypatch.setattr(dispatch.commands, "run_verb", _fake_run_verb)
+    monkeypatch.setitem(dispatch.commands.HANDLER_OVERRIDES, "resources.list", handler)
     args = build_parser().parse_args(["resources", "list"])
     assert asyncio.run(dispatch.run(args)) == 0
     assert seen and seen[0].command == "resources"
@@ -215,7 +256,7 @@ def test_dispatch_routes_descriptor_verb_to_run_verb(monkeypatch: pytest.MonkeyP
 
 def test_dispatch_unknown_command_exits() -> None:
     args = argparse.Namespace(command="nope", subcommand=None)
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit, match="^unknown command: nope$"):
         asyncio.run(dispatch.run(args))
 
 
@@ -236,14 +277,16 @@ def _route_spies(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
         called["doctor"] = True
         return 0
 
-    async def _run_verb(args: argparse.Namespace) -> int:
-        called["run_verb"] = True
+    async def handler(args: argparse.Namespace) -> int:
+        called["generated"] = True
         return 0
 
     monkeypatch.setattr(dispatch, "_tool_call", _tool_call)
     monkeypatch.setattr(dispatch, "_login", _login)
     monkeypatch.setattr(dispatch.commands.doctor, "doctor", _doctor)
-    monkeypatch.setattr(dispatch.commands, "run_verb", _run_verb)
+    monkeypatch.setattr(
+        dispatch.commands, "select_verb", lambda args: (GENERATED_VERBS[0], handler)
+    )
     return called
 
 
@@ -257,11 +300,11 @@ def test_dispatch_routes_tool_call(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_dispatch_does_not_route_tool_without_call_subcommand(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # `tool` with a non-`call` subcommand must fall through to run_verb, not the passthrough.
+    # A non-`call` subcommand falls through to generated selection.
     called = _route_spies(monkeypatch)
     args = argparse.Namespace(command="tool", tool_command="list", subcommand=None)
     assert asyncio.run(dispatch.run(args)) == 0
-    assert called == {"run_verb": True}
+    assert called == {"generated": True}
 
 
 def test_dispatch_routes_login(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -311,11 +354,10 @@ def test_report_requires_an_explicit_scope() -> None:
     assert excinfo.value.code == 2
 
 
-def test_run_verb_routes_generic_handler_verb_to_the_seam(
+def test_dispatch_routes_generic_handler_verb_to_the_seam(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A path with no handler override resolves to its tool and uses generic dispatch.
-    from kdive.cli.commands import registry
 
     seen: dict[str, str] = {}
 
@@ -325,16 +367,16 @@ def test_run_verb_routes_generic_handler_verb_to_the_seam(
 
     monkeypatch.setattr(dispatch, "invoke_generated_verb", _fake_seam)
     args = argparse.Namespace(command="accounting", subcommand="estimate")
-    assert asyncio.run(registry.run_verb(args)) == 0
+    assert asyncio.run(dispatch.run(args)) == 0
     assert seen["tool"] == "accounting.estimate"
 
 
-def test_run_verb_unknown_generated_path_exits() -> None:
+def test_select_verb_unknown_generated_path_exits() -> None:
     from kdive.cli.commands import registry
 
     args = argparse.Namespace(command="accounting", subcommand="does-not-exist")
-    with pytest.raises(SystemExit):
-        asyncio.run(registry.run_verb(args))
+    with pytest.raises(SystemExit, match="^unknown command: accounting does-not-exist$"):
+        registry.select_verb(args)
 
 
 @pytest.mark.parametrize(

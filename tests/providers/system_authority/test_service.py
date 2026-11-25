@@ -11,8 +11,8 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from kdive.domain.external_boot_values import RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
-from kdive.providers.ports.external_boot import RootSpecV1
 from kdive.providers.system_authority import journal as journal_module
 from kdive.providers.system_authority import service as service_module
 from kdive.providers.system_authority.journal import (
@@ -34,6 +34,7 @@ from kdive.providers.system_authority.protocol import (
     AuthoritySystemProofV1,
     AuthoritySystemProvisionFacts,
     AuthoritySystemProvisionSnapshot,
+    AuthoritySystemServiceError,
     AuthoritySystemTakeoverRequestV1,
     authority_system_record_digest,
 )
@@ -43,10 +44,7 @@ from kdive.providers.system_authority.repository import (
     AuthoritySystemJournalHead,
     ResolvedAuthoritySystemOperation,
 )
-from kdive.providers.system_authority.service import (
-    AuthoritySystemService,
-    AuthoritySystemServiceError,
-)
+from kdive.providers.system_authority.service import AuthoritySystemService
 
 _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64
@@ -165,7 +163,7 @@ class _Repository:
                 profile_identity=request.profile_identity,
                 root_identity=request.root_identity,
                 bootstrap_identity=request.bootstrap_identity,
-                operation=request.operation.value,
+                operation=request.operation,
                 operation_identity=request.operation_identity,
                 operation_digest=request.operation_digest,
                 state=state,

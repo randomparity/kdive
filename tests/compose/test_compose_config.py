@@ -115,21 +115,17 @@ def test_project_name_is_stable_across_worktrees_and_respects_overrides(
     assert json.loads(result.stdout)["name"] == expected
 
 
-def test_worker_death_verifier_uses_inspect_only_private_proxy() -> None:
+def test_recovery_registration_needs_no_http_proxy() -> None:
     model = _config()
     services = model["services"]
-    proxy = services["worker-death-api"]
-
+    server = services["server"]
+    assert "worker-death-api" not in services
+    assert "worker-death-api" not in server["depends_on"]
+    assert "worker-death" not in model["networks"]
+    assert server["networks"] == {"default": None}
+    assert "KDIVE_DOCKER_DEATH_API" not in server["environment"]
+    assert server["environment"]["KDIVE_WORKER_DEATH_VERIFIER"] == "docker"
     assert services["worker"]["environment"]["KDIVE_WORKER_INCARNATION_KIND"] == "docker"
-    assert services["server"]["environment"]["KDIVE_WORKER_DEATH_VERIFIER"] == "docker"
-    assert proxy["entrypoint"] == [
-        "python",
-        "-m",
-        "kdive.processes.lifecycle.compose.docker_death_api",
-    ]
-    assert proxy["user"] == "root"
-    assert proxy["networks"] == {"worker-death": None}
-    assert model["networks"]["worker-death"]["internal"] is True
 
 
 def test_worker_requires_evidence_preserving_compose_wrapper() -> None:

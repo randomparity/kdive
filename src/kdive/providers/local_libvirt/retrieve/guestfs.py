@@ -7,8 +7,9 @@ import math
 import shutil
 import tempfile
 import time
-from collections.abc import Callable
-from pathlib import Path
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
+from pathlib import Path, PurePosixPath
 from typing import Protocol, cast
 from uuid import UUID
 
@@ -61,6 +62,37 @@ class _GuestfsHandle(Protocol):  # pragma: no cover - live_vm (libguestfs bindin
 def _libvirt_uri() -> str:
     """The provider's configured libvirt URI (``KDIVE_LIBVIRT_URI``, default ``qemu:///system``)."""
     return config.require(LIBVIRT_URI)
+
+
+@contextmanager
+def _retrieve_domain(system_id: UUID, *, operation: str) -> Generator[libvirt.virDomain | None]:
+    """Own native retrieval calls; only lookup NO_DOMAIN means absence (ADR-0859)."""
+    connection: libvirt.virConnect | None = None
+    try:
+        connection = libvirt.open(_libvirt_uri())
+        try:
+            domain = connection.lookupByName(domain_name_for(system_id))
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
+                raise
+            domain = None
+        yield domain
+    except libvirt.libvirtError as exc:
+        raise CategorizedError(
+            "local retrieve native operation failed; verify libvirt connectivity and retry",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"system_id": str(system_id), "operation": operation},
+        ) from exc
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception as exc:
+                _log.warning(
+                    "local retrieve close failed: operation=%s type=%s",
+                    operation,
+                    type(exc).__name__,
+                )
 
 
 class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
@@ -125,15 +157,17 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
                 "libguestfs (the guestfs Python binding) is required for local kdump capture",
                 category=ErrorCategory.MISSING_DEPENDENCY,
             ) from exc
-        guest = cast("_GuestfsHandle", guestfs.GuestFS(python_return_dict=True))
+        guest: _GuestfsHandle | None = None
         try:
+            guest = cast("_GuestfsHandle", guestfs.GuestFS(python_return_dict=True))
             guest.add_drive_opts(overlay, readonly=True)
             guest.launch()
             roots = guest.inspect_os()
             if roots:
                 _mount_guest_filesystems(guest, roots[0])
         except Exception as exc:
-            _close_guestfs_handle(guest, "after failed read-only overlay open")
+            if guest is not None:
+                _close_guestfs_handle(guest, "after failed read-only overlay open")
             raise CategorizedError(
                 "libguestfs failed to open the System overlay",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -161,8 +195,10 @@ def _mount_guest_filesystems(guest: _GuestfsHandle, root: str) -> None:
     Mountpoints are mounted shortest-path first so a parent is in place before its child.
     The ROOT mount stays fatal — an overlay whose root will not mount is unreadable, and the
     caller turns that into a typed INFRASTRUCTURE_FAILURE rather than an empty core list that
-    would read as "the guest never dumped". Every other filesystem is best-effort: one
-    unreadable /home must not deny a core sitting on a healthy /var.
+    would read as "the guest never dumped". Ancestors of /var/crash and its direct capture
+    directories are required for the fixed one-directory-deep core globs too (ADR-0861).
+    Other directory mounts remain best-effort: an unreadable /home or deeper non-capture
+    directory must not deny a core sitting on healthy capture storage.
     """
     mountpoints = guest.inspect_get_mountpoints(root)
     guest.mount_ro(mountpoints.get("/", root), "/")
@@ -172,6 +208,10 @@ def _mount_guest_filesystems(guest: _GuestfsHandle, root: str) -> None:
         try:
             guest.mount_ro(device, mountpoint)
         except Exception:
+            crash_root = PurePosixPath("/var/crash")
+            path = PurePosixPath(mountpoint)
+            if crash_root.is_relative_to(path) or path.parent == crash_root:
+                raise
             _log.warning(
                 "libguestfs could not mount %s (%s) read-only; continuing without it",
                 mountpoint,
@@ -223,17 +263,12 @@ def _force_off_domain(system_id: UUID) -> None:  # pragma: no cover - live_vm (l
     never finished — libguestfs reads of a disk a running guest is mutating are unsafe
     (ADR-0203/0217).
     """
-    conn = libvirt.open(_libvirt_uri())
-    try:
-        try:
-            domain = conn.lookupByName(domain_name_for(system_id))
-        except libvirt.libvirtError:
-            return  # already gone — nothing running to quiesce
+    with _retrieve_domain(system_id, operation="force_off_domain") as domain:
+        if domain is None:
+            return
         # Hard by design (ADR-0679): the kdump wait is over, so a clean request only adds delay.
         if domain.isActive():
             domain.destroy()
-    finally:
-        conn.close()
 
 
 def _real_domain_settled(system_id: UUID) -> bool:  # pragma: no cover - live_vm (libvirt)
@@ -243,16 +278,11 @@ def _real_domain_settled(system_id: UUID) -> bool:  # pragma: no cover - live_vm
     a domain that has been undefined/removed is also "settled". Any other state (running, the
     crash kernel still booting/dumping) is not settled, so the poll keeps waiting.
     """
-    conn = libvirt.open(_libvirt_uri())
-    try:
-        try:
-            domain = conn.lookupByName(domain_name_for(system_id))
-        except libvirt.libvirtError:
-            return True  # gone — nothing left running, treat as settled
+    with _retrieve_domain(system_id, operation="check_domain_settled") as domain:
+        if domain is None:
+            return True
         state, _reason = domain.state()
         return state == libvirt.VIR_DOMAIN_SHUTOFF
-    finally:
-        conn.close()
 
 
 def _real_wait_for_vmcore(system_id: UUID) -> HarvestOutcome:  # pragma: no cover - live_vm
@@ -270,8 +300,8 @@ def _real_wait_for_vmcore(system_id: UUID) -> HarvestOutcome:  # pragma: no cove
     ``vmcore-incomplete`` was seen so ``capture`` can disclose an incomplete-core readiness
     failure (ADR-0251). Owns the spool's lifecycle only up to a complete core: it creates a
     private temp directory, streams the chosen core into it, and removes the directory when no
-    complete core is found or the harvest raises. On a complete core the caller (``capture``)
-    owns cleanup, so the file survives this function's ``finally``.
+    complete core is found or opening/harvesting raises (ADR-0861). On a complete core the
+    caller (``capture``) owns cleanup, so the file survives this function's ``finally``.
     """
     _poll_until_settled(
         lambda: _real_domain_settled(system_id),
@@ -283,13 +313,15 @@ def _real_wait_for_vmcore(system_id: UUID) -> HarvestOutcome:  # pragma: no cove
     overlay = overlay_path(system_id)
     spool_dir = Path(tempfile.mkdtemp(prefix="kdive-kdump-"))
     dest = spool_dir / "vmcore"
-    reader = _LibguestfsCoreReader(overlay)
+    reader: _LibguestfsCoreReader | None = None
     outcome = HarvestOutcome(core=None, incomplete_found=False)
     try:
+        reader = _LibguestfsCoreReader(overlay)
         outcome = harvest_vmcore(reader, overlay, dest=dest, max_bytes=MAX_CORE_BYTES)
         return outcome
     finally:
-        reader.close()
+        if reader is not None:
+            reader.close()
         if outcome.core is None:
             _remove_spool(dest)
 

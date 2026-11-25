@@ -19,7 +19,7 @@ import os
 import stat
 import threading
 import xml.etree.ElementTree as ET  # noqa: S405 - serialization follows a defused parse
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -32,7 +32,18 @@ from pydantic import ValidationError
 
 from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+from kdive.domain.external_boot_values import (
+    ActivationOwnership,
+    Architecture,
+    ExternalBootActivationBinding,
+    OpaqueProviderRef,
+    RunningKernelObservation,
+)
+
+# The name the sink actually writes, imported rather than restated so the two cannot
+# drift: a second literal here would silently stop matching if the sink ever renamed it.
+from kdive.providers.local_libvirt.lifecycle.boot.recovery import _ARCHIVE_NAME
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
     _OWNED_TEMPORARY_NAMES,
     _PROJECTION_NAME,
     LocalRecoveryMetadataV1,
@@ -43,23 +54,12 @@ from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     _read_private_file,
     _require_private_owned_directory,
 )
-
-# The name the sink actually writes, imported rather than restated so the two cannot
-# drift: a second literal here would silently stop matching if the sink ever renamed it.
-from kdive.providers.local_libvirt.lifecycle.boot.recovery import _ARCHIVE_NAME
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootOperationLease,
     OperationOwnership,
     PinnedOperationOwnership,
     RunningDomain,
     _Guest,
-)
-from kdive.providers.ports.external_boot import (
-    ActivationOwnership,
-    Architecture,
-    ExternalBootActivationBinding,
-    OpaqueProviderRef,
-    RunningKernelObservation,
 )
 from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.shared.guest_agent import (
@@ -421,13 +421,30 @@ class LocalPayloadCleanup:
         """
         # Composed first, so a non-canonical binding refuses before anything is opened.
         binding = metadata.binding
-        directory = f"{_canonical_name(binding.system_id)}.{_canonical_name(binding.activation_id)}"
+        components = tuple(
+            _canonical_name(value)
+            for value in (binding.system_id, binding.run_id, binding.activation_id)
+        )
+        directory = f"{components[0]}.{components[2]}"
         recovery_fd = self._open_recovery_directory(directory)
         try:
             ownership = ActivationOwnership(system_id=binding.system_id, run_id=binding.run_id)
             parts = _artifact_ref_parts(
                 metadata.materialized_modules, ownership, binding.activation_id
             )
+            try:
+                with ExitStack() as descriptors:
+                    resolved_fd = os.open(self._root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    descriptors.callback(os.close, resolved_fd)
+                    _require_private_owned_directory(resolved_fd, "artifact root")
+                    for component in components:
+                        resolved_fd = _open_private_directory(resolved_fd, component)
+                        descriptors.callback(os.close, resolved_fd)
+                    opened, resolved = os.fstat(root_fd), os.fstat(resolved_fd)
+                    if (opened.st_dev, opened.st_ino) != (resolved.st_dev, resolved.st_ino):
+                        raise ValueError("artifact descriptor does not match cleanup ownership")
+            except OSError as exc:
+                raise ValueError(_refused(_ARTIFACT_ROOT_REFUSED, exc)) from None
             try:
                 projection_fd = _open_private_directory(root_fd, parts[4])
             except FileNotFoundError:
@@ -491,13 +508,7 @@ class LocalPayloadCleanup:
         root_fd = os.open(self._root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             _require_private_owned_directory(root_fd, "artifact root")
-            try:
-                system_fd = _open_private_directory(root_fd, binding.system_id)
-            except FileNotFoundError:
-                # Legacy unit seams can supply an already-open activation descriptor while
-                # omitting its parents. There is then nothing this bounded parent walk can
-                # prune; payload deletion remains confined to the supplied descriptor.
-                return
+            system_fd = _open_private_directory(root_fd, binding.system_id)
             try:
                 run_fd = _open_private_directory(system_fd, binding.run_id)
                 try:

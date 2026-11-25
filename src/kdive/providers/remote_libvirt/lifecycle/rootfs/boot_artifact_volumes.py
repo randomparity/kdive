@@ -21,7 +21,7 @@ from uuid import UUID, uuid4
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports.external_boot import OpaqueProviderRef
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
     BootArtifactKind,
     render_boot_artifact_name,

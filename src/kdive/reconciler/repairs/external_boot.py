@@ -1,9 +1,12 @@
-"""Enqueue worker-owned repair for stranded external-boot activations (ADR-0596)."""
+"""Enqueue bounded worker-owned external-boot repair (ADRs 0596, 0855)."""
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Literal, LiteralString, cast
 from uuid import UUID
 
@@ -11,10 +14,10 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from pydantic import ValidationError
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
 from kdive.jobs.payloads import (
     Authorizing,
     BootPayload,
@@ -24,12 +27,17 @@ from kdive.jobs.payloads import (
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import Purpose
+from kdive.services.external_boot.payloads import build_external_boot_payload
 
 _log = logging.getLogger(__name__)
 
 type RepairOperation = Literal[
     "activate", "recover", "resolve-conflict", "release", "cleanup", "teardown"
 ]
+
+
+type RepairLane = Literal["activation", "recovery", "release", "cleanup"]
+type RepairCursors = dict[RepairLane, UUID]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,16 +48,21 @@ class _Candidate:
     plan_identity: str
     project: str
     operation: RepairOperation
+    state: str
+    current_attempt_id: UUID | None
+    readiness_deadline: datetime | None
 
 
 _REPAIR_BATCH = 100
 _SOURCE_JOB_SCAN_LIMIT = 100
 _JOB_LOOKUP_TIMEOUT_MS = 2_000
+_REPAIR_KEY_PREFIX = "external-boot:repair:"
 
 
-_CANDIDATE_SQL = {
+_CANDIDATE_SQL: dict[RepairLane, str] = {
     "activation": """
         SELECT a.id AS activation_id, a.system_id, a.run_id, a.plan_identity, system.project,
+               a.state, a.current_attempt_id, a.activation_readiness_deadline AS readiness_deadline,
                'activate' AS operation
         FROM external_boot_activations a
         JOIN systems system ON system.id = a.system_id
@@ -58,6 +71,8 @@ _CANDIDATE_SQL = {
     """,
     "recovery": """
         SELECT a.id AS activation_id, a.system_id, a.run_id, a.plan_identity, system.project,
+               a.state, a.current_attempt_id,
+               attempt.recovery_readiness_deadline AS readiness_deadline,
                CASE WHEN attempt.recovery_basis = 'pre_recovery'
                     THEN 'resolve-conflict' ELSE 'recover' END AS operation
         FROM external_boot_activations a
@@ -70,6 +85,7 @@ _CANDIDATE_SQL = {
     """,
     "release": """
         SELECT a.id AS activation_id, a.system_id, a.run_id, a.plan_identity, system.project,
+               a.state, a.current_attempt_id, NULL::timestamptz AS readiness_deadline,
                'release' AS operation
         FROM external_boot_activations a
         JOIN external_boot_reservations reservation ON reservation.activation_id = a.id
@@ -81,6 +97,7 @@ _CANDIDATE_SQL = {
     """,
     "cleanup": """
         SELECT a.id AS activation_id, a.system_id, a.run_id, a.plan_identity, system.project,
+               a.state, a.current_attempt_id, NULL::timestamptz AS readiness_deadline,
                CASE WHEN a.state IN ('recovered', 'abandoned')
                     THEN 'cleanup' ELSE 'teardown' END AS operation
         FROM external_boot_activations a
@@ -93,11 +110,19 @@ _CANDIDATE_SQL = {
 }
 
 
-async def _candidates(conn: AsyncConnection, lane: str) -> tuple[_Candidate, ...]:
+async def _candidates(
+    conn: AsyncConnection, lane: RepairLane, *, after: UUID | None = None
+) -> tuple[_Candidate, ...]:
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            cast(LiteralString, _CANDIDATE_SQL[lane] + " ORDER BY a.id LIMIT %s"),
-            (_REPAIR_BATCH,),
+            cast(
+                LiteralString,
+                "SELECT candidate.* FROM ("
+                + _CANDIDATE_SQL[lane]
+                + ") AS candidate WHERE (%s::uuid IS NULL OR candidate.activation_id > %s) "
+                "ORDER BY candidate.activation_id LIMIT %s",
+            ),
+            (after, after, _REPAIR_BATCH),
         )
         rows = await cur.fetchall()
     return tuple(
@@ -108,6 +133,9 @@ async def _candidates(conn: AsyncConnection, lane: str) -> tuple[_Candidate, ...
             plan_identity=row["plan_identity"],
             project=row["project"],
             operation=row["operation"],
+            state=row["state"],
+            current_attempt_id=row["current_attempt_id"],
+            readiness_deadline=row["readiness_deadline"],
         )
         for row in rows
     )
@@ -139,16 +167,19 @@ async def _candidate_jobs(
                 authority_instance,
             )
         )
-    live_predicate = (
+    job_predicate = (
         "AND j.payload #>> '{external_boot_authority_v1,operation}' = candidate.operation "
         "AND j.payload #>> '{external_boot_authority_v1,authority_instance}' "
         "    = candidate.authority_instance "
         "AND (j.state = 'queued' OR (j.state = 'running' AND "
         "(j.lease_expires_at >= now() OR j.attempt < j.max_attempts))) "
         if live_only
-        else ""
+        else "AND j.dedup_key NOT LIKE %s "
     )
-    parameters.extend(([JobKind.BOOT.value, JobKind.TEARDOWN.value], _SOURCE_JOB_SCAN_LIMIT))
+    parameters.append([JobKind.BOOT.value, JobKind.TEARDOWN.value])
+    if not live_only:
+        parameters.append(f"{_REPAIR_KEY_PREFIX}%")
+    parameters.append(_SOURCE_JOB_SCAN_LIMIT)
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT set_config('statement_timeout', %s, true)",
@@ -169,7 +200,7 @@ async def _candidate_jobs(
             "    = candidate.plan_identity "
             "AND j.authorizing ->> 'project' = candidate.project "
             "WHERE j.kind = ANY(%s) "
-            + live_predicate
+            + job_predicate
             + ") SELECT jobs.* FROM ranked JOIN jobs USING (id) "
             "WHERE candidate_rank <= %s ORDER BY jobs.created_at DESC, jobs.id DESC",
             parameters,
@@ -268,7 +299,25 @@ async def _enqueue_candidate(
     marker = ExternalBootAuthorityMarkerV1.model_validate(
         source.payload["external_boot_authority_v1"]
     )
-    operation_identity = f"repair:{candidate.activation_id}:{candidate.operation}:{source.id}"
+    phase = json.dumps(
+        [
+            candidate.state,
+            str(candidate.current_attempt_id) if candidate.current_attempt_id is not None else None,
+            candidate.readiness_deadline.astimezone(UTC).isoformat()
+            if candidate.readiness_deadline is not None
+            else None,
+            authority_instance,
+        ],
+        separators=(",", ":"),
+    )
+    admission_identity = (
+        f"{candidate.activation_id}:{candidate.operation}:{source.id}:"
+        f"{sha256(phase.encode()).hexdigest()}"
+    )
+    dedup_key = f"{_REPAIR_KEY_PREFIX}{admission_identity}"
+    if await queue.dedup_replay(conn, dedup_key) is not None:
+        return False
+    operation_identity = f"repair:{admission_identity}"
     kind, payload = await build_external_boot_payload(
         conn,
         activation_id=candidate.activation_id,
@@ -289,7 +338,7 @@ async def _enqueue_candidate(
         kind,
         payload,
         source.authorizing,
-        f"external-boot:{operation_identity}",
+        dedup_key,
     )
     return inserted
 
@@ -297,13 +346,25 @@ async def _enqueue_candidate(
 async def repair_external_boot_lane(
     conn: AsyncConnection,
     *,
-    lane: Literal["activation", "recovery", "release", "cleanup"],
+    lane: RepairLane,
     resolver: ProviderResolver,
     authority_instance: str,
+    cursors: RepairCursors | None = None,
 ) -> int:
-    """Enqueue deterministic successors for one post-prepared repair lane."""
+    """Inspect at most one page, retaining per-lane progress in the caller's map (ADR-0839).
+
+    Omitted state is one-shot; repeat standalone callers supply the same map. A nonempty page
+    advances after each ordinary outcome, while cancellation retries the interrupted candidate.
+    """
+    if cursors is None:
+        cursors = {}
     repaired = 0
-    candidates = await _candidates(conn, lane)
+    candidates = await _candidates(conn, lane, after=cursors.get(lane))
+    if not candidates and lane in cursors:
+        candidates = await _candidates(conn, lane)
+    if not candidates:
+        cursors.pop(lane, None)
+        return 0
     source_jobs = await _candidate_jobs(
         conn, candidates, live_only=False, authority_instance=authority_instance
     )
@@ -322,12 +383,22 @@ async def repair_external_boot_lane(
                     live_jobs=live_jobs,
                 )
             repaired += inserted
-        except Exception:
-            # Provider and durable payload exceptions may contain host identifiers. The lane's
-            # bounded operation label is enough for telemetry; raw diagnostics stay private.
-            _log.warning(
-                "reconciler: external-boot %s candidate repair failed", candidate.operation
+        except Exception as error:
+            # Messages and tracebacks may contain provider identities or durable payloads.
+            category = (
+                error.category
+                if isinstance(error, CategorizedError)
+                else ErrorCategory.INFRASTRUCTURE_FAILURE
             )
+            _log.warning(
+                "reconciler: external-boot %s candidate repair failed "
+                "activation_id=%s exception=%s category=%s",
+                candidate.operation,
+                candidate.activation_id,
+                type(error).__name__[:80],
+                category.value,
+            )
+        cursors[lane] = candidate.activation_id
     return repaired
 
 

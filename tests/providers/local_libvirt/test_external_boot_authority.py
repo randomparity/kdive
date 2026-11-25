@@ -24,8 +24,22 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import (
+    AbsentComponentState,
+    ComponentState,
+    ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    KernelIdentity,
+    OpaqueProviderRef,
+    PresentComponentState,
+    ProviderStateIdentity,
+    RecoveryObjectObservation,
+    RecoveryPoint,
+    RunningKernelObservation,
+)
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityCommitContextV1,
     AuthorityConflictResolutionRequestV1,
     AuthorityInstallRefusalV1,
@@ -33,6 +47,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityRecoveryObservationContextV1,
+    AuthorityServiceError,
     AuthorityTakeoverRequestV1,
     AuthorityTeardownMutationRequestV1,
     JournalPhase,
@@ -42,9 +57,7 @@ from kdive.providers.external_boot_authority.protocol import (
     record_digest,
 )
 from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
     AuthorityMutationAdapter,
-    AuthorityServiceError,
     ExternalBootAuthorityService,
     ProofBarrierAbort,
 )
@@ -61,24 +74,27 @@ from kdive.providers.local_libvirt.external_boot_authority import (
     LocalExternalBootAuthorityAdapter,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
-    CleanupQuarantineReceiptV1,
-    CleanupTombstoneV1,
-    FinalizeCleanupProof,
     GuestRecoveryWriter,
     LocalExternalBootIO,
     LocalExternalBootMaterializer,
     LocalLibvirtExternalBoot,
     LocalObservedState,
+    RealLocalExternalBootIO,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import GuestFreeSpaceRefusal
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
+    CleanupQuarantineReceiptV1,
+    CleanupTombstoneV1,
+    FinalizeCleanupProof,
     LocalPartialAbortReceiptV1,
     LocalRecoveryMetadataV1,
     LocalSystemTeardownAnchorV1,
     LocalSystemTeardownIntentV1,
-    RealLocalExternalBootIO,
     RecoveryIntentAbsentError,
     RecoveryMetadataStore,
     RecoveryPhase,
+    recovery_point_digest,
 )
-from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import GuestFreeSpaceRefusal
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     LocalExternalBootOperationLease,
     LocalExternalBootSessionFactory,
@@ -88,19 +104,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
     LocalArtifactRoot,
     LocalOperationLane,
     LocalOperationLeaseScope,
-)
-from kdive.providers.ports.external_boot import (
-    AbsentComponentState,
-    ComponentState,
-    ExternalBootActivationBinding,
-    ExternalBootPreparationObservation,
-    KernelIdentity,
-    OpaqueProviderRef,
-    PresentComponentState,
-    ProviderStateIdentity,
-    RecoveryObjectObservation,
-    RecoveryPoint,
-    RunningKernelObservation,
 )
 
 # The authority service's own repository double. Reused rather than reimplemented here:
@@ -279,7 +282,7 @@ class _FakeIO:
             tombstone=CleanupTombstoneV1(
                 binding=recovery.binding,
                 recovery_point=recovery,
-                point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
+                point_digest=recovery_point_digest(recovery),
             ),
             proof=proof,
         )
@@ -327,7 +330,7 @@ class _FakeIO:
         return CleanupTombstoneV1(
             binding=binding,
             recovery_point=point,
-            point_digest=LocalLibvirtExternalBoot.point_digest(point),
+            point_digest=recovery_point_digest(point),
         )
 
     def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState:
@@ -2094,7 +2097,7 @@ async def test_a_cleanup_commit_finalizes_the_tombstone_against_the_anchored_rec
     assert proof.attempt_id == str(started.attempt_id)
     assert proof.phase == "mutation-started"
     assert proof.binding == _BINDING
-    assert proof.point_digest == LocalLibvirtExternalBoot.point_digest(_point(io.metadata))
+    assert proof.point_digest == recovery_point_digest(_point(io.metadata))
 
     # The tombstone remains observable until the authority has anchored the terminal receipt;
     # only then may finalization remove the recovery directory.

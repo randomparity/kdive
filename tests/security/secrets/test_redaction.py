@@ -264,3 +264,18 @@ def test_redact_url_credentials_preserves_explicit_port_zero() -> None:
     assert redacted == "https://host:0/x"
     assert "u:p@" not in redacted
     assert "@" not in redacted
+
+
+def test_global_scope_redaction_survives_colliding_string_release() -> None:
+    registry = SecretRegistry()
+    registry.register("proof-global-value", scope=None)
+    registry.register("proof-bounded-value", scope="__global__")
+    redactor = SecretRedactionFilter(registry)
+    before = logging.makeLogRecord({"msg": "values proof-global-value proof-bounded-value"})
+    assert redactor.filter(before)
+    assert before.getMessage() == f"values {REDACTION} {REDACTION}"
+
+    registry.release("__global__")
+    after = logging.makeLogRecord({"msg": "values proof-global-value proof-bounded-value"})
+    assert redactor.filter(after)
+    assert after.getMessage() == f"values {REDACTION} proof-bounded-value"

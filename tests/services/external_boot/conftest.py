@@ -28,7 +28,7 @@ from kdive.domain.external_boot_activation import (
     ExternalBootTeardownEvidenceV1,
     ExternalBootTerminalEvidenceV1,
 )
-from kdive.providers.ports.external_boot import ExternalBootMaterialization, RecoveryPoint
+from kdive.domain.external_boot_values import ExternalBootMaterialization, RecoveryPoint
 
 _AT = datetime(2026, 8, 28, tzinfo=UTC)
 _PLAN = "sha256:" + "a" * 64

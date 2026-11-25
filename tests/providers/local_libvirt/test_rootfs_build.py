@@ -23,6 +23,7 @@ import pytest
 
 from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import RootSource, RootSpecV1
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.families.rhel import RhelFamily
 from kdive.images.families.steps import (
@@ -63,7 +64,6 @@ from kdive.providers.local_libvirt.rootfs_build import (
     _parse_os_release,
     family_for,
 )
-from kdive.providers.ports.external_boot import RootSource, RootSpecV1
 from tests.support.customize_steps import rendered, upload_source
 
 

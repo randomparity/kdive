@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ValidationError as FastMCPValidationError
 from opentelemetry import metrics as otel_metrics
 from psycopg_pool import AsyncConnectionPool
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import CategorizedError
@@ -230,17 +232,21 @@ def _register_allocations_request(
         with `allocations.renew`. A queued allocation holds no lease yet, so it carries neither
         field until it is granted.
         """
-        request = AllocationRequestPayload(
-            shape=shape,
-            vcpus=vcpus,
-            memory_gb=memory_gb,
-            disk_gb=disk_gb,
-            window=window,
-            resource=resource,
-            arch=arch,
-            pcie_devices=pcie_devices,
-            on_capacity=on_capacity,
-        )
+        try:
+            request = AllocationRequestPayload(
+                shape=shape,
+                vcpus=vcpus,
+                memory_gb=memory_gb,
+                disk_gb=disk_gb,
+                window=window,
+                resource=resource,
+                arch=arch,
+                pcie_devices=pcie_devices,
+                on_capacity=on_capacity,
+            )
+        except ValidationError as exc:
+            # These are flat caller arguments, not stored data or a handler failure (ADR-0844).
+            raise FastMCPValidationError(str(exc), log_level=logging.WARNING) from exc
         try:
             _guard_resource_kind(request, resolver)  # ADR-0269: on the shared handler path
         except CategorizedError as exc:

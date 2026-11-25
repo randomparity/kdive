@@ -6,6 +6,7 @@ a ``diagnostics_worker_check`` job and bounded-waits within ``WORKER_DISPATCH_BU
 inline result, keeping ``doctor``'s single coherent verdict (ADR-0091 §1). A job the worker never
 picks up in time surfaces as ``WORKER_UNAVAILABLE`` (ADR-0139), never a hang.
 
+ADR-0854 bounds queue awaits and propagates the shared report deadline.
 Shared result wording lives in the dependency-neutral diagnostics contracts module.
 """
 
@@ -107,8 +108,34 @@ class JobWorkerCheckDispatcher:
     def _dedup_key(self) -> str:
         return f"diagnostics:{self._provider}:{self._dedup_suffix or uuid.uuid4()}"
 
-    async def run_worker_checks(self) -> list[CheckResult]:
+    async def run_worker_checks(self, *, deadline: float | None = None) -> list[CheckResult]:
+        """Bound all queue waits by the local budget and optional event-loop report deadline."""
+        now = asyncio.get_running_loop().time()
+        end = now + self._budget
+        if deadline is not None:
+            end = min(end, deadline)
+        if end <= now:
+            return self._budget_exhausted()
+        timeout = asyncio.timeout_at(end)
+        try:
+            async with timeout:
+                return await self._run_worker_checks()
+        except TimeoutError:
+            if not timeout.expired():
+                raise
+            return self._budget_exhausted()
+
+    def _budget_exhausted(self) -> list[CheckResult]:
+        return _unavailable(
+            WORKER_UNAVAILABLE_DETAIL,
+            _TRANSPORT_FAILURE,
+            provider=self._provider,
+            check_ids=self._worker_check_ids,
+        )
+
+    async def _run_worker_checks(self) -> list[CheckResult]:
         dedup_key = self._dedup_key()
+        start = self._clock()
         # Platform-internal job: it is a read-only side effect of an already-audited operator
         # `ops.diagnostics` call (ADR-0091 §4), not an agent/tenant request, so it carries a
         # synthetic `diagnostics` principal rather than threading the per-request operator identity
@@ -129,7 +156,6 @@ class JobWorkerCheckDispatcher:
                 check_ids=self._worker_check_ids,
             )
         _log.info("diagnostics worker-check job %s enqueued (dedup_key=%s)", job.id, dedup_key)
-        start = self._clock()
         while True:
             try:
                 current = await self._get(dedup_key)
@@ -146,12 +172,7 @@ class JobWorkerCheckDispatcher:
             remaining = self._budget - (self._clock() - start)
             if remaining <= 0:
                 _log.warning("diagnostics job %s not picked up within %ss", dedup_key, self._budget)
-                return _unavailable(
-                    WORKER_UNAVAILABLE_DETAIL,
-                    _TRANSPORT_FAILURE,
-                    provider=self._provider,
-                    check_ids=self._worker_check_ids,
-                )
+                return self._budget_exhausted()
             await self._sleep(min(self._poll_interval, remaining))
 
     def _from_terminal(self, job: Job) -> list[CheckResult]:
@@ -166,6 +187,17 @@ class JobWorkerCheckDispatcher:
                     provider=self._provider,
                     check_ids=self._worker_check_ids,
                 )
+            present = {result.check_id for result in results}
+            for check_id in self._worker_check_ids:
+                if check_id not in present:
+                    results.extend(
+                        _unavailable(
+                            f"diagnostics worker omitted expected check {check_id!r}",
+                            _INFRASTRUCTURE_FAILURE,
+                            provider=self._provider,
+                            check_ids=(check_id,),
+                        )
+                    )
             _log.info("diagnostics job %s succeeded", job.id)
             return results
         category = job.error_category or _INFRASTRUCTURE_FAILURE

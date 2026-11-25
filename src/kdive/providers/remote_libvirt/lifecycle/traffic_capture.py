@@ -22,6 +22,8 @@ the handler's ``finally``; :meth:`prepare` additionally pre-deletes *this job's 
 (concurrency-safe, unlike a whole-System sweep), so an at-least-once retry of a job that died
 mid-capture starts clean. A pcap orphaned by a job that exhausts its retries is reclaimed by the
 reconciler's capture reaper (ADR-0556).
+
+Error propagation follows ADR-0847 and ADR-0848.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 import libvirt
+from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -138,15 +141,20 @@ def discover_dac_identity(domain_xml: str) -> tuple[int, int]:
     """The ``(uid, gid)`` the running domain's QEMU process runs as, from its DAC seclabel.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` (``reason=dac_seclabel_unusable``) when the XML
-            is malformed or carries no ``+uid:+gid`` DAC label for a non-root user. The owner is
-            never guessed: a wrong one leaves QEMU unable to write or lets another account in.
+        CategorizedError: ``CONFIGURATION_ERROR`` with ``reason=dac_xml_parse_failed`` when
+            parsing fails, or ``reason=dac_seclabel_unusable`` when parsed XML carries no
+            ``+uid:+gid`` DAC label for a non-root user. The owner is never guessed: a wrong one
+            leaves QEMU unable to write or lets another account in.
     """
     try:
         root = _safe_fromstring(domain_xml)
-    except Exception:  # noqa: BLE001 - host-emitted XML; a parse failure reads as unusable
-        root = None
-    label = None if root is None else root.findtext("./seclabel[@model='dac']/label")
+    except (ET.ParseError, DefusedXmlException) as exc:
+        raise CategorizedError(
+            "remote domain XML could not be parsed for capture DAC discovery",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "dac_xml_parse_failed"},
+        ) from exc
+    label = root.findtext("./seclabel[@model='dac']/label")
     match = _DAC_LABEL.fullmatch(label.strip()) if label else None
     if match is None or int(match.group(1)) == 0:
         raise CategorizedError(
@@ -187,7 +195,7 @@ def discover_netdev_id(domain_xml: str) -> str:
     """
     try:
         root = _safe_fromstring(domain_xml)
-    except Exception as exc:  # noqa: BLE001 - host-emitted XML; a parse failure reads as config
+    except (ET.ParseError, DefusedXmlException) as exc:
         raise CategorizedError(
             "remote domain XML could not be parsed for netdev discovery",
             category=ErrorCategory.CONFIGURATION_ERROR,
@@ -305,7 +313,11 @@ class RemoteLibvirtTrafficCapture:
                     },
                 )
             except BaseException:
-                _delete_volume(volume)
+                vol_name = PurePosixPath(dest_path).name
+                try:
+                    _delete_volume(volume, vol_name)
+                except CategorizedError:
+                    _log.warning("remote pcap rollback failed for %s; volume may linger", vol_name)
                 raise
 
     def detach(self, domain_name: str, *, qom_id: str) -> None:
@@ -345,7 +357,7 @@ class RemoteLibvirtTrafficCapture:
                 pool = self._lookup_pool(conn)
                 volume = self._lookup_volume_optional(pool, vol_name)
                 if volume is not None:
-                    _delete_volume(volume)
+                    _delete_volume(volume, vol_name)
         except CategorizedError:
             _log.warning("remote pcap reclaim failed for %s; volume may linger", vol_name)
 
@@ -408,7 +420,7 @@ class RemoteLibvirtTrafficCapture:
         volume = self._lookup_volume_optional(pool, vol_name)
         if volume is not None:
             _log.info("reclaiming stale pcap volume %s before capture", vol_name)
-            _delete_volume(volume)
+            _delete_volume(volume, vol_name)
 
     def _lookup_pool(self, conn: _CaptureConn) -> _CapturePool:
         pool_name = self._config_factory().pcap_pool
@@ -473,19 +485,22 @@ class RemoteLibvirtTrafficCapture:
     def _download(
         self, conn: _CaptureConn, volume: _CaptureVolume, vol_name: str, ceiling: int
     ) -> bytes:
-        stream = conn.newStream(0)
+        stream = None
         sink = _BoundedMemorySink(ceiling)
         try:
+            stream = conn.newStream(0)
             volume.download(stream, 0, 0, 0)
             stream.recvAll(sink.recv, None)
             stream.finish()
         except CategorizedError:
-            with contextlib.suppress(Exception):
-                stream.abort()
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.abort()
             raise
         except (libvirt.libvirtError, OSError, RuntimeError) as exc:
-            with contextlib.suppress(Exception):
-                stream.abort()
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.abort()
             raise CategorizedError(
                 "remote pcap stream download failed",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -659,9 +674,15 @@ def _refused(reply: QmpReply, operation: str, domain_name: str) -> CategorizedEr
     )
 
 
-def _delete_volume(volume: _CaptureVolume) -> None:
-    with contextlib.suppress(Exception):
+def _delete_volume(volume: _CaptureVolume, vol_name: str) -> None:
+    try:
         volume.delete(0)
+    except libvirt.libvirtError as exc:
+        raise CategorizedError(
+            "remote pcap volume deletion failed",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"volume": vol_name},
+        ) from exc
 
 
 def _pool_type_and_target(pool_xml: str) -> tuple[str | None, str | None]:

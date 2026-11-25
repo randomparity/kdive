@@ -6,13 +6,13 @@ from uuid import uuid4
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle.records import InvestigationBuild
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     DebuginfoSource,
     ExternalBootPlan,
     RootSource,
     RootSpecV1,
 )
+from kdive.domain.lifecycle.records import InvestigationBuild
 from kdive.services.external_boot.plan import (
     construct_external_boot_plan,
     external_boot_root_arguments,

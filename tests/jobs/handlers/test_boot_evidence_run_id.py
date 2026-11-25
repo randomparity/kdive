@@ -11,7 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import StoredArtifact
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.jobs.handlers.runs import boot_evidence
+from kdive.providers.local_libvirt import console as local_console
 
 
 async def _seed_run(conn: AsyncConnection, system_id: UUID, run_id: UUID) -> None:
@@ -67,7 +67,7 @@ def test_boot_evidence_row_carries_run_id(
                 ) as worker_pool,
                 worker_pool.connection() as conn,
             ):
-                artifact = await boot_evidence._upsert_console_artifact_row(
+                artifact = await local_console._upsert_console_artifact_row(
                     conn, system_id, run_id, _stored(system_id, run_id, "etag-1"), b"boot bytes"
                 )
             async with pool.connection() as conn:
@@ -96,10 +96,10 @@ def test_boot_evidence_recapture_keeps_run_id(
                 ) as worker_pool,
                 worker_pool.connection() as conn,
             ):
-                first = await boot_evidence._upsert_console_artifact_row(
+                first = await local_console._upsert_console_artifact_row(
                     conn, system_id, run_id, _stored(system_id, run_id, "etag-1"), b"boot bytes"
                 )
-                second = await boot_evidence._upsert_console_artifact_row(
+                second = await local_console._upsert_console_artifact_row(
                     conn, system_id, run_id, _stored(system_id, run_id, "etag-2"), b"boot bytes"
                 )
                 assert second.id == first.id  # same Run re-capture refreshes its own row

@@ -144,6 +144,34 @@ def test_list_host_owned_filters_to_kdive_domains() -> None:
 # --- per-host teardown --------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "error_code", [libvirt.VIR_ERR_INTERNAL_ERROR, libvirt.VIR_ERR_OPERATION_DENIED]
+)
+def test_teardown_aborts_when_domain_xml_cannot_be_read(error_code: int) -> None:
+    error = libvirt_error(error_code)
+    domain = _FakeDomain(_DOMAIN, xml_error=error)
+    conn = _FakeConn(domains=[domain])
+
+    with pytest.raises(CategorizedError, match="reading leaked domain XML") as raised:
+        _teardown(conn, "fallback-pool", _DOMAIN)
+
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert raised.value.details == {"domain": _DOMAIN}
+    assert raised.value.__cause__ is error
+    assert not domain.destroyed and not domain.undefined
+    assert conn.pool.deleted == []
+
+
+def test_teardown_stops_when_domain_disappears_before_xml_read() -> None:
+    domain = _FakeDomain(_DOMAIN, xml_error=_NO_DOMAIN)
+    conn = _FakeConn(domains=[domain])
+
+    assert _teardown(conn, "fallback-pool", _DOMAIN) is False
+
+    assert not domain.destroyed and not domain.undefined
+    assert conn.pool.deleted == []
+
+
 def test_teardown_reaps_the_domain_and_reclaims_its_overlay() -> None:
     domain = _FakeDomain(_DOMAIN, xml=_domain_xml("warm-pool"))
     conn = _FakeConn(domains=[domain])
@@ -290,6 +318,7 @@ class _FakeDomain:
         metadata: str | None = None,
         metadata_error: libvirt.libvirtError | None = None,
         xml: str = "<domain/>",
+        xml_error: libvirt.libvirtError | None = None,
         destroy_error: libvirt.libvirtError | None = None,
         undefine_error: libvirt.libvirtError | None = None,
     ) -> None:
@@ -297,6 +326,7 @@ class _FakeDomain:
         self._metadata = metadata
         self._metadata_error = metadata_error
         self._xml = xml
+        self._xml_error = xml_error
         self._destroy_error = destroy_error
         self._undefine_error = undefine_error
         self.destroyed = False
@@ -315,6 +345,8 @@ class _FakeDomain:
 
     def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
         del flags
+        if self._xml_error is not None:
+            raise self._xml_error
         return self._xml
 
     def destroy(self) -> int:

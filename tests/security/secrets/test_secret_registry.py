@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
@@ -109,3 +111,32 @@ def test_scope_refs_labels_non_string_scope_without_leaking_repr() -> None:
     refs = registry.scope_refs()
     assert refs == frozenset({"<scoped>"})
     assert all("object at 0x" not in ref for ref in refs)
+
+
+@pytest.mark.parametrize("shared_value", [False, True])
+def test_global_scope_survives_colliding_string_scope_release(shared_value: bool) -> None:
+    registry = SecretRegistry()
+    global_value = "proof-global-value"
+    scoped_value = global_value if shared_value else "proof-bounded-value"
+    registry.register(global_value, scope=None)
+    registry.register(scoped_value, scope="__global__")
+    before = registry.version()
+
+    registry.release("__global__")
+
+    assert registry.snapshot() == frozenset({global_value})
+    assert registry.version() == before + 1
+    registry.release("__global__")
+    assert registry.snapshot() == frozenset({global_value})
+    assert registry.version() == before + 1
+
+
+def test_colliding_string_scope_keeps_its_presence_label() -> None:
+    registry = SecretRegistry()
+    registry.register("proof-global-value", scope=None)
+    registry.register("proof-bounded-value", scope="__global__")
+    assert registry.scope_refs() == frozenset({"<process-global>", "__global__"})
+
+    registry.release("__global__")
+
+    assert registry.scope_refs() == frozenset({"<process-global>"})

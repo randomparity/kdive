@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from kdive.build_artifacts.validation import parse_gnu_build_id
-from kdive.providers.ports.external_boot import KernelIdentity
+from kdive.domain.external_boot_values import KernelIdentity
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     CAT_PROGRAM,
     MAX_CMDLINE_BYTES,

@@ -156,6 +156,8 @@ async def seed_run(
     conn_pool: AsyncConnectionPool,
     build_profile: dict[str, Any],
     target_kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT,
+    *,
+    run_id: UUID | None = None,
 ) -> UUID:
     inv_id = await seed_investigation(conn_pool)
     sys_id = await seed_system(conn_pool)
@@ -163,7 +165,7 @@ async def seed_run(
         run = await RUNS.insert(
             conn,
             Run(
-                id=uuid4(),
+                id=uuid4() if run_id is None else run_id,
                 created_at=TEST_DT,
                 updated_at=TEST_DT,
                 principal="user-1",
@@ -182,9 +184,13 @@ async def seed_external_run(
     conn_pool: AsyncConnectionPool,
     build_profile: dict[str, Any] | None = None,
     target_kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT,
+    *,
+    run_id: UUID | None = None,
 ) -> UUID:
     """A CREATED external Run with no upload manifest."""
-    return await seed_run(conn_pool, build_profile or {"schema_version": 1}, target_kind)
+    return await seed_run(
+        conn_pool, build_profile or {"schema_version": 1}, target_kind, run_id=run_id
+    )
 
 
 async def seed_external_run_with_manifest(
@@ -193,13 +199,15 @@ async def seed_external_run_with_manifest(
     build_profile: dict[str, Any] | None = None,
     ttl: timedelta = timedelta(hours=1),
     target_kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT,
+    *,
+    run_id: UUID | None = None,
 ) -> UUID:
     """A CREATED external Run plus a persisted upload manifest.
 
     A negative ``ttl`` seeds an already-lapsed upload window (the deadline is stamped
     ``now() + ttl`` in Postgres), which is how the expiry rejections are exercised.
     """
-    run_id = await seed_external_run(conn_pool, build_profile, target_kind)
+    run_id = await seed_external_run(conn_pool, build_profile, target_kind, run_id=run_id)
     async with conn_pool.connection() as conn:
         await upload_manifest.replace_manifest(
             conn,

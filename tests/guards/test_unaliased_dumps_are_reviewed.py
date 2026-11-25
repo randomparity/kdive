@@ -34,7 +34,7 @@ _MIXED_LOCAL = (
     "(exclude schema_, same-class validate); the other dumps receive models with no alias"
 )
 _MIXED_REMOTE = (
-    "the anchor dumps in matches_anchor and execute_system_teardown are alias-bearing, dumped "
+    "the anchor dump in execute_system_teardown is alias-bearing, dumped "
     "by Python names on purpose "
     "(exclude schema_, same-class validate); the other dumps receive models with no alias"
 )
@@ -65,6 +65,7 @@ _ALLOWED: dict[str, tuple[int, str]] = {
     "src/kdive/processes/lifecycle/systemd/systemd_worker_state.py": (3, _NO_ALIAS),
     "src/kdive/profiles/build.py": (1, _NO_ALIAS),
     "src/kdive/providers/external_boot_authority/device_identity.py": (1, _NO_ALIAS),
+    "src/kdive/providers/external_boot_authority/module_protocol.py": (1, _NO_ALIAS),
     "src/kdive/providers/external_boot_authority/module_volume_sweep.py": (1, _NO_ALIAS),
     "src/kdive/providers/external_boot_authority/service.py": (2, _NO_ALIAS),
     "src/kdive/providers/external_boot_authority/transport.py": (1, _NO_ALIAS),
@@ -72,7 +73,11 @@ _ALLOWED: dict[str, tuple[int, str]] = {
     "src/kdive/providers/local_libvirt/lifecycle/boot/recovery.py": (1, _NO_ALIAS),
     "src/kdive/providers/ports/traffic.py": (2, _NO_ALIAS),
     "src/kdive/providers/remote_libvirt/authority_client.py": (3, _NO_ALIAS),
-    "src/kdive/providers/remote_libvirt/external_boot_authority.py": (5, _MIXED_REMOTE),
+    "src/kdive/providers/remote_libvirt/external_boot_authority.py": (2, _MIXED_REMOTE),
+    "src/kdive/providers/remote_libvirt/external_boot_store.py": (
+        2,
+        "matches_anchor compares Python-name dictionaries with schema_ excluded on both sides",
+    ),
     "src/kdive/providers/shared/debug_common/gdbmi/commands/disassembly.py": (1, _NO_ALIAS),
     "src/kdive/providers/shared/debug_common/gdbmi/commands/modules.py": (1, _NO_ALIAS),
     "src/kdive/providers/shared/debug_common/gdbmi/commands/stack.py": (3, _NO_ALIAS),

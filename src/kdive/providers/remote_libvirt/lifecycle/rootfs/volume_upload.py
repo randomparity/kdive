@@ -9,6 +9,8 @@ partially-created volume before surfacing an infrastructure failure.
 
 The connection/pool/volume/stream slices are duck-typed protocols so the orchestration is
 unit-tested with fakes; the real ``libvirt`` objects satisfy them structurally.
+
+Error propagation follows ADR-0848.
 """
 
 from __future__ import annotations
@@ -115,9 +117,9 @@ def upload_qcow2_volume(
 ) -> None:
     """Create ``volume_name`` in ``pool_name`` and stream ``qcow2_path`` into it.
 
-    Fatal on any libvirt fault: the volume must land, so a create/upload failure raises an
+    A libvirt fault or local source I/O failure after creation raises an
     ``INFRASTRUCTURE_FAILURE`` after aborting the stream and deleting the partially-created volume
-    (best-effort cleanup, so a stale zero-byte volume never shadows a later retry).
+    (best-effort cleanup; failed deletion warns with pool and volume context).
 
     Args:
         conn: An open mutual-TLS libvirt connection (the caller owns its lifecycle).
@@ -128,16 +130,15 @@ def upload_qcow2_volume(
 
     Raises:
         CategorizedError: ``INFRASTRUCTURE_FAILURE`` on any libvirt error during lookup, create, or
-            stream.
+            stream, or on local source I/O failure after creation.
     """
     capacity = qcow2_path.stat().st_size
     try:
         pool = conn.storagePoolLookupByName(pool_name)
     except libvirt.libvirtError as exc:
         raise _infra("looking up the storage pool", pool=pool_name) from exc
-    # Idempotent re-run: a volume already present is a prior successful upload (a failed upload
-    # deletes its partial volume), so skip the create+stream and let the caller re-attach the
-    # config. Only a genuinely-absent volume is created and streamed.
+    # Idempotent re-runs reuse existing targets. Failed rollback can leave a partial target;
+    # require_new refuses reuse so staging callers can inspect that condition.
     try:
         pool.storageVolLookupByName(volume_name)
     except libvirt.libvirtError as exc:
@@ -158,16 +159,24 @@ def upload_qcow2_volume(
         volume = pool.createXML(render_base_volume_xml(volume_name, capacity_bytes=capacity))
     except libvirt.libvirtError as exc:
         raise _infra("creating the volume", pool=pool_name, volume=volume_name) from exc
-    stream = conn.newStream(0)
+    stream = None
     try:
+        stream = conn.newStream(0)
         volume.upload(stream, 0, capacity, 0)
         with qcow2_path.open("rb") as handle:
             stream.sendAll(lambda _stream, nbytes, _opaque: handle.read(nbytes), None)
         stream.finish()
-    except libvirt.libvirtError as exc:
-        with contextlib.suppress(libvirt.libvirtError):
-            stream.abort()
-        with contextlib.suppress(libvirt.libvirtError):
+    except (libvirt.libvirtError, OSError) as exc:
+        if stream is not None:
+            with contextlib.suppress(libvirt.libvirtError, OSError):
+                stream.abort()
+        try:
             volume.delete(0)
+        except libvirt.libvirtError:
+            _log.warning(
+                "remote volume rollback failed for pool %s volume %s; target may linger",
+                pool_name,
+                volume_name,
+            )
         raise _infra("streaming the qcow2", pool=pool_name, volume=volume_name) from exc
     _log.info("uploaded %s to remote pool %s as volume %s", qcow2_path, pool_name, volume_name)

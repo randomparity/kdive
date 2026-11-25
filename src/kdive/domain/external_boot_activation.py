@@ -22,7 +22,7 @@ from kdive.domain.capacity.state import (
     ExternalBootActivationState,
     ExternalBootReservationState,
 )
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ExternalBootMaterialization,
     OpaqueProviderRef,
     RecoveryPoint,

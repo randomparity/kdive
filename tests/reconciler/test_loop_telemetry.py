@@ -527,10 +527,13 @@ def test_run_once_forwards_pool_reaper_and_config(monkeypatch: pytest.MonkeyPatc
     )
     captured: dict[str, object] = {}
 
-    async def _fake_reconcile_once(p: object, r: object, *, config: object) -> ReconcileReport:
+    async def _fake_reconcile_once(
+        p: object, r: object, *, config: object, **observations: object
+    ) -> ReconcileReport:
         captured["pool"] = p
         captured["reaper"] = r
         captured["config"] = config
+        captured["observations"] = observations
         return _empty_report()
 
     monkeypatch.setattr(reconciler_loop, "reconcile_once", _fake_reconcile_once)
@@ -539,6 +542,11 @@ def test_run_once_forwards_pool_reaper_and_config(monkeypatch: pytest.MonkeyPatc
     assert captured["pool"] is pool
     assert captured["reaper"] is reaper
     assert captured["config"] is cfg
+    assert set(cast(dict[str, object], captured["observations"])) == {
+        "external_boot_cursors",
+        "teardown_warnings",
+        "stalled_teardown_progress",
+    }
 
 
 def test_run_cancels_heartbeat_ticker_on_exit(monkeypatch: pytest.MonkeyPatch) -> None:

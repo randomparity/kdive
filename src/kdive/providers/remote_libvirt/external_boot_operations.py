@@ -11,8 +11,7 @@ from uuid import UUID
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     AbsentComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
@@ -22,16 +21,20 @@ from kdive.providers.ports.external_boot import (
     ProviderStateIdentity,
     RunningKernelObservation,
 )
+from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
+from kdive.providers.ports.module_operation import RemoteDeviceIdentityPort
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootObservedState,
-    RemoteExternalBootRecoveryRecord,
-    RemoteFinalizedTeardownRefsV1,
-    RemoteModuleTerminalRecord,
     RemoteSystemTeardownInspection,
     RemoteSystemTeardownState,
 )
 from kdive.providers.remote_libvirt.external_boot_materialization import (
     ConcreteRemoteExternalBootMaterializer,
+)
+from kdive.providers.remote_libvirt.external_boot_store import (
+    RemoteExternalBootRecoveryRecord,
+    RemoteFinalizedTeardownRefsV1,
+    RemoteModuleTerminalRecord,
 )
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     AcknowledgedDefinition,
@@ -50,19 +53,18 @@ from kdive.providers.remote_libvirt.lifecycle.external_boot import (
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
     parse_boot_artifact_name,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-    HostStatDeviceIdentity,
-    RemoteDeviceIdentityPort,
-    prove_no_foreign_storage_references,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
-    render_module_volume_name,
-)
 from kdive.providers.remote_libvirt.lifecycle.xml import (
     overlay_volume_name,
     supplied_base_volume_name,
 )
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
+    render_module_volume_name,
+)
 from kdive.providers.shared.guest_agent import GuestDomain
+from kdive.providers.shared.libvirt_attachments import (
+    HostStatDeviceIdentity,
+    prove_no_foreign_storage_references,
+)
 from kdive.providers.shared.runtime_paths import domain_name_for
 
 # Pause between identity reads while the guest agent is not yet answering, and the most one

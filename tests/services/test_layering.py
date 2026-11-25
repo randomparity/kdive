@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import ast
+import json
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 _SERVICES = Path(__file__).resolve().parents[2] / "src" / "kdive" / "services"
 
@@ -28,3 +33,55 @@ def test_services_never_import_mcp() -> None:
     }
     bad = {p: ms for p, ms in offenders.items() if ms}
     assert not bad, f"services must not import kdive.mcp (layering inversion): {bad}"
+
+
+def test_shared_system_teardown_policy_has_a_service_owner() -> None:
+    path = _SERVICES / "systems/teardown.py"
+    assert path.is_file(), "shared teardown routing belongs in a concrete service"
+    from kdive.services.systems.teardown import route_external_boot_teardown
+
+    assert route_external_boot_teardown.__module__ == "kdive.services.systems.teardown"
+
+
+def test_breakglass_teardown_imports_policy_from_services() -> None:
+    path = _SERVICES.parent / "mcp/tools/ops/security/breakglass.py"
+    imports = _imported_modules(path)
+    assert "kdive.mcp.tools.lifecycle.systems.admin" not in imports
+    assert "kdive.services.systems.teardown" in imports
+
+
+@pytest.mark.parametrize(
+    ("consumer", "name", "expected"),
+    [
+        (
+            "kdive.services.systems.teardown",
+            "build_external_boot_payload",
+            "kdive.services.external_boot.payloads",
+        ),
+        (
+            "kdive.reconciler.repairs.jobs",
+            "reclaim_system_core_after_provider_teardown",
+            "kdive.services.systems.reclaim",
+        ),
+    ],
+)
+def test_shared_lifecycle_consumer_does_not_load_worker_handlers(
+    consumer: str, name: str, expected: str
+) -> None:
+    code = f"""
+import importlib,json,sys
+module=importlib.import_module({consumer!r})
+print(json.dumps({{'owner':getattr(module,{name!r}).__module__,
+ 'handlers':sorted(n for n in sys.modules
+                   if n=='kdive.jobs.handlers' or n.startswith('kdive.jobs.handlers.'))}}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+    observed = json.loads(result.stdout)
+    assert observed["owner"] == expected, observed
+    assert observed["handlers"] == [], observed

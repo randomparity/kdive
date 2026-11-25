@@ -8,9 +8,10 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.domain.external_boot_values import RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
-from kdive.providers.ports.external_boot import RootSpecV1
-from kdive.providers.system_authority.repository import AuthoritySystemBinding, _snapshot
+from kdive.providers.system_authority.protocol import AuthoritySystemOperation
+from kdive.providers.system_authority.repository import AuthoritySystemBinding, _binding, _snapshot
 
 
 def _profile() -> ProvisioningProfile:
@@ -49,7 +50,7 @@ def test_snapshot_recomputes_persisted_profile_root_and_bootstrap_identities() -
         profile_identity="sha256:" + profile_digest(profile),
         root_identity=root_digest,
         bootstrap_identity="sha256:" + hashlib.sha256(public_key.encode()).hexdigest(),
-        operation="provision",
+        operation=AuthoritySystemOperation.PROVISION,
         operation_identity="provision-a",
         operation_digest="sha256:" + "b" * 64,
         state="current",
@@ -75,3 +76,41 @@ def test_snapshot_recomputes_persisted_profile_root_and_bootstrap_identities() -
 
     with pytest.raises(ValueError, match="profile identity"):
         _snapshot(row, replace(binding, profile_identity=root_digest))
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        ("provision", AuthoritySystemOperation.PROVISION),
+        ("preactivation-teardown", AuthoritySystemOperation.PREACTIVATION_TEARDOWN),
+        ("destroy", None),
+        ("PROVISION", None),
+    ],
+)
+def test_binding_decodes_the_operation_enum(
+    stored: str, expected: AuthoritySystemOperation | None
+) -> None:
+    row = {
+        "authority_id": uuid4(),
+        "generation": 1,
+        "system_id": uuid4(),
+        "allocation_id": uuid4(),
+        "resource_id": uuid4(),
+        "provider_kind": "local-libvirt",
+        "resource_name": "host-a",
+        "authority_instance": "authority-a",
+        "profile_identity": "sha256:" + "a" * 64,
+        "root_identity": "sha256:" + "b" * 64,
+        "bootstrap_identity": "sha256:" + "c" * 64,
+        "operation": stored,
+        "operation_identity": "operation-a",
+        "operation_digest": "sha256:" + "d" * 64,
+        "state": "current",
+    }
+    if expected is None:
+        with pytest.raises(ValueError, match="authority System operation is invalid"):
+            _binding(row)
+    else:
+        binding = _binding(row)
+        assert binding.operation is expected
+        assert binding.operation.value == stored

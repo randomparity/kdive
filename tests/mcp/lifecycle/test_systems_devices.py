@@ -21,7 +21,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import JOBS, SNAPSHOTS, SYSTEM_DEVICES, SYSTEMS, devices_for_system
+from kdive.db.repositories import SNAPSHOTS, SYSTEM_DEVICES, SYSTEMS, devices_for_system
 from kdive.domain.capacity.state import SnapshotState, SystemDeviceState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Snapshot, SystemDevice
@@ -54,7 +54,11 @@ from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.lifecycle import runs_support
 from tests.mcp.systems_support import SYSTEM_ADMIN_HANDLERS, provider_resolver, provisioning_profile
 from tests.mcp.systems_support import ctx as _ctx
-from tests.support.worker_fence import register_worker
+from tests.support.worker_fence import (
+    dequeue_as_current_worker,
+    incarnation_credential,
+    register_worker,
+)
 
 _PLUGGING, _ATTACHED = SystemDeviceState.PLUGGING, SystemDeviceState.ATTACHED
 _FAILED, _LOST = SystemDeviceState.FAILED, SystemDeviceState.LOST
@@ -154,12 +158,18 @@ class _Env:
     async def run_worker(self, job_id: str, port: object | None = None) -> None:
         """Run the queued job's real handler on the worker login, as the worker would."""
         async with self.owner.connection() as conn:
-            job = await JOBS.get(conn, UUID(job_id))
-        assert job is not None
+            job = await dequeue_as_current_worker(conn, "devices-test-worker")
+        assert job is not None and job.id == UUID(job_id)
         resolver = self.resolver(port)
         run = plug_device_handler if job.kind is JobKind.PLUG_DEVICE else unplug_device_handler
         try:
-            await run(self.worker, job, resolver=resolver, secret_registry=SecretRegistry())
+            await run(
+                self.worker,
+                job,
+                resolver=resolver,
+                secret_registry=SecretRegistry(),
+                incarnation_credential=incarnation_credential("devices-test-worker"),
+            )
         finally:
             await self.settle_job(job_id)
 

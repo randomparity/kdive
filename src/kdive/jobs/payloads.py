@@ -28,6 +28,7 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.cmdline import cmdline_extra_error
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
+from kdive.domain.external_boot_values import ExternalBootPlan, RootSpecV1
 from kdive.domain.operations.jobs import (
     RETIRED_JOB_KINDS,
     Job,
@@ -37,12 +38,11 @@ from kdive.domain.operations.jobs import (
 )
 from kdive.domain.operations.sysrq import SysRqCommand
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     operation_is_permitted,
 )
-from kdive.providers.ports.external_boot import ExternalBootPlan, RootSpecV1
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemMarkerV1,
     AuthoritySystemOperation,
@@ -618,6 +618,9 @@ class TeardownPayload(SystemPayload):
     external_boot_authority_v1: ExternalBootAuthorityMarkerV1 | None = None
     authority_system_v1: AuthoritySystemMarkerV1 | None = None
     remote_module_attempt_v1: ModuleAttemptPreparationRequestV1 | None = None
+
+    # Only automatic stalled-System repair consumes this request allowance (ADR-0843).
+    automatic_teardown_replay_v1: Literal["consumed"] | None = None
 
     @field_validator("remote_module_attempt_v1", mode="before")
     @classmethod

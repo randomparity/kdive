@@ -20,28 +20,26 @@ from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
-from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
-from kdive.jobs.handlers.external_boot.registrar import build_operations
-from kdive.jobs.handlers.external_boot.router import route_marked
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
     ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,
-    HandlerRegistry,
 )
+from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
+from kdive.jobs.handlers.external_boot.registrar import build_operations
+from kdive.jobs.handlers.external_boot.router import route_marked
+from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.worker import Worker
 from kdive.mcp.tools.external_boot.recovery_requests import request_release, resolve_conflict
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.external_boot_authority.transport import _dispatch
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
@@ -246,9 +244,11 @@ async def _resolve(
     result = await handler(worker, claimed, marker)
     assert isinstance(result, ExternalBootAuthoritySuccessV1)
     assert result.result.operation == "recovery-attempt"
-    assert await queue.complete_external_boot(
+    checkpoint = await queue.complete_external_boot(
         worker, claimed, result, incarnation_credential=SecretStr(case.credential)
     )
+    assert isinstance(checkpoint, queue.ExternalBootCommitOutcome)
+    assert checkpoint.continue_claim is True
     result = await handler(worker, claimed, marker)
     if not restores:
         assert isinstance(result, ExternalBootAuthorityConflictV1)
@@ -261,7 +261,9 @@ async def _resolve(
     completed = await queue.complete_external_boot(
         worker, claimed, result, incarnation_credential=SecretStr(case.credential)
     )
-    assert isinstance(completed, Job) and completed.state.value == "succeeded"
+    assert isinstance(completed, queue.ExternalBootCommitOutcome)
+    assert completed.job.state.value == "succeeded"
+    assert completed.continue_claim is False
     return claimed.id
 
 
@@ -341,9 +343,11 @@ async def _run_marked(
     result = await handler(worker, job, marker)
     while isinstance(result, ExternalBootAuthoritySuccessV1):
         assert result.result.operation in {"recovery-attempt", "deadline"}
-        assert await queue.complete_external_boot(
+        checkpoint = await queue.complete_external_boot(
             worker, job, result, incarnation_credential=SecretStr(case.credential)
         )
+        assert isinstance(checkpoint, queue.ExternalBootCommitOutcome)
+        assert checkpoint.continue_claim is True
         result = await handler(worker, job, marker)
     assert isinstance(result, ExternalBootAuthorityConflictV1)
     return result

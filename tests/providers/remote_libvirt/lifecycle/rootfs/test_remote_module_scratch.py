@@ -7,12 +7,12 @@ from typing import Any
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_scratch import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_scratch import (
     HEAD_BYTES,
     ScratchState,
     classify_head,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
     SCRATCH_CAPACITY_BYTES,
     prepare_attempt_volumes,
 )
@@ -200,7 +200,7 @@ def test_retry_refuses_a_scratch_with_the_wrong_capacity_before_writing(tmp_path
 def test_retry_refuses_a_scratch_formatted_by_another_worker_mid_repair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from kdive.providers.remote_libvirt.lifecycle.rootfs import remote_module_volumes as volumes
+    from kdive.providers.remote_libvirt.module_preparation import remote_module_volumes as volumes
 
     conn = Conn()
     wanted = request(tmp_path, inspect_attachments=_detached_all)
@@ -256,7 +256,7 @@ def test_a_short_image_read_aborts_the_upload(
 
 
 def test_scratch_image_carries_no_orphan_file_feature(tmp_path: Path) -> None:
-    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_scratch import (
+    from kdive.providers.remote_libvirt.module_preparation.remote_module_scratch import (
         build_scratch_image,
     )
 

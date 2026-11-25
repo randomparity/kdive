@@ -101,7 +101,8 @@ def jump_find(
         if match < window_start:  # a long line pushed the match out of the window
             window_start = match
             window_end = min(size, match + max_bytes)
-        next_offset = line_start - 1 if line_start > 0 else None
+        # Zero means end-of-artifact on input, so it cannot be a continuation cursor.
+        next_offset = line_start - 1 if line_start > 1 else None
     return JumpHit(
         match_offset=match,
         match_line=match_line,

@@ -567,6 +567,14 @@ def _register_systems_teardown(
         tool returns `configuration_error` and enqueues no ordinary teardown job. A System without
         external-boot history that is mid-reprovision is refused with `conflict`
         (`current_status: reprovisioning`) and nothing is enqueued; retry once it settles.
+
+        Ordinary teardown permits one automatic recovery admission per current request after
+        explicitly retryable attempt exhaustion, using the job's existing attempt budget. This
+        is a durable admission limit, with no timed retry promise. Terminal or unknown failures
+        and `teardown_automatic_replay_exhausted` stop automatic recovery. Inspect the job's
+        failure details, correct the cause, then call systems.teardown with a new or omitted
+        idempotency_key and poll jobs.wait; the original key replays its recorded response.
+        A live job replay preserves its allowance; an actual explicit failed-job restart resets it.
         """
         return await _teardown_system(
             pool, current_context(), system_id, idempotency_key=idempotency_key, resolver=resolver
@@ -789,13 +797,15 @@ def _register_systems_delete_snapshot(
 _HOTPLUG_LIMITS = (
     f"Limits: a System holds at most {DEVICE_LIMIT} device rows in any state, counted per System "
     "(a ninth plug is refused `conflict`, `reason: device_limit`, `data.limit`; un-plug a "
-    "`failed`, `lost` or `attached` row to make room). A job settles within its window, "
-    "counted in seconds on the worker's clock from the moment the job starts running (queue "
-    "wait is excluded) and covering the provider call and every poll; "
-    "`systems.list_devices` shows the absolute `settle_deadline` against its `server_time`. "
-    "At the deadline the job fails `control_failure` (`reason: settle_timeout`), the row "
-    "becomes `failed` and the device may still appear or vanish later: call "
-    "`systems.list_devices`, then `systems.unplug_device` (safe to repeat) or plug again."
+    "`failed`, `lost` or `attached` row to make room). The window bounds observation per "
+    "attempt, in seconds on the worker's monotonic clock from provider-step start (queue "
+    "and System-lock wait excluded). `systems.list_devices` shows the absolute "
+    "`settle_deadline` against its `server_time`. Expiry stops further observation. A started "
+    "mutation, including disk absence cleanup, retains the System lock until it finishes, "
+    "so settlement may be later. A definitive completed outcome is recorded; an outcome still "
+    "pending at expiry fails `control_failure` (`reason: settle_timeout`); the row becomes "
+    "`failed` with available recovery evidence. Call `systems.list_devices`, then "
+    "`systems.unplug_device` (safe to repeat) or plug again."
 )
 
 _HOTPLUG_ADMISSION = (

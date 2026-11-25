@@ -19,6 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
 from kdive.domain.external_boot_activation import ExternalBootReservationRelease
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, Job, JobKind
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
@@ -32,19 +33,16 @@ from kdive.jobs.worker import Worker
 from kdive.mcp.tools.external_boot.recovery_requests import request_release
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityTeardownMutationRequestV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.external_boot_authority.teardown import AuthorityTeardownSnapshot
 from kdive.providers.external_boot_authority.transport import _dispatch
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry

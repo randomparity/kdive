@@ -13,28 +13,28 @@ import psycopg
 from psycopg import AsyncConnection
 from pydantic import SecretStr
 
-from kdive.domain.operations.jobs import Job
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.jobs import queue
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
+from kdive.jobs.external_boot_models import (
+    ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthoritySuccessV1,
+)
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1, ExternalBootAuthoritySuccessV1
 from kdive.mcp.tools.external_boot.recovery_requests import resolve_conflict
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityCommitContextV1,
     AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.external_boot_authority.transport import _dispatch
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -229,7 +229,8 @@ def test_mcp_conflict_job_claims_and_converges_through_authority_service(
                         result,
                         incarnation_credential=SecretStr(case.credential),
                     )
-                    assert interim is not None
+                    assert isinstance(interim, queue.ExternalBootCommitOutcome)
+                    assert interim.continue_claim is True
                     result = await handler(worker, claimed, marker)
                 assert isinstance(result, ExternalBootAuthoritySuccessV1)
                 completed = await queue.complete_external_boot(
@@ -238,7 +239,9 @@ def test_mcp_conflict_job_claims_and_converges_through_authority_service(
                     result,
                     incarnation_credential=SecretStr(case.credential),
                 )
-                assert isinstance(completed, Job) and completed.state.value == "succeeded"
+                assert isinstance(completed, queue.ExternalBootCommitOutcome)
+                assert completed.job.state.value == "succeeded"
+                assert completed.continue_claim is False
             row = await seed.execute(
                 "SELECT state FROM external_boot_activations WHERE id=%s", (vehicle.activation_id,)
             )

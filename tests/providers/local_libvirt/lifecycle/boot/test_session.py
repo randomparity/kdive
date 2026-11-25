@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import errno
 import importlib
 import io
@@ -13,6 +14,7 @@ import threading
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
+from importlib.util import resolve_name
 from pathlib import Path
 from typing import Any, BinaryIO, Literal, cast
 from uuid import UUID
@@ -24,23 +26,28 @@ from pydantic import SecretStr
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, resolve_local_timing
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    OpaqueProviderRef,
+    RecoveryPoint,
+    RunningKernelObservation,
+)
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.providers.external_boot_authority import transport
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
 )
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
 from kdive.providers.local_libvirt.lifecycle.boot import session as session_module
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LibguestfsAuthenticatedGuestTree,
     LocalLibvirtExternalBoot,
-    TargetProjectionStore,
-    TargetProjectionV1,
 )
+from kdive.providers.local_libvirt.lifecycle.boot.owned_domain import owned_system_semantic_identity
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
     ReadinessResult,
@@ -49,6 +56,10 @@ from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
     ModuleArchiveCapture,
     RealGuestRecoveryWriter,
     RecoveryArchiveSink,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
+    TargetProjectionStore,
+    TargetProjectionV1,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
     ExpectedOperationOwnership,
@@ -64,19 +75,12 @@ from kdive.providers.local_libvirt.lifecycle.boot.session import (
     _ConcreteSession,
     _Find0TreeCursor,
     open_authority_system_teardown,
-    owned_system_semantic_identity,
     prove_no_foreign_system_storage_references,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import LocalArtifactRoot
 from kdive.providers.local_libvirt.settings import (
     LIBVIRT_BOOT_WINDOW_S,
     LIBVIRT_TCG_DEADLINE_MULTIPLIER,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    OpaqueProviderRef,
-    RecoveryPoint,
-    RunningKernelObservation,
 )
 from kdive.providers.shared.libvirt_external_boot import boot_projection_identity
 from tests.providers.external_boot_authority.service_support import _mutation, _takeover
@@ -94,6 +98,10 @@ from tests.providers.local_libvirt.lifecycle.boot.session_support import (
 )
 
 _SESSION_LOGGER = "kdive.providers.local_libvirt.lifecycle.boot.session"
+_OWNED_DOMAIN_FIXTURE_IDENTITY = (
+    "sha256:"
+    "e8f3bf9dda9e1b2d2e18b627b595d25b5d2704a39b9648fe7fb7fecb6052de28"  # pragma: allowlist secret
+)
 
 
 class FakeLease:
@@ -359,6 +367,201 @@ def test_authority_teardown_session_requires_no_activation_or_run(tmp_path: Path
     session.close()
 
 
+@pytest.mark.parametrize(
+    ("location", "kind"),
+    [
+        ("root", "permission"),
+        ("nested", "permission"),
+        ("root", "io"),
+        ("nested", "io"),
+        ("nested", "missing"),
+        ("root", "unknown"),
+        ("nested", "unknown"),
+        ("root", "wrong"),
+    ],
+)
+def test_storage_enumeration_rejects_directory_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str, kind: str
+) -> None:
+    overlay = tmp_path / "overlay"
+    overlay.touch()
+    baseline = tmp_path / "baseline"
+    nested = baseline / "nested"
+    nested.mkdir(parents=True)
+    (nested / "kernel").write_bytes(b"kernel")
+    denied = baseline if location == "root" else nested
+    fault: OSError
+    if kind == "permission":
+        fault = PermissionError(errno.EACCES, "storage unreadable", str(denied))
+    elif kind == "io":
+        fault = OSError(errno.EIO, "storage unreadable", str(denied))
+    elif kind == "missing":
+        fault = FileNotFoundError(errno.ENOENT, "directory vanished", str(denied))
+    elif kind == "unknown":
+        fault = FileNotFoundError(errno.ENOENT, "unknown directory vanished")
+    else:
+        fault = FileNotFoundError(errno.ENOENT, "different directory vanished", str(nested))
+    original = os.scandir
+
+    def scan(path: str):
+        if path == str(denied):
+            raise fault
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", scan)
+    with pytest.raises(type(fault)) as raised:
+        session_module._system_storage_paths(str(overlay), str(baseline))
+    assert raised.value is fault
+
+
+def test_storage_enumeration_rejects_a_directory_misclassified_after_metadata_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    overlay = tmp_path / "overlay"
+    overlay.touch()
+    baseline = tmp_path / "baseline"
+    nested = baseline / "nested"
+    nested.mkdir(parents=True)
+    (nested / "kernel").touch()
+    fault = OSError(errno.EIO, "directory metadata unreadable", str(nested))
+    original = os.scandir
+
+    class Entry:
+        name = nested.name
+
+        def is_dir(self) -> bool:
+            raise fault
+
+    @contextmanager
+    def scan(path: str):
+        if path == str(baseline):
+            yield iter([Entry()])
+        else:
+            with original(path) as entries:
+                yield entries
+
+    monkeypatch.setattr(os, "scandir", scan)
+    with pytest.raises(OSError) as raised:
+        session_module._system_storage_paths(str(overlay), str(baseline))
+    assert raised.value.errno == errno.EIO
+    assert raised.value.filename == str(nested)
+
+
+@pytest.mark.parametrize("overlay_present", [False, True])
+@pytest.mark.parametrize("baseline_present", [False, True])
+def test_storage_enumeration_accepts_absent_artifacts(
+    tmp_path: Path, overlay_present: bool, baseline_present: bool
+) -> None:
+    overlay = tmp_path / "overlay"
+    baseline = tmp_path / "baseline"
+    expected: set[str] = set()
+    if overlay_present:
+        overlay.touch()
+        expected.add(str(overlay))
+    if baseline_present:
+        baseline.mkdir()
+        kernel = baseline / "kernel"
+        kernel.touch()
+        expected.add(str(kernel))
+    assert session_module._system_storage_paths(str(overlay), str(baseline)) == expected
+
+
+@pytest.mark.parametrize("vanish_after", [0, 1])
+def test_storage_enumeration_continues_after_a_file_vanishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vanish_after: int
+) -> None:
+    overlay = tmp_path / "overlay"
+    overlay.touch()
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    files = {str(baseline / name) for name in ("one", "two", "three")}
+    for name in files:
+        Path(name).touch()
+    original = os.stat
+    seen: list[str] = []
+    vanished: set[str] = set()
+
+    def stat_file(path: str, *args, **kwargs):
+        if str(path) in files:
+            if not vanished and len(seen) == vanish_after:
+                vanished.add(str(path))
+                os.unlink(path)
+                raise FileNotFoundError(errno.ENOENT, "file vanished", path)
+            seen.append(str(path))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat_file)
+    observed = session_module._system_storage_paths(str(overlay), str(baseline))
+    assert len(vanished) == 1
+    assert observed == (files - vanished) | {str(overlay)}
+    assert all(Path(name).is_file() for name in files - vanished)
+
+
+def test_storage_enumeration_keeps_only_nonfollowing_regular_files(tmp_path: Path) -> None:
+    overlay = tmp_path / "overlay"
+    overlay.touch()
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    kernel = baseline / "kernel"
+    kernel.touch()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    payload = outside / "payload"
+    payload.touch()
+    (baseline / "file-link").symlink_to(payload)
+    (baseline / "directory-link").symlink_to(outside, target_is_directory=True)
+    os.mkfifo(baseline / "fifo")
+    assert session_module._system_storage_paths(str(overlay), str(baseline)) == {
+        str(overlay),
+        str(kernel),
+    }
+
+
+@pytest.mark.parametrize("file_count", [4095, 4096])
+def test_storage_enumeration_bounds_the_combined_regular_file_set(
+    tmp_path: Path, file_count: int
+) -> None:
+    overlay = tmp_path / "overlay"
+    overlay.touch()
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    for index in range(file_count):
+        (baseline / str(index)).touch()
+    if file_count == 4096:
+        with pytest.raises(ValueError, match="storage path set exceeds its bound"):
+            session_module._system_storage_paths(str(overlay), str(baseline))
+    else:
+        observed = session_module._system_storage_paths(str(overlay), str(baseline))
+        assert len(observed) == 4096
+        assert str(overlay) in observed
+
+
+@pytest.mark.parametrize("target", ["overlay", "kernel"])
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EIO])
+def test_storage_enumeration_preserves_file_stat_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str, code: int
+) -> None:
+    overlay = tmp_path / "overlay"
+    overlay.touch()
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    kernel = baseline / "kernel"
+    kernel.touch()
+    denied = overlay if target == "overlay" else kernel
+    fault = OSError(code, "file unreadable", str(denied))
+    original = os.stat
+
+    def stat_file(path: str, *args, **kwargs):
+        if str(path) == str(denied):
+            raise fault
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat_file)
+    with pytest.raises(type(fault)) as raised:
+        session_module._system_storage_paths(str(overlay), str(baseline))
+    assert raised.value is fault
+
+
 def test_authority_teardown_rejects_a_sibling_overlay_attachment(tmp_path: Path) -> None:
     events: list[str] = []
     owner = _TeardownDomain(events)
@@ -382,6 +585,35 @@ def test_authority_teardown_rejects_a_sibling_overlay_attachment(tmp_path: Path)
 
     assert "domain.list:0" in events
     assert "connection.close" in events
+
+
+def test_owned_domain_identity_has_no_session_dependency() -> None:
+    package = "kdive.providers.local_libvirt.lifecycle.boot"
+    path = Path(session_module.__file__).with_name("owned_domain.py")
+    tree = ast.parse(path.read_text())
+    imports: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                module = resolve_name("." * node.level + module, package)
+            imports.extend(f"{module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+    assert not [name for name in imports if name.startswith(f"{package}.session")]
+
+
+def test_authority_semantic_identity_preserves_its_literal_digest() -> None:
+    assert (
+        owned_system_semantic_identity(_xml(), SYSTEM_ID, OVERLAY) == _OWNED_DOMAIN_FIXTURE_IDENTITY
+    )
+
+
+@pytest.mark.parametrize(("unit", "amount"), [("pages", "2"), ("MiB", "many"), ("KiB", "-1")])
+def test_authority_semantic_identity_rejects_invalid_memory(unit: str, amount: str) -> None:
+    xml = _xml().replace("<os>", f'<memory unit="{unit}">{amount}</memory><os>')
+    with pytest.raises(ValueError, match="memory is not a supported integer quantity"):
+        owned_system_semantic_identity(xml, SYSTEM_ID, OVERLAY)
 
 
 def test_authority_semantic_identity_permits_libvirt_generated_device_fields() -> None:
@@ -824,7 +1056,14 @@ def test_expected_ownership_without_activation_accepts_exact_system_and_run() ->
         _expected().run_id = UUID(int=9)  # ty: ignore[invalid-assignment]
 
 
-def test_expected_ownership_mismatch_preserves_rejection_when_pin_close_fails() -> None:
+class _CloseAbort(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("close_error", [OSError("pin close"), _CloseAbort("pin close")])
+def test_expected_ownership_mismatch_preserves_rejection_when_pin_close_fails(
+    close_error: BaseException,
+) -> None:
     events: list[str] = []
 
     class CloseFaultPin:
@@ -832,7 +1071,7 @@ def test_expected_ownership_mismatch_preserves_rejection_when_pin_close_fails() 
 
         def close(self) -> None:
             self.close_attempts += 1
-            raise OSError("pin close")
+            raise close_error
 
     pin = CloseFaultPin()
 
@@ -844,7 +1083,7 @@ def test_expected_ownership_mismatch_preserves_rejection_when_pin_close_fails() 
     with pytest.raises(ValueError, match="expected ownership") as raised:
         _factory(events, pin_lease=pin_lease).open(_lease(), crossed)
 
-    assert raised.value.__notes__ == ["cleanup failed: OSError('pin close')"]
+    assert raised.value.__notes__ == [f"cleanup failed: {close_error!r}"]
     assert pin.close_attempts == 1
     assert events == []
 
@@ -2976,27 +3215,97 @@ def test_start_refuses_active_domain_before_preparation() -> None:
     session.close()
 
 
-def test_failed_start_invalidates_readiness_and_closes_window() -> None:
+@pytest.mark.parametrize(
+    "close_error", [None, OSError("window close"), _CloseAbort("window close")]
+)
+def test_failed_start_invalidates_readiness_and_closes_window(
+    close_error: BaseException | None,
+) -> None:
     events: list[str] = []
+
+    create_error = RuntimeError("create failed")
 
     class FailingDomain(Domain):
         def create(self) -> int:
             self.events.append("domain.create")
-            raise RuntimeError("create failed")
+            raise create_error
 
-    window = _Window(events, "failed")
+    class ClosingWindow(_Window):
+        close_attempts = 0
+
+        def close(self) -> None:
+            self.close_attempts += 1
+            super().close()
+            if close_error is not None:
+                raise close_error
+
+    window = ClosingWindow(events, "failed")
     session = _factory(
         events,
         FailingDomain(events),
         prepare_console=lambda _sid: cast(ConsoleReadinessWindow, window),
     ).open(_lease(), _expected())
 
-    with pytest.raises(RuntimeError, match="create failed"):
+    with pytest.raises(RuntimeError, match="create failed") as raised:
         session.start()
+    assert raised.value is create_error
+    if close_error is not None:
+        assert raised.value.__notes__ == [f"cleanup failed: {close_error!r}"]
     with pytest.raises(RuntimeError, match="successful start"):
         session.readiness()
     assert events.count("window.close:failed") == 1
     session.close()
+    assert window.close_attempts == 1
+
+
+@pytest.mark.parametrize("readiness_fails", [False, True])
+@pytest.mark.parametrize(
+    "close_error", [None, OSError("window close"), _CloseAbort("window close")]
+)
+def test_readiness_failure_preserves_primary_and_releases_window_once(
+    readiness_fails: bool,
+    close_error: BaseException | None,
+) -> None:
+    events: list[str] = []
+    readiness_error = RuntimeError("readiness failed")
+
+    class ClosingWindow(_Window):
+        close_attempts = 0
+
+        def close(self) -> None:
+            self.close_attempts += 1
+            super().close()
+            if close_error is not None:
+                raise close_error
+
+    window = ClosingWindow(events, "readiness")
+
+    def readiness(_sid: UUID, candidate: ConsoleReadinessWindow) -> ReadinessResult:
+        assert candidate is window
+        if readiness_fails:
+            raise readiness_error
+        return ReadinessResult(True, True)
+
+    session = _factory(
+        events,
+        prepare_console=lambda _sid: cast(ConsoleReadinessWindow, window),
+        readiness=readiness,
+    ).open(_lease(), _expected())
+    session.start()
+    if readiness_fails or close_error is not None:
+        expected_error = readiness_error if readiness_fails else close_error
+        assert expected_error is not None
+        with pytest.raises(type(expected_error)) as raised:
+            session.readiness()
+        assert raised.value is expected_error
+        if readiness_fails and close_error is not None:
+            assert raised.value.__notes__ == [f"cleanup failed: {close_error!r}"]
+        with pytest.raises(RuntimeError, match="successful start"):
+            session.readiness()
+    else:
+        assert session.readiness() == ReadinessResult(True, True)
+    session.close()
+    assert window.close_attempts == 1
 
 
 def test_repeated_readiness_returns_cached_result_and_closes_once() -> None:
@@ -3134,16 +3443,20 @@ def test_inspection_reads_the_persistent_definition_of_a_running_domain() -> Non
     domain.active = True
     session = _factory(events, domain).open(_lease(), _expected())
 
-    assert session.inspect_closed().xml == inactive.encode()
+    running = session.inspect_persistent_definition()
+    assert running.xml == inactive.encode()
+    assert running.active
     domain.active = False
-    assert session.inspect_closed().xml == inactive.encode()
+    stopped = session.inspect_persistent_definition()
+    assert stopped.xml == inactive.encode()
+    assert not stopped.active
     session.close()
 
 
 def test_inspection_is_exact_immutable_and_validates_ownership() -> None:
     events: list[str] = []
     session = _factory(events).open(_lease(), _expected())
-    inspection = session.inspect_closed()
+    inspection = session.inspect_persistent_definition()
     assert inspection.xml == _xml().encode()
     assert inspection.domain_name == f"kdive-{SYSTEM_ID}"
     assert inspection.overlay.device == 8 and inspection.overlay.inode == 9
@@ -3183,7 +3496,7 @@ def test_define_xml_preserves_a_decomposed_target_command_line() -> None:
     session.define_xml(target, projected=True)
 
     assert domain.xml == target
-    assert session.inspect_closed(projected=True).xml == target.encode()
+    assert session.inspect_persistent_definition(projected=True).xml == target.encode()
     session.close()
 
 
@@ -3194,7 +3507,7 @@ def test_factory_reopens_a_target_with_a_decomposed_command_line() -> None:
 
     session = _factory(events, domain).open(_lease(), _expected())
 
-    assert session.inspect_closed(projected=True).xml == target.encode()
+    assert session.inspect_persistent_definition(projected=True).xml == target.encode()
     session.close()
 
 
@@ -3214,7 +3527,7 @@ def test_source_inspection_keeps_the_strict_nfc_contract() -> None:
     domain.xml = _xml().replace("root=x", "root=x debug=cafe\u0301")
 
     with pytest.raises(ValueError, match="domain XML must be NFC"):
-        session.inspect_closed()
+        session.inspect_persistent_definition()
 
     session.close()
 
@@ -3356,7 +3669,10 @@ def test_guest_rechecks_inactive_and_overlay_before_every_operation() -> None:
 
 
 @pytest.mark.parametrize("name", ["/etc/passwd", "../escape", "a/b", ".", "..", ""])
-def test_guest_artifact_transfer_rejects_host_path_escape_before_open(name: str) -> None:
+def test_guest_artifact_transfer_rejects_host_path_escape_before_open(
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
     factory = LocalExternalBootSessionFactory(
         pin_lease=LANE.pin,
@@ -3367,22 +3683,33 @@ def test_guest_artifact_transfer_rejects_host_path_escape_before_open(name: str)
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
-        open_relative=lambda *_args: events.append("artifact.child.open") or 42,
-        close_transfer_descriptor=lambda _fd: events.append("artifact.child.close"),
     )
     session = factory.open(_lease(), _expected())
-    with session.guest() as guest:
-        assert not hasattr(guest, "upload")
-        assert not hasattr(guest, "download")
-        with pytest.raises(ValueError, match="canonical relative"):
-            guest.upload_artifact(name, "/guest/destination")
-        with pytest.raises(ValueError, match="canonical relative"):
-            guest.download_artifact("/guest/source", name)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_module,
+            "_open_relative",
+            lambda *_args: events.append("artifact.child.open") or 42,
+        )
+        patch.setattr(
+            os,
+            "close",
+            lambda _fd: events.append("artifact.child.close"),
+        )
+        with session.guest() as guest:
+            assert not hasattr(guest, "upload")
+            assert not hasattr(guest, "download")
+            with pytest.raises(ValueError, match="canonical relative"):
+                guest.upload_artifact(name, "/guest/destination")
+            with pytest.raises(ValueError, match="canonical relative"):
+                guest.download_artifact("/guest/source", name)
     assert "artifact.child.open" not in events
     session.close()
 
 
-def test_guest_artifact_transfers_use_owned_fds_and_close_each() -> None:
+def test_guest_artifact_transfers_use_owned_fds_and_close_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
     factory = LocalExternalBootSessionFactory(
         pin_lease=LANE.pin,
@@ -3393,27 +3720,50 @@ def test_guest_artifact_transfers_use_owned_fds_and_close_each() -> None:
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
-        open_relative=lambda root, name, flags, mode: (
-            events.append(f"artifact.child.open:{root}:{name}:{flags}:{mode}") or 42
-        ),
-        close_transfer_descriptor=lambda fd: events.append(f"artifact.child.close:{fd}"),
-        fsync_descriptor=lambda fd: events.append(f"artifact.child.fsync:{fd}"),
-        replace_relative=lambda root, source, target: events.append(
-            f"artifact.replace:{root}:{source}:{target}"
-        ),
-        temporary_artifact_name=lambda name: f".{name}.tmp",
     )
     session = factory.open(_lease(), _expected())
-    with session.guest() as guest:
-        guest.upload_artifact("input.tar", "/guest/input.tar")
-        guest.download_artifact("/guest/output.tar", "output.tar")
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_module,
+            "_open_relative",
+            lambda root, name, flags, mode: (
+                events.append(f"artifact.child.open:{root}:{name}:{flags}:{mode}") or 42
+            ),
+        )
+        patch.setattr(
+            os,
+            "close",
+            lambda fd: events.append(f"artifact.child.close:{fd}"),
+        )
+        patch.setattr(
+            os,
+            "fsync",
+            lambda fd: events.append(f"artifact.child.fsync:{fd}"),
+        )
+        patch.setattr(
+            session_module,
+            "_replace_relative",
+            lambda root, source, target: events.append(
+                f"artifact.replace:{root}:{source}:{target}"
+            ),
+        )
+        patch.setattr(
+            session_module,
+            "_temporary_artifact_name",
+            lambda name: f".{name}.tmp",
+        )
+        with session.guest() as guest:
+            guest.upload_artifact("input.tar", "/guest/input.tar")
+            guest.download_artifact("/guest/output.tar", "output.tar")
     assert "upload:/proc/self/fd/42:/guest/input.tar" in events
     assert "download:/guest/output.tar:/proc/self/fd/42" in events
     assert events.count("artifact.child.close:42") == 2
     session.close()
 
 
-def test_download_publishes_atomically_after_fsync_and_close() -> None:
+def test_download_publishes_atomically_after_fsync_and_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
     factory = LocalExternalBootSessionFactory(
         pin_lease=LANE.pin,
@@ -3424,19 +3774,38 @@ def test_download_publishes_atomically_after_fsync_and_close() -> None:
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
-        open_relative=lambda root, name, flags, mode: (
-            events.append(f"open:{root}:{name}:{flags}:{mode}") or 42
-        ),
-        close_transfer_descriptor=lambda fd: events.append(f"close:{fd}"),
-        fsync_descriptor=lambda fd: events.append(f"fsync:{fd}"),
-        replace_relative=lambda root, source, target: events.append(
-            f"replace:{root}:{source}:{target}"
-        ),
-        temporary_artifact_name=lambda name: f".{name}.tmp",
     )
     session = factory.open(_lease(), _expected())
-    with session.guest() as guest:
-        guest.download_artifact("/guest/output.tar", "output.tar")
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_module,
+            "_open_relative",
+            lambda root, name, flags, mode: (
+                events.append(f"open:{root}:{name}:{flags}:{mode}") or 42
+            ),
+        )
+        patch.setattr(
+            os,
+            "close",
+            lambda fd: events.append(f"close:{fd}"),
+        )
+        patch.setattr(
+            os,
+            "fsync",
+            lambda fd: events.append(f"fsync:{fd}"),
+        )
+        patch.setattr(
+            session_module,
+            "_replace_relative",
+            lambda root, source, target: events.append(f"replace:{root}:{source}:{target}"),
+        )
+        patch.setattr(
+            session_module,
+            "_temporary_artifact_name",
+            lambda name: f".{name}.tmp",
+        )
+        with session.guest() as guest:
+            guest.download_artifact("/guest/output.tar", "output.tar")
     open_event = next(event for event in events if event.startswith("open:"))
     assert f":{os.O_WRONLY | os.O_CREAT | os.O_EXCL}:" in open_event
     assert events.index("download:/guest/output.tar:/proc/self/fd/42") < events.index("fsync:42")
@@ -3445,7 +3814,9 @@ def test_download_publishes_atomically_after_fsync_and_close() -> None:
     session.close()
 
 
-def test_failed_download_removes_temp_and_preserves_existing_final() -> None:
+def test_failed_download_removes_temp_and_preserves_existing_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
 
     class PartialDownloadGuest(Guest):
@@ -3462,25 +3833,50 @@ def test_failed_download_removes_temp_and_preserves_existing_final() -> None:
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
-        open_relative=lambda *_args: 42,
-        close_transfer_descriptor=lambda fd: events.append(f"close:{fd}"),
-        fsync_descriptor=lambda fd: events.append(f"fsync:{fd}"),
-        replace_relative=lambda root, source, target: events.append(
-            f"replace:{root}:{source}:{target}"
-        ),
-        unlink_relative=lambda root, name: events.append(f"unlink:{root}:{name}"),
-        temporary_artifact_name=lambda name: f".{name}.tmp",
     )
     session = factory.open(_lease(), _expected())
-    with session.guest() as guest, pytest.raises(OSError, match="partial download"):
-        guest.download_artifact("/guest/output.tar", "output.tar")
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_module,
+            "_open_relative",
+            lambda *_args: 42,
+        )
+        patch.setattr(
+            os,
+            "close",
+            lambda fd: events.append(f"close:{fd}"),
+        )
+        patch.setattr(
+            os,
+            "fsync",
+            lambda fd: events.append(f"fsync:{fd}"),
+        )
+        patch.setattr(
+            session_module,
+            "_replace_relative",
+            lambda root, source, target: events.append(f"replace:{root}:{source}:{target}"),
+        )
+        patch.setattr(
+            session_module,
+            "_unlink_relative",
+            lambda root, name: events.append(f"unlink:{root}:{name}"),
+        )
+        patch.setattr(
+            session_module,
+            "_temporary_artifact_name",
+            lambda name: f".{name}.tmp",
+        )
+        with session.guest() as guest, pytest.raises(OSError, match="partial download"):
+            guest.download_artifact("/guest/output.tar", "output.tar")
     assert "close:42" in events
     assert "unlink:41:.output.tar.tmp" in events
     assert not any(event.startswith("replace:") for event in events)
     session.close()
 
 
-def test_guest_transfer_preserves_primary_and_attempts_faulting_fd_close() -> None:
+def test_guest_transfer_preserves_primary_and_attempts_faulting_fd_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
 
     class TransferFaultGuest(Guest):
@@ -3501,15 +3897,24 @@ def test_guest_transfer_preserves_primary_and_attempts_faulting_fd_close() -> No
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
-        open_relative=lambda *_args: 42,
-        close_transfer_descriptor=close_fault,
     )
     session = factory.open(_lease(), _expected())
-    with (
-        session.guest() as guest,
-        pytest.raises(LookupError, match="transfer primary") as raised,
-    ):
-        guest.upload_artifact("input.tar", "/guest/input.tar")
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_module,
+            "_open_relative",
+            lambda *_args: 42,
+        )
+        patch.setattr(
+            os,
+            "close",
+            close_fault,
+        )
+        with (
+            session.guest() as guest,
+            pytest.raises(LookupError, match="transfer primary") as raised,
+        ):
+            guest.upload_artifact("input.tar", "/guest/input.tar")
     assert raised.value.__notes__ == ["cleanup failed: OSError('close secondary')"]
     assert events.count("artifact.child.close:42") == 1
     session.close()
@@ -3554,7 +3959,7 @@ def test_close_poisons_wrappers_and_releases_pin_last() -> None:
         "connection.close",
     ]
     lease.release()
-    for call in (session.inspect_closed, lambda: guest.exists("/etc/os-release")):
+    for call in (session.inspect_persistent_definition, lambda: guest.exists("/etc/os-release")):
         with pytest.raises(RuntimeError, match="closed"):
             call()
 
@@ -3801,7 +4206,9 @@ def test_failed_boot_teardown_removes_an_authority_owned_system(tmp_path: Path) 
     assert not baseline.exists()
 
 
-def test_narrow_injected_primitives_keep_host_authority_private() -> None:
+def test_narrow_injected_primitives_keep_host_authority_private(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[str] = []
     domain = Domain(events)
     observation = RunningKernelObservation(
@@ -3818,10 +4225,6 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
         fstat_overlay=lambda _fd: (8, 9, stat.S_IFREG | 0o600),
         close_overlay_descriptor=lambda _fd: None,
         close_descriptor=lambda _fd: None,
-        open_relative=lambda root, name, flags, mode: (
-            events.append(f"openat:{root}:{name}:{flags}:{mode}") or 42
-        ),
-        unlink_relative=lambda root, name: events.append(f"unlinkat:{root}:{name}"),
         prepare_console=lambda _sid: cast(ConsoleReadinessWindow, _Window(events, "authority")),
         readiness=lambda _system_id, _window: ReadinessResult(True, True),
         observe_running=lambda _system_id, _domain: observation,
@@ -3830,24 +4233,37 @@ def test_narrow_injected_primitives_keep_host_authority_private() -> None:
         ),
     )
     session = factory.open(_lease(), _expected())
-    assert session.open_artifact("point.json", 0) == 42
-    session.unlink_artifact("point.json")
-    session.start()
-    assert session.readiness() == ReadinessResult(True, True)
-    assert session.observe_running() == observation
-    creates = events.count("domain.create")
-    session.restore_power()
-    assert events.count("domain.create") == creates
-    session.stop_and_require_inactive(mode="destroy")
-    session.cleanup_payloads(_metadata().model_copy(update={"binding": BINDING}))
-    session.restore_power()
-    assert domain.active
-    session.stop_and_require_inactive(mode="destroy")
-    assert not domain.active
-    assert not hasattr(session.inspect_closed().overlay, "path")
-    assert not hasattr(session, "artifact_root_descriptor")
-    with pytest.raises(ValueError, match="relative"):
-        session.open_artifact("../escape", 0)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            session_module,
+            "_open_relative",
+            lambda root, name, flags, mode: (
+                events.append(f"openat:{root}:{name}:{flags}:{mode}") or 42
+            ),
+        )
+        patch.setattr(
+            session_module,
+            "_unlink_relative",
+            lambda root, name: events.append(f"unlinkat:{root}:{name}"),
+        )
+        assert session.open_artifact("point.json", 0) == 42
+        session.unlink_artifact("point.json")
+        session.start()
+        assert session.readiness() == ReadinessResult(True, True)
+        assert session.observe_running() == observation
+        creates = events.count("domain.create")
+        session.restore_power()
+        assert events.count("domain.create") == creates
+        session.stop_and_require_inactive(mode="destroy")
+        session.cleanup_payloads(_metadata().model_copy(update={"binding": BINDING}))
+        session.restore_power()
+        assert domain.active
+        session.stop_and_require_inactive(mode="destroy")
+        assert not domain.active
+        assert not hasattr(session.inspect_persistent_definition().overlay, "path")
+        assert not hasattr(session, "artifact_root_descriptor")
+        with pytest.raises(ValueError, match="relative"):
+            session.open_artifact("../escape", 0)
     session.close()
     for call in (
         session.readiness,
@@ -3899,7 +4315,7 @@ def test_session_snapshots_ownership_after_lane_pin() -> None:
         run_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         activation_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     )
-    assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
+    assert session.inspect_persistent_definition().domain_name == f"kdive-{SYSTEM_ID}"
     session.start()
     session.readiness()
     session.observe_running()
@@ -3941,7 +4357,7 @@ def test_pinner_mutation_cannot_change_atomic_ownership_snapshot() -> None:
         close_descriptor=lambda _fd: None,
     )
     session = _with_artifact_root(factory.open(lease, _expected()))
-    assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
+    assert session.inspect_persistent_definition().domain_name == f"kdive-{SYSTEM_ID}"
     assert events.count(f"domain.open:kdive-{SYSTEM_ID}") == 1
     assert events.count(f"artifact-owner:{SYSTEM_ID}:{BINDING.activation_id}") == 1
     session.close()
@@ -3975,7 +4391,7 @@ def test_artifact_callback_cannot_redirect_snapshot_by_mutating_caller_lease() -
     session = _with_artifact_root(factory.open(lease, _expected()))
     assert received[0].system_id == SYSTEM_ID
     assert received[0].binding == BINDING
-    assert session.inspect_closed().domain_name == f"kdive-{SYSTEM_ID}"
+    assert session.inspect_persistent_definition().domain_name == f"kdive-{SYSTEM_ID}"
     session.close()
 
 
@@ -4106,3 +4522,268 @@ def test_session_libvirt_seams_name_only_methods_the_real_binding_has(
     }
     assert declared
     assert sorted(name for name in declared if not hasattr(binding, name)) == []
+
+
+@pytest.mark.parametrize("stage", ["before-connection", "after-connection", "after-overlay"])
+@pytest.mark.parametrize("primary_type", [RuntimeError, _CloseAbort])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_acquisition_cleanup_preserves_primary_and_independent_attempts(
+    stage: str, primary_type: type[BaseException], close_fails: bool
+) -> None:
+    events: list[str] = []
+    lease = _lease()
+    primary = primary_type("acquisition failed")
+    failures = {name: OSError(f"{name} failed") for name in ("overlay", "connection", "pin")}
+
+    def close(name: str) -> None:
+        events.append(f"close:{name}")
+        if close_fails:
+            raise failures[name]
+
+    class AcquisitionPin(FakePin):
+        def close(self) -> None:
+            super().close()
+            close("pin")
+
+    class AcquisitionConnection(Conn):
+        def lookupByName(self, name: str) -> Domain:  # noqa: N802
+            if stage == "after-connection":
+                raise primary
+            return super().lookupByName(name)
+
+        def close(self) -> None:
+            close("connection")
+
+    def connect() -> AcquisitionConnection:
+        events.append("connection.open")
+        if stage == "before-connection":
+            raise primary
+        return AcquisitionConnection(events, Domain(events))
+
+    def pin(candidate: LocalExternalBootOperationLease) -> PinnedOperationOwnership:
+        assert candidate is lease
+        return PinnedOperationOwnership(
+            OperationOwnership(SYSTEM_ID, BINDING), AcquisitionPin(lease)
+        )
+
+    def inspect_overlay(descriptor: int) -> tuple[int, int, int]:
+        assert descriptor == 40
+        raise primary
+
+    def close_overlay(descriptor: int) -> None:
+        assert descriptor == 40
+        close("overlay")
+
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=pin,
+        connect=connect,
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: Guest(events),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=inspect_overlay,
+        close_overlay_descriptor=close_overlay,
+    )
+    with pytest.raises(primary_type) as raised:
+        factory.open(lease, _expected())
+
+    assert raised.value is primary
+    expected = {
+        "before-connection": ["pin"],
+        "after-connection": ["connection", "pin"],
+        "after-overlay": ["overlay", "connection", "pin"],
+    }[stage]
+    assert [event for event in events if event.startswith("close:")] == [
+        f"close:{name}" for name in expected
+    ]
+    assert getattr(primary, "__notes__", []) == (
+        [f"cleanup failed: {failures[name]!r}" for name in expected] if close_fails else []
+    )
+    assert lease.pins == 0
+    lease.release()
+
+
+@pytest.mark.parametrize("abort_at", ["overlay", "connection", "pin"])
+def test_acquisition_cleanup_preserves_base_exception_interruption(abort_at: str) -> None:
+    events: list[str] = []
+    lease = _lease()
+    primary = RuntimeError("acquisition failed")
+    abort = _CloseAbort("cleanup interrupted")
+
+    def close(name: str) -> None:
+        events.append(name)
+        if name == abort_at:
+            raise abort
+        raise OSError(f"{name} failed")
+
+    class AcquisitionPin(FakePin):
+        def close(self) -> None:
+            super().close()
+            close("pin")
+
+    class AcquisitionConnection(Conn):
+        def close(self) -> None:
+            close("connection")
+
+    def pin(candidate: LocalExternalBootOperationLease) -> PinnedOperationOwnership:
+        assert candidate is lease
+        return PinnedOperationOwnership(
+            OperationOwnership(SYSTEM_ID, BINDING), AcquisitionPin(lease)
+        )
+
+    def inspect_overlay(_descriptor: int) -> tuple[int, int, int]:
+        raise primary
+
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=pin,
+        connect=lambda: AcquisitionConnection([], Domain([])),
+        open_artifact_root=lambda _ownership: 41,
+        open_guest=lambda: Guest([]),
+        open_overlay=lambda _path: 40,
+        fstat_overlay=inspect_overlay,
+        close_overlay_descriptor=lambda _descriptor: close("overlay"),
+    )
+    with pytest.raises(_CloseAbort) as raised:
+        factory.open(lease, _expected())
+
+    assert raised.value is abort
+    assert abort.__context__ is primary
+    order = ["overlay", "connection", "pin"]
+    assert events == order[: order.index(abort_at) + 1]
+    assert getattr(primary, "__notes__", []) == []
+    assert lease.pins == (0 if abort_at == "pin" else 1)
+
+
+@pytest.fixture
+def artifact_transfer_session(
+    tmp_path: Path,
+) -> Iterator[tuple[LocalExternalBootSession, Path, Guest]]:
+    activation = tmp_path / "activation"
+    activation.mkdir(mode=0o700)
+    overlay = tmp_path / "overlay"
+    overlay.write_bytes(b"qcow")
+    events: list[str] = []
+
+    class DownloadGuest(Guest):
+        def download(self, remotefilename: str, filename: str) -> None:
+            super().download(remotefilename, filename)
+            Path(filename).write_bytes(b"downloaded payload")
+
+    transfer_guest = DownloadGuest(events)
+    factory = LocalExternalBootSessionFactory(
+        pin_lease=LANE.pin,
+        connect=lambda: Conn(events, Domain(events, _xml(overlay=str(overlay)))),
+        open_artifact_root=lambda _ownership: os.open(
+            activation, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        ),
+        open_guest=lambda: transfer_guest,
+        overlay_path_for=lambda _system_id: str(overlay),
+    )
+    lease = _lease()
+    session = factory.open(lease, _expected())
+    try:
+        yield session, activation, transfer_guest
+    finally:
+        session.close()
+        assert lease.pins == 0
+
+
+def test_default_filesystem_operations_publish_real_download(
+    artifact_transfer_session: tuple[LocalExternalBootSession, Path, Guest],
+) -> None:
+    session, activation, _ = artifact_transfer_session
+    final = activation / "output.tar"
+    final.write_bytes(b"previous payload")
+    with session.guest() as guest:
+        guest.download_artifact("/guest/output.tar", "output.tar")
+    assert final.read_bytes() == b"downloaded payload"
+    assert stat.S_IMODE(final.stat().st_mode) == 0o600
+    assert list(activation.iterdir()) == [final]
+
+
+@pytest.mark.parametrize("operation", ["open", "sync", "close", "replace"])
+def test_download_fault_at_filesystem_operation_preserves_final_and_closes_transfer(
+    artifact_transfer_session: tuple[LocalExternalBootSession, Path, Guest],
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    session, activation, _ = artifact_transfer_session
+    final = activation / "output.tar"
+    final.write_bytes(b"previous payload")
+    fault = OSError(errno.EIO, f"injected {operation} failure")
+    real_close = os.close
+    closed: list[int] = []
+
+    def close(descriptor: int) -> None:
+        real_close(descriptor)
+        closed.append(descriptor)
+        if operation == "close":
+            raise fault
+
+    def refuse(*_args: object) -> None:
+        raise fault
+
+    with session.guest() as guest, monkeypatch.context() as patch:
+        patch.setattr(os, "close", close)
+        if operation == "open":
+            patch.setattr(session_module, "_open_relative", refuse)
+        elif operation == "sync":
+            patch.setattr(os, "fsync", refuse)
+        elif operation == "replace":
+            patch.setattr(session_module, "_replace_relative", refuse)
+        with pytest.raises(OSError) as raised:
+            guest.download_artifact("/guest/output.tar", "output.tar")
+
+    assert raised.value is fault
+    assert final.read_bytes() == b"previous payload"
+    assert list(activation.iterdir()) == [final]
+    assert len(closed) == (0 if operation == "open" else 1)
+    for descriptor in closed:
+        with pytest.raises(OSError) as closed_error:
+            os.fstat(descriptor)
+        assert closed_error.value.errno == errno.EBADF
+
+
+def test_download_validates_temporary_name_at_operation_boundary(
+    artifact_transfer_session: tuple[LocalExternalBootSession, Path, Guest],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, activation, _ = artifact_transfer_session
+    final = activation / "output.tar"
+    final.write_bytes(b"previous payload")
+    with session.guest() as guest, monkeypatch.context() as patch:
+        patch.setattr(session_module, "_temporary_artifact_name", lambda name: name)
+        with pytest.raises(ValueError, match="temporary artifact name must differ"):
+            guest.download_artifact("/guest/output.tar", "output.tar")
+    assert final.read_bytes() == b"previous payload"
+    assert list(activation.iterdir()) == [final]
+
+
+def test_failed_download_keeps_primary_when_filesystem_unlink_fails(
+    artifact_transfer_session: tuple[LocalExternalBootSession, Path, Guest],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, activation, transfer_guest = artifact_transfer_session
+    final = activation / "output.tar"
+    final.write_bytes(b"previous payload")
+    primary = LookupError("partial download")
+    secondary = OSError("unlink failed")
+    download = transfer_guest.download
+
+    def partial_download(source: str, destination: str) -> None:
+        download(source, destination)
+        raise primary
+
+    def refuse_unlink(_descriptor: int, _name: str) -> None:
+        raise secondary
+
+    with session.guest() as guest, monkeypatch.context() as patch:
+        patch.setattr(transfer_guest, "download", partial_download)
+        patch.setattr(session_module, "_unlink_relative", refuse_unlink)
+        with pytest.raises(LookupError) as raised:
+            guest.download_artifact("/guest/output.tar", "output.tar")
+    assert raised.value is primary
+    assert raised.value.__notes__ == [f"cleanup failed: {secondary!r}"]
+    assert final.read_bytes() == b"previous payload"
+    remaining = [path for path in activation.iterdir() if path != final]
+    assert len(remaining) == 1
+    assert remaining[0].read_bytes() == b"downloaded payload"

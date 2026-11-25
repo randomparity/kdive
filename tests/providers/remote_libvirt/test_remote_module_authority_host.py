@@ -22,9 +22,24 @@ from kdive.db.remote_module_attempt_obligations import (
     ModuleAttemptWorkerWriteContext,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import ExternalBootActivationBinding, ExternalBootPlan
 from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptObligationReceiptV1,
     ModuleAttemptPreparationRequestV1,
+)
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleOperationV1,
+    RemoteModuleResultV1,
+    identity_for,
+)
+from kdive.providers.external_boot_authority.module_protocol import (
+    PreparedVolume,
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleSystemTeardownRequestV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
 )
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
@@ -32,50 +47,37 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTeardownMutationRequestV1,
 )
 from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
-from kdive.providers.ports.external_boot import ExternalBootActivationBinding, ExternalBootPlan
 from kdive.providers.remote_libvirt.authority_client import (
     RemoteModuleAuthorityAdapter,
     module_completion,
 )
 from kdive.providers.remote_libvirt.external_boot_authority import (
     DurableRemoteModuleVolumePreparationHost,
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModulePreparationBeginResponseV1,
-    RemoteModuleSystemTeardownRequestV1,
-    RemoteModuleTerminalPreparationResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
-    RemoteModuleVolumePreparationStore,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.remote_libvirt.external_boot_store import RemoteExternalBootStore
+from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
+from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
-    RemoteModuleOperationV1,
-    RemoteModuleResultV1,
-    identity_for,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_operation import (
-    RemoteModuleApplianceExecution,
-    RemoteModuleVolumePreparation,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
-    RemoteModulePreparationExecutor,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import (
-    BuiltSourceImage,
-    ModuleTreeEntry,
-    PreparedVolume,
-    SourceFilesystemEvidence,
-    render_module_volume_name,
-)
-from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
-from kdive.providers.remote_libvirt.remote_module_authority_host import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_authority_host import (
     ConcreteRemoteModuleAuthorityHost,
     FactoryRemoteModuleAuthorityHost,
     RemoteModuleAuthorityHostConfiguration,
     RemoteModuleAuthorityHostFactory,
     load_installed_remote_module_appliance,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_operation import (
+    RemoteModuleApplianceExecution,
+    RemoteModuleVolumePreparation,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
+    RemoteModulePreparationExecutor,
+)
+from kdive.providers.remote_libvirt.module_preparation.remote_module_volumes import (
+    BuiltSourceImage,
+    ModuleTreeEntry,
+    SourceFilesystemEvidence,
+    render_module_volume_name,
 )
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -273,7 +275,7 @@ async def test_production_factory_binds_overlay_and_verified_installed_appliance
     )
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir(mode=0o700)
-    store = RemoteModuleVolumePreparationStore(evidence_root)
+    store = RemoteExternalBootStore(evidence_root)
     durable = DurableRemoteModuleVolumePreparationHost(
         store, FactoryRemoteModuleAuthorityHost(factory), monotonic=clock
     )
@@ -520,7 +522,7 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
 
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir(mode=0o700)
-    store = RemoteModuleVolumePreparationStore(evidence_root)
+    store = RemoteExternalBootStore(evidence_root)
     durable_host = DurableRemoteModuleVolumePreparationHost(store, host)
     store.stage(request, 10_000.0)
     response = await durable_host.execute(request)
@@ -681,7 +683,7 @@ async def test_concrete_host_creates_streams_runs_reopens_and_tears_down(
     assert repository.discharged
     store.close()
 
-    restarted_store = RemoteModuleVolumePreparationStore(evidence_root)
+    restarted_store = RemoteExternalBootStore(evidence_root)
     appliance.created_flags = None
     replay = await DurableRemoteModuleVolumePreparationHost(restarted_store, host).execute(request)
     assert replay == response
@@ -785,7 +787,7 @@ class _Quiesce:
         )
         evidence_root = tmp_path / "evidence"
         evidence_root.mkdir(mode=0o700)
-        self.store = RemoteModuleVolumePreparationStore(evidence_root)
+        self.store = RemoteExternalBootStore(evidence_root)
         self.store.stage(self.request, deadline)
         self.durable = DurableRemoteModuleVolumePreparationHost(self.store, host)
 
@@ -931,6 +933,48 @@ def test_the_request_binds_a_staged_plan_to_the_combined_manifest() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("remaining", "budget"),
+    [(1000.75, 900), (899.75, 899), (0.999, None), (0.0, None), (-1.0, None)],
+)
+async def test_worker_module_opening_uses_capped_whole_second_budget(
+    monkeypatch: pytest.MonkeyPatch, remaining: float, budget: int | None
+) -> None:
+    from kdive.services import remote_module_authority_preparation as preparation
+
+    opened: list[int] = []
+
+    class Opened(Exception):
+        pass
+
+    class Sender:
+        async def open_remote_module_attempt(self, request: Any, *, deadline: float) -> Any:
+            assert deadline == 100.0 + remaining
+            opened.append(request.budget_seconds)
+            raise Opened
+
+    monkeypatch.setattr(
+        preparation,
+        "asyncio",
+        SimpleNamespace(get_running_loop=lambda: SimpleNamespace(time=lambda: 100.0)),
+    )
+    authority = _request().authority
+    expected_error = Opened if budget is not None else TimeoutError
+    with pytest.raises(expected_error):
+        await prepare_remote_module_on_authority_host(
+            pool=cast(Any, None),
+            repository=cast(Any, None),
+            sender=cast(Any, Sender()),
+            inputs=preparation.RemoteModulePreparationInputs(authority=authority),
+            job_id=uuid4(),
+            job_attempt=1,
+            incarnation_credential=SecretStr("worker-credential"),
+            deadline=100.0 + remaining,
+        )
+    assert opened == ([] if budget is None else [budget])
+
+
+@pytest.mark.anyio
 async def test_worker_refuses_a_module_only_operation_for_a_staged_plan() -> None:
     staged = _request(staged=True)
     module_only = staged.operation.model_copy(
@@ -955,7 +999,6 @@ async def test_worker_refuses_a_module_only_operation_for_a_staged_plan() -> Non
             repository=cast(Any, None),
             sender=cast(Any, _Sender()),
             inputs=cast(Any, SimpleNamespace(authority=staged.authority)),
-            executor=None,
             job_id=uuid4(),
             job_attempt=1,
             incarnation_credential=cast(Any, None),
@@ -1380,7 +1423,9 @@ class _PowerAwareInspection:
 async def _restored_stack_with_a_running_system(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[_Quiesce, _SystemDomain, _PowerAwareInspection]:
-    from kdive.providers.remote_libvirt import remote_module_authority_host as host_module
+    from kdive.providers.remote_libvirt.module_preparation import (
+        remote_module_authority_host as host_module,
+    )
 
     system = _SystemDomain(active=False)
     stack = _Quiesce(tmp_path, system, fixed_inspection=True)
@@ -1597,7 +1642,7 @@ async def test_expired_deadline_leaves_a_running_system_running(tmp_path: Path) 
 
 
 def test_prior_power_record_is_first_write_wins_and_validated(tmp_path: Path) -> None:
-    store = RemoteModuleVolumePreparationStore(tmp_path)
+    store = RemoteExternalBootStore(tmp_path)
     authority = _request().authority
     assert store.record_prior_power(authority, "running") == "running"
     assert store.record_prior_power(authority, "inactive") == "running"
@@ -1654,8 +1699,10 @@ async def test_unrestorable_power_keeps_the_failure_latched(tmp_path: Path) -> N
 async def test_missing_result_logs_the_bounded_console_tail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from kdive.providers.remote_libvirt import remote_module_authority_host as host_module
-    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+    from kdive.providers.remote_libvirt.module_preparation import (
+        remote_module_authority_host as host_module,
+    )
+    from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance import (
         ApplianceOutcome,
     )
 

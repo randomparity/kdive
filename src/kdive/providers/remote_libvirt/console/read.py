@@ -76,10 +76,12 @@ class RemoteLibvirtConsoleReader:
         swallowed): an empty return therefore always means the console was reachable but silent
         over the window, never that it could not be read. The leader-liveness probe runs after the
         read so ``pumped`` reflects a leader alive through the moment the window was assembled.
+        Redaction also runs in a worker thread, after the leader probe completes.
         """
         data, next_index = await asyncio.to_thread(self._read_parts, system_id, start_index)
         pumped = await self._leader_probe(conn, self._leader_name)
-        return ConsoleWindowRead(self._redact(data), next_index, pumped)
+        data = await asyncio.to_thread(self._redact, data)
+        return ConsoleWindowRead(data, next_index, pumped)
 
     def _read_parts(self, system_id: UUID, start_index: int) -> tuple[bytes, int]:
         """List the window's part indices and assemble their bytes (blocking store I/O).

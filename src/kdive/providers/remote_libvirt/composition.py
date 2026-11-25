@@ -22,10 +22,6 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.rootfs.stage_volume import StageVolumeDeps
 from kdive.observability.console_telemetry import ConsoleTelemetry
-from kdive.providers.core.discovery_registration import (
-    DiscoveryRegistrationTarget,
-    ProviderDiscoveryRegistration,
-)
 from kdive.providers.core.runtime import (
     ConsoleCapabilities,
     DebugCapabilities,
@@ -120,6 +116,7 @@ from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     real_module_debuginfo_resolver,
 )
 from kdive.providers.shared.debug_common.gdbmi.policy.hostpolicy import allow_acl_remote
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.providers.shared.traffic_capture.execution import CaptureExecutor
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -132,9 +129,6 @@ from kdive.security.secrets.secrets import (
 from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
 from kdive.store.objectstore import ObjectStore
 
-_POOL = "remote-libvirt"
-# Reuses seeded `local`; a remote seed row would be DDL beyond migration 0020.
-_COST_CLASS = "local"
 RunningSystemsFactory = Callable[[AsyncConnectionPool], RunningSystems]
 
 
@@ -357,29 +351,6 @@ async def build_console_hosting(
     return ConsoleHosting(loop, registry, leader_conn, host_pool)
 
 
-def discovery_registration(*, secret_registry: SecretRegistry) -> ProviderDiscoveryRegistration:
-    # Remote-libvirt resource rows are created by reconcile_resources from the systems.toml overlay
-    # (ADR-0112), never by discovery — the registration is creates=False, so the registrar is a
-    # bind-only no-op and never resolves the target. The fleet is multi-host (ADR-0187), so there
-    # is no single host to enumerate here; the target factory fails loudly if it is ever reached.
-    del secret_registry
-    return ProviderDiscoveryRegistration(
-        target_factory=_no_discovery_target,
-        kind=ResourceKind.REMOTE_LIBVIRT,
-        pool_name=_POOL,
-        cost_class=_COST_CLASS,
-        creates=False,
-    )
-
-
-def _no_discovery_target() -> DiscoveryRegistrationTarget:
-    raise CategorizedError(
-        "remote-libvirt discovery does not create resource rows (creates=False); the fleet is "
-        "registered by reconcile_resources from systems.toml",
-        category=ErrorCategory.CONFIGURATION_ERROR,
-    )
-
-
 def _debug_capabilities(secret_registry: SecretRegistry, store: ObjectStore) -> DebugCapabilities:
     return DebugCapabilities(
         attach_seam=remote_attach_seam,
@@ -496,6 +467,7 @@ def build_runtime(
     )
 
     return ProviderRuntime(
+        system_handle=libvirt_system_handle,
         authority=_authority,
         profile_policy=RemoteLibvirtProfilePolicy(),
         provisioner=RemoteLibvirtProvisioning(

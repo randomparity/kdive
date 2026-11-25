@@ -13,12 +13,12 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
 from kdive.images.rootfs.catalog import RootfsCatalogEntry, load_rootfs_catalog
 from kdive.mcp.tools.lifecycle.vmcore.handlers import VMCORE_METHODS
+from kdive.providers.assembly.composition import ProviderComposition
 from kdive.providers.core.runtime import ProviderSupport
-from kdive.providers.local_libvirt.composition import build_runtime as build_local_runtime
-from kdive.providers.remote_libvirt.composition import build_runtime as build_remote_runtime
 from kdive.security.secrets.secret_registry import SecretRegistry
 from scripts.coverage_campaign.evidence import NodeID
 from scripts.coverage_campaign.gridgen import CensusRow, generate_rows
@@ -81,6 +81,7 @@ _CORE_METHODS = frozenset(method.value for method in VMCORE_METHODS)
 HANDLER_REFUSAL = "vmcore.fetch handler: method does not produce a vmcore"
 # #3099 owns the kdivectl translation cells of the core service tools (ADR-0795).
 _CLI_OWNER = 3099
+_REMOTE_OWNERS = {2813: 3113, 2814: 3114, 3062: 3080, 3119: 3120, 2815: 3116}
 
 
 class OperationGroup(BaseModel):
@@ -169,13 +170,19 @@ def load_mapping(path: Path = _MAPPING) -> ContractMapping:
 
 def read_inventory() -> Inventory:
     registry = SecretRegistry()
+    resolver = ProviderComposition(secret_registry=registry).build_provider_resolver(
+        enable_local_libvirt=True,
+        enable_remote_libvirt=True,
+        enable_fault_inject=False,
+        enable_byo_host=False,
+    )
     return Inventory(
         tuple(generate_rows()),
         load_rootfs_catalog(),
         SUPPORTED_ARCHES,
         {
-            "local-libvirt": build_local_runtime(secret_registry=registry).support,
-            "remote-libvirt": build_remote_runtime(secret_registry=registry).support,
+            "local-libvirt": resolver.resolve(ResourceKind.LOCAL_LIBVIRT).support,
+            "remote-libvirt": resolver.resolve(ResourceKind.REMOTE_LIBVIRT).support,
         },
     )
 
@@ -259,6 +266,17 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
             refused = row.tool == "vmcore.fetch" and supported and variant not in _CORE_METHODS
             if refused:
                 supported, source = False, HANDLER_REFUSAL
+            # POWER owns its architecture lane before provider-specific ownership applies.
+            base_owner = group.owner
+            if (
+                group.owner in (2813, 2814, 2815, 3062, 3098, 3112, 3119, 3552, 3687)
+                and arch == "ppc64le"
+            ):
+                base_owner = 2818
+            elif provider == "remote-libvirt":
+                base_owner = _REMOTE_OWNERS.get(group.owner, group.owner)
+            elif group.owner == 2815 and row.tool in _LOCAL_CONTROL_TOOLS:
+                base_owner = 3115
             for configuration in row.configurations:
                 for exposure in (
                     ("direct", "gateway", "cli") if group.cli else ("direct", "gateway")
@@ -277,31 +295,11 @@ def _tool_cells(row: CensusRow, group: OperationGroup, inventory: Inventory) -> 
                     roles = tuple(group.role_overrides.get(row.tool, roles))
                     if group.authority:
                         roles = (*roles, "authority")
-                    owner = group.owner
-                    # Lifecycle, break-glass, debug, capture, power/snapshot and hot-plug ppc64le
-                    # cells wait for the POWER lane (#2818), CLI cells included; x86_64 remote
-                    # System cells are #3080's, remote run/image cells #3120's, remote debug cells
-                    # #3113's, remote capture cells #3114's, remote power/snapshot/control cells
-                    # #3116's.
-                    if (
-                        group.owner in (2813, 2814, 2815, 3062, 3098, 3112, 3119, 3552, 3687)
-                        and arch == "ppc64le"
-                    ):
-                        owner = 2818
-                    elif group.owner == 2813 and provider == "remote-libvirt":
-                        owner = 3113
-                    elif group.owner == 2814 and provider == "remote-libvirt":
-                        owner = 3114
-                    elif group.owner == 3062 and provider == "remote-libvirt":
-                        owner = 3080
-                    elif group.owner == 3119 and provider == "remote-libvirt":
-                        owner = 3120
-                    elif group.owner == 2815 and provider == "remote-libvirt":
-                        owner = 3116
-                    elif group.owner == 2815 and row.tool in _LOCAL_CONTROL_TOOLS:
-                        owner = 3115
-                    if exposure == "cli":
-                        owner = 2818 if arch == "ppc64le" else _CLI_OWNER
+                    owner = (
+                        (2818 if arch == "ppc64le" else _CLI_OWNER)
+                        if exposure == "cli"
+                        else base_owner
+                    )
                     cell = Cell(
                         identity + "/functional",
                         scenario_id + "/functional",

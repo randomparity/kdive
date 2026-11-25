@@ -34,13 +34,13 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReclaimInvestigationRootfsPayload, load_payload
 from kdive.providers.shared.runtime_paths import (
-    ROOTFS_DIR,
     STAGED_ROOTFS_MARKER_SUFFIX,
     UPLOADS_DIR,
     overlay_name,
     staged_rootfs_marker_path,
     staged_rootfs_path,
 )
+from kdive.providers.shared.runtime_paths import rootfs_dir as configured_rootfs_dir
 from kdive.providers.shared.staging.rootfs_fetch_leases import (
     fetch_lease_pins_base,
     reap_dead_fetch_leases,
@@ -603,7 +603,7 @@ async def reclaim_investigation_rootfs_handler(
     job: Job,
     *,
     artifact_store: ArtifactObjectDeleter,
-    rootfs_dir: str = ROOTFS_DIR,
+    rootfs_dir: str | None = None,
     uploads_dir: str = UPLOADS_DIR,
 ) -> str | None:
     """Reclaim an investigation's due uploaded-rootfs bases, then settle its drain bookkeeping.
@@ -628,6 +628,8 @@ async def reclaim_investigation_rootfs_handler(
     """
     payload = load_payload(job, ReclaimInvestigationRootfsPayload)
     investigation_id = UUID(payload.investigation_id)
+    if rootfs_dir is None:
+        rootfs_dir = configured_rootfs_dir()
     reclaimed = 0
     faulted = False
     for raw_artifact_id in payload.artifact_ids:

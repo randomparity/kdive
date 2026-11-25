@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import os
 import subprocess
 import sys
 import tarfile
@@ -606,3 +607,134 @@ def test_project_command_pins_every_compose_operation_to_the_requested_project(
             {"COMPOSE_PROJECT_NAME": "kdive-proof-a1b2", "EXTRA": "value"},
         )
     ]
+
+
+@pytest.fixture
+def lifecycle_lock_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "project.lock"
+    monkeypatch.setattr(compose_worker_lifecycle, "Path", lambda _value: path)
+    return path
+
+
+def _probe_lifecycle_lock(path: Path) -> str:
+    script = """
+import sys
+from pathlib import Path
+from kdive.processes.lifecycle.compose import compose_worker_lifecycle as module
+path = Path(sys.argv[1])
+module.Path = lambda _value: path
+try:
+    with module._lifecycle_lock("test-project"):
+        print("entered")
+except RuntimeError:
+    print("refused")
+"""
+    return subprocess.run(
+        [sys.executable, "-c", script, str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    ).stdout.strip()
+
+
+def test_lifecycle_lock_creates_private_regular_file(lifecycle_lock_path: Path) -> None:
+    with compose_worker_lifecycle._lifecycle_lock("test-project"):
+        metadata = lifecycle_lock_path.stat()
+        assert metadata.st_mode & 0o777 == 0o600
+        assert metadata.st_uid == os.getuid()
+        assert metadata.st_nlink == 1
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "directory"])
+def test_lifecycle_lock_refuses_unsafe_inode(lifecycle_lock_path: Path, kind: str) -> None:
+    target = lifecycle_lock_path.with_name("unrelated")
+    target.write_text("unchanged")
+    if kind == "symlink":
+        lifecycle_lock_path.symlink_to(target)
+    elif kind == "hardlink":
+        lifecycle_lock_path.hardlink_to(target)
+    else:
+        lifecycle_lock_path.mkdir()
+    with (
+        pytest.raises(RuntimeError, match="lifecycle lock.*safe supervisor-owned file"),
+        compose_worker_lifecycle._lifecycle_lock("test-project"),
+    ):
+        pytest.fail("unsafe inode entered the lifecycle critical section")
+    assert target.read_text() == "unchanged"
+
+
+def test_lifecycle_lock_refuses_fifo_without_waiting(tmp_path: Path) -> None:
+    path = tmp_path / "fifo"
+    os.mkfifo(path)
+    assert _probe_lifecycle_lock(path) == "refused"
+
+
+def test_lifecycle_lock_refuses_foreign_owner(
+    lifecycle_lock_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lifecycle_lock_path.touch(mode=0o600)
+    real_fstat = os.fstat
+
+    def foreign_owner(fd: int) -> os.stat_result:
+        metadata = list(real_fstat(fd))
+        metadata[4] = os.getuid() + 1
+        return os.stat_result(metadata)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(compose_worker_lifecycle.os, "fstat", foreign_owner)
+        with (
+            pytest.raises(RuntimeError, match="lifecycle lock.*safe supervisor-owned file"),
+            compose_worker_lifecycle._lifecycle_lock("test-project"),
+        ):
+            pytest.fail("foreign-owned inode entered the lifecycle critical section")
+
+
+def test_lifecycle_lock_excludes_another_process(lifecycle_lock_path: Path) -> None:
+    with compose_worker_lifecycle._lifecycle_lock("test-project"):
+        assert _probe_lifecycle_lock(lifecycle_lock_path) == "refused"
+    assert _probe_lifecycle_lock(lifecycle_lock_path) == "entered"
+
+
+def test_lifecycle_lock_releases_after_exception(lifecycle_lock_path: Path) -> None:
+    with (
+        pytest.raises(ValueError, match="operation failed"),
+        compose_worker_lifecycle._lifecycle_lock("test-project"),
+    ):
+        raise ValueError("operation failed")
+    assert _probe_lifecycle_lock(lifecycle_lock_path) == "entered"
+
+
+def test_supervisor_file_closes_descriptor_after_fstat_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_open, real_fstat = os.open, os.fstat
+    opened: list[int] = []
+
+    def record_open(path: Path, flags: int, mode: int = 0o777) -> int:
+        descriptor = real_open(path, flags, mode)
+        opened.append(descriptor)
+        return descriptor
+
+    def fail_fstat(_fd: int) -> os.stat_result:
+        raise OSError("injected metadata failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(compose_worker_lifecycle.os, "open", record_open)
+        patch.setattr(compose_worker_lifecycle.os, "fstat", fail_fstat)
+        with pytest.raises(OSError, match="injected metadata failure"):
+            compose_worker_lifecycle._prepare_credential_file(tmp_path / "credential")
+    assert len(opened) == 1
+    descriptor = opened[0]
+    try:
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            real_fstat(descriptor)
+    finally:
+        try:
+            real_fstat(descriptor)
+        except OSError:
+            pass
+        else:
+            os.close(descriptor)

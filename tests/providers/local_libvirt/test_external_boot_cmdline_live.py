@@ -11,10 +11,10 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from kdive.domain.external_boot_values import RunningKernelObservation
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import LocalRunningObserver
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
-from kdive.providers.ports.external_boot import RunningKernelObservation
 from kdive.testing.live_vm import boot_gdbstub_domain, create_overlay
 from tests.live_vm import (
     require_live_vm_bzimage,

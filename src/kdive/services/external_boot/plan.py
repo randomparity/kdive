@@ -8,12 +8,12 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle.records import InvestigationBuild
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ExternalBootPlan,
     RootSpecV1,
     direct_root_arguments,
 )
+from kdive.domain.lifecycle.records import InvestigationBuild
 from kdive.serialization import JsonValue
 
 

@@ -22,76 +22,13 @@ from typing import Any, BinaryIO, Literal, cast
 from uuid import UUID
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
-from kdive.providers.external_boot_authority.teardown import (
-    AuthorityTeardownReservationV1,
-    ProviderRecoveryRefusal,
-    SystemTeardownSupersededError,
-)
-from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
-from kdive.providers.local_libvirt.lifecycle.boot import recovery as recovery_validation
-from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
-    CleanupQuarantineReceiptV1,
-    CleanupTombstoneV1,
-    FinalizeCleanupProof,
-    LibguestfsAuthenticatedGuestTree,
-    LocalExternalBootMaterializer,
-    LocalLibvirtExternalBoot,
-    LocalObservedState,
-    LocalPreStopIntentV1,
-    LocalRecoveryMetadataV1,
-    LocalSystemTeardownAnchorV1,
-    LocalSystemTeardownIntentV1,
-    LocalSystemTeardownRecordV1,
-    ModuleLayout,
-    PublicationPhase,
-    RealLocalExternalBootIO,
-    RecoveryMetadataStore,
-    RecoveryPhase,
-    SystemTeardownPhase,
-    TargetProjectionStore,
-    TargetProjectionV1,
-    advance_absence_publication,
-    advance_module_publication,
-    convert_kernel_bundle_modules,
-    recovery_directory_name,
-    render_target_xml,
-)
-from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import (
-    VMLINUX_HEADROOM_BYTES,
-    GuestFreeSpaceRefusal,
-)
-from kdive.providers.local_libvirt.lifecycle.boot.readiness import ProbeFailure, ReadinessResult
-from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
-    AbsentModuleCapture,
-    AuthenticatedGuestTree,
-    GuestRecoveryWriter,
-    KernelBundleSource,
-    ModuleArchiveCapture,
-    RealGuestRecoveryWriter,
-    RecoveryArchiveSink,
-    RecoveryArchiveSource,
-)
-from kdive.providers.local_libvirt.lifecycle.boot.selinux_policy import ModuleLabelPolicy
-from kdive.providers.local_libvirt.lifecycle.boot.session import (
-    ClosedDomainInspection,
-    ExpectedOperationOwnership,
-    InactiveGuestDirectoryEntry,
-    LocalExternalBootOperationLease,
-    LocalExternalBootSessionFactory,
-    LocalSystemTeardownInspection,
-    OverlayIdentity,
-)
-from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
-    LocalArtifactRoot,
-    LocalOperationLane,
-    LocalOperationLeaseScope,
-)
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     AbsentComponentState,
+    ActivationOwnership,
     ComponentState,
     DebuginfoSource,
     ExternalBootActivationBinding,
@@ -109,8 +46,78 @@ from kdive.providers.ports.external_boot import (
     RecoveryPoint,
     RunningKernelObservation,
 )
+from kdive.providers.external_boot_authority.teardown import (
+    AuthorityTeardownReservationV1,
+    ProviderRecoveryRefusal,
+    SystemTeardownSupersededError,
+)
+from kdive.providers.local_libvirt.lifecycle.boot import _artifact_staging as staging_module
+from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
+from kdive.providers.local_libvirt.lifecycle.boot import recovery as recovery_validation
+from kdive.providers.local_libvirt.lifecycle.boot import recovery_store as recovery_store_module
+from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    LibguestfsAuthenticatedGuestTree,
+    LocalExternalBootMaterializer,
+    LocalLibvirtExternalBoot,
+    LocalObservedState,
+    ModuleLayout,
+    PublicationPhase,
+    RealLocalExternalBootIO,
+    advance_absence_publication,
+    advance_module_publication,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import (
+    VMLINUX_HEADROOM_BYTES,
+    GuestFreeSpaceRefusal,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import convert_kernel_bundle_modules
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import ProbeFailure, ReadinessResult
+from kdive.providers.local_libvirt.lifecycle.boot.recovery import (
+    AbsentModuleCapture,
+    AuthenticatedGuestTree,
+    GuestRecoveryWriter,
+    KernelBundleSource,
+    ModuleArchiveCapture,
+    RealGuestRecoveryWriter,
+    RecoveryArchiveSink,
+    RecoveryArchiveSource,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
+    CleanupQuarantineReceiptV1,
+    CleanupTombstoneV1,
+    FinalizeCleanupProof,
+    LocalPreStopIntentV1,
+    LocalRecoveryMetadataV1,
+    LocalSystemTeardownAnchorV1,
+    LocalSystemTeardownIntentV1,
+    LocalSystemTeardownRecordV1,
+    RecoveryMetadataStore,
+    RecoveryPhase,
+    SystemTeardownPhase,
+    TargetProjectionStore,
+    TargetProjectionV1,
+    recovery_directory_name,
+    recovery_point_digest,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.selinux_policy import ModuleLabelPolicy
+from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    ExpectedOperationOwnership,
+    InactiveGuestDirectoryEntry,
+    LocalExternalBootOperationLease,
+    LocalExternalBootSessionFactory,
+    LocalSystemTeardownInspection,
+    OverlayIdentity,
+    PersistentDomainInspection,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
+    LocalArtifactRoot,
+    LocalOperationLane,
+    LocalOperationLeaseScope,
+)
 from kdive.providers.shared.external_boot_bounds import materialization_reservation_bytes
+from kdive.providers.shared.libvirt_external_boot import render_target_xml
 from kdive.providers.shared.runtime_paths import overlay_path
+from kdive.store.objectstore import ObjectStore
 from tests.providers.local_libvirt.external_boot_support import (
     _BINDING,
     _SOURCE_XML,
@@ -131,6 +138,18 @@ _TEARDOWN_RESERVATION = AuthorityTeardownReservationV1(
     owner_key=OpaqueProviderRef(ref="owners/private"),
     reserved_bytes=4096,
 )
+
+
+def test_recovery_record_encoding_preserves_canonical_bytes() -> None:
+    class Record(BaseModel):
+        schema_: str = Field(alias="schema")
+        z: list[int]
+        a: str
+
+    record = Record(schema="test-record", z=[2, 1], a="café")
+    assert recovery_store_module._canonical_record_bytes(record) == (
+        '{"a":"café","schema":"test-record","z":[2,1]}'.encode()
+    )
 
 
 def test_render_target_xml_changes_only_owned_boot_projection() -> None:
@@ -438,7 +457,7 @@ def test_system_teardown_discard_finalizes_after_a_crash_before_the_intent_unlin
     original = external_boot_module.os.unlink
 
     def crash_on_intent(path: str, *, dir_fd: int | None = None) -> None:
-        if path == external_boot_module._INTENT_NAME:
+        if path == recovery_store_module._INTENT_NAME:
             raise OSError("crashed before the intent unlink")
         original(path, dir_fd=dir_fd)
 
@@ -1504,7 +1523,7 @@ def test_recovery_metadata_store_retries_interrupted_temporary_replacement(
                 expected_model = CleanupTombstoneV1(
                     binding=metadata.binding,
                     recovery_point=_point(metadata),
-                    point_digest=LocalLibvirtExternalBoot.point_digest(_point(metadata)),
+                    point_digest=recovery_point_digest(_point(metadata)),
                 )
                 temporary_name = ".tombstone.next"
     expected_bytes = json.dumps(
@@ -1540,7 +1559,7 @@ def test_recovery_metadata_store_retries_interrupted_temporary_replacement(
                 reference,
                 metadata.binding,
                 metadata,
-                LocalLibvirtExternalBoot.point_digest(point),
+                recovery_point_digest(point),
             )
             assert tombstone.binding == metadata.binding
 
@@ -1662,7 +1681,7 @@ def test_real_materializer_capacity_accepts_equality_and_refuses_one_over() -> N
     plan = _plan().model_copy(update={"debuginfo": debuginfo})
     reservation = (
         materialization_reservation_bytes(plan)
-        + external_boot_module._MAX_PROJECTION_BYTES
+        + recovery_store_module._MAX_PROJECTION_BYTES
         + external_boot_module._MAX_RECOVERY_METADATA_BYTES
     )
     calls: list[ExternalBootPlan] = []
@@ -1727,18 +1746,18 @@ def test_exact_bundle_validation_discards_rebuilt_archive_output(
         assert name == "modules"
         return converted
 
-    monkeypatch.setattr(external_boot_module, "_stream_exact_version", stream_exact_version)
-    monkeypatch.setattr(external_boot_module, "convert_kernel_bundle_modules", convert)
-    monkeypatch.setattr(external_boot_module, "_descriptor_digest", digest)
-    monkeypatch.setattr(external_boot_module, "_installed_module_manifest", lambda _fd: "manifest")
+    monkeypatch.setattr(staging_module, "_stream_exact_version", stream_exact_version)
+    monkeypatch.setattr(staging_module, "convert_kernel_bundle_modules", convert)
+    monkeypatch.setattr(staging_module, "_descriptor_digest", digest)
+    monkeypatch.setattr(staging_module, "_installed_module_manifest", lambda _fd: "manifest")
     monkeypatch.setattr(
-        external_boot_module.RealLocalExternalBootMaterializer,
+        staging_module.RealLocalExternalBootMaterializer,
         "_validate_bundle_evidence",
         staticmethod(lambda _plan, _descriptor: {}),
     )
     try:
-        store = cast(external_boot_module.ObjectStore, object())
-        materializer = external_boot_module.RealLocalExternalBootMaterializer(store)
+        store = cast(ObjectStore, object())
+        materializer = staging_module.RealLocalExternalBootMaterializer(store)
         assert materializer._validate_local_bundle(plan, directory_fd) == ({}, "manifest")
         assert not (tmp_path / ".bundle.verify").exists()
     finally:
@@ -1815,7 +1834,7 @@ def test_cleanup_tombstone_finalization_is_exact_and_absent_retry_is_idempotent(
     root.mkdir(mode=0o700)
     metadata = _metadata("recovered")
     point = _point(metadata)
-    digest = LocalLibvirtExternalBoot.point_digest(point)
+    digest = recovery_point_digest(point)
     proof = FinalizeCleanupProof(
         point_digest=digest,
         binding=point.binding,
@@ -2446,7 +2465,7 @@ class _ExternalIO:
         return CleanupTombstoneV1(
             binding=binding,
             recovery_point=point,
-            point_digest=LocalLibvirtExternalBoot.point_digest(point),
+            point_digest=recovery_point_digest(point),
         )
 
     def observe_state(self, metadata: LocalRecoveryMetadataV1) -> LocalObservedState:
@@ -2524,7 +2543,7 @@ class _ExternalIO:
             tombstone=CleanupTombstoneV1(
                 binding=recovery.binding,
                 recovery_point=recovery,
-                point_digest=LocalLibvirtExternalBoot.point_digest(recovery),
+                point_digest=recovery_point_digest(recovery),
             ),
             proof=proof,
         )
@@ -2570,7 +2589,7 @@ class _ExternalPin:
 
 def _cleanup_proof_for(point: RecoveryPoint) -> FinalizeCleanupProof:
     return FinalizeCleanupProof(
-        point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        point_digest=recovery_point_digest(point),
         binding=point.binding,
         operation_id="cleanup-operation",
         attempt_id="00000000-0000-0000-0000-000000000099",
@@ -2724,7 +2743,7 @@ class _RealPreparation:
         self,
         materialization: ExternalBootMaterialization,
         binding: ExternalBootActivationBinding,
-        inspection: ClosedDomainInspection,
+        inspection: PersistentDomainInspection,
         session: object,
     ) -> LocalPreStopIntentV1:
         del materialization, binding, inspection, session
@@ -2741,7 +2760,7 @@ class _RealSession:
         self.close_fault = False
         self.guest_fault = False
         self.stops: list[str] = []
-        self.inspection = ClosedDomainInspection(
+        self.inspection = PersistentDomainInspection(
             xml=preparation.metadata.source_xml.encode(),
             active=preparation.metadata.prior_power == "running",
             definition_identity=preparation.metadata.source_definition,
@@ -2756,7 +2775,9 @@ class _RealSession:
         del artifact
         return self.projection
 
-    def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
+    def inspect_persistent_definition(
+        self, *, projected: bool = False
+    ) -> PersistentDomainInspection:
         del projected
         return self.inspection
 
@@ -2954,7 +2975,7 @@ def test_teardown_abort_finishes_finalization_interrupted_before_rmdir(
     metadata = _metadata("recovered")
     point = _point(metadata)
     proof = FinalizeCleanupProof(
-        point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        point_digest=recovery_point_digest(point),
         binding=point.binding,
         operation_id="00000000-0000-0000-0000-000000000004",
         attempt_id="00000000-0000-0000-0000-000000000005",
@@ -3291,7 +3312,9 @@ class _RestartSession(_RealSession):
             expected_cmdline=b"root=UUID=x",
         )
 
-    def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
+    def inspect_persistent_definition(
+        self, *, projected: bool = False
+    ) -> PersistentDomainInspection:
         del projected
         return replace(
             self.inspection,
@@ -3313,10 +3336,8 @@ class _RestartSession(_RealSession):
         return os.open(self.artifact, flags)
 
     def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int:
-        owner = external_boot_module.ActivationOwnership(
-            system_id=_BINDING.system_id, run_id=_BINDING.run_id
-        )
-        external_boot_module._artifact_ref_parts(artifact, owner, _BINDING.activation_id)
+        owner = ActivationOwnership(system_id=_BINDING.system_id, run_id=_BINDING.run_id)
+        recovery_store_module._artifact_ref_parts(artifact, owner, _BINDING.activation_id)
         return os.open(self.artifact, flags)
 
     @contextmanager
@@ -4455,7 +4476,7 @@ def test_fresh_finalization_resumes_around_tombstone_deletion(
     )
     harness.cleanup()
     proof = FinalizeCleanupProof(
-        point_digest=LocalLibvirtExternalBoot.point_digest(harness.point),
+        point_digest=recovery_point_digest(harness.point),
         binding=harness.point.binding,
         operation_id="00000000-0000-0000-0000-000000000004",
         attempt_id="00000000-0000-0000-0000-000000000005",
@@ -5355,7 +5376,7 @@ def test_real_adapter_rejects_wrong_domain_state_before_stop(tmp_path: Path) -> 
         definition_identity="sha256:" + "f" * 64,
     )
 
-    with pytest.raises(ValueError, match="closed domain inspection"):
+    with pytest.raises(ValueError, match="persistent domain inspection"):
         _real_prepare(io, materialization)
 
     assert preparation.actions == ["inspect"]
@@ -5509,7 +5530,7 @@ def test_real_adapter_cleanup_complete_still_validates_authority(
     ports = LocalLibvirtExternalBoot(io)
     with RecoveryMetadataStore(root) as store:
         reference = store.publish(metadata)
-        store.publish_tombstone(reference, metadata.binding, metadata, ports.point_digest(point))
+        store.publish_tombstone(reference, metadata.binding, metadata, recovery_point_digest(point))
 
     with pytest.raises(ValueError, match="stale or foreign"):
         ports.cleanup(point, OpaqueProviderRef(ref=authority))
@@ -5894,7 +5915,7 @@ def test_system_teardown_drops_residue_beside_an_adopted_receipt(tmp_path: Path)
     point, receipt = _quarantined(root)
     directory = root / recovery_directory_name(point.recovery_ref, point.binding)
     residue = directory / "intent.json"
-    residue.write_bytes(external_boot_module._metadata_bytes(_metadata("recovered")))
+    residue.write_bytes(recovery_store_module._canonical_record_bytes(_metadata("recovered")))
     residue.chmod(0o600)
     with RecoveryMetadataStore(root) as store:
         store.adopt_cleanup_quarantine(receipt)
@@ -5924,10 +5945,10 @@ def test_system_teardown_absence_refuses_a_tombstone_the_adopted_receipt_does_no
     other = CleanupTombstoneV1(
         binding=point.binding,
         recovery_point=moved,
-        point_digest=LocalLibvirtExternalBoot.point_digest(moved),
+        point_digest=recovery_point_digest(moved),
     )
     directory = root / recovery_directory_name(point.recovery_ref, point.binding)
-    (directory / "tombstone.json").write_bytes(external_boot_module._tombstone_bytes(other))
+    (directory / "tombstone.json").write_bytes(recovery_store_module._canonical_record_bytes(other))
 
     with RecoveryMetadataStore(root) as store:
         assert not store.exact_recovery_absence(point.binding, adopted_receipt_absent=True)
@@ -5970,7 +5991,7 @@ def test_record_cleanup_quarantine_keeps_a_receipt_adopted_before_its_replace(
     root = tmp_path / "recovery"
     root.mkdir(mode=0o700)
     point, receipt = _quarantined(root)
-    replace = external_boot_module._replace_private_file
+    replace = recovery_store_module._replace_private_file
     outcome: list[object] = []
 
     def adopt_first(*args: Any, **kwargs: Any) -> object:
@@ -5988,7 +6009,7 @@ def test_record_cleanup_quarantine_keeps_a_receipt_adopted_before_its_replace(
         assert worker.is_alive()
         return replace(*args, **kwargs)
 
-    monkeypatch.setattr(external_boot_module, "_replace_private_file", adopt_first)
+    monkeypatch.setattr(recovery_store_module, "_replace_private_file", adopt_first)
     with RecoveryMetadataStore(root) as store:
         store.record_cleanup_quarantine(point, _cleanup_proof_for(point))
     monkeypatch.undo()
@@ -6031,7 +6052,7 @@ def test_record_cleanup_quarantine_rejects_a_tombstone_finalized_before_its_lock
             (directory / "tombstone.json").unlink()
         flock(fd, operation)
 
-    monkeypatch.setattr(external_boot_module.fcntl, "flock", finalize_then_lock)
+    monkeypatch.setattr(recovery_store_module.fcntl, "flock", finalize_then_lock)
     with RecoveryMetadataStore(root) as store, pytest.raises(FileNotFoundError):
         store.record_cleanup_quarantine(point, _cleanup_proof_for(point))
     monkeypatch.undo()
@@ -6064,7 +6085,7 @@ def test_receipt_decisions_wait_for_the_activation_directory_lock(
         worker.join(timeout=0.5)
         assert worker.is_alive()
         assert (directory / "cleanup-quarantine.json").read_bytes() == (
-            external_boot_module._cleanup_quarantine_bytes(receipt)
+            recovery_store_module._canonical_record_bytes(receipt)
         )
     finally:
         os.close(held)
@@ -6433,9 +6454,7 @@ def test_accounted_cleanup_removes_preparation_receipt(tmp_path: Path) -> None:
     with RecoveryMetadataStore(root) as store:
         reference = store.publish(metadata)
         store.publish_preparation(receipt)
-        store.publish_tombstone(
-            reference, metadata.binding, metadata, LocalLibvirtExternalBoot.point_digest(point)
-        )
+        store.publish_tombstone(reference, metadata.binding, metadata, recovery_point_digest(point))
         assert store.observe_preparation(request).state == "absent"
 
 
@@ -6525,7 +6544,7 @@ def test_finalize_requires_exact_cleanup_proof_binding_and_point() -> None:
     point = _point(io.metadata)
     ports.cleanup(point, OpaqueProviderRef(ref="authority/current"))
     proof = FinalizeCleanupProof(
-        point_digest=ports.point_digest(point),
+        point_digest=recovery_point_digest(point),
         binding=point.binding,
         operation_id="00000000-0000-0000-0000-000000000004",
         attempt_id="00000000-0000-0000-0000-000000000005",
@@ -6546,7 +6565,7 @@ def test_finalize_passes_authenticated_journal_fields_without_local_interpretati
     ports = LocalLibvirtExternalBoot(io)
     point = _point(io.metadata)
     proof = FinalizeCleanupProof(
-        point_digest=ports.point_digest(point),
+        point_digest=recovery_point_digest(point),
         binding=point.binding,
         operation_id="00000000-0000-0000-0000-000000000099",
         attempt_id="00000000-0000-0000-0000-000000000098",
@@ -6648,14 +6667,14 @@ def test_finalization_continues_a_matching_recovery_record_left_by_publication(
     root.mkdir(mode=0o700)
     metadata = _metadata("recovered")
     point = _point(metadata)
-    digest = LocalLibvirtExternalBoot.point_digest(point)
+    digest = recovery_point_digest(point)
     with RecoveryMetadataStore(root) as store:
         reference = store.publish(metadata)
         name = recovery_directory_name(reference, metadata.binding)
         store.publish_tombstone(reference, metadata.binding, metadata, digest)
         # Restore the record `publish_tombstone` unlinked, reproducing the interrupted state.
         record = root / name / "intent.json"
-        record.write_bytes(external_boot_module._metadata_bytes(metadata))
+        record.write_bytes(recovery_store_module._canonical_record_bytes(metadata))
         record.chmod(0o600)
 
         assert sorted(path.name for path in (root / name).iterdir()) == [
@@ -6689,7 +6708,7 @@ def _tombstone_residue_fixture(
     authority = OpaqueProviderRef(ref="authority/current")
     materialization = _materialization().model_copy(
         update={
-            "ownership": external_boot_module.ActivationOwnership(
+            "ownership": ActivationOwnership(
                 system_id=metadata.binding.system_id,
                 run_id=metadata.binding.run_id,
             ),
@@ -6722,7 +6741,7 @@ def _tombstone_residue_fixture(
             reference,
             metadata.binding,
             metadata,
-            LocalLibvirtExternalBoot.point_digest(point),
+            recovery_point_digest(point),
         )
     if intent:
         (directory / "intent.json").write_bytes(intent_bytes)
@@ -6731,7 +6750,7 @@ def _tombstone_residue_fixture(
         (directory / "preparation-result.json").write_bytes(preparation_bytes)
         (directory / "preparation-result.json").chmod(0o600)
     proof = FinalizeCleanupProof(
-        point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        point_digest=recovery_point_digest(point),
         binding=point.binding,
         operation_id="cleanup-operation",
         attempt_id="00000000-0000-0000-0000-000000000005",
@@ -6804,7 +6823,7 @@ def test_finalization_refuses_untrusted_tombstone_residue(
         intent.write_bytes(b'{"schema":')
     elif corruption == "changed":
         changed = _metadata("recovered").model_copy(update={"plan_identity": "sha256:" + "e" * 64})
-        intent.write_bytes(external_boot_module._metadata_bytes(changed))
+        intent.write_bytes(recovery_store_module._canonical_record_bytes(changed))
     elif corruption == "changed-preparation":
         intent.unlink()
         preparation = directory / "preparation-result.json"
@@ -6930,7 +6949,7 @@ def _abortable_activation(
             "plan_identity": projection.plan_identity,
             "artifacts": MaterializedArtifacts(
                 kernel=kernel,
-                modules=external_boot_module._projection_ref(projection, "modules"),
+                modules=recovery_store_module._projection_ref(projection, "modules"),
                 initrd=None,
             ),
         }
@@ -7197,14 +7216,14 @@ def _direct_root_plan(device: str = "/dev/vda") -> ExternalBootPlan:
 
 
 def test_projection_carries_the_root_uuid_a_direct_root_plan_must_prove() -> None:
-    assert external_boot_module._whole_disk_root_uuid(_direct_root_plan()) == "x"
+    assert staging_module._whole_disk_root_uuid(_direct_root_plan()) == "x"
     plan = external_boot_plan(UUID(_BINDING.system_id), UUID(_BINDING.run_id))
-    assert external_boot_module._whole_disk_root_uuid(plan) is None
+    assert staging_module._whole_disk_root_uuid(plan) is None
 
 
 def test_projection_refuses_a_direct_root_other_than_the_local_disk() -> None:
     with pytest.raises(ValueError, match="/dev/vda"):
-        external_boot_module._whole_disk_root_uuid(_direct_root_plan("/dev/vdb"))
+        staging_module._whole_disk_root_uuid(_direct_root_plan("/dev/vdb"))
 
 
 @pytest.mark.parametrize(("observed", "accepted"), [("x", True), ("y", False), (None, False)])

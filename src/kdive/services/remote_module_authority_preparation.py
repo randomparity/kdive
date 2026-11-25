@@ -8,7 +8,7 @@ import math
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -28,15 +28,12 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityPreparationMutationRequestV1,
 )
-from kdive.providers.ports.authority import AuthorityRequestSender
 from kdive.providers.ports.module_operation import (
     ModuleAuthority,
     ModuleBeginRequest,
     ModuleCompletion,
     ModuleLifecycleRequest,
     ModulePreparationRequest,
-    PreparationExecutor,
-    RemoteDeviceIdentityPort,
 )
 from kdive.services.remote_module_volume_preparation import (
     prepare_verified_remote_module_attempt,
@@ -48,10 +45,6 @@ _WAIT_MAX_S = 2.0
 _WAIT_GROWTH = 1.6
 _WAIT_JITTER = 0.25
 _WAIT_LOG_INTERVAL_S = 30.0
-
-
-class RemoteModulePreparationAuthority(AuthorityRequestSender, ModuleAuthority, Protocol):
-    """The worker's typed authority sender and provider module capability."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,9 +87,8 @@ async def prepare_remote_module_on_authority_host(
     *,
     pool: AsyncConnectionPool,
     repository: RemoteModuleAttemptObligationRepository,
-    sender: RemoteModulePreparationAuthority,
+    sender: ModuleAuthority,
     inputs: RemoteModulePreparationInputs,
-    executor: PreparationExecutor | None,
     job_id: UUID,
     job_attempt: int,
     incarnation_credential: SecretStr,
@@ -140,10 +132,8 @@ async def prepare_remote_module_on_authority_host(
 
     async def execute(
         attempt: ModuleAttempt,
-        identity: RemoteDeviceIdentityPort,
         check_deadline: Callable[[], None],
     ) -> ModuleCompletion:
-        del identity
         if attempt != expected:
             raise ValueError("remote module verified attempt changed")
         check_deadline()
@@ -183,11 +173,8 @@ async def prepare_remote_module_on_authority_host(
         repository,
         preparation,
         expected,
-        executor,
-        sender,
         deadline,
-        None,
-        awaited_operation=execute,
+        execute,
         commit_result=commit_result,
         allow_terminal_replay=True,
     )
@@ -310,7 +297,7 @@ async def execute_remote_module_lifecycle_on_authority_host(
     *,
     connection: AsyncConnection,
     repository: RemoteModuleAttemptObligationRepository,
-    sender: RemoteModulePreparationAuthority,
+    sender: ModuleAuthority,
     authority: AuthorityMutationRequestV1,
     preparation: ModuleAttemptPreparationRequestV1,
     worker_context: ModuleAttemptWorkerWriteContext,

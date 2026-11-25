@@ -75,10 +75,8 @@ from kdive.providers.remote_libvirt.settings import REMOTE_LIBVIRT_STORAGE_POOL
 from kdive.providers.shared.directory_listing import list_directory_descriptor
 
 if TYPE_CHECKING:
-    from kdive.providers.external_boot_authority.service import (
-        AuthenticatedPeer,
-        ExternalBootAuthorityService,
-    )
+    from kdive.providers.external_boot_authority.protocol import AuthenticatedPeer
+    from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
     from kdive.providers.system_authority.composition import AuthoritySystemBaseFile
     from kdive.providers.system_authority.manifest import (
         AuthoritySystemManifestFile,
@@ -1499,7 +1497,7 @@ def _open_remote_module_connection(config: AuthorityHostConfig) -> Any:
     """Open and verify the one private pool and every selected installed appliance."""
     import libvirt
 
-    from kdive.providers.remote_libvirt.remote_module_authority_host import (
+    from kdive.providers.remote_libvirt.module_preparation.remote_module_authority_host import (
         load_installed_remote_module_appliance,
     )
 
@@ -1742,7 +1740,6 @@ def _build_mutation_service(
         DurableRemoteModuleVolumePreparationHost,
         RemoteExternalBootAuthorityAdapter,
         RemoteExternalBootCoordinator,
-        RemoteModuleVolumePreparationStore,
     )
     from kdive.providers.remote_libvirt.external_boot_materialization import (
         REMOTE_MATERIALIZATION_CAPACITY_BYTES,
@@ -1751,21 +1748,20 @@ def _build_mutation_service(
     from kdive.providers.remote_libvirt.external_boot_operations import (
         ConcreteRemoteExternalBootOperations,
     )
+    from kdive.providers.remote_libvirt.external_boot_store import RemoteExternalBootStore
     from kdive.providers.remote_libvirt.lifecycle.external_boot import OBSERVATION_PROGRAMS
-    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-        HostStatDeviceIdentity,
+    from kdive.providers.remote_libvirt.module_preparation.remote_module_authority_host import (
+        FactoryRemoteModuleAuthorityHost,
+        RemoteModuleAuthorityHostFactory,
     )
-    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+    from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
         RemoteModulePreparationExecutor,
     )
     from kdive.providers.remote_libvirt.reaping.module_volume_sweep import (
         ModuleVolumeSweepService,
     )
-    from kdive.providers.remote_libvirt.remote_module_authority_host import (
-        FactoryRemoteModuleAuthorityHost,
-        RemoteModuleAuthorityHostFactory,
-    )
     from kdive.providers.shared.guest_agent import GuestAgentExec, qemu_agent_command
+    from kdive.providers.shared.libvirt_attachments import HostStatDeviceIdentity
     from kdive.security.secrets.secret_registry import SecretRegistry
 
     try:
@@ -1774,7 +1770,7 @@ def _build_mutation_service(
         if isinstance(binding.adapter, AuthorityAdapterCloser):
             binding.adapter.close()
         raise
-    module_store = RemoteModuleVolumePreparationStore(config.remote_module_store_dir)
+    module_store = RemoteExternalBootStore(config.remote_module_store_dir)
     module_executor = RemoteModulePreparationExecutor()
     registry = SecretRegistry()
     monotonic = time.monotonic

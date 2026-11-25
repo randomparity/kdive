@@ -18,16 +18,14 @@ from psycopg.rows import dict_row
 
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityTakeoverRequestV1,
     RecoveryObjectBindingV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from tests.db.release_phase_support import (
     SourceAuthorityAdapter,
     acknowledge_release_root,

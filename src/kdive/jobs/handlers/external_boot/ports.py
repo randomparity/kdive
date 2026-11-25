@@ -14,6 +14,7 @@ from kdive.jobs.payloads import EXTERNAL_BOOT_AUTHORITY_MARKER_KEY
 from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
@@ -22,12 +23,13 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTeardownMutationRequestV1,
     AuthorityTeardownResponseV1,
 )
+from kdive.providers.ports.module_operation import ModuleAuthority
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.external_boot.routing import AuthorityReservationGeometry
 
 if TYPE_CHECKING:
     from kdive.jobs.external_boot_authority_client import ExternalBootClientFactory
-    from kdive.jobs.handlers.system_reclaim import RetiredKeyBatchDeleter
+    from kdive.services.systems.reclaim import RetiredKeyBatchDeleter
 
 __all__ = [
     "EXTERNAL_BOOT_AUTHORITY_MARKER_KEY",
@@ -61,9 +63,15 @@ class ExternalBootAuthorityAcknowledger(Protocol):
 
 
 class ExternalBootAuthorityExecutor(Protocol):
-    """Execute one mutation through the provider authority receipt journal."""
+    """Execute and observe mutations through the provider authority receipt journal."""
 
     async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1: ...
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1: ...
+
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1: ...
 
 
 class ExternalBootAuthorityPreparationExecutor(Protocol):
@@ -107,3 +115,4 @@ class ExternalBootHandlerPorts:
     activation_readiness_timeout: timedelta = timedelta(minutes=5)
     recovery_readiness_timeout: timedelta = timedelta(minutes=5)
     reservation_geometry: Callable[[ProviderBinding], AuthorityReservationGeometry] | None = None
+    module_authority: ModuleAuthority | None = None

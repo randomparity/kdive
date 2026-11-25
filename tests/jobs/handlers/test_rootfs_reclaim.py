@@ -31,6 +31,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
+import kdive.config as config
 from kdive.artifacts.storage import ObjectVersion, VersionBatch
 from kdive.artifacts.uploads.content_address import rootfs_object_token
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -529,6 +530,50 @@ def test_live_overlay_pins_the_base_and_the_job_succeeds(migrated_url: str, tmp_
         )
         assert not staged.exists()
         assert not partial.exists()  # now a crash orphan; swept with the drained dir
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("explicit_root", [False, True])
+def test_reclaim_root_default_follows_each_invocation(
+    explicit_root: bool, migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            system_id = await _seed_system(seed, inv, "ready", _upload_profile())
+        finally:
+            await seed.close()
+        roots = [tmp_path / name for name in ("first", "second", "explicit")]
+        for root in roots:
+            root.mkdir()
+        uploads = tmp_path / "uploads"
+        staged = _stage(uploads, inv)
+        store = _RecordingStore()
+        conn = await connect(_WORKER_DSN.get())
+        try:
+            for configured in roots[:2]:
+                monkeypatch.setenv("KDIVE_LIBVIRT_ROOTFS_ROOT", str(configured))
+                config.load()
+                chosen = roots[2] if explicit_root else configured
+                overlay = chosen / overlay_name(system_id)
+                overlay.write_bytes(b"overlay")
+                kwargs = {"rootfs_dir": str(chosen)} if explicit_root else {}
+                result = await reclaim_investigation_rootfs_handler(
+                    conn,
+                    _job(inv, [artifact_id]),
+                    artifact_store=store,
+                    uploads_dir=str(uploads),
+                    **kwargs,
+                )
+                assert result == "0"
+                assert staged.exists()
+                assert store.deleted == []
+                overlay.unlink()
+        finally:
+            await conn.close()
 
     asyncio.run(_run())
 

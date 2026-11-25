@@ -20,7 +20,7 @@ import pytest
 from kdive.db.migrate import apply_migrations, discover_migrations
 from kdive.processes.lifecycle.compose import compose_worker_lifecycle as lifecycle_module
 from kdive.processes.lifecycle.compose.compose_worker_lifecycle import ComposeWorkerLifecycle
-from kdive.processes.lifecycle.compose.docker_death_api import WorkerLifecycleGate
+from kdive.processes.lifecycle.compose.worker_lifecycle_gate import WorkerLifecycleGate
 from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     DockerAuthorityBinding,

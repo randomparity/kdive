@@ -1,9 +1,8 @@
-"""The six enqueueable external-boot operation handlers (spec §7).
+"""Enqueueable external-boot handlers (ADRs 0593, 0614, 0620 and 0832).
 
-Each is the shared runner parameterized by its row of the specification's §7 table: the activation
-states the **commit** admits, the evidence columns it reads, its footnoted prerequisites, its port
-call, and its result variant. Nothing here calls ``commit_external_boot_authority_result``; the
-handler returns its result and the worker commits it under ``_authority_binding_matches``.
+Ordinary handlers return bound results for the worker to commit. Derived release
+and teardown finalize their exact receipt transactions before returning a distinct
+completion marker; the worker checks its binding without committing it again.
 """
 
 from __future__ import annotations
@@ -12,14 +11,17 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any, Final, Literal, LiteralString, cast
+from typing import Any, Final, Literal, LiteralString
 from uuid import NAMESPACE_URL, uuid5
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.db.remote_module_attempt_obligations import (
+    ModuleAttemptWorkerWriteContext,
+    RemoteModuleAttemptObligationRepository,
+)
 from kdive.domain.capacity.state import ExternalBootActivationState as State
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_activation import (
@@ -27,31 +29,42 @@ from kdive.domain.external_boot_activation import (
     ExternalBootReleaseEvidenceV1,
 )
 from kdive.domain.external_boot_timing import timing_deadline
+from kdive.domain.external_boot_values import RecoveryPoint, RunningKernelObservation
 from kdive.domain.operations.jobs import Job
+from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
+from kdive.jobs.external_boot_models import (
+    ActivateResult,
+    CleanupResult,
+    CleanupResultEvidence,
+    DeadlineResult,
+    ExternalBootAuthorityConflictV1,
+    ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthoritySuccessV1,
+    ExternalBootDerivedReleaseCompletion,
+    ExternalBootDerivedTeardownCompletion,
+    RecoverResult,
+    RecoveryAttemptResult,
+    ReleaseResult,
+    ReleaseResultEvidence,
+    TeardownResult,
+)
 from kdive.jobs.handlers.external_boot.evidence import (
+    authority_carrier_data,
     authority_result,
     conflict_result,
     terminal_evidence,
 )
 from kdive.jobs.handlers.external_boot.operations import ExternalBootOperationHandler
 from kdive.jobs.handlers.external_boot.ports import (
-    ExternalBootAuthorityExecutor,
     ExternalBootHandlerPorts,
 )
 from kdive.jobs.handlers.external_boot.runner import (
     OperationContext,
     _CommandLineMismatch,
     authority_ref,
+    run_derived_operation,
     run_operation,
     starts_fresh_readiness_budget,
-)
-from kdive.jobs.handlers.system_reclaim import reclaim_system_core_after_provider_teardown
-from kdive.jobs.models import (
-    ExternalBootAuthorityConflictV1,
-    ExternalBootAuthorityMarkerV1,
-    ExternalBootAuthoritySuccessV1,
-    ExternalBootDerivedReleaseCompletion,
-    ExternalBootDerivedTeardownCompletion,
 )
 from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.providers.external_boot_authority.protocol import (
@@ -63,7 +76,8 @@ from kdive.providers.external_boot_authority.protocol import (
     RecoveryObjectBindingV1,
     canonical_teardown_proof_bytes,
 )
-from kdive.providers.ports.external_boot import RecoveryPoint, RunningKernelObservation
+from kdive.providers.ports.module_operation import ModuleAuthority, ModuleCompletion
+from kdive.services.systems.reclaim import reclaim_system_core_after_provider_teardown
 
 __all__ = [
     "activate_handler",
@@ -105,19 +119,37 @@ _ORDINARY_CLEANUP_STATES: Final = frozenset({State.RECOVERED, State.ABANDONED})
 _CONFLICT_CATEGORIES: Final = frozenset({"conflict", "mixed"})
 
 
-async def execute_remote_module_lifecycle_on_authority_host(**values: Any) -> Any:
-    """Load the remote provider only for a remote lifecycle operation."""
+async def execute_remote_module_lifecycle_on_authority_host(
+    *,
+    connection: AsyncConnection,
+    repository: RemoteModuleAttemptObligationRepository,
+    sender: ModuleAuthority,
+    authority: AuthorityMutationRequestV1,
+    preparation: ModuleAttemptPreparationRequestV1,
+    worker_context: ModuleAttemptWorkerWriteContext,
+    action: Literal["restore", "reap"],
+    deadline: float,
+) -> ModuleCompletion:
+    """Lazily dispatch a module lifecycle operation through its declared capability."""
     from kdive.services.remote_module_authority_preparation import (
         execute_remote_module_lifecycle_on_authority_host as execute,
     )
 
-    return await execute(**values)
+    return await execute(
+        connection=connection,
+        repository=repository,
+        sender=sender,
+        authority=authority,
+        preparation=preparation,
+        worker_context=worker_context,
+        action=action,
+        deadline=deadline,
+    )
 
 
 async def _execute_remote_module_lifecycle(
     context: OperationContext,
     request: AuthorityMutationRequestV1,
-    executor: ExternalBootAuthorityExecutor,
 ) -> None:
     authority = context.binding.runtime.authority
     if (
@@ -131,16 +163,13 @@ async def _execute_remote_module_lifecycle(
         }
     ):
         return
-    from kdive.db.remote_module_attempt_obligations import (
-        ModuleAttemptWorkerWriteContext,
-        RemoteModuleAttemptObligationRepository,
-    )
-    from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
-
     raw_preparation = context.job.payload.get("remote_module_attempt_v1")
     if raw_preparation is None:
         raise _refuse("remote module lifecycle authority inputs are incomplete")
     preparation = ModuleAttemptPreparationRequestV1.from_payload(raw_preparation)
+    sender = context.module_authority
+    if sender is None:
+        raise _refuse("no operation-bound remote module authority is configured")
     steps: dict[AuthorityOperation, tuple[Literal["restore", "reap"], ...]] = {
         AuthorityOperation.RECOVER: ("restore",),
         # A resolve recovers like RECOVER and leaves the volumes for the release CLEANUP (#3414).
@@ -151,7 +180,7 @@ async def _execute_remote_module_lifecycle(
         await execute_remote_module_lifecycle_on_authority_host(
             connection=context.connection,
             repository=RemoteModuleAttemptObligationRepository(),
-            sender=cast(Any, executor),
+            sender=sender,
             authority=request,
             preparation=preparation,
             worker_context=ModuleAttemptWorkerWriteContext(
@@ -238,52 +267,52 @@ def _derived_request(context: OperationContext, operation: str) -> AuthorityMuta
 
 async def _run_active_release(
     context: OperationContext,
+    *,
+    credential_digest: bytes,
+    deadline: datetime,
 ) -> ExternalBootDerivedReleaseCompletion | ExternalBootAuthorityConflictV1:
     """Commit the two derived mutations before the one root release completion."""
-    executor = context.prerequisites.get("authority_executor")
+    executor = context.authority_executor
     if executor is None:
         raise _refuse("no external-boot authority executor is configured")
-    credential = context.prerequisites["incarnation_credential"]
     recover = _derived_request(context, "recover")
     if context.activation.state is not State.RECOVERED:
         status = await _derived_release_status(
-            context.prerequisites["connection"],
+            context.connection,
             "SELECT public.begin_external_boot_derived_release_recovery(%s,%s,%s,%s,%s,%s,%s)",
             (
-                credential,
+                credential_digest,
                 context.job.id,
                 context.job.attempt,
                 context.authority.authority_id,
                 context.authority.generation,
                 recover.attempt_id,
-                context.prerequisites["deadline"],
+                deadline,
             ),
         )
         if status != "applied":
             raise CategorizedError(
                 "derived release recovery was superseded", category=ErrorCategory.STALE_HANDLE
             )
-        await _execute_remote_module_lifecycle(
-            context, recover, cast(ExternalBootAuthorityExecutor, executor)
-        )
-        observed = await cast(ExternalBootAuthorityExecutor, executor).execute(recover)
+        await _execute_remote_module_lifecycle(context, recover)
+        observed = await executor.execute(recover)
         if observed.category in _CONFLICT_CATEGORIES:
             return conflict_result(context, observed)
         _require_category(context, observed, "source")
         evidence = terminal_evidence(context, "recovered")
         status = await _derived_release_status(
-            context.prerequisites["connection"],
+            context.connection,
             "SELECT public.commit_external_boot_derived_release_recovery("
             "%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
             (
-                credential,
+                credential_digest,
                 context.job.id,
                 context.job.attempt,
                 context.authority.authority_id,
                 context.authority.generation,
                 recover.operation_identity,
                 recover.operation_digest,
-                json.dumps(evidence),
+                evidence.model_dump_json(by_alias=True),
             ),
         )
         if status != "applied":
@@ -292,16 +321,14 @@ async def _run_active_release(
                 category=ErrorCategory.STALE_HANDLE,
             )
     cleanup = _derived_request(context, "cleanup")
-    await _execute_remote_module_lifecycle(
-        context, cleanup, cast(ExternalBootAuthorityExecutor, executor)
-    )
-    observed = await cast(ExternalBootAuthorityExecutor, executor).execute(cleanup)
+    await _execute_remote_module_lifecycle(context, cleanup)
+    observed = await executor.execute(cleanup)
     _require_category(context, observed, "absent")
     status = await _derived_release_status(
-        context.prerequisites["connection"],
+        context.connection,
         "SELECT public.adopt_external_boot_release_cleanup_receipt_from_head(%s,%s,%s,%s,%s,%s)",
         (
-            credential,
+            credential_digest,
             context.job.id,
             context.job.attempt,
             context.authority.authority_id,
@@ -311,11 +338,11 @@ async def _run_active_release(
     )
     if status == "not_applicable":
         status = await _derived_release_status(
-            context.prerequisites["connection"],
+            context.connection,
             "SELECT public.record_external_boot_release_cleanup_receipt_from_head("
             "%s,%s,%s,%s,%s,%s)",
             (
-                credential,
+                credential_digest,
                 context.job.id,
                 context.job.attempt,
                 context.authority.authority_id,
@@ -350,14 +377,14 @@ async def _run_active_release(
         "system_id": str(context.marker.system_id),
         "release_identity": identity,
         "mode": "ordinary",
-        "completed_at": _now(),
+        "completed_at": _now().isoformat().replace("+00:00", "Z"),
     }
     status = await _derived_release_status(
-        context.prerequisites["connection"],
+        context.connection,
         "SELECT public.finalize_external_boot_derived_release("
         "%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)",
         (
-            credential,
+            credential_digest,
             context.job.id,
             context.job.attempt,
             context.authority.authority_id,
@@ -372,16 +399,15 @@ async def _run_active_release(
             "derived release finalization was superseded", category=ErrorCategory.STALE_HANDLE
         )
     return ExternalBootDerivedReleaseCompletion.model_validate(
-        authority_result(
+        authority_carrier_data(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "release",
-                "result_ref": None,
-                "release_identity": identity,
-                "evidence": release,
-            },
-        ).model_dump(mode="json", by_alias=True)
+            ReleaseResult(
+                operation="release",
+                result_ref=None,
+                release_identity=identity,
+                evidence=ReleaseResultEvidence.model_validate(release),
+            ),
+        )
     )
 
 
@@ -389,8 +415,8 @@ def _refuse(message: str) -> CategorizedError:
     return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR, terminal=True)
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _recovery(context: OperationContext) -> RecoveryPoint:
@@ -493,9 +519,9 @@ async def _execute(
     if executor is None:
         raise _refuse("no external-boot authority executor is configured")
     request = _mutation_request(context)
-    await _execute_remote_module_lifecycle(context, request, executor)
+    await _execute_remote_module_lifecycle(context, request)
     if isinstance(request, AuthorityConflictResolutionRequestV1):
-        authority_observation = await cast(Any, executor).execute_conflict_resolution(request)
+        authority_observation = await executor.execute_conflict_resolution(request)
     else:
         authority_observation = await executor.execute(request)
     kernel_observation = None
@@ -660,7 +686,7 @@ async def _teardown_prerequisites(
         raise _refuse(
             f"teardown requires the newest activation on nonterminal system {activation.system_id}"
         )
-    return {"connection": conn}
+    return {}
 
 
 def _handler(
@@ -701,27 +727,13 @@ def _handler(
             ports=ports,
             require_activation_state=require_activation_state,
             require_activation_evidence=require_activation_evidence,
-            require_preconditions=lambda conn, activation, marker: _with_executor(
-                require_preconditions, ports, conn, activation, marker
-            ),
+            require_preconditions=require_preconditions,
             call_port=_execute,
             build_result=checked_build,
             before_port=before_port,
         )
 
     return handler
-
-
-async def _with_executor(
-    preconditions: Callable[..., Awaitable[Mapping[str, Any]]],
-    ports: ExternalBootHandlerPorts,
-    conn: AsyncConnection,
-    activation: ExternalBootActivation,
-    marker: ExternalBootAuthorityMarkerV1,
-) -> Mapping[str, Any]:
-    values = dict(await preconditions(conn, activation, marker))
-    values["authority_executor"] = ports.authority_executor
-    return values
 
 
 def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
@@ -740,13 +752,12 @@ def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
             raise _refuse("activating row has no activation readiness deadline")
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "activate",
-                "result_ref": None,
-                "evidence": terminal_evidence(context, "active"),
-                "activation_readiness_deadline": deadline.isoformat().replace("+00:00", "Z"),
-            },
+            ActivateResult(
+                operation="activate",
+                result_ref=None,
+                evidence=terminal_evidence(context, "active"),
+                activation_readiness_deadline=deadline,
+            ),
         )
 
     def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
@@ -767,11 +778,7 @@ def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
         )
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "deadline",
-                "deadline": deadline.isoformat().replace("+00:00", "Z"),
-            },
+            DeadlineResult(operation="deadline", deadline=deadline),
         )
 
     return _handler(
@@ -785,38 +792,6 @@ def activate_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
     )
 
 
-def _recovering_handler(
-    ports: ExternalBootHandlerPorts,
-    *,
-    operation: str,
-    state: State,
-    attempt_state: str,
-) -> ExternalBootOperationHandler:
-    """``recover`` and ``resolve-conflict`` differ in three parameters, so they share a body."""
-
-    def build(
-        context: OperationContext, observation: AuthorityObservationV1
-    ) -> ExternalBootAuthoritySuccessV1:
-        return authority_result(
-            context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": operation,
-                "result_ref": None,
-                "evidence": terminal_evidence(context, "recovered"),
-            },
-        )
-
-    return _handler(
-        ports,
-        require_activation_state=frozenset({state}),
-        require_activation_evidence=_ACTIVATION_EVIDENCE,
-        require_preconditions=_require_attempt_state(attempt_state),
-        expected_observation="source",
-        build_result=build,
-    )
-
-
 def recover_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
     """Re-run the recovery point and confirm the kernel, under a ``recovering`` attempt row."""
 
@@ -825,12 +800,11 @@ def recover_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
     ) -> ExternalBootAuthoritySuccessV1:
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "recover",
-                "result_ref": None,
-                "evidence": terminal_evidence(context, "recovered"),
-            },
+            RecoverResult(
+                operation="recover",
+                result_ref=None,
+                evidence=terminal_evidence(context, "recovered"),
+            ),
         )
 
     def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
@@ -848,13 +822,12 @@ def recover_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
         )
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "recovery-attempt",
-                "attempt_id": str(attempt_id),
-                "recovery_basis": "recovery_point",
-                "deadline": deadline.isoformat().replace("+00:00", "Z"),
-            },
+            RecoveryAttemptResult(
+                operation="recovery-attempt",
+                attempt_id=attempt_id,
+                recovery_basis="recovery_point",
+                deadline=deadline,
+            ),
         )
 
     async def require_attempt(
@@ -885,12 +858,11 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
     ) -> ExternalBootAuthoritySuccessV1:
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "resolve-conflict",
-                "result_ref": None,
-                "evidence": terminal_evidence(context, "recovered"),
-            },
+            RecoverResult(
+                operation="resolve-conflict",
+                result_ref=None,
+                evidence=terminal_evidence(context, "recovered"),
+            ),
         )
 
     async def before_port(context: OperationContext) -> ExternalBootAuthoritySuccessV1 | None:
@@ -902,7 +874,7 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
         expected = context.marker.expected_observed_composite
         if expected is None:
             raise _refuse("resolve-conflict has no observed composite binding")
-        observation = await cast(Any, executor).observe(_mutation_request(context))
+        observation = await executor.observe(_mutation_request(context))
         if observation.category == "unreadable" or observation.composite_state != expected:
             raise CategorizedError(
                 "authority observation no longer matches the conflict binding",
@@ -921,14 +893,13 @@ def resolve_conflict_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOpe
         )
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "recovery-attempt",
-                "attempt_id": str(attempt_id),
-                "recovery_basis": "pre_recovery",
-                "deadline": deadline.isoformat().replace("+00:00", "Z"),
-                "observed_composite_state": expected,
-            },
+            RecoveryAttemptResult(
+                operation="recovery-attempt",
+                attempt_id=attempt_id,
+                recovery_basis="pre_recovery",
+                deadline=deadline,
+                observed_composite_state=expected,
+            ),
         )
 
     async def require_attempt(
@@ -965,11 +936,10 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
         context: OperationContext,
     ) -> ExternalBootDerivedReleaseCompletion | ExternalBootAuthorityConflictV1:
         fresh = ports.clock() + ports.recovery_readiness_timeout
-        prerequisites = dict(context.prerequisites)
-        prerequisites.update(
-            connection=context.prerequisites["connection"],
-            incarnation_credential=hashlib.sha256(
-                ports.incarnation_credential.get_secret_value().encode("utf-8")
+        return await _run_active_release(
+            context,
+            credential_digest=hashlib.sha256(
+                context.incarnation_credential.get_secret_value().encode("utf-8")
             ).digest(),
             deadline=(
                 fresh
@@ -977,69 +947,37 @@ def release_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
                 else _request_deadline(context, fresh)
             ),
         )
-        return await _run_active_release(replace(context, prerequisites=prerequisites))
 
     async def handler(
         conn: AsyncConnection, job: Job, marker: ExternalBootAuthorityMarkerV1
     ) -> ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1:
-        return cast(
-            ExternalBootAuthoritySuccessV1 | ExternalBootAuthorityConflictV1,
-            await run_operation(
-                conn,
-                job,
-                marker,
-                ports=ports,
-                require_activation_state=frozenset(
-                    {State.ACTIVE, State.RECOVERING, State.RECOVERED}
-                ),
-                require_activation_evidence=_ACTIVATION_EVIDENCE,
-                require_preconditions=lambda conn, activation, marker: _with_executor(
-                    _release_prerequisites, ports, conn, activation, marker
-                ),
-                call_port=_unreachable_release_port,
-                build_result=_unreachable_release_result,
-                before_port=complete,
-            ),
+        return await run_derived_operation(
+            conn,
+            job,
+            marker,
+            ports=ports,
+            require_activation_state=frozenset({State.ACTIVE, State.RECOVERING, State.RECOVERED}),
+            require_activation_evidence=_ACTIVATION_EVIDENCE,
+            require_preconditions=_require_releasable,
+            complete=complete,
         )
 
     return handler
 
 
-def _unreachable_release_port(_context: OperationContext) -> None:
-    raise AssertionError("derived release completion must run before a provider port")
-
-
-def _unreachable_release_result(
-    _context: OperationContext, _observation: object
-) -> ExternalBootDerivedReleaseCompletion:
-    raise AssertionError("derived release completion must run before result construction")
-
-
-async def _release_prerequisites(
-    conn: AsyncConnection,
-    activation: ExternalBootActivation,
-    marker: ExternalBootAuthorityMarkerV1,
-) -> Mapping[str, Any]:
-    values = dict(await _require_releasable(conn, activation, marker))
-    values["connection"] = conn
-    return values
-
-
 def _cleanup_evidence(
     context: OperationContext, *, teardown_identity: str | None
-) -> dict[str, Any]:
+) -> CleanupResultEvidence:
     ordinary = context.activation.state in _ORDINARY_CLEANUP_STATES
-    evidence: dict[str, Any] = {
-        "schema": "external-boot-cleanup-evidence-v1",
-        "activation_id": str(context.marker.activation_id),
-        "system_id": str(context.marker.system_id),
-        "release_identity": context.prerequisites["release_identity"],
-        "mode": "ordinary" if ordinary else "system_teardown",
-        "completed_at": _now(),
-    }
-    if teardown_identity is not None:
-        evidence["teardown_identity"] = teardown_identity
-    return evidence
+    return CleanupResultEvidence(
+        schema_="external-boot-cleanup-evidence-v1",
+        activation_id=context.marker.activation_id,
+        system_id=context.marker.system_id,
+        release_identity=context.prerequisites["release_identity"],
+        mode="ordinary" if ordinary else "system_teardown",
+        teardown_identity=teardown_identity,
+        completed_at=_now(),
+    )
 
 
 def cleanup_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHandler:
@@ -1058,17 +996,16 @@ def cleanup_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHan
         ordinary = context.activation.state in _ORDINARY_CLEANUP_STATES
         return authority_result(
             context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "cleanup",
-                "result_ref": None,
-                "evidence": _cleanup_evidence(
+            CleanupResult(
+                operation="cleanup",
+                result_ref=None,
+                evidence=_cleanup_evidence(
                     context,
                     teardown_identity=(
                         None if ordinary else context.prerequisites["teardown_identity"]
                     ),
                 ),
-            },
+            ),
         )
 
     return _handler(
@@ -1107,7 +1044,7 @@ async def _discharge_module_reap_after_teardown(context: OperationContext) -> No
         operation_nonce=receipt.operation_nonce,
     )
     discharged = await RemoteModuleAttemptObligationRepository().worker_discharge_reap_obligation(
-        context.prerequisites["connection"],
+        context.connection,
         ModuleAttemptWorkerWriteContext(
             job_id=context.job.id,
             job_attempt=context.job.attempt,
@@ -1152,14 +1089,14 @@ def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
         if response.proof.disposition != "retained_quarantine":
             await _discharge_module_reap_after_teardown(context)
             await reclaim_system_core_after_provider_teardown(
-                context.prerequisites["connection"],
+                context.connection,
                 artifact_store,
                 context.marker.system_id,
                 reclaim_snapshot_ledger=True,
                 reclaim_device_ledger=True,
                 discharge_mutation_obligations=False,
             )
-        async with context.prerequisites["connection"].cursor() as cursor:
+        async with context.connection.cursor() as cursor:
             await cursor.execute(
                 "SELECT public.finalize_external_boot_authority_teardown(%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
@@ -1180,45 +1117,26 @@ def teardown_handler(ports: ExternalBootHandlerPorts) -> ExternalBootOperationHa
             raise CategorizedError(
                 "teardown receipt was superseded", category=ErrorCategory.STALE_HANDLE
             )
-        carrier = {
-            "schema": "external-boot-authority-result-v1",
-            "authority_id": context.authority.authority_id,
-            "generation": context.authority.generation,
-            "activation_id": context.marker.activation_id,
-            "run_id": context.marker.run_id,
-            "system_id": context.marker.system_id,
-            "plan_identity": context.marker.plan_identity,
-            "purpose": context.marker.purpose,
-            "provider_kind": context.marker.provider_kind,
-            "authority_instance": context.marker.authority_instance,
-            "admitted_operation": context.marker.operation,
-            "operation_identity": context.marker.operation_identity,
-            "operation_digest": context.authority.operation_digest,
-            "journal_sequence": response.journal_sequence,
-            "journal_digest": response.journal_digest,
-            "result": {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "teardown",
-                "result_ref": None,
-                "response": response.model_dump(mode="json", by_alias=True),
-            },
-        }
+        carrier = authority_carrier_data(
+            context,
+            TeardownResult(operation="teardown", result_ref=None, response=response),
+        )
+        carrier["journal_sequence"] = response.journal_sequence
+        carrier["journal_digest"] = response.journal_digest
         return ExternalBootDerivedTeardownCompletion.model_validate(carrier)
 
-    return _handler(
-        ports,
-        require_activation_state=frozenset(set(State) - {State.TORN_DOWN}),
-        require_activation_evidence=frozenset(),
-        require_preconditions=lambda conn, activation, marker: _teardown_prerequisites(
-            conn, activation, marker
-        ),
-        expected_observation="absent",
-        build_result=_unreachable_teardown_result,
-        before_port=complete,
-    )
+    async def handler(
+        conn: AsyncConnection, job: Job, marker: ExternalBootAuthorityMarkerV1
+    ) -> ExternalBootDerivedTeardownCompletion:
+        return await run_derived_operation(
+            conn,
+            job,
+            marker,
+            ports=ports,
+            require_activation_state=frozenset(set(State) - {State.TORN_DOWN}),
+            require_activation_evidence=frozenset(),
+            require_preconditions=_teardown_prerequisites,
+            complete=complete,
+        )
 
-
-def _unreachable_teardown_result(
-    _context: OperationContext, _observation: object
-) -> ExternalBootDerivedTeardownCompletion:
-    raise AssertionError("authority teardown completion must run before result construction")
+    return handler

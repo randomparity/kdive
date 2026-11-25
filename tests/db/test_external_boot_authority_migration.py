@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from kdive.domain.external_boot_activation import ExternalBootReleaseEvidenceV1
@@ -266,7 +267,8 @@ def _durable_surface_snapshot(
         "(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.system_id) "
         "FROM external_boot_authority_counters AS c), "
         "(SELECT jsonb_agg(to_jsonb(audit) ORDER BY audit.id) "
-        "FROM external_boot_authority_audit AS audit)",
+        "FROM external_boot_authority_audit AS audit), "
+        "(SELECT jsonb_agg(to_jsonb(rs) ORDER BY rs.id) FROM run_steps AS rs)",
     ).fetchone()
     assert row is not None
     return tuple(row)
@@ -1068,6 +1070,15 @@ def test_succeeded_run_can_allocate_and_commit_activation_or_recovery(
 
     with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
         assert _commit(worker, case, authority, result) == ("applied", "succeeded")
+    with psycopg.connect(migrated_url) as observer:
+        readiness = observer.execute(
+            "SELECT state,result FROM run_steps WHERE run_id=%s AND step='boot'", (case.run_id,)
+        ).fetchone()
+    assert readiness == (
+        ("succeeded", {"system_id": str(case.system_id), "boot_outcome": "ready"})
+        if purpose == "activate"
+        else None
+    )
 
 
 @pytest.mark.parametrize("purpose", ["activate", "recover"])
@@ -2737,3 +2748,282 @@ def test_audit_rows_exclude_credentials_provider_secrets_and_free_text(
         ).fetchall()
         assert serialized
         assert case.credential.hex() not in "".join(row[0] for row in serialized)
+
+
+def _activation_commit_case(
+    migrated_url: str, dsns: _RoleDsns, *, worker_suffix: str = "b"
+) -> tuple[_AuthorityCase, _Allocated, dict[str, object]]:
+    with psycopg.connect(migrated_url) as seed:
+        case = _seed_case(seed, worker_suffix=worker_suffix)
+        seed.execute(
+            "UPDATE external_boot_activations SET state='activating', "
+            "activation_readiness_deadline=now() WHERE id=%s",
+            (case.activation_id,),
+        )
+    with psycopg.connect(dsns("kdive_worker"), autocommit=True) as worker:
+        authority = _allocate(worker, case)
+    with psycopg.connect(dsns("kdive_provider_authority"), autocommit=True) as provider:
+        assert _acknowledge(provider, case, authority) == "applied"
+    return (
+        case,
+        authority,
+        {
+            "schema": "external-boot-authority-result-v1",
+            "operation": "activate",
+            "result_ref": _EVIDENCE_DIGEST,
+            "evidence": _terminal_evidence(case, "active"),
+            "activation_readiness_deadline": "2026-08-29T00:05:00Z",
+        },
+    )
+
+
+def test_activation_commit_publishes_readiness_with_its_terminal_writes(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    case, authority, result = _activation_commit_case(migrated_url, authority_role_dsns)
+    with (
+        psycopg.connect(migrated_url, autocommit=True) as observer,
+        psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker,
+    ):
+        before = _result_state_snapshot(observer, case, authority)
+        with worker.transaction():
+            assert _commit(worker, case, authority, result) == ("applied", "succeeded")
+            assert _result_state_snapshot(observer, case, authority) == before
+            assert (
+                observer.execute(
+                    "SELECT state, result FROM run_steps WHERE run_id=%s AND step='boot'",
+                    (case.run_id,),
+                ).fetchone()
+                is None
+            )
+        assert observer.execute(
+            "SELECT state, result FROM run_steps WHERE run_id=%s AND step='boot'",
+            (case.run_id,),
+        ).fetchone() == (
+            "succeeded",
+            {"system_id": str(case.system_id), "boot_outcome": "ready"},
+        )
+        assert observer.execute(
+            "SELECT e.state, j.state, a.state FROM external_boot_activations e "
+            "JOIN jobs j ON j.id=%s JOIN external_boot_authorities a ON a.id=%s WHERE e.id=%s",
+            (case.job_id, authority.authority_id, case.activation_id),
+        ).fetchone() == ("active", "succeeded", "retired")
+        assert observer.execute(
+            "SELECT count(*) FROM external_boot_authority_audit "
+            "WHERE authority_id=%s AND outcome='result_committed'",
+            (authority.authority_id,),
+        ).fetchone() == (1,)
+
+
+@pytest.mark.parametrize("failure_table", ["run_steps", "external_boot_authority_audit"])
+def test_activation_publication_rolls_back_early_and_late_insert_failures(
+    migrated_url: str, authority_role_dsns: _RoleDsns, failure_table: str
+) -> None:
+    case, authority, result = _activation_commit_case(migrated_url, authority_role_dsns)
+    function = "test_reject_activation_publication_" + uuid4().hex
+    trigger = "test_activation_publication_" + uuid4().hex
+    with (
+        psycopg.connect(migrated_url, autocommit=True) as observer,
+        psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker,
+    ):
+        observer.execute(
+            sql.SQL(
+                "CREATE FUNCTION public.{}() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                "BEGIN IF NEW.run_id={} THEN "
+                "RAISE EXCEPTION 'injected activation publication failure'; "
+                "END IF; RETURN NEW; END $$"
+            ).format(sql.Identifier(function), sql.Literal(case.run_id))
+        )
+        try:
+            observer.execute(
+                sql.SQL(
+                    "CREATE TRIGGER {} BEFORE INSERT ON public.{} "
+                    "FOR EACH ROW EXECUTE FUNCTION public.{}()"
+                ).format(
+                    sql.Identifier(trigger), sql.Identifier(failure_table), sql.Identifier(function)
+                )
+            )
+            before = _durable_surface_snapshot(observer, case)
+            with pytest.raises(
+                psycopg.errors.RaiseException, match="injected activation publication failure"
+            ):
+                _commit(worker, case, authority, result)
+            assert _durable_surface_snapshot(observer, case) == before
+        finally:
+            observer.execute(
+                sql.SQL("DROP TRIGGER IF EXISTS {} ON public.{}").format(
+                    sql.Identifier(trigger), sql.Identifier(failure_table)
+                )
+            )
+            observer.execute(sql.SQL("DROP FUNCTION public.{}()").format(sql.Identifier(function)))
+
+
+@pytest.mark.parametrize("existing", ["same-system", "foreign-system", "running-step"])
+def test_activation_publication_preserves_existing_boot_evidence(
+    migrated_url: str, authority_role_dsns: _RoleDsns, existing: str
+) -> None:
+    case, authority, result = _activation_commit_case(migrated_url, authority_role_dsns)
+    old_result = {
+        "system_id": str(uuid4() if existing == "foreign-system" else case.system_id),
+        "boot_outcome": "ready",
+    }
+    with psycopg.connect(migrated_url, autocommit=True) as observer:
+        observer.execute(
+            "INSERT INTO run_steps (run_id,step,state,result) VALUES (%s,'boot',%s,%s)",
+            (
+                case.run_id,
+                "running" if existing == "running-step" else "succeeded",
+                Jsonb(old_result),
+            ),
+        )
+        before = observer.execute(
+            "SELECT to_jsonb(rs) FROM run_steps rs WHERE run_id=%s AND step='boot'",
+            (case.run_id,),
+        ).fetchone()
+        assert before is not None and isinstance(before[0], dict)
+        assert before[0]["result"] == old_result
+        with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+            assert _commit(worker, case, authority, result) == ("applied", "succeeded")
+        assert (
+            observer.execute(
+                "SELECT to_jsonb(rs) FROM run_steps rs WHERE run_id=%s AND step='boot'",
+                (case.run_id,),
+            ).fetchone()
+            == before
+        )
+
+
+def test_retired_activation_replay_cannot_restore_deleted_readiness(
+    migrated_url: str, authority_role_dsns: _RoleDsns
+) -> None:
+    case, authority, result = _activation_commit_case(migrated_url, authority_role_dsns)
+    with (
+        psycopg.connect(migrated_url, autocommit=True) as observer,
+        psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker,
+    ):
+        assert _commit(worker, case, authority, result) == ("applied", "succeeded")
+        committed = _durable_surface_snapshot(observer, case)
+        assert _commit(worker, case, authority, result)[0] == "superseded"
+        assert _durable_surface_snapshot(observer, case) == committed
+        with observer.transaction():
+            for scope, identifier in (("system", case.system_id), ("run", case.run_id)):
+                observer.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 2125))",
+                    (f"kdive:{scope}:{identifier}",),
+                )
+            observer.execute(
+                "DELETE FROM run_steps WHERE run_id=%s AND step='boot'", (case.run_id,)
+            )
+        without_readiness = _durable_surface_snapshot(observer, case)
+        assert _commit(worker, case, authority, result)[0] == "superseded"
+        assert _durable_surface_snapshot(observer, case) == without_readiness
+        assert (
+            observer.execute(
+                "SELECT 1 FROM run_steps WHERE run_id=%s AND step='boot'", (case.run_id,)
+            ).fetchone()
+            is None
+        )
+    fresh, fresh_authority, fresh_result = _activation_commit_case(
+        migrated_url, authority_role_dsns, worker_suffix="c"
+    )
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert _commit(worker, fresh, fresh_authority, fresh_result) == ("applied", "succeeded")
+    with psycopg.connect(migrated_url) as observer:
+        assert observer.execute(
+            "SELECT result FROM run_steps WHERE run_id=%s AND step='boot'", (fresh.run_id,)
+        ).fetchone() == ({"system_id": str(fresh.system_id), "boot_outcome": "ready"},)
+
+
+@pytest.mark.parametrize("operation", ["deadline", "fail"])
+def test_non_activate_authority_result_does_not_publish_readiness(
+    migrated_url: str, authority_role_dsns: _RoleDsns, operation: str
+) -> None:
+    case, authority, _result = _activation_commit_case(migrated_url, authority_role_dsns)
+    payload: dict[str, object] = {
+        "schema": "external-boot-authority-result-v1",
+        "operation": operation,
+    }
+    if operation == "deadline":
+        with psycopg.connect(migrated_url) as observer:
+            row = observer.execute(
+                "SELECT activation_readiness_deadline FROM external_boot_activations WHERE id=%s",
+                (case.activation_id,),
+            ).fetchone()
+        assert row is not None
+        payload["deadline"] = row[0].isoformat()
+    else:
+        payload.update(
+            error_category="infrastructure_failure",
+            failure_context={"phase": "provider-call"},
+            terminal=False,
+        )
+    with psycopg.connect(authority_role_dsns("kdive_worker"), autocommit=True) as worker:
+        assert (
+            _commit(worker, case, authority, payload, admitted_operation="activate")[0] == "applied"
+        )
+    with psycopg.connect(migrated_url) as observer:
+        assert (
+            observer.execute(
+                "SELECT 1 FROM run_steps WHERE run_id=%s AND step='boot'", (case.run_id,)
+            ).fetchone()
+            is None
+        )
+
+
+def _commit_function_definition(conn: psycopg.Connection) -> str:
+    row = conn.execute(
+        "SELECT pg_get_functiondef(%s::regprocedure)", (_COMMIT_SIGNATURE,)
+    ).fetchone()
+    assert row is not None
+    return row[0]
+
+
+def test_readiness_migration_preserves_existing_function_security_and_amendments(
+    pg_conn: psycopg.Connection,
+) -> None:
+    _apply_through(pg_conn, "0203")
+    metadata_query = (
+        "SELECT proowner,prosecdef,proconfig,proacl,proargtypes,prorettype,proargnames "
+        "FROM pg_proc WHERE oid=%s::regprocedure"
+    )
+    before = pg_conn.execute(metadata_query, (_COMMIT_SIGNATURE,)).fetchone()
+    definition = _commit_function_definition(pg_conn)
+    assert "w.fence_protocol = 4" in definition
+    assert "public.external_boot_install_refusal_is_valid" in definition
+    _apply_version(pg_conn, "0204")
+    assert pg_conn.execute(metadata_query, (_COMMIT_SIGNATURE,)).fetchone() == before
+    updated = _commit_function_definition(pg_conn)
+    assert "w.fence_protocol = 4" in updated
+    assert "public.external_boot_install_refusal_is_valid" in updated
+    assert "SECURITY DEFINER" in updated and "SET search_path TO ''" in updated
+
+
+@pytest.mark.parametrize("seam_shape", ["missing", "duplicated"])
+def test_readiness_migration_rejects_changed_commit_shape_without_replacing_it(
+    pg_conn: psycopg.Connection, seam_shape: str
+) -> None:
+    _apply_through(pg_conn, "0203")
+    seam = """        UPDATE public.external_boot_activations
+        SET state = 'active', terminal_evidence = v_evidence,
+            activation_readiness_deadline = v_deadline
+        WHERE id = p_activation_id;
+    ELSIF v_operation IN ('recover', 'resolve-conflict') THEN"""
+    definition = _commit_function_definition(pg_conn)
+    assert definition.count(seam) == 1
+    if seam_shape == "missing":
+        changed = definition.replace(
+            seam,
+            seam.replace(
+                "WHERE id = p_activation_id;", "WHERE id = p_activation_id /* changed */;"
+            ),
+        )
+    else:
+        changed = definition.replace(seam, "/* " + seam + " */\n" + seam)
+    pg_conn.execute(changed.encode())
+    installed = _commit_function_definition(pg_conn)
+    with (
+        pytest.raises(psycopg.errors.RaiseException, match="activation commit shape changed"),
+        pg_conn.transaction(),
+    ):
+        _apply_version(pg_conn, "0204")
+    assert _commit_function_definition(pg_conn) == installed

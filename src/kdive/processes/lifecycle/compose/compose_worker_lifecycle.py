@@ -27,7 +27,7 @@ from kdive.config.core_settings import (
     LIFECYCLE_WITNESS_DATABASE_URL,
     WORKER_DATABASE_URL,
 )
-from kdive.processes.lifecycle.compose.docker_death_api import WorkerLifecycleGate
+from kdive.processes.lifecycle.compose.worker_lifecycle_gate import WorkerLifecycleGate
 from kdive.worker_lifecycle.authority_store import (
     CURRENT_WORKER_FENCE_PROTOCOL,
     DockerAuthorityBinding,
@@ -387,7 +387,9 @@ async def _terminate(
 
 
 def _credential_path(project: str) -> Path:
-    return Path(f"/tmp/kdive-compose-worker-{project}.credential")
+    return Path(
+        f"/tmp/kdive-compose-worker-{project}.credential"  # nosec B108: validated descriptor
+    )
 
 
 def _remove_managed_worker_volumes(project: str) -> None:
@@ -419,7 +421,9 @@ def _remove_managed_worker_volumes(project: str) -> None:
 
 
 def _prepare_credential_file(path: Path) -> None:
-    descriptor = _open_credential_file(path, os.O_CREAT | os.O_WRONLY)
+    descriptor = _open_supervisor_file(
+        path, os.O_CREAT | os.O_WRONLY, subject="worker credential handoff"
+    )
     try:
         os.ftruncate(descriptor, 0)
         os.fchmod(descriptor, 0o600)
@@ -427,24 +431,28 @@ def _prepare_credential_file(path: Path) -> None:
         os.close(descriptor)
 
 
-def _open_credential_file(path: Path, flags: int) -> int:
+def _open_supervisor_file(path: Path, flags: int, *, subject: str) -> int:
+    message = f"{subject} is not a safe supervisor-owned file"
     try:
         descriptor = os.open(path, flags | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
     except OSError as exc:
-        raise RuntimeError("worker credential handoff is not a safe supervisor-owned file") from exc
-    metadata = os.fstat(descriptor)
-    if (
-        metadata.st_uid != os.getuid()
-        or metadata.st_nlink != 1
-        or not stat.S_ISREG(metadata.st_mode)
-    ):
+        raise RuntimeError(message) from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or not stat.S_ISREG(metadata.st_mode)
+        ):
+            raise RuntimeError(message)
+    except BaseException:
         os.close(descriptor)
-        raise RuntimeError("worker credential handoff is not a safe supervisor-owned file")
+        raise
     return descriptor
 
 
 def _credential(path: Path) -> str:
-    descriptor = _open_credential_file(path, os.O_RDONLY)
+    descriptor = _open_supervisor_file(path, os.O_RDONLY, subject="worker credential handoff")
     with os.fdopen(descriptor, encoding="utf-8") as handoff:
         value = handoff.read().strip()
     generated = not value
@@ -469,7 +477,7 @@ def _cleanup_credential(path: Path) -> None:
 
 
 def _write_credential(path: Path, credential: str) -> None:
-    descriptor = _open_credential_file(path, os.O_WRONLY)
+    descriptor = _open_supervisor_file(path, os.O_WRONLY, subject="worker credential handoff")
     with os.fdopen(descriptor, "w", encoding="utf-8") as handoff:
         os.fchmod(handoff.fileno(), 0o600)
         handoff.truncate(0)
@@ -564,8 +572,15 @@ def _parser() -> argparse.ArgumentParser:
 def _lifecycle_lock(project: str):
     if not _PROJECT.fullmatch(project):
         raise RuntimeError("Compose project name is invalid for the lifecycle lock")
-    path = Path(f"/tmp/kdive-compose-worker-{project}.lock")
-    with path.open("a+", encoding="utf-8") as lock_file:
+    path = Path(
+        f"/tmp/kdive-compose-worker-{project}.lock"  # nosec B108: validated descriptor
+    )
+    descriptor = _open_supervisor_file(
+        path,
+        os.O_RDWR | os.O_CREAT | os.O_NONBLOCK,
+        subject="Compose lifecycle lock",
+    )
+    with os.fdopen(descriptor, "a+", encoding="utf-8") as lock_file:
         try:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:

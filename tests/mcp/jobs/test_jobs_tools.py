@@ -7,7 +7,7 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastmcp.tools.base import ToolResult
@@ -38,8 +38,10 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import jobs as jobs_tools
+from kdive.mcp.tools._common import encode_ts_uuid_cursor
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import Role, RoleDenied
+from tests.clock import STORE_MTIME
 from tests.support.worker_fence import register_worker
 
 WORKER_LOCAL_ID = "00000000-0000-0000-0000-0000000000c0"  # was db.build_hosts.WORKER_LOCAL_ID
@@ -939,15 +941,21 @@ def test_list_jobs_empty_pagination_fields(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_list_jobs_drains_every_row_following_cursor(migrated_url: str) -> None:
+@pytest.mark.parametrize(
+    "first_cursor", [pytest.param(None, id="none"), pytest.param("", id="empty")]
+)
+def test_list_jobs_drains_every_row_following_cursor(
+    migrated_url: str, first_cursor: str | None
+) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             for i in range(5):
                 await _enqueue(pool, f"d{i}")
             seen: list[str] = []
-            cursor: str | None = None
+            cursor: str | None = first_cursor
             for _ in range(10):  # bound the loop defensively
                 resp = await _list_jobs(pool, VIEWER_CTX, limit=2, cursor=cursor)
+                assert resp.status == "ok"
                 seen.extend(item.object_id for item in resp.items)
                 if not resp.data["truncated"]:
                     break
@@ -960,10 +968,19 @@ def test_list_jobs_drains_every_row_following_cursor(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_list_jobs_malformed_cursor_is_config_error(migrated_url: str) -> None:
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        pytest.param("!!!", id="malformed"),
+        pytest.param(
+            encode_ts_uuid_cursor("resources.list", STORE_MTIME, UUID(int=1)), id="wrong-tool"
+        ),
+    ],
+)
+def test_list_jobs_malformed_cursor_is_config_error(migrated_url: str, cursor: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await _list_jobs(pool, VIEWER_CTX, limit=2, cursor="!!!")
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=2, cursor=cursor)
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "invalid_cursor"

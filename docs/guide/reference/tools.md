@@ -22,19 +22,22 @@ middleware handles it and converts it to an ``authorization_denied`` envelope.
 ``CategorizedError`` uses the same typed error-to-envelope conversion as direct
 tool handlers, including when FastMCP wraps it in ``ToolError``. ``NotFoundError``
 (unknown/disabled tool) and a schema-validation failure on ``arguments`` are both
-caught and converted to ``configuration_error`` envelopes; the latter's
-``data.field_errors`` names each offending argument and its failure kind — the same
-detail a direct bind would raise — and ``data.accepted_fields`` additionally lists
-the tool's top-level keys. For a tool whose only parameter wraps a nested model (e.g.
-``artifacts.get(request: ArtifactsGetRequest)``), ``data.nested_accepted_fields`` also
-names that nested model's field names, and the envelope ``detail`` gives the exact
-``tools.search(names=[...], detail="full")`` follow-up call. All three are included
-only when you could already see that tool through ``tools.search``; all are omitted
-otherwise.
+caught and converted to ``configuration_error`` envelopes. For provenance-confirmed
+caller-binding failures, ``data.field_errors`` lists argument names and failure kinds,
+bounded by the entry cap in the ``arguments`` description. Additional errors are omitted;
+correct the reported arguments and retry, or discover the full schema with ``tools.search``.
+``data.accepted_fields`` lists top-level keys when schema properties are available.
+``data.nested_accepted_fields`` resolves each referenced top-level property's nested
+field names one level, when available (including optional model properties).
+These schema fields are included only when you could already see the tool through
+``tools.search``. Visible binding failures give an exact-name full-schema lookup;
+hidden or missing-context binding failures give generic discovery guidance. Both
+include ``tools.search`` in ``suggested_next_actions``. A bare body validation failure
+retains generic detail without schema metadata or discovery actions.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `arguments` | object(free-form) (nullable) | no | Arguments object for that tool; omit or pass {} for no-arg tools. |
+| `arguments` | object(free-form) (nullable) | no | Arguments object for that tool; omit or pass {} for no-arg tools. Visible caller-binding failures report at most 20 field-error entries per response; additional entries are omitted. Correct the reported arguments and retry, or use tools.search for the full schema. |
 | `name` | string | yes | The registered tool to call (use tools.search to discover names). |
 
 ## `tools.search`

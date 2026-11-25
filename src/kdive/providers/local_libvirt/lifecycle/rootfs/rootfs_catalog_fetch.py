@@ -19,8 +19,8 @@ from kdive.images.rootfs.fetch import fetch_public_provisioning_rootfs
 from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import CatalogFetch
 from kdive.store.objectstore import object_store_from_env
 
-# The s3-fetch cache lives OUTSIDE allowed_roots (which default to [ROOTFS_DIR]) so a cached image
-# is never reachable as a staged-path candidate, keeping the no-escape invariant true.
+# The fixed S3-fetch cache is separate from the default allowed root, so cached images are not
+# staged-path candidates under that layout. Operator-selected allowed roots must keep it separate.
 _CACHE_DIR = Path("/var/lib/kdive/rootfs-cache")
 
 

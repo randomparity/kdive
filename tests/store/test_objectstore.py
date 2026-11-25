@@ -7,9 +7,11 @@ exactly as the db tests do; the pure tests (key validation, etag normalization,
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import threading
+import traceback
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
@@ -1033,10 +1035,13 @@ def test_get_artifact_client_error_without_response_metadata_is_infrastructure_f
     assert str(excinfo.value) == "object-store get_object for 'k' failed: boom"
 
 
-def test_get_artifact_invalid_metadata_is_infrastructure_failure() -> None:
+def test_get_artifact_invalid_sensitivity_is_infrastructure_failure() -> None:
     class _BadMetaClient:
         def get_object(self, **_kwargs: object) -> dict[str, object]:
-            return {"Metadata": {}, "Body": _StaticBody(b"x")}
+            return {
+                "Metadata": {"sensitivity": "invalid", "retention-class": "vmcore"},
+                "Body": _StaticBody(b"x"),
+            }
 
     store = ObjectStore(_BadMetaClient(), "bucket")
     with pytest.raises(CategorizedError) as excinfo:
@@ -1233,10 +1238,15 @@ class _StreamingBody:
 
 
 class _StreamingClient:
-    """A stub S3 client whose ``get_object`` returns a fresh ``_StreamingBody`` + metadata."""
+    """Return a fresh body by default, or an injected body for lifetime-failure probes."""
 
     def __init__(
-        self, data: bytes, *, chunk: int | None = None, metadata: dict[str, str] | None = None
+        self,
+        data: bytes,
+        *,
+        chunk: int | None = None,
+        metadata: dict[str, str] | None = None,
+        body: _StreamingBody | None = None,
     ) -> None:
         self._data = data
         self._chunk = chunk
@@ -1247,10 +1257,15 @@ class _StreamingClient:
         )
         self.last_kwargs: dict[str, object] | None = None
         self.body: _StreamingBody | None = None
+        self._body_override = body
 
     def get_object(self, **kwargs: object) -> dict[str, object]:
         self.last_kwargs = kwargs
-        self.body = _StreamingBody(self._data, chunk=self._chunk)
+        self.body = (
+            self._body_override
+            if self._body_override is not None
+            else _StreamingBody(self._data, chunk=self._chunk)
+        )
         return {"Metadata": self._metadata, "Body": self.body}
 
 
@@ -1325,8 +1340,11 @@ def test_get_artifact_stream_transport_error_is_infrastructure_failure() -> None
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
-def test_get_artifact_stream_invalid_metadata_is_infrastructure_failure() -> None:
-    store = ObjectStore(_StreamingClient(b"x", metadata={}), "bucket")
+def test_get_artifact_stream_invalid_sensitivity_is_infrastructure_failure() -> None:
+    store = ObjectStore(
+        _StreamingClient(b"x", metadata={"sensitivity": "invalid", "retention-class": "vmcore"}),
+        "bucket",
+    )
     with (
         pytest.raises(CategorizedError) as excinfo,
         store.get_artifact_stream("t/vmcore/oid/core", None),
@@ -2389,3 +2407,178 @@ def test_conditional_missing_spool_is_typed(tmp_path: Path) -> None:
             )
         )
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+class _StreamLifetimeBody(_StreamingBody):
+    def __init__(
+        self,
+        *,
+        close_error: BaseException | None = None,
+        read_error: BaseException | None = None,
+    ) -> None:
+        super().__init__(b"payload")
+        self.close_error = close_error
+        self.read_error = read_error
+        self.close_attempts = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if self.read_error is not None:
+            raise self.read_error
+        return super().read(size)
+
+    def close(self) -> None:
+        self.close_attempts += 1
+        if self.close_error is not None:
+            raise self.close_error
+        super().close()
+
+
+@pytest.mark.parametrize(
+    "primary_type",
+    [
+        None,
+        ValueError,
+        StopIteration,
+        KeyboardInterrupt,
+        SystemExit,
+        GeneratorExit,
+        asyncio.CancelledError,
+    ],
+)
+@pytest.mark.parametrize("close_type", [OSError, RuntimeError])
+def test_stream_close_preserves_consumer_primary(
+    primary_type: type[BaseException] | None, close_type: type[Exception]
+) -> None:
+    primary = (
+        primary_type("proof primary")
+        if primary_type is not None
+        else CategorizedError("proof primary", category=ErrorCategory.CONFLICT, terminal=True)
+    )
+    cause = RuntimeError("proof primary cause")
+    primary.__cause__ = cause
+    primary.add_note("prior primary note")
+    body = _StreamLifetimeBody(close_error=close_type("private-close-diagnostic"))
+    store = ObjectStore(_StreamingClient(b"payload", body=body), "bucket")
+
+    with pytest.raises(type(primary)) as failure, store.get_artifact_stream("k", None) as stream:
+        assert stream.reader.read(1) == b"p"
+        raise primary
+
+    assert failure.value is primary
+    assert failure.value.__cause__ is cause
+    assert failure.value.__notes__ == [
+        "prior primary note",
+        "object-store get_object body close failed: " + close_type.__name__,
+    ]
+    if isinstance(primary, CategorizedError):
+        assert primary.category is ErrorCategory.CONFLICT
+        assert primary.terminal
+    assert body.close_attempts == 1
+    assert "private-close-diagnostic" not in "".join(traceback.format_exception(failure.value))
+
+
+@pytest.mark.parametrize("close_type", [OSError, RuntimeError])
+def test_stream_close_preserves_classified_read_failure(close_type: type[Exception]) -> None:
+    read_error = ReadTimeoutError(endpoint_url="http://proof.invalid")
+    body = _StreamLifetimeBody(
+        close_error=close_type("private-close-diagnostic"), read_error=read_error
+    )
+    store = ObjectStore(_StreamingClient(b"payload", body=body), "bucket")
+
+    with pytest.raises(CategorizedError) as failure, store.get_artifact_stream("k", None) as stream:
+        stream.reader.read()
+
+    assert failure.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert failure.value.__cause__ is read_error
+    assert failure.value.details == {"key": "k", "s3_error_code": "ReadTimeoutError"}
+    assert failure.value.__notes__ == [
+        "object-store get_object body close failed: " + close_type.__name__
+    ]
+    assert body.close_attempts == 1
+    assert "private-close-diagnostic" not in "".join(traceback.format_exception(failure.value))
+
+
+@pytest.mark.parametrize("error_kind", ["os", "runtime", "transport", "client"])
+def test_stream_standalone_close_failure_is_categorized_without_raw_diagnostics(
+    error_kind: str,
+) -> None:
+    errors: dict[str, Exception] = {
+        "os": OSError("private-close-diagnostic"),
+        "runtime": RuntimeError("private-close-diagnostic"),
+        "transport": ReadTimeoutError(endpoint_url="http://private-close-diagnostic.invalid"),
+        "client": ClientError(
+            {"Error": {"Code": "InternalError", "Message": "private-close-diagnostic"}},
+            "GetObject",
+        ),
+    }
+    close_error = errors[error_kind]
+    body = _StreamLifetimeBody(close_error=close_error)
+    store = ObjectStore(_StreamingClient(b"payload", body=body), "bucket")
+
+    with pytest.raises(CategorizedError) as failure, store.get_artifact_stream("k", None) as stream:
+        assert stream.reader.read() == b"payload"
+
+    code = "InternalError" if error_kind == "client" else type(close_error).__name__
+    assert failure.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert failure.value.details == {"key": "k", "s3_error_code": code}
+    assert str(failure.value) == f"object-store get_object body close for 'k' failed: {code}"
+    assert failure.value.__cause__ is None
+    assert failure.value.__suppress_context__
+    assert body.close_attempts == 1
+    assert "private-close-diagnostic" not in "".join(traceback.format_exception(failure.value))
+
+
+@pytest.mark.parametrize(
+    "control_type", [KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError]
+)
+@pytest.mark.parametrize("consumer_fails", [False, True])
+def test_stream_close_control_signals_propagate(
+    control_type: type[BaseException], consumer_fails: bool
+) -> None:
+    control = control_type("proof close control")
+    body = _StreamLifetimeBody(close_error=control)
+    store = ObjectStore(_StreamingClient(b"payload", body=body), "bucket")
+
+    with pytest.raises(control_type) as failure, store.get_artifact_stream("k", None) as stream:
+        assert stream.reader.read(1) == b"p"
+        if consumer_fails:
+            raise ValueError("proof consumer")
+
+    assert failure.value is control
+    assert body.close_attempts == 1
+
+
+@pytest.mark.parametrize("consumer_fails", [False, True])
+def test_stream_healthy_close_keeps_success_or_primary(consumer_fails: bool) -> None:
+    body = _StreamLifetimeBody()
+    store = ObjectStore(_StreamingClient(b"payload", body=body), "bucket")
+    primary = ValueError("proof primary")
+    try:
+        with store.get_artifact_stream("k", None) as stream:
+            assert stream.reader.read(1) == b"p"
+            if consumer_fails:
+                raise primary
+    except ValueError as error:
+        assert consumer_fails
+        assert error is primary
+    else:
+        assert not consumer_fails
+    assert body.closed
+    assert body.close_attempts == 1
+
+
+def test_stream_close_does_not_adopt_an_outer_handled_exception() -> None:
+    body = _StreamLifetimeBody(close_error=OSError("private-close-diagnostic"))
+    store = ObjectStore(_StreamingClient(b"payload", body=body), "bucket")
+    outer = ValueError("unrelated outer exception")
+    try:
+        raise outer
+    except ValueError:
+        with (
+            pytest.raises(CategorizedError) as failure,
+            store.get_artifact_stream("k", None) as stream,
+        ):
+            assert stream.reader.read(1) == b"p"
+    assert failure.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert not hasattr(outer, "__notes__")
+    assert body.close_attempts == 1

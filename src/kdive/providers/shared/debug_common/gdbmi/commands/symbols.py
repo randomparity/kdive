@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -23,8 +24,6 @@ class _SymbolHost(Protocol):
     def execute_mi_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]: ...
 
     def _redactor(self) -> Redactor: ...
-
-    def _evaluate_symbol(self, attachment: GdbMiAttachment, name: str) -> list[MiRecord]: ...
 
 
 class GdbMiSymbolCommands:
@@ -55,7 +54,7 @@ class GdbMiSymbolCommands:
                 code="bad_symbol_name",
                 details={"name": name},
             )
-        value = evaluate_value(self._evaluate_symbol(attachment, name))
+        value = evaluate_value(_evaluate_symbol(self, attachment, name))
         match = _SYMBOL_ADDR_RE.search(value) if isinstance(value, str) else None
         if match is None:
             raise CategorizedError(
@@ -69,24 +68,46 @@ class GdbMiSymbolCommands:
             )
         return int(match.group(0), 16)
 
-    def _evaluate_symbol(
-        self: _SymbolHost, attachment: GdbMiAttachment, name: str
-    ) -> list[MiRecord]:
-        """Evaluate ``&name``, narrowing a resolution ``^error`` to ``SYMBOL_NOT_FOUND``."""
-        try:
-            return self.execute_mi_command(attachment, f"-data-evaluate-expression &{name}")
-        except CategorizedError as exc:
-            if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
-                payload = exc.details.get("payload")
-                msg = payload.get("msg") if isinstance(payload, dict) else None
-                if isinstance(msg, str) and _SYMBOL_NOT_FOUND_RE.search(msg):
-                    raise CategorizedError(
-                        f"symbol {name!r} not found",
-                        category=ErrorCategory.SYMBOL_NOT_FOUND,
-                        details={
-                            "code": "symbol_not_found",
-                            "name": name,
-                            "hint": _SYMBOL_INLINE_HINT,
-                        },
-                    ) from exc
-            raise
+
+def _evaluate_symbol(host: _SymbolHost, attachment: GdbMiAttachment, name: str) -> list[MiRecord]:
+    """Evaluate ``&name``, narrowing a resolution ``^error`` to ``SYMBOL_NOT_FOUND``."""
+    try:
+        return host.execute_mi_command(attachment, f"-data-evaluate-expression &{name}")
+    except CategorizedError as exc:
+        if exc.category is ErrorCategory.DEBUG_ATTACH_FAILURE:
+            payload = exc.details.get("payload")
+            msg = payload.get("msg") if isinstance(payload, dict) else None
+            if isinstance(msg, str) and _SYMBOL_NOT_FOUND_RE.search(msg):
+                raise CategorizedError(
+                    f"symbol {name!r} not found",
+                    category=ErrorCategory.SYMBOL_NOT_FOUND,
+                    details={
+                        "code": "symbol_not_found",
+                        "name": name,
+                        "hint": _SYMBOL_INLINE_HINT,
+                    },
+                ) from exc
+        raise
+
+
+def _resolve_target(
+    attachment: GdbMiAttachment,
+    resolve_symbol: Callable[[GdbMiAttachment, str], int],
+    *,
+    symbol: str | None,
+    address: int | None,
+) -> int:
+    """Resolve exactly one of ``symbol`` / ``address`` to a numeric address."""
+    has_symbol = symbol is not None
+    has_address = address is not None
+    if has_symbol == has_address:
+        raise config_error(
+            "exactly one of symbol or address is required",
+            code="bad_target",
+            details={"symbol": symbol, "address": address},
+        )
+    if symbol is not None:
+        return resolve_symbol(attachment, symbol)
+    if not isinstance(address, int) or address < 0 or address > 0xFFFFFFFFFFFFFFFF:
+        raise config_error("address out of range", code="bad_address", details={"address": address})
+    return address

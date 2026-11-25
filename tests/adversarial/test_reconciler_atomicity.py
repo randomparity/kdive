@@ -2,8 +2,8 @@
 
 Invariant (ADR-0021, `reconciler/loop.py::_repair_abandoned_jobs`): a zombie job
 (`running`, lapsed lease, `attempt >= max_attempts`) is dead-lettered *and*, when its
-payload names a non-terminal run, that run is failed — in one transaction, so a crash
-cannot strand the run un-compensated. A terminal run is left untouched; a job a worker
+payload names a running run, that run is failed — in one transaction, so a crash
+cannot strand the run un-compensated. Unstarted and terminal runs are left untouched; a job a worker
 finalized first (fence miss) is skipped.
 """
 
@@ -16,6 +16,8 @@ import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from kdive.db.repositories import RUNS
+from kdive.domain.capacity.state import RunState
 from kdive.reconciler.loop import _repair_abandoned_jobs
 from tests.adversarial.conftest import one, open_conn, seed_run
 
@@ -54,6 +56,7 @@ def test_zombie_with_run_fails_both_job_and_run(migrated_url: str) -> None:
     async def _run() -> None:
         async with open_conn(migrated_url) as conn:
             run_id = await seed_run(conn)
+            await RUNS.update_state(conn, run_id, RunState.RUNNING)
             job_id = await _make_zombie(conn, run_id)
             swept = await _repair_abandoned_jobs(conn)
             assert swept == 1
@@ -62,8 +65,28 @@ def test_zombie_with_run_fails_both_job_and_run(migrated_url: str) -> None:
             async with conn.cursor() as cur:
                 await cur.execute("SELECT error_category FROM jobs WHERE id = %s", (job_id,))
                 assert (await one(cur))[0] == "lease_expired"
-                await cur.execute("SELECT failure_category FROM runs WHERE id = %s", (run_id,))
-                assert (await one(cur))[0] == "lease_expired"
+                await cur.execute(
+                    "SELECT failure_category, failing_job_id FROM runs WHERE id = %s", (run_id,)
+                )
+                assert await one(cur) == ("lease_expired", job_id)
+
+    asyncio.run(_run())
+
+
+def test_zombie_leaves_unstarted_run_unchanged(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with open_conn(migrated_url) as conn:
+            run_id = await seed_run(conn)
+            before = await RUNS.get(conn, run_id)
+            assert before is not None and before.state is RunState.CREATED
+            job_id = await _make_zombie(conn, run_id)
+
+            assert await _repair_abandoned_jobs(conn) == 1
+
+            assert await RUNS.get(conn, run_id) == before
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT state, error_category FROM jobs WHERE id = %s", (job_id,))
+                assert await one(cur) == ("failed", "lease_expired")
 
     asyncio.run(_run())
 

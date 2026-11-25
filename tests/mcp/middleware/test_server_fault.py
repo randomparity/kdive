@@ -59,7 +59,7 @@ def _app() -> FastMCP:
         row = validate_stored(_Row, {"profile": "not-an-int"})
         return ToolResponse.success(str(row.profile), "ok")
 
-    # A caller-input rebuild in a tool BindingErrorMiddleware converts (#2981 keeps its path).
+    # An unrelated body model happens to match a curated profile location (ADR-0844).
     @app.tool(name="systems.provision")
     async def provision(allocation_id: str) -> ToolResponse:
         _Row.model_validate({"profile": "not-an-int"})
@@ -98,15 +98,13 @@ def test_server_fault_returns_a_server_fault_envelope(
     assert not [r for r in fastmcp_log.records if _ARGUMENT_ERROR_LOG in r.getMessage()]
 
 
-def test_caller_input_rebuild_keeps_binding_envelope(
+def test_matching_body_error_keeps_framework_failure(
     fastmcp_log: pytest.LogCaptureFixture,
 ) -> None:
     result = _call("systems.provision", {"allocation_id": "a-1"})
 
-    assert not result.is_error
-    envelope = result.structured_content
-    assert envelope["object_id"] == "a-1"
-    assert envelope["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
+    assert result.is_error
+    assert result.structured_content is None
     assert not [r for r in fastmcp_log.records if r.levelno == logging.ERROR]
 
 

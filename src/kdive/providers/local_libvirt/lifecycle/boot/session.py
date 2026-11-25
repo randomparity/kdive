@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import errno
-import hashlib
-import json
 import logging
 import os
 import selectors
@@ -26,7 +24,12 @@ import libvirt
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1, resolve_local_timing
-from kdive.domain.platform.arch_traits import rendered_machine_alias
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    OpaqueProviderRef,
+    RunningKernelObservation,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.owned_domain import parse_owned_xml
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleReadinessWindow,
     ReadinessResult,
@@ -42,32 +45,19 @@ from kdive.providers.local_libvirt.settings import (
     LIBVIRT_BOOT_WINDOW_S,
     LIBVIRT_TCG_DEADLINE_MULTIPLIER,
 )
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    OpaqueProviderRef,
-    RunningKernelObservation,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.shared.directory_listing import list_directory_descriptor
+from kdive.providers.shared.libvirt_attachments import (
     HostStatDeviceIdentity,
     prove_no_foreign_path_references,
 )
-from kdive.providers.shared.directory_listing import list_directory_descriptor
 from kdive.providers.shared.libvirt_external_boot import (
     boot_projection_element_identity,
-    parse_domain_xml,
-    parse_projected_domain_xml,
     preserved_element_identity,
-)
-from kdive.providers.shared.libvirt_xml import (
-    KDIVE_METADATA_NS,
-    backing_store_projection,
-    recorded_gdb_port_from_root,
-    recorded_ssh_port_from_root,
 )
 from kdive.providers.shared.runtime_paths import domain_name_for
 
 if TYPE_CHECKING:
-    from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
         LocalRecoveryMetadataV1,
         TargetProjectionV1,
     )
@@ -97,8 +87,8 @@ class _BoundOverlay:
 
 
 @dataclass(frozen=True)
-class ClosedDomainInspection:
-    """Immutable facts derived from one persistent/inactive domain definition."""
+class PersistentDomainInspection:
+    """Immutable persistent domain definition and observed power state."""
 
     xml: bytes
     active: bool
@@ -239,7 +229,9 @@ class LocalExternalBootSession(Protocol):
     def reopen_projection(self, artifact: OpaqueProviderRef) -> TargetProjectionV1: ...
     def projection_artifact_path(self, projection: TargetProjectionV1, name: str) -> str: ...
     def boot_identity(self, xml: str) -> str: ...
-    def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection: ...
+    def inspect_persistent_definition(
+        self, *, projected: bool = False
+    ) -> PersistentDomainInspection: ...
     def require_inactive(self) -> None: ...
     def stop_and_require_inactive(self, *, mode: StopMode) -> None: ...
     def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int: ...
@@ -870,12 +862,6 @@ class _ConcreteSession:
         fstat_overlay: Callable[[int], tuple[int, int, int]],
         close_descriptor: Callable[[int], None],
         close_overlay_descriptor: Callable[[int], None],
-        close_transfer_descriptor: Callable[[int], None],
-        open_relative: Callable[[int, str, int, int], int],
-        unlink_relative: Callable[[int, str], None],
-        replace_relative: Callable[[int, str, str], None],
-        fsync_descriptor: Callable[[int], None],
-        temporary_artifact_name: Callable[[str], str],
         worker_pid: int,
         prepare_console: PrepareConsole,
         readiness: ReadinessProbe,
@@ -898,12 +884,6 @@ class _ConcreteSession:
         self._fstat_overlay = fstat_overlay
         self._close_descriptor = close_descriptor
         self._close_overlay_descriptor = close_overlay_descriptor
-        self._close_transfer_descriptor = close_transfer_descriptor
-        self._open_relative = open_relative
-        self._unlink_relative = unlink_relative
-        self._replace_relative = replace_relative
-        self._fsync_descriptor = fsync_descriptor
-        self._temporary_artifact_name = temporary_artifact_name
         self._worker_pid = worker_pid
         self._prepare_console = prepare_console
         self._console_window_s = console_window_s
@@ -943,10 +923,10 @@ class _ConcreteSession:
             raise ValueError("activation already contains a different target projection")
         try:
             os.mkdir(digest_name, mode=0o700, dir_fd=artifact_fd)
-            self._fsync_descriptor(artifact_fd)
+            os.fsync(artifact_fd)
         except FileExistsError:
             pass
-        descriptor = self._open_relative(
+        descriptor = _open_relative(
             artifact_fd,
             digest_name,
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -965,25 +945,25 @@ class _ConcreteSession:
 
     def reopen_projection(self, artifact: OpaqueProviderRef) -> TargetProjectionV1:
         """Read an exact projection selected by an owner-checked local artifact reference."""
-        from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (  # noqa: PLC0415
+        from kdive.domain.external_boot_values import ActivationOwnership  # noqa: PLC0415
+        from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
             TargetProjectionStore,
             TargetProjectionV1,
             _artifact_ref_parts,
         )
-        from kdive.providers.ports.external_boot import ActivationOwnership  # noqa: PLC0415
 
         self._require_open_domain()
         reference = artifact
         owner = ActivationOwnership(system_id=self._binding.system_id, run_id=self._binding.run_id)
         parts = _artifact_ref_parts(reference, owner, self._binding.activation_id)
-        descriptor = self._open_relative(
+        descriptor = _open_relative(
             self._artifact_root(),
             parts[4],
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
             0,
         )
         try:
-            projection_file = self._open_relative(
+            projection_file = _open_relative(
                 descriptor, "target-projection.json", os.O_RDONLY | os.O_NOFOLLOW, 0
             )
             try:
@@ -1011,18 +991,20 @@ class _ConcreteSession:
 
     def boot_identity(self, xml: str) -> str:
         """Measure only the boot projection of an owned candidate definition."""
-        root = _parse_owned_xml(xml, self._system_id, self._overlay.path, projected=True)
+        root = parse_owned_xml(xml, self._system_id, self._overlay.path, projected=True)
         return _boot_identity(root)
 
-    def inspect_closed(self, *, projected: bool = False) -> ClosedDomainInspection:
+    def inspect_persistent_definition(
+        self, *, projected: bool = False
+    ) -> PersistentDomainInspection:
         domain = self._require_open_domain()
         # The persistent definition: a running domain's live XML adds runtime-only facts
         # (id, aliases, pty paths) that disappear when it stops, so it cannot be compared across
         # the stop that separates prepare from activate.
         xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
-        root = _parse_owned_xml(xml, self._system_id, self._overlay.path, projected=projected)
+        root = parse_owned_xml(xml, self._system_id, self._overlay.path, projected=projected)
         active = _active(domain)
-        return ClosedDomainInspection(
+        return PersistentDomainInspection(
             xml=xml.encode(),
             active=active,
             definition_identity=_preserved_identity(root),
@@ -1050,29 +1032,27 @@ class _ConcreteSession:
 
     def open_artifact(self, name: str, flags: int, mode: int = 0o600) -> int:
         self._require_open_domain()
-        return self._open_relative(self._artifact_root(), _relative_name(name), flags, mode)
+        return _open_relative(self._artifact_root(), _relative_name(name), flags, mode)
 
     def open_projection_artifact(self, artifact: OpaqueProviderRef, flags: int) -> int:
         """Open one payload inside its owner-checked projection digest directory."""
-        from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (  # noqa: PLC0415
-            _artifact_ref_parts,
-        )
-        from kdive.providers.ports.external_boot import ActivationOwnership  # noqa: PLC0415
+        from kdive.domain.external_boot_values import ActivationOwnership  # noqa: PLC0415
+        from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import _artifact_ref_parts
 
         self._require_open_domain()
         owner = ActivationOwnership(system_id=self._binding.system_id, run_id=self._binding.run_id)
         parts = _artifact_ref_parts(artifact, owner, self._binding.activation_id)
-        directory = self._open_relative(
+        directory = _open_relative(
             self._artifact_root(), parts[4], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, 0
         )
         try:
-            return self._open_relative(directory, parts[5], flags, 0)
+            return _open_relative(directory, parts[5], flags, 0)
         finally:
             self._close_descriptor(directory)
 
     def unlink_artifact(self, name: str) -> None:
         self._require_open_domain()
-        self._unlink_relative(self._artifact_root(), _relative_name(name))
+        _unlink_relative(self._artifact_root(), _relative_name(name))
 
     def guest(self) -> _GuestContext:
         self._require_open_domain()
@@ -1081,7 +1061,7 @@ class _ConcreteSession:
     def define_xml(self, xml: str, *, projected: bool = False) -> None:
         self._require_no_guest_context()
         self.require_inactive()
-        _parse_owned_xml(xml, self._system_id, self._overlay.path, projected=projected)
+        parse_owned_xml(xml, self._system_id, self._overlay.path, projected=projected)
         assert self._connection is not None
         self._domain = self._connection.defineXML(xml)
 
@@ -1097,11 +1077,16 @@ class _ConcreteSession:
         window = self._readiness_window
         if window is None:
             raise RuntimeError("readiness requires a successful start")
+        self._readiness_window = None
         try:
             result = self._readiness(self._system_id, window)
-        finally:
-            window.close()
-            self._readiness_window = None
+        except BaseException as exc:
+            try:
+                window.close()
+            except BaseException as close_error:
+                exc.add_note(f"cleanup failed: {close_error!r}")
+            raise
+        window.close()
         self._readiness_result = result
         return result
 
@@ -1145,8 +1130,11 @@ class _ConcreteSession:
         )
         try:
             self._require_open_domain().create()
-        except BaseException:
-            window.close()
+        except BaseException as exc:
+            try:
+                window.close()
+            except BaseException as close_error:
+                exc.add_note(f"cleanup failed: {close_error!r}")
             raise
         self._readiness_window = window
 
@@ -1251,24 +1239,24 @@ class _ConcreteSession:
     ) -> None:
         self._guard_guest_operation(wrapper)
         final_name = _relative_name(artifact_name)
-        temporary_name = _relative_name(self._temporary_artifact_name(final_name))
+        temporary_name = _relative_name(_temporary_artifact_name(final_name))
         if temporary_name == final_name:
             raise ValueError("temporary artifact name must differ from final artifact name")
         descriptor = self.open_artifact(temporary_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         try:
             guest.download(guest_source, f"/proc/self/fd/{descriptor}")
-            self._fsync_descriptor(descriptor)
+            os.fsync(descriptor)
             closing, descriptor = descriptor, None
-            self._close_transfer_descriptor(closing)
-            self._replace_relative(self._artifact_root(), temporary_name, final_name)
+            os.close(closing)
+            _replace_relative(self._artifact_root(), temporary_name, final_name)
         except BaseException as exc:
             if descriptor is not None:
                 try:
-                    self._close_transfer_descriptor(descriptor)
+                    os.close(descriptor)
                 except Exception as close_error:
                     exc.add_note(f"cleanup failed: {close_error!r}")
             try:
-                self._unlink_relative(self._artifact_root(), temporary_name)
+                _unlink_relative(self._artifact_root(), temporary_name)
             except FileNotFoundError:
                 pass
             except Exception as unlink_error:
@@ -1331,11 +1319,11 @@ class _ConcreteSession:
             transfer(f"/proc/self/fd/{descriptor}")
         except BaseException as exc:
             try:
-                self._close_transfer_descriptor(descriptor)
+                os.close(descriptor)
             except Exception as close_error:
                 exc.add_note(f"cleanup failed: {close_error!r}")
             raise
-        self._close_transfer_descriptor(descriptor)
+        os.close(descriptor)
 
     def _guard_guest_operation(self, guest: _GuestContext) -> None:
         if guest not in self._guests:
@@ -1380,12 +1368,6 @@ class LocalExternalBootSessionFactory:
         fstat_overlay: Callable[[int], tuple[int, int, int]] | None = None,
         close_descriptor: Callable[[int], None] = os.close,
         close_overlay_descriptor: Callable[[int], None] = os.close,
-        close_transfer_descriptor: Callable[[int], None] = os.close,
-        open_relative: Callable[[int, str, int, int], int] | None = None,
-        unlink_relative: Callable[[int, str], None] | None = None,
-        replace_relative: Callable[[int, str, str], None] | None = None,
-        fsync_descriptor: Callable[[int], None] = os.fsync,
-        temporary_artifact_name: Callable[[str], str] | None = None,
         worker_pid: int | None = None,
         prepare_console: PrepareConsole | None = None,
         readiness: ReadinessProbe | None = None,
@@ -1404,12 +1386,6 @@ class LocalExternalBootSessionFactory:
         self._fstat_overlay = fstat_overlay or _fstat_identity
         self._close_descriptor = close_descriptor
         self._close_overlay_descriptor = close_overlay_descriptor
-        self._close_transfer_descriptor = close_transfer_descriptor
-        self._open_relative = open_relative or _open_relative
-        self._unlink_relative = unlink_relative or _unlink_relative
-        self._replace_relative = replace_relative or _replace_relative
-        self._fsync_descriptor = fsync_descriptor
-        self._temporary_artifact_name = temporary_artifact_name or _temporary_artifact_name
         self._worker_pid = worker_pid if worker_pid is not None else os.getpid()
         self._prepare_console = prepare_console or _unconfigured_prepare_console
         self._readiness = readiness or _unconfigured_readiness
@@ -1436,22 +1412,14 @@ class LocalExternalBootSessionFactory:
         facts = ownership.ownership
         system_id = facts.system_id
         binding = facts.binding
-        binding_matches_pin = binding.system_id == str(system_id)
-        binding_matches_expected = (
-            system_id == expected.system_id
-            and UUID(binding.run_id) == expected.run_id
-            and (
-                expected.activation_id is None
-                or UUID(binding.activation_id) == expected.activation_id
-            )
-        )
-        if not binding_matches_pin or not binding_matches_expected:
-            mismatch = ValueError("operation lease does not match expected ownership")
+        try:
+            _require_expected_ownership(facts, expected)
+        except BaseException as exc:
             try:
                 pin.close()
             except BaseException as close_error:
-                mismatch.add_note(f"cleanup failed: {close_error!r}")
-            raise mismatch
+                exc.add_note(f"cleanup failed: {close_error!r}")
+            raise
         connection: _Connection | None = None
         domain: _Domain | None = None
         overlay_fd: int | None = None
@@ -1468,7 +1436,7 @@ class LocalExternalBootSessionFactory:
                     category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                     details={"system_id": str(system_id)},
                 ) from exc
-            inactive_root = _parse_owned_xml(
+            inactive_root = parse_owned_xml(
                 inactive_xml, system_id, expected_overlay, projected=True
             )
             if local_timing is not None:
@@ -1491,7 +1459,7 @@ class LocalExternalBootSessionFactory:
                     )
             _require_guest_agent_channel(inactive_root, system_id)
             xml = domain.XMLDesc(0)
-            _parse_owned_xml(xml, system_id, expected_overlay, projected=True)
+            parse_owned_xml(xml, system_id, expected_overlay, projected=True)
             overlay_fd = self._open_overlay(expected_overlay)
             device, inode, mode = self._fstat_overlay(overlay_fd)
             if not stat.S_ISREG(mode):
@@ -1509,12 +1477,6 @@ class LocalExternalBootSessionFactory:
                 fstat_overlay=self._fstat_overlay,
                 close_descriptor=self._close_descriptor,
                 close_overlay_descriptor=self._close_overlay_descriptor,
-                close_transfer_descriptor=self._close_transfer_descriptor,
-                open_relative=self._open_relative,
-                unlink_relative=self._unlink_relative,
-                replace_relative=self._replace_relative,
-                fsync_descriptor=self._fsync_descriptor,
-                temporary_artifact_name=self._temporary_artifact_name,
                 worker_pid=self._worker_pid,
                 prepare_console=self._prepare_console,
                 readiness=self._readiness,
@@ -1529,22 +1491,20 @@ class LocalExternalBootSessionFactory:
             )
         except BaseException as exc:
             errors: list[Exception] = []
-            for closer in (
-                (
-                    lambda: (
-                        self._close_overlay_descriptor(overlay_fd)
-                        if overlay_fd is not None
-                        else None
-                    )
-                ),
-                connection.close if connection is not None else None,
-                pin.close,
-            ):
-                if closer is not None:
-                    try:
-                        closer()
-                    except Exception as close_error:
-                        errors.append(close_error)
+            if overlay_fd is not None:
+                try:
+                    self._close_overlay_descriptor(overlay_fd)
+                except Exception as close_error:
+                    errors.append(close_error)
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception as close_error:
+                    errors.append(close_error)
+            try:
+                pin.close()
+            except Exception as close_error:
+                errors.append(close_error)
             for error in errors:
                 exc.add_note(f"cleanup failed: {error!r}")
             raise
@@ -1637,8 +1597,8 @@ class _ConcreteSystemTeardownSession:
             raise ValueError("owned domain is absent")
         inactive = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
         live = domain.XMLDesc(0)
-        _parse_owned_xml(inactive, self._system_id, self._overlay)
-        _parse_owned_xml(live, self._system_id, self._overlay)
+        parse_owned_xml(inactive, self._system_id, self._overlay)
+        parse_owned_xml(live, self._system_id, self._overlay)
         return inactive, live
 
     def destroy(self) -> None:
@@ -1719,10 +1679,10 @@ class _ConcreteSystemTeardownSession:
                 return None
             raise
         expected_overlay = self._overlay
-        _parse_owned_xml(
+        parse_owned_xml(
             domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE), self._system_id, expected_overlay
         )
-        _parse_owned_xml(domain.XMLDesc(0), self._system_id, expected_overlay)
+        parse_owned_xml(domain.XMLDesc(0), self._system_id, expected_overlay)
         return domain
 
 
@@ -1767,22 +1727,35 @@ def prove_no_foreign_system_storage_references(
 
 
 def _system_storage_paths(overlay: str, baseline: str) -> frozenset[str]:
+    def on_walk_error(error: OSError) -> None:
+        # A missing subtree leaves an incomplete proof; only the absent root is benign.
+        if isinstance(error, FileNotFoundError) and error.filename == baseline:
+            return
+        raise error
+
     paths: set[str] = set()
     try:
         if stat.S_ISREG(os.stat(overlay, follow_symlinks=False).st_mode):
             paths.add(overlay)
     except FileNotFoundError:
         pass
-    try:
-        for current, _directories, files in os.walk(baseline, followlinks=False):
-            for name in files:
-                path = os.path.join(current, name)
-                if stat.S_ISREG(os.stat(path, follow_symlinks=False).st_mode):
+    for current, _directories, files in os.walk(baseline, followlinks=False, onerror=on_walk_error):
+        for name in files:
+            path = os.path.join(current, name)
+            try:
+                mode = os.stat(path, follow_symlinks=False).st_mode
+                if stat.S_ISDIR(mode):
+                    raise OSError(
+                        errno.EIO,
+                        "local System teardown storage enumeration skipped a directory",
+                        path,
+                    )
+                if stat.S_ISREG(mode):
                     paths.add(path)
-                if len(paths) > 4096:
-                    raise ValueError("local System teardown storage path set exceeds its bound")
-    except FileNotFoundError:
-        pass
+            except FileNotFoundError:
+                continue
+            if len(paths) > 4096:
+                raise ValueError("local System teardown storage path set exceeds its bound")
     return frozenset(paths)
 
 
@@ -1885,197 +1858,6 @@ def _require_guest_agent_channel(root: ET.Element, system_id: UUID) -> None:
 
 # libvirt names the TCG domain type "qemu"; the timing snapshot says "tcg".
 _DOMAIN_TYPE_ACCEL = {"kvm": "kvm", "qemu": "tcg"}
-
-
-def _parse_owned_xml(
-    xml: str,
-    system_id: UUID,
-    expected_overlay: str,
-    *,
-    projected: bool = False,
-) -> ET.Element:
-    parser = parse_projected_domain_xml if projected else parse_domain_xml
-    root = parser(xml)
-    if root.tag != "domain" or root.findtext("name") != domain_name_for(system_id):
-        raise ValueError("domain ownership does not match the operation lease")
-    if root.findtext(f"metadata/{{{KDIVE_METADATA_NS}}}system") != str(system_id):
-        raise ValueError("domain ownership metadata does not match the operation lease")
-    all_disks = root.findall("devices/disk")
-    if len(all_disks) > 4096:
-        raise ValueError("domain XML exceeds the owned-storage device bound")
-    disks = []
-    overlay_references = 0
-    for disk in all_disks:
-        source = disk.find("source")
-        driver = disk.find("driver")
-        target = disk.find("target")
-        if source is not None and source.get("file") == expected_overlay:
-            overlay_references += 1
-        if (
-            disk.get("type") == "file"
-            and disk.get("device") == "disk"
-            and source is not None
-            and source.get("file") == expected_overlay
-            and driver is not None
-            and driver.get("type") == "qcow2"
-            and target is not None
-            and target.get("dev") == "vda"
-            and target.get("bus") == "virtio"
-            and disk.find("readonly") is None
-        ):
-            disks.append(disk)
-    if len(disks) != 1 or overlay_references != 1:
-        raise ValueError("domain overlay ownership is absent or ambiguous")
-    return root
-
-
-def _disk_source_is(disk: ET.Element, expected_overlay: str) -> bool:
-    source = disk.find("source")
-    return source is not None and source.get("file") == expected_overlay
-
-
-def owned_system_semantic_identity(xml: str, system_id: UUID, expected_overlay: str) -> str:
-    """Return the local authority's libvirt-normalization-tolerant System definition identity.
-
-    This intentionally projects only KDIVE-rendered semantics.  Libvirt-generated ids, aliases,
-    addresses, controllers, and default devices are excluded; all root, boot, resource, network,
-    guest-agent, metadata, and QEMU-argument fields KDIVE controls remain in the digest.
-    """
-    root = _parse_owned_xml(xml, system_id, expected_overlay)
-    os_element = root.find("os")
-    matching_disks = [
-        disk for disk in root.findall("devices/disk") if _disk_source_is(disk, expected_overlay)
-    ]
-    disk = matching_disks[0]
-    source = disk.find("source")
-    driver = disk.find("driver")
-    target = disk.find("target")
-    assert source is not None and driver is not None and target is not None
-    qemu_args = tuple(
-        argument.get("value")
-        for argument in root.findall(
-            "./{http://libvirt.org/schemas/domain/qemu/1.0}commandline/"
-            "{http://libvirt.org/schemas/domain/qemu/1.0}arg"
-        )
-    )
-    channels = tuple(
-        (channel.get("type"), channel_target.get("type"), channel_target.get("name"))
-        for channel in root.findall("devices/channel")
-        if (channel_target := channel.find("target")) is not None
-    )
-    serial_log = root.find("devices/serial/log")
-    cpu = root.find("cpu")
-    features = root.find("features")
-    memory = root.find("memory")
-    os_type = os_element.find("type") if os_element is not None else None
-    interfaces = tuple(
-        {
-            "type": interface.get("type"),
-            "source": None
-            if (interface_source := interface.find("source")) is None
-            else interface_source.attrib,
-            "model": None
-            if (interface_model := interface.find("model")) is None
-            else interface_model.get("type"),
-        }
-        for interface in root.findall("devices/interface")
-    )
-    value = {
-        "schema": "kdive-local-authority-domain-semantics-v2",
-        "domain_type": root.get("type"),
-        "name": root.findtext("name"),
-        "uuid": root.findtext("uuid"),
-        "memory_bytes": _memory_bytes(memory),
-        "vcpu": root.findtext("vcpu"),
-        "cpu": _rendered_cpu_projection(cpu),
-        "os": None
-        if os_element is None
-        else {
-            "type": None if os_type is None else (os_type.text, _canonical_os_type_attrib(os_type)),
-            "kernel": os_element.findtext("kernel"),
-            "initrd": os_element.findtext("initrd"),
-            "cmdline": os_element.findtext("cmdline"),
-        },
-        "features": ()
-        if features is None
-        else tuple(
-            (tag, feature.attrib)
-            for tag in ("acpi", "vmcoreinfo")
-            if (feature := features.find(tag)) is not None
-        ),
-        "root_disk": {
-            "source_file": source.get("file"),
-            "driver": (driver.get("name"), driver.get("type")),
-            "target": (target.get("dev"), target.get("bus")),
-            "readonly": disk.find("readonly") is not None,
-            "backing": backing_store_projection(disk),
-        },
-        "gdb_port": recorded_gdb_port_from_root(root),
-        "ssh_port": recorded_ssh_port_from_root(root),
-        "qemu_args": qemu_args,
-        "interfaces": interfaces,
-        "guest_channels": channels,
-        "emulator": root.findtext("devices/emulator") if root.get("type") == "qemu" else None,
-        "preserve_on_crash": root.findtext("on_crash") == "preserve",
-        "serial_log": None
-        if serial_log is None
-        else (serial_log.get("file"), serial_log.get("append")),
-        "system_metadata": root.findtext(f"metadata/{{{KDIVE_METADATA_NS}}}system"),
-    }
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    return _digest(b"kdive-local-authority-domain-semantics-v2", payload)
-
-
-def _rendered_cpu_projection(cpu: ET.Element | None) -> tuple[str | None, str | None] | None:
-    """Project ``<cpu>`` only when KDIVE rendered it.
-
-    KDIVE renders ``host-passthrough``/``host-model`` (KVM) or a pinned ``custom`` element with
-    ``check='partial'``.  A TCG domain gets no rendered ``<cpu>``, but libvirt adds a defaulted
-    ``custom`` element (``check='none'``), which must not move the identity.  Any other ``check``
-    (``partial``, or libvirt's ``full`` rewrite of a pinned model) stays in the digest.
-    """
-    if cpu is None or (cpu.get("mode") == "custom" and cpu.get("check") in (None, "none")):
-        return None
-    return (cpu.get("mode"), cpu.findtext("model"))
-
-
-def _canonical_os_type_attrib(os_type: ET.Element) -> dict[str, str]:
-    """Project ``os/type`` attributes with libvirt's versioned machine mapped to the alias."""
-    attrib = dict(os_type.attrib)
-    if "machine" in attrib:
-        attrib["machine"] = rendered_machine_alias(attrib.get("arch"), attrib["machine"])
-    return attrib
-
-
-def _memory_bytes(memory: ET.Element | None) -> int | None:
-    if memory is None:
-        return None
-    value = memory.text
-    units = {
-        "b": 1,
-        "byte": 1,
-        "bytes": 1,
-        "kb": 1000,
-        "kib": 1024,
-        "mb": 1_000_000,
-        "mib": 1_048_576,
-        "gb": 1_000_000_000,
-        "gib": 1_073_741_824,
-        "tb": 1_000_000_000_000,
-        "tib": 1_099_511_627_776,
-    }
-    try:
-        factor = units[memory.get("unit", "KiB").lower()]
-        amount = int(value) if value is not None else -1
-    except (KeyError, ValueError) as exc:
-        raise ValueError("domain memory is not a supported integer quantity") from exc
-    if amount < 0:
-        raise ValueError("domain memory is not a supported integer quantity")
-    return amount * factor
-
-
-def _digest(prefix: bytes, payload: bytes) -> str:
-    return "sha256:" + hashlib.sha256(prefix + b"\0" + payload).hexdigest()
 
 
 def _preserved_identity(root: ET.Element) -> str:

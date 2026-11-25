@@ -21,14 +21,26 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Literal
 
-from kdive.domain.external_boot_activation import ExternalBootActivation
+from kdive.domain.external_boot_activation import (
+    ExternalBootActivation,
+    ExternalBootConflictEvidenceV1,
+    ExternalBootTerminalEvidenceV1,
+)
+from kdive.domain.external_boot_values import OpaqueProviderRef
+from kdive.jobs.external_boot_models import (
+    ConflictResult,
+    ExternalBootAuthorityConflictV1,
+    ExternalBootAuthoritySuccessV1,
+    ExternalBootResultPayload,
+    ExternalBootSuccessPayload,
+)
 from kdive.jobs.handlers.external_boot.runner import OperationContext
-from kdive.jobs.models import ExternalBootAuthorityConflictV1, ExternalBootAuthoritySuccessV1
 from kdive.providers.external_boot_authority.protocol import AuthorityObservationV1
 
 __all__ = [
+    "authority_carrier_data",
     "authority_result",
     "conflict_result",
     "known_object_refs",
@@ -60,21 +72,22 @@ def known_object_refs(activation: ExternalBootActivation) -> tuple[str, ...]:
     )
 
 
-def terminal_evidence(context: OperationContext, outcome: str) -> dict[str, Any]:
+def terminal_evidence(
+    context: OperationContext, outcome: Literal["active", "recovered"]
+) -> ExternalBootTerminalEvidenceV1:
     """Terminal evidence for ``outcome``, composed only from rows and the acknowledgement."""
-    return {
-        "schema": "external-boot-terminal-evidence-v1",
-        "activation_id": str(context.marker.activation_id),
-        "system_id": str(context.marker.system_id),
-        "outcome": outcome,
-        "composite_state": context.acknowledgement.positive_quiescence_digest,
-        "objects": [{"ref": ref} for ref in known_object_refs(context.activation)],
-        "observed_at": _now(),
-    }
+    return ExternalBootTerminalEvidenceV1(
+        activation_id=context.marker.activation_id,
+        system_id=context.marker.system_id,
+        outcome=outcome,
+        composite_state=context.acknowledgement.positive_quiescence_digest,
+        objects=tuple(OpaqueProviderRef(ref=ref) for ref in known_object_refs(context.activation)),
+        observed_at=_now(),
+    )
 
 
 def authority_result(
-    context: OperationContext, result: dict[str, Any]
+    context: OperationContext, result: ExternalBootSuccessPayload
 ) -> ExternalBootAuthoritySuccessV1:
     """Wrap ``result`` in the binding the worker's ``_authority_binding_matches`` re-checks.
 
@@ -89,7 +102,7 @@ def authority_result(
     nowhere**, so the job keeps its lease and wedges ``running``. Returning the base class would
     satisfy every type annotation and every binding check and still never commit.
     """
-    return ExternalBootAuthoritySuccessV1.model_validate(_bound(context, result))
+    return ExternalBootAuthoritySuccessV1.model_validate(authority_carrier_data(context, result))
 
 
 def conflict_result(
@@ -100,28 +113,23 @@ def conflict_result(
     The commit re-reads the observation id and composite from the authority's own terminal journal
     head and refuses a carrier that differs, so these two values are a claim the database checks.
     """
-    evidence = {
-        "schema": "external-boot-conflict-evidence-v1",
-        "activation_id": str(context.marker.activation_id),
-        "system_id": str(context.marker.system_id),
-        "observation_id": str(observation.observation_id),
-        "composite_state": observation.composite_state,
-        "objects": [{"ref": ref} for ref in known_object_refs(context.activation)],
-        "observed_at": _now(),
-    }
+    evidence = ExternalBootConflictEvidenceV1(
+        activation_id=context.marker.activation_id,
+        system_id=context.marker.system_id,
+        observation_id=observation.observation_id,
+        composite_state=observation.composite_state,
+        objects=tuple(OpaqueProviderRef(ref=ref) for ref in known_object_refs(context.activation)),
+        observed_at=_now(),
+    )
     return ExternalBootAuthorityConflictV1.model_validate(
-        _bound(
-            context,
-            {
-                "schema": "external-boot-authority-result-v1",
-                "operation": "conflict",
-                "evidence": evidence,
-            },
-        )
+        authority_carrier_data(context, ConflictResult(operation="conflict", evidence=evidence))
     )
 
 
-def _bound(context: OperationContext, result: dict[str, Any]) -> dict[str, Any]:
+def authority_carrier_data(
+    context: OperationContext, result: ExternalBootResultPayload
+) -> dict[str, object]:
+    """Bind a freshly validated, unmodified payload to its claimed authority facts."""
     marker = context.marker
     return {
         "schema": "external-boot-authority-result-v1",
@@ -143,5 +151,5 @@ def _bound(context: OperationContext, result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+def _now() -> datetime:
+    return datetime.now(UTC)

@@ -31,9 +31,7 @@ from kdive.providers.core.resource_registration import register_or_refresh_disco
 from kdive.providers.core.runtime import DiscoveryRegistrar, ProviderRuntime
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.fault_inject import composition as fault_inject_composition
-from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
-from kdive.providers.fault_inject.lifecycle.hotplug import HotplugBehaviour
 from kdive.providers.infra.console_hosting import DbRunningRemoteSystems
 from kdive.providers.infra.reaping import (
     CaptureReaper,
@@ -61,7 +59,6 @@ from kdive.providers.remote_libvirt.config import (
     is_remote_libvirt_configured,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.assembly import UNCONFIGURED_OBJECT_STORE
 from kdive.store.objectstore import ObjectStore, object_store_from_env
 
 if TYPE_CHECKING:
@@ -141,7 +138,7 @@ class _RuntimeDescriptor:
     kind: ResourceKind
     enabled: Callable[[], bool]
     runtime_factory: Callable[[], ProviderRuntime]
-    discovery_registration_factory: Callable[[], ProviderDiscoveryRegistration]
+    discovery_registration_factory: Callable[[], ProviderDiscoveryRegistration] | None = None
     infra_reaper_factory: Callable[[], InfraReaper] | None = None
     transport_resetter_factory: Callable[[], TransportResetter] | None = None
     dump_volume_reaper_factory: Callable[[], DumpVolumeReaper] | None = None
@@ -150,9 +147,10 @@ class _RuntimeDescriptor:
     console_hosting_factory: _ConsoleHostingBuilder | None = None
 
     def build_runtime(self) -> ProviderRuntime:
-        return _with_discovery_registration(
-            self.runtime_factory(), self.discovery_registration_factory()
-        )
+        runtime = self.runtime_factory()
+        if self.discovery_registration_factory is None:
+            return runtime
+        return _with_discovery_registration(runtime, self.discovery_registration_factory())
 
 
 def _discovery_registrar(registration: ProviderDiscoveryRegistration) -> DiscoveryRegistrar:
@@ -183,35 +181,6 @@ def _with_discovery_registration(
     runtime: ProviderRuntime, registration: ProviderDiscoveryRegistration
 ) -> ProviderRuntime:
     return replace(runtime, discovery_registrar=_discovery_registrar(registration))
-
-
-def build_local_runtime(
-    *, secret_registry: SecretRegistry, store: ObjectStore = UNCONFIGURED_OBJECT_STORE
-) -> ProviderRuntime:
-    runtime = local_composition.build_runtime(secret_registry=secret_registry, store=store)
-    return _with_discovery_registration(runtime, local_composition.discovery_registration())
-
-
-def build_fault_inject_runtime(
-    *,
-    inventory: FaultInjectInventory | None = None,
-    engine: FaultEngine | None = None,
-    hotplug_behaviour: HotplugBehaviour | None = None,
-    store: ObjectStore = UNCONFIGURED_OBJECT_STORE,
-) -> ProviderRuntime:
-    runtime = fault_inject_composition.build_runtime(
-        inventory=inventory, engine=engine, hotplug_behaviour=hotplug_behaviour, store=store
-    )
-    return _with_discovery_registration(runtime, fault_inject_composition.discovery_registration())
-
-
-def build_remote_runtime(
-    *, secret_registry: SecretRegistry, store: ObjectStore = UNCONFIGURED_OBJECT_STORE
-) -> ProviderRuntime:
-    runtime = remote_composition.build_runtime(secret_registry=secret_registry, store=store)
-    return _with_discovery_registration(
-        runtime, remote_composition.discovery_registration(secret_registry=secret_registry)
-    )
 
 
 async def ensure_local_host_registered(pool: AsyncConnectionPool) -> None:
@@ -356,7 +325,6 @@ class ProviderComposition:
                     else byo_composition.is_configured()
                 ),
                 runtime_factory=byo_composition.build_runtime,
-                discovery_registration_factory=byo_composition.discovery_registration,
             ),
             _RuntimeDescriptor(
                 kind=ResourceKind.LOCAL_LIBVIRT,
@@ -376,7 +344,6 @@ class ProviderComposition:
                 runtime_factory=lambda: fault_inject_composition.build_runtime(
                     inventory=self._fault_inject_inventory, store=self._object_store
                 ),
-                discovery_registration_factory=fault_inject_composition.discovery_registration,
                 infra_reaper_factory=lambda: fault_inject_composition.build_reaper(
                     self._fault_inject_inventory
                 ),
@@ -388,9 +355,6 @@ class ProviderComposition:
                     secret_registry=self._secret_registry,
                     store=self._object_store,
                     authority_sender_factory=authority_sender_factory,
-                ),
-                discovery_registration_factory=lambda: remote_composition.discovery_registration(
-                    secret_registry=self._secret_registry
                 ),
                 infra_reaper_factory=lambda: remote_composition.build_infra_reaper(
                     secret_registry=self._secret_registry
@@ -597,9 +561,6 @@ class ProviderComposition:
 
 
 __all__ = [
-    "build_fault_inject_runtime",
-    "build_local_runtime",
-    "build_remote_runtime",
     "ensure_local_host_registered",
     "ProviderComposition",
 ]

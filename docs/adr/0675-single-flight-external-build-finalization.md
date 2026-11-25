@@ -4,6 +4,9 @@
 
 Accepted (2026-09-23)
 
+> **Superseded by [0837](0837-build-finalization-belongs-to-the-app-registration.md)** (2026-11-23)
+> for the task namespace; retry and cancellation guarantees are retained.
+
 ## Context
 
 ADR-0656 keeps `runs.complete_build` synchronous and gives one recovery rule for a dropped

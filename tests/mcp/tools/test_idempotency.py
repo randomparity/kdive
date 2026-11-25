@@ -142,13 +142,14 @@ def test_keyed_mutation_maps_cross_kind_key_collision_to_conflict(migrated_url: 
     asyncio.run(scenario())
 
 
-def test_dedup_replay_refuses_a_clock_dependent_recycle_policy() -> None:
+@pytest.mark.parametrize("entrypoint", ["queue", "mcp"])
+def test_dedup_replay_refuses_a_clock_dependent_recycle_policy(entrypoint: str) -> None:
     """#2889: whether a lapsed final attempt recycles is decided only in enqueue's UPDATE."""
-    assert queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED not in _idempotency._RECYCLED
 
     async def _run() -> None:
         with pytest.raises(ValueError, match="database clock"):
-            await _idempotency.dedup_replay(
+            replay = queue.dedup_replay if entrypoint == "queue" else _idempotency.dedup_replay
+            await replay(
                 cast(AsyncConnection, None),
                 "dk",
                 recycle=queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED,

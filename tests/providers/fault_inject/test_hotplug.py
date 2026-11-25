@@ -8,8 +8,8 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import PowerAction
-from kdive.providers.assembly.composition import build_fault_inject_runtime
 from kdive.providers.fault_inject.capabilities import HOTPLUG_BEHAVIOUR_KEY
+from kdive.providers.fault_inject.composition import build_runtime
 from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
 from kdive.providers.fault_inject.lifecycle.faulted import FaultedHotplug
@@ -395,7 +395,7 @@ def test_reprovisioning_a_domain_restarts_its_draw_sequence() -> None:
 def test_rebound_ports_share_one_draw_sequence_per_system() -> None:
     inventory = FaultInjectInventory()
     inventory.record(_SYSTEM, _DOMAIN)
-    runtime = build_fault_inject_runtime(inventory=inventory)
+    runtime = build_runtime(inventory=inventory)
     caps = {"fault_rate": {"hotplug": 0.5}, "seed": 1}
     rebinding = [runtime.for_resource("row", caps) for _ in range(12)]
     single = _faulted(0.5)[0]
@@ -414,9 +414,7 @@ def test_rebound_ports_share_one_draw_sequence_per_system() -> None:
 def test_runtime_wires_the_behaviour_and_follows_control_power() -> None:
     inventory = FaultInjectInventory()
     inventory.record(_SYSTEM, _DOMAIN)
-    runtime = build_fault_inject_runtime(
-        inventory=inventory, hotplug_behaviour=HotplugBehaviour.BUSY
-    )
+    runtime = build_runtime(inventory=inventory, hotplug_behaviour=HotplugBehaviour.BUSY)
     port = runtime.device_hotplug
     assert port is not None
     handle = port.plug(_DOMAIN, _NIC).provider_handle
@@ -433,7 +431,7 @@ def test_runtime_wires_the_behaviour_and_follows_control_power() -> None:
 def test_runtime_with_an_engine_wraps_the_port_in_the_faulting_decorator() -> None:
     engine = FaultEngine(seed=0, fault_rate={}, max_latency_s={})
 
-    runtime = build_fault_inject_runtime(engine=engine)
+    runtime = build_runtime(engine=engine)
 
     assert isinstance(runtime.device_hotplug, FaultedHotplug)
 

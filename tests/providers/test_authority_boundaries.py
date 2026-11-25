@@ -1,6 +1,7 @@
 """Shared authority orchestration depends on neutral ports, not provider implementation."""
 
 import ast
+from importlib.util import resolve_name
 from pathlib import Path
 
 import pytest
@@ -46,3 +47,23 @@ def test_shared_authority_import_boundary(module: str) -> None:
 @pytest.mark.parametrize("name", ["remote_module_operation", "remote_module_phases"])
 def test_unused_service_facades_are_removed(name: str) -> None:
     assert not (ROOT / "src/kdive/services" / f"{name}.py").exists()
+
+
+def test_provider_assembly_does_not_import_worker_modules() -> None:
+    violations = []
+    for path in (ROOT / "src/kdive/providers/assembly").rglob("*.py"):
+        package = ".".join(path.parent.relative_to(ROOT / "src").parts)
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level:
+                    module = resolve_name("." * node.level + module, package)
+                names = [module] + [f"{module}.{alias.name}" for alias in node.names]
+            else:
+                continue
+            for name in names:
+                if name == "kdive.jobs" or name.startswith("kdive.jobs."):
+                    violations.append(f"{path.relative_to(ROOT)}:{node.lineno}: {name}")
+    assert not violations, "\n".join(violations)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     AbsentComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,

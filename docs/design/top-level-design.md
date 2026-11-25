@@ -59,6 +59,16 @@ MCP contracts; [ADRs](../adr/README.md) record decisions and subsequent amendmen
                     ▼                    └──────────────────────────────┘
    providers: local-libvirt │ fault-inject (test opt-in) │ remote-libvirt (configured)
 
+     worker ── Resource-bound ProviderRuntime.authority
+                 ├── local-libvirt: mutual TLS over Unix request socket ──┐
+                 └── remote-libvirt: mutual TLS over IPv4 TCP ────────────┤
+                                                                         ▼
+                                   ┌─────────────────────────────────────────┐
+                                   │ Optional provider-side authority host   │
+                                   │ Provider mutations; per-System journals │
+                                   └───────────────────┬─────────────────────┘
+                                                       └──▶ Postgres authority evidence
+
      Kubernetes API ── bounded Pod authority ──▶ lifecycle-witness ──▶ Postgres
        (Kubernetes-only)                                worker-incarnation state
      worker init ────── mTLS credential broker ────────────▲
@@ -67,6 +77,18 @@ MCP contracts; [ADRs](../adr/README.md) record decisions and subsequent amendmen
 
 This is the live topology. A future UI may introduce another protocol only after its public
 surface is designed and implemented; it is not part of the current ingress contract.
+
+The external-boot authority host is an optional provider-side service, deployed through
+[`kdive-external-boot-authority.service`](../../deploy/systemd/system/kdive-external-boot-authority.service)
+with `python -m kdive external-boot-authority-host`. Configured local-libvirt requests use its
+mutual-TLS Unix request socket; configured remote-libvirt requests use the optional mutual-TLS
+IPv4 TCP listener, which requires both an address and a port. Workers reach it through the
+Resource-bound `ProviderRuntime.authority` capability; default local VM operation does not
+require this service. The host serves provider mutations only when explicitly provisioned,
+owns per-System file journals with Postgres-backed authority evidence, checks readiness before
+notifying systemd, rechecks readiness periodically, and closes its listeners on exit. The
+[host lifecycle](../../src/kdive/providers/external_boot_authority/host.py) and
+[transport](../../src/kdive/providers/external_boot_authority/transport.py) implement this boundary.
 
 - **MCP over streamable HTTP** — the service is remote and multi-user; agents
   authenticate with scoped, on-behalf-of tokens.

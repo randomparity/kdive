@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ActivationOwnership,
     BundleSource,
     ExternalBootMaterialization,
@@ -20,6 +19,7 @@ from kdive.providers.ports.external_boot import (
     RootSource,
     RootSpecV1,
 )
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name, render_domain_xml
 from kdive.providers.shared.guest_agent import AgentExecResult
 

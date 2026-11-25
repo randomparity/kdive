@@ -16,24 +16,13 @@ _log = logging.getLogger(__name__)
 KDIVE_METADATA_NS = "https://kdive.dev/libvirt/1"
 QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 
-_kdive_namespace_registered = False
-_qemu_namespace_registered = False
-
 
 def register_kdive_namespace() -> None:
-    global _kdive_namespace_registered
-    if _kdive_namespace_registered:
-        return
     ET.register_namespace("kdive", KDIVE_METADATA_NS)
-    _kdive_namespace_registered = True
 
 
 def register_qemu_namespace() -> None:
-    global _qemu_namespace_registered
-    if _qemu_namespace_registered:
-        return
     ET.register_namespace("qemu", QEMU_NS)
-    _qemu_namespace_registered = True
 
 
 def append_qcow2_backing_store(disk: ET.Element, base_path: str, *, relabel: bool) -> None:

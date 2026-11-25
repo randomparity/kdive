@@ -121,3 +121,16 @@ def test_resolve_anchor_edges() -> None:
     assert resolve_anchor(100, direction="backward", byte_offset=-1) == 100
     assert resolve_anchor(100, direction="backward", byte_offset=40) == 40
     assert resolve_anchor(100, direction="backward", byte_offset=999) == 100
+
+
+def test_backward_match_after_empty_first_line_has_no_restarting_cursor() -> None:
+    hit = jump_find(
+        b"\nBUG: second line",
+        terms=("BUG:",),
+        direction="backward",
+        byte_offset=0,
+        max_bytes=4096,
+    )
+    assert hit is not None
+    assert hit.match_line == 2
+    assert hit.next_offset is None

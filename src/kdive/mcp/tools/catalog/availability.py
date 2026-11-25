@@ -55,7 +55,6 @@ from kdive.security.authz.rbac import Role, projects_with_role
 from kdive.services.allocation.admission.affinity import resource_visible_to_projects
 from kdive.services.allocation.admission.core import (
     OCCUPYING_ALLOCATION_STATE_VALUES,
-    pcie_claim,
 )
 
 if TYPE_CHECKING:
@@ -95,17 +94,6 @@ class _ResourcesAvailabilityPayload(ToolPayload):
 class _HostAvailability(NamedTuple):
     response: ToolResponse
     fits: list[str]
-
-
-def _resolve_cap(resource: Resource) -> int | None:
-    """Read the per-host cap; return ``None`` for the invalid/missing case (non-raising).
-
-    The admission gate's ``_resolve_cap`` *raises* ``configuration_error`` here — i.e. it
-    treats the host as un-grantable. Availability must not crash the whole aggregate over one
-    bad row, so it degrades that host to ``None`` and the caller flags it non-schedulable
-    (never "fits now"), matching the admission verdict without raising.
-    """
-    return resource.capability_view.allocation_cap()
 
 
 def _size_ceiling(resource: Resource) -> tuple[int | None, int | None]:
@@ -180,7 +168,8 @@ async def _claims_by_resource(conn: AsyncConnection) -> dict[UUID, list[PCIeClai
     """Fleet-wide active PCIe claims grouped by host (one query, no per-host N+1).
 
     Unions the ``pcie_claim`` snapshots of every allocation in the shared non-terminal
-    occupancy set (the same set :func:`pcie_claim.active_claims` reads per host), keyed by
+    occupancy set read per host by
+    :func:`kdive.services.allocation.admission.pcie_claim.active_claims`, keyed by
     ``resource_id``. Availability is an unlocked read — unlike the in-lock claim path, it
     needs the whole fleet's occupancy in one round-trip, not one host under a held lock.
     """
@@ -203,7 +192,7 @@ async def _claims_by_resource(conn: AsyncConnection) -> dict[UUID, list[PCIeClai
 
 def _free_descriptors(resource: Resource, claims: list[PCIeClaim]) -> list[PCIeDescriptor]:
     """The host's static PCIe descriptors minus the BDFs held by active claims."""
-    descriptors = pcie_claim.descriptors_for(resource)
+    descriptors = resource.capability_view.pcie_descriptors()
     claimed = {claim["bdf"] for claim in claims}
     return [d for d in descriptors if d["bdf"] not in claimed]
 
@@ -260,9 +249,10 @@ def _host_item(
     descriptor list is included only when ``include_devices`` is set (summarize-by-default,
     ADR-0332), so the unfiltered view stays cheap.
     """
-    cap = _resolve_cap(resource)
+    cap = resource.capability_view.allocation_cap()
     ceiling = _size_ceiling(resource)
     has_ceiling = ceiling[0] is not None and ceiling[1] is not None
+    # A missing or invalid cap makes only this host unschedulable; the aggregate still succeeds.
     schedulable = (
         cap is not None
         and has_ceiling

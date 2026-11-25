@@ -47,6 +47,7 @@ from jsonschema import Draft202012Validator
 
 import kdive.cli.commands.mutations as mutations
 import kdive.cli.commands.reads as reads
+from kdive.cli import dispatch
 from kdive.cli.__main__ import build_parser
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
 from kdive.cli.commands.generated_args import GENERATED_ARG_PREFIX
@@ -54,6 +55,7 @@ from kdive.cli.commands.registry import HANDLER_OVERRIDES
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 from kdive.mcp.tools._common import DEFAULT_WAIT_S, MAX_WAIT_S
 from scripts.generate import gen_cli_verbs as gen
+from scripts.generate.offline_catalog import registry_tools
 
 _OK_ENVELOPE = {"object_id": "o", "status": "ok", "data": {}, "items": []}
 
@@ -92,7 +94,7 @@ class _FakeSession:
 @pytest.fixture(scope="module")
 def tool_schemas() -> dict[str, dict[str, Any]]:
     """The live registry's tool name -> JSON schema, built once for the module."""
-    return {tool.name: (tool.parameters or {}) for tool in gen._registry_tools()}
+    return {tool.name: (tool.parameters or {}) for tool in registry_tools()}
 
 
 @pytest.fixture(scope="module")
@@ -255,9 +257,7 @@ def _payloads_for(
         except SystemExit:
             continue
         with contextlib.suppress(SystemExit), contextlib.redirect_stdout(io.StringIO()):
-            from kdive.cli.commands import registry
-
-            asyncio.run(registry.run_verb(args))
+            asyncio.run(dispatch.run(args))
         captured += [(argv, name, payload) for name, payload in client.calls]
     return captured
 

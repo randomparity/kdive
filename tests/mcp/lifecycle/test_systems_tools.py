@@ -1987,7 +1987,7 @@ def test_force_teardown_ordinary_path_runs_admission_matrix(
             "denied", details={"reason": "test_denial"}, next_actions=[], project=project
         )
 
-    monkeypatch.setattr(systems_admin, "check_external_boot_admission", _deny)
+    monkeypatch.setattr(breakglass, "check_external_boot_admission", _deny)
 
     async def _run() -> None:
         async with systems_support.pool(migrated_url) as pool:
@@ -4344,3 +4344,66 @@ def test_a_system_admin_key_stored_without_an_argument_digest_conflicts(migrated
             assert await _job_count(pool) == 0
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("recycled", [False, True], ids=["fresh", "recycled"])
+@pytest.mark.parametrize(
+    "failure_category",
+    [None, ErrorCategory.INFRASTRUCTURE_FAILURE, ErrorCategory.CONFLICT],
+    ids=["runtime", "infrastructure", "conflict"],
+)
+def test_authority_teardown_recording_failure_rolls_back_job_and_audit(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    recycled: bool,
+    failure_category: ErrorCategory | None,
+) -> None:
+    async def fail_recording(*_args: object, **_kwargs: object) -> None:
+        if failure_category is None:
+            raise RuntimeError("teardown recording failed")
+        raise CategorizedError("teardown recording failed", category=failure_category)
+
+    async def run() -> None:
+        resolver = provider_resolver(external_boot=ExternalBootOperations())
+        requester = replace(ctx(Role.ADMIN), principal="user-2")
+        async with systems_support.pool(migrated_url) as pool:
+            if recycled:
+                system_id, job_id = await _authority_teardown_job(pool)
+                async with pool.connection() as conn:
+                    await conn.execute(
+                        "UPDATE jobs SET state='failed', attempt=max_attempts, "
+                        "error_category='conflict' WHERE id=%s",
+                        (job_id,),
+                    )
+            else:
+                system_id = await _seed_authority_teardown_system(pool)
+            key = f"{system_id}:teardown"
+            async with pool.connection() as conn:
+                before = await queue.get_by_dedup_key(conn, key)
+            before_document = before.model_dump() if before is not None else None
+            audits_before = await _recycle_audit_principals(pool, system_id)
+            monkeypatch.setattr(systems_admin, "record_envelope", fail_recording)
+            expected_error = RuntimeError if failure_category is None else CategorizedError
+
+            with pytest.raises(expected_error, match="teardown recording failed"):
+                await teardown_system(
+                    pool,
+                    requester,
+                    system_id,
+                    idempotency_key="record-fails",
+                    resolver=resolver,
+                )
+
+            async with pool.connection() as conn:
+                after = await queue.get_by_dedup_key(conn, key)
+                stored = await (
+                    await conn.execute(
+                        "SELECT count(*) FROM idempotency_keys WHERE principal=%s AND key=%s",
+                        (requester.principal, "record-fails"),
+                    )
+                ).fetchone()
+            assert (after.model_dump() if after is not None else None) == before_document
+            assert stored == (0,)
+            assert await _recycle_audit_principals(pool, system_id) == audits_before
+
+    asyncio.run(run())

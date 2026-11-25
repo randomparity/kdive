@@ -15,7 +15,9 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind, JobState
 from kdive.jobs import worker
 from kdive.jobs.handlers.connectivity import ssh_authorize
@@ -28,11 +30,31 @@ from kdive.jobs.handlers.connectivity.ssh_authorize import (
 from kdive.jobs.handlers.connectivity.ssh_reachable import ReachResult
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.ports.handles import SystemHandle
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.system_bootstrap_key import ensure_system_bootstrap_key
 
 _NOW = datetime(2025, 1, 1)
 _KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 agent@host"
+
+
+@pytest.fixture
+def system_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supply the DB metadata boundary only for database-free connector/probe cases."""
+
+    async def get(_conn: object, system_id: UUID) -> System:
+        return System(
+            id=system_id,
+            created_at=_NOW,
+            updated_at=_NOW,
+            allocation_id=uuid4(),
+            state=SystemState.READY,
+            provisioning_profile={},
+            principal="user",
+            project="proj",
+        )
+
+    monkeypatch.setattr(ssh_authorize.SYSTEMS, "get", get)
 
 
 async def _reachable(_host: str, _port: int) -> ReachResult:
@@ -90,7 +112,9 @@ def _authority_resolver() -> MagicMock:
         resolve_ssh_endpoint=invisible,
         ssh_connect=lambda _host, _port: True,
     )
-    binding = SimpleNamespace(runtime=SimpleNamespace(connector=connector))
+    binding = SimpleNamespace(
+        runtime=SimpleNamespace(connector=connector, system_handle=libvirt_system_handle)
+    )
     resolver = MagicMock()
     resolver.binding_for_system = AsyncMock(return_value=binding)
     return resolver
@@ -101,7 +125,9 @@ def _resolver(
 ) -> MagicMock:
     connector = MagicMock()
     connector.recorded_ssh_endpoint = MagicMock(return_value=endpoint, side_effect=raises)
-    binding = SimpleNamespace(runtime=SimpleNamespace(connector=connector))
+    binding = SimpleNamespace(
+        runtime=SimpleNamespace(connector=connector, system_handle=libvirt_system_handle)
+    )
     resolver = MagicMock()
     resolver.binding_for_system = AsyncMock(return_value=binding)
     return resolver
@@ -152,6 +178,7 @@ def test_argv_targets_the_given_host_for_remote_endpoint() -> None:
     assert "47101" in argv
 
 
+@pytest.mark.usefixtures("system_record")
 def test_handler_unprovisioned_is_configuration_error() -> None:
     resolver = _resolver(None)
     with pytest.raises(CategorizedError) as excinfo:
@@ -175,6 +202,7 @@ def test_handler_unprovisioned_is_configuration_error() -> None:
     assert "reprovision" not in str(excinfo.value).lower()
 
 
+@pytest.mark.usefixtures("system_record")
 def test_handler_propagates_absent_domain_distinctly() -> None:
     """A missing domain reaches the job verdict as its own reason (#2502, ADR-0658).
 
@@ -206,7 +234,7 @@ def test_handler_propagates_absent_domain_distinctly() -> None:
 
 # --- Fast-fail pre-flight (#1012): an unreachable guest fails in seconds, terminally, not a
 # multi-minute `running`. The pre-flight runs before the bootstrap-key load and the append retry,
-# so these need no DB — a MagicMock conn is never read. ---
+# so these supply only the System metadata read; key storage is never reached. ---
 
 
 @pytest.mark.parametrize(
@@ -216,6 +244,7 @@ def test_handler_propagates_absent_domain_distinctly() -> None:
         (ReachResult.missing_banner(), "banner_timeout", "no SSH banner"),
     ],
 )
+@pytest.mark.usefixtures("system_record")
 def test_handler_unreachable_preflight_fails_fast_terminal(
     result: ReachResult, reason: str, detail: str
 ) -> None:
@@ -258,6 +287,7 @@ def test_handler_unreachable_preflight_fails_fast_terminal(
     assert ssh_calls == []
 
 
+@pytest.mark.usefixtures("system_record")
 def test_handler_preflight_reason_survives_failure_context() -> None:
     # The acceptance shape: an unreachable pre-flight surfaces `failure_detail_reason` through the
     # same _failure_context path jobs.get/jobs.wait read — a named reason in seconds, not `running`.
@@ -406,17 +436,25 @@ def test_handler_authorizes_via_per_system_key_and_cleans_up_temp_key(
     assert key_path is not None and not key_path.exists()  # and cleaned up after
 
 
+@pytest.mark.parametrize("recorded_name", [None, "", "retained-provider-target"])
+@pytest.mark.parametrize("state", [SystemState.READY, SystemState.PAUSED])
 def test_handler_resolves_endpoint_by_domain_name(
-    migrated_url: str, authority_role_dsns: Callable[[str], str]
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    recorded_name: str | None,
+    state: SystemState,
 ) -> None:
-    # The connector resolves the live libvirt domain by name, so the handler must pass the
-    # System's `kdive-<id>` domain name, not the bare id (regression for the live-proof bug where
-    # the bare id raised VIR_ERR_NO_DOMAIN -> spurious ssh_not_provisioned).
+    # Ordinary jobs retain their provider lookup even if the System is no longer READY;
+    # a persisted custom name wins over the provider's unnamed-System fallback.
     async def _run() -> tuple[str, UUID]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
+                await conn.execute(
+                    "UPDATE systems SET domain_name = %s, state = %s WHERE id = %s",
+                    (recorded_name, state.value, system_id),
+                )
                 await ensure_system_bootstrap_key(conn, system_id, secret_registry=SecretRegistry())
                 job = _job_for(system_id)
                 resolver = _resolver(("127.0.0.1", 22022))
@@ -442,7 +480,7 @@ def test_handler_resolves_endpoint_by_domain_name(
                 return str(handle), system_id
 
     domain_name, system_id = asyncio.run(_run())
-    assert domain_name == f"kdive-{system_id}"
+    assert domain_name == (recorded_name or f"kdive-{system_id}")
 
 
 def test_handler_ssh_failure_propagates_transport_failure(
@@ -576,6 +614,7 @@ def test_attach_console_tail_best_effort_when_unavailable(monkeypatch: pytest.Mo
     assert "console_tail" not in exc.details
 
 
+@pytest.mark.usefixtures("system_record")
 def test_unreachable_preflight_failure_context_carries_console_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -640,3 +679,33 @@ def test_handler_no_bootstrap_key_is_configuration_error(
                 assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("carried", [False, True])
+def test_missing_authorization_system_keeps_its_existing_error(
+    monkeypatch: pytest.MonkeyPatch, carried: bool
+) -> None:
+    monkeypatch.setattr(ssh_authorize.SYSTEMS, "get", AsyncMock(return_value=None))
+    job = _job()
+    if carried:
+        job = job.model_copy(update={"payload": {**job.payload, "ssh_forward_port": 22022}})
+    resolver = _resolver(("127.0.0.1", 22022))
+    with pytest.raises(CategorizedError) as caught:
+        asyncio.run(
+            authorize_ssh_key_handler(
+                MagicMock(),
+                job,
+                resolver=resolver,
+                secret_registry=SecretRegistry(),
+            )
+        )
+    if carried:
+        assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+        assert caught.value.details == {"reason": "system_not_ready"}
+    else:
+        assert caught.value.category is ErrorCategory.NOT_FOUND
+        assert caught.value.details == {
+            "object_kind": "system",
+            "object_id": job.payload["system_id"],
+        }
+    resolver.binding_for_system.assert_not_awaited()

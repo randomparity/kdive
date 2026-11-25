@@ -481,7 +481,7 @@ def test_publish_uses_generic_generated_dispatch() -> None:
 #
 # Specialised handlers and generic descriptors use different execution paths, so asserting against
 # a hand-called handler cannot prove the generic command line works. These drive the real route:
-# argv -> build_parser() -> dispatch.run() -> registry.run_verb() -> invoke_generated_verb(),
+# argv -> build_parser() -> dispatch.run() -> invoke_generated_verb(), after registry selection,
 # with only the transport (`_session_factory`) faked.
 
 

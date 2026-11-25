@@ -18,10 +18,12 @@ sweep-level consequence — that the pass survives it and finishes its remaining
 
 from __future__ import annotations
 
+from io import BytesIO
 from typing import Any
 
 import pytest
 
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.store.objectstore import ObjectStore
 from tests.clock import STORE_MTIME
@@ -306,3 +308,137 @@ def test_list_prefix_requires_only_the_key_it_returns() -> None:
         keyless.list_prefix("p/")
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert excinfo.value.details["field"] == "Key"
+
+
+class _GetBody(BytesIO):
+    def __init__(self, *, close_error: BaseException | None = None) -> None:
+        super().__init__(b"payload")
+        self.close_error = close_error
+        self.close_attempts = 0
+        self.read_attempts = 0
+
+    def read(self, size: int | None = -1, /) -> bytes:
+        self.read_attempts += 1
+        return super().read(size)
+
+    def close(self) -> None:
+        self.close_attempts += 1
+        if self.close_error is not None:
+            raise self.close_error
+        super().close()
+
+
+class _CannedGetClient:
+    def __init__(self, reply: dict[str, object]) -> None:
+        self.reply = reply
+
+    def get_object(self, **_kwargs: object) -> dict[str, object]:
+        return self.reply
+
+
+def _read_get(store: ObjectStore, streaming: bool) -> tuple[bytes, Sensitivity, str]:
+    if streaming:
+        with store.get_artifact_stream("rotation-state", None) as artifact:
+            return artifact.reader.read(), artifact.sensitivity, artifact.retention_class
+    artifact = store.get_artifact("rotation-state", None)
+    return artifact.data, artifact.sensitivity, artifact.retention_class
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["buffered", "streamed"])
+@pytest.mark.parametrize(
+    ("reply", "field"),
+    [
+        ({}, "Metadata"),
+        ({"Metadata": None}, "Metadata"),
+        ({"Metadata": []}, "Metadata"),
+        ({"Metadata": "not-a-mapping"}, "Metadata"),
+        ({"Metadata": {}}, "sensitivity"),
+        ({"Metadata": {"sensitivity": None}}, "sensitivity"),
+        ({"Metadata": {"sensitivity": []}}, "sensitivity"),
+        ({"Metadata": {"sensitivity": 3}}, "sensitivity"),
+        ({"Metadata": {"sensitivity": "redacted"}}, "retention-class"),
+        ({"Metadata": {"sensitivity": "redacted", "retention-class": None}}, "retention-class"),
+        ({"Metadata": {"sensitivity": "redacted", "retention-class": []}}, "retention-class"),
+        ({"Metadata": {"sensitivity": "redacted", "retention-class": 3}}, "retention-class"),
+    ],
+)
+def test_get_rejects_malformed_metadata_without_reading_body(
+    streaming: bool, reply: dict[str, object], field: str
+) -> None:
+    body = _GetBody()
+    try:
+        store = ObjectStore(_CannedGetClient({**reply, "Body": body}), "the-bucket")
+        with pytest.raises(CategorizedError) as excinfo:
+            _read_get(store, streaming)
+        assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        assert excinfo.value.details == {
+            "op": "get_object",
+            "bucket": "the-bucket",
+            "key": "rotation-state",
+            "field": field,
+        }
+        assert field in str(excinfo.value)
+        assert body.read_attempts == 0
+        assert body.close_attempts == 1
+        assert body.closed
+    finally:
+        BytesIO.close(body)
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["buffered", "streamed"])
+@pytest.mark.parametrize("close_error_type", [RuntimeError, OSError, KeyboardInterrupt, SystemExit])
+def test_get_metadata_rejection_preserves_close_failure_precedence(
+    streaming: bool, close_error_type: type[BaseException]
+) -> None:
+    close_error = close_error_type("private-cleanup-diagnostic")
+    body = _GetBody(close_error=close_error)
+    store = ObjectStore(
+        _CannedGetClient(
+            {"Metadata": {"sensitivity": "invalid", "retention-class": "console"}, "Body": body}
+        ),
+        "the-bucket",
+    )
+    try:
+        if isinstance(close_error, Exception):
+            with pytest.raises(CategorizedError) as excinfo:
+                _read_get(store, streaming)
+            assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+            assert excinfo.value.details == {"key": "rotation-state"}
+            assert str(excinfo.value) == (
+                "artifact 'rotation-state' has absent or invalid sensitivity metadata"
+            )
+            assert excinfo.value.__notes__ == [
+                "object-store get_object rejected-body close failed: " + close_error_type.__name__
+            ]
+        else:
+            with pytest.raises(close_error_type) as control:
+                _read_get(store, streaming)
+            assert control.value is close_error
+        assert body.read_attempts == 0
+        assert body.close_attempts == 1
+    finally:
+        BytesIO.close(body)
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["buffered", "streamed"])
+@pytest.mark.parametrize("sensitivity", list(Sensitivity))
+@pytest.mark.parametrize("retention", ["console", ""])
+def test_get_preserves_valid_metadata(
+    streaming: bool, sensitivity: Sensitivity, retention: str
+) -> None:
+    body = _GetBody()
+    store = ObjectStore(
+        _CannedGetClient(
+            {
+                "Metadata": {"sensitivity": sensitivity.value, "retention-class": retention},
+                "Body": body,
+            }
+        ),
+        "the-bucket",
+    )
+    try:
+        assert _read_get(store, streaming) == (b"payload", sensitivity, retention)
+        assert body.read_attempts > 0
+        assert body.close_attempts == int(streaming)
+    finally:
+        BytesIO.close(body)

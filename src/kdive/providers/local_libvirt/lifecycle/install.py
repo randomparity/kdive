@@ -527,8 +527,6 @@ class LocalLibvirtInstaller:
         ``<qemu:commandline>`` passthrough, ADR-0210) would otherwise round-trip to an
         auto-assigned ``ns0:`` prefix that libvirt rejects — silently dropping the gdbstub.
         """
-        register_kdive_namespace()
-        register_qemu_namespace()
         try:
             domain = _lookup(conn, domain_name)
             current = domain.XMLDesc(0)
@@ -553,6 +551,8 @@ class LocalLibvirtInstaller:
         if initrd_path is not None:
             ET.SubElement(os_el, "initrd").text = str(initrd_path)
         ET.SubElement(os_el, "cmdline").text = cmdline
+        register_kdive_namespace()
+        register_qemu_namespace()
         return ET.tostring(root, encoding="unicode")
 
     @staticmethod

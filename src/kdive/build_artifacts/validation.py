@@ -1,4 +1,4 @@
-"""Provider-neutral validation for externally uploaded build artifacts."""
+"""Provider-neutral validation for uploaded build artifacts (ADR-0869)."""
 
 from __future__ import annotations
 
@@ -248,10 +248,15 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
             "Must be gzip specifically; a plain .tar, .tar.xz, or .tar.zst is rejected.",
             "List boot/vmlinuz before lib/modules: validation scans at most the first 128 MiB of "
             "decompressed output (a gzip-bomb guard), so the lib/modules header must be within it.",
-            "Finalization then scans the complete exact object version: at most 200000 headers, "
-            "8589934592 uncompressed regular-file bytes, and 536870912 boot/vmlinuz bytes. "
+            "Finalization scans the complete exact object version and validates gzip completion: "
+            f"at most {_EXTERNAL_BOOT_ARCHIVE_MAX_MEMBERS} inspected tar headers, "
+            f"{_EXTERNAL_BOOT_ARCHIVE_MAX_BYTES} total decoded bytes including framing, padding "
+            f"and trailing data, and {_EXTERNAL_BOOT_MEMBER_MAX_BYTES} boot/vmlinuz bytes. "
             "It rejects aliases, duplicate paths, unrelated members, unsafe links, and nodes "
             "other than directories, regular files, and contained relative symlinks.",
+            "Byte limits apply per exact uploaded kernel object version, with no reference clock. "
+            "Malformed or oversized bundles fail BUILD_FAILURE before publication; remove unneeded "
+            "content or padding, rebuild a valid gzip bundle, upload it and finalize again.",
         ),
     ),
     "vmlinux": ArtifactContract(
@@ -721,6 +726,20 @@ class _GuardedTarReader:
         self._pending_header = header
         return self.read(size)
 
+    def finish(self) -> None:
+        """Validate source EOF under the aggregate raw byte budget."""
+        while True:
+            remaining = _EXTERNAL_BOOT_ARCHIVE_MAX_BYTES - self._raw_bytes
+            if remaining < 0:
+                raise _build_failure(
+                    "kernel bundle exceeds the external-boot raw tar byte limit",
+                    max_bytes=_EXTERNAL_BOOT_ARCHIVE_MAX_BYTES,
+                )
+            chunk = self._source.read(min(_DECODE_CHUNK_BYTES, remaining + 1))
+            self._raw_bytes += len(chunk)
+            if not chunk:
+                return
+
 
 def _scan_external_boot_archive(
     store: ValidatorStore,
@@ -788,9 +807,8 @@ def _scan_external_boot_archive(
                 if entry is not None:
                     entries.append(entry)
                     module_members += 1
-        while guarded.read(_DECODE_CHUNK_BYTES):
-            pass
-    except (EOFError, OSError, tarfile.TarError) as exc:
+        guarded.finish()
+    except (EOFError, OSError, tarfile.TarError, zlib.error) as exc:
         raise _build_failure("kernel bundle is not a complete readable gzip tar") from exc
     finally:
         source.close()

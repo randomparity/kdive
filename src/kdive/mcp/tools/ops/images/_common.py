@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
@@ -9,6 +11,8 @@ from kdive.mcp.responses import ToolResponse
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
+
+_log = logging.getLogger(__name__)
 
 UPLOAD_TOOL = "images.upload"
 DELETE_TOOL = "images.delete"
@@ -41,19 +45,22 @@ async def audit_project_denial(
     project: str,
     args: dict[str, object],
 ) -> None:
-    """Record a project-role denial row on its own connection before any pool mutation."""
-    async with pool.connection() as conn, conn.transaction():
-        await audit.record_denial(
-            conn,
-            event=audit.DenialEvent(
-                principal=ctx.principal,
-                agent_session=ctx.agent_session,
-                project=project,
-                tool=tool,
-                args=args,
-                reason=f"{ctx.principal!r} may not {tool} in project {project!r}",
-            ),
-        )
+    """Best-effort project-denial audit; the denied operation remains denied on failure."""
+    try:
+        async with pool.connection() as conn, conn.transaction():
+            await audit.record_denial(
+                conn,
+                event=audit.DenialEvent(
+                    principal=ctx.principal,
+                    agent_session=ctx.agent_session,
+                    project=project,
+                    tool=tool,
+                    args=args,
+                    reason=f"{ctx.principal!r} may not {tool} in project {project!r}",
+                ),
+            )
+    except Exception:
+        _log.warning("failed to audit image role denial for tool %s", tool)
 
 
 async def record_admin_breakglass(

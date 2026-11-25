@@ -47,8 +47,11 @@ async def redacted_console_tail(
     """Return the last ``max_chars`` characters of the redacted console, or ``None``.
 
     Empty, absent, worker-unreadable, and failed reads all return ``None`` so console evidence
-    cannot mask the consumer's primary operation or failure.
+    cannot mask the consumer's primary operation or failure. Zero returns an empty tail for
+    available evidence; a negative character limit raises ``ValueError`` before reading.
     """
+    if max_chars < 0:
+        raise ValueError("max_chars must be nonnegative")
     try:
         redacted = await read_redacted_console(system_id, secret_registry)
     except Exception:
@@ -60,4 +63,6 @@ async def redacted_console_tail(
         return None
     if not redacted:
         return None
+    if max_chars == 0:
+        return ""
     return redacted.decode("utf-8", "replace")[-max_chars:]

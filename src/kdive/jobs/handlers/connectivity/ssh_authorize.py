@@ -18,13 +18,12 @@ from psycopg import AsyncConnection
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers.connectivity.ssh_reachable import ProbeFn, ReachResult, _real_probe
 from kdive.jobs.payloads import AuthorizeSshKeyPayload, load_payload
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.shared.console_evidence import redacted_console_tail
-from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.providers.shared.ssh_connect_retry import (
     SshFailureReason,
     SshRetryPolicy,
@@ -196,19 +195,24 @@ async def _attach_console_tail(
         exc.details["console_tail"] = tail
 
 
-async def _require_ready(conn: AsyncConnection, system_id: UUID) -> None:
-    """Refuse a carried port once its System left ``ready``.
-
-    The domain read proves the domain exists; a stored port does not, and a torn-down System's
-    port can be reused by another System's forward (ADR-0811).
-    """
+async def _system_for_authorization(
+    conn: AsyncConnection, system_id: UUID, *, require_ready: bool
+) -> System:
+    """Load the operation identity; carried ports also require a live READY System."""
     system = await SYSTEMS.get(conn, system_id)
-    if system is None or system.state is not SystemState.READY:
+    if require_ready and (system is None or system.state is not SystemState.READY):
         raise CategorizedError(
             "system is no longer ready; cannot authorize a key over its reported SSH forward",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "system_not_ready"},
         )
+    if system is None:
+        raise CategorizedError(
+            f"system {system_id} was not found",
+            category=ErrorCategory.NOT_FOUND,
+            details={"object_kind": "system", "object_id": str(system_id)},
+        )
+    return system
 
 
 async def authorize_ssh_key_handler(
@@ -242,11 +246,13 @@ async def authorize_ssh_key_handler(
     """
     payload = load_payload(job, AuthorizeSshKeyPayload)
     system_id = UUID(payload.system_id)
-    if payload.ssh_forward_port is not None:
-        await _require_ready(conn, system_id)
+    system = await _system_for_authorization(
+        conn, system_id, require_ready=payload.ssh_forward_port is not None
+    )
     binding = await resolver.binding_for_system(conn, system_id)
     endpoint = binding.runtime.connector.recorded_ssh_endpoint(
-        SystemHandle(domain_name_for(system_id)), ssh_forward_port=payload.ssh_forward_port
+        binding.runtime.system_handle(system.id, system.domain_name),
+        ssh_forward_port=payload.ssh_forward_port,
     )
     if endpoint is None:
         # The local-libvirt forward is always rendered now (ADR-0281, #937); a None endpoint means

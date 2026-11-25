@@ -26,6 +26,7 @@ from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.middleware.server_fault import SERVER_FAULT_DETAIL, ServerFaultMiddleware
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools._common import encode_ts_uuid_cursor
 from kdive.mcp.tools.catalog import resources as catalog_resources_tools
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import release_failure
 from kdive.mcp.tools.ops.resources import host_ops as resources_tools
@@ -42,8 +43,10 @@ from kdive.providers.remote_libvirt.resource_details import (
     StagedVolumeProbe,
     project_resource_details,
 )
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.allocation.release import ReleaseOutcome
+from tests.clock import STORE_MTIME
 from tests.mcp.json_data import data_sequence, json_mapping
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
@@ -95,6 +98,7 @@ async def _list_resources(
 def _resolver_with_staged_projector(probe: StagedVolumeProbe) -> ProviderResolver:
     unused_port = cast(Any, object())
     runtime = ProviderRuntime(
+        system_handle=libvirt_system_handle,
         profile_policy=unused_port,
         provisioner=unused_port,
         installer=unused_port,
@@ -259,6 +263,7 @@ def _descriptor_runtime(
 ) -> ProviderRuntime:
     unused_port = cast(Any, object())
     return ProviderRuntime(
+        system_handle=libvirt_system_handle,
         profile_policy=unused_port,
         provisioner=unused_port,
         installer=unused_port,
@@ -525,6 +530,7 @@ def _resolver_with_rebound_staged_probe(
 
     def _runtime(probe: StagedVolumeProbe) -> ProviderRuntime:
         return ProviderRuntime(
+            system_handle=libvirt_system_handle,
             profile_policy=unused_port,
             provisioner=unused_port,
             installer=unused_port,
@@ -1550,15 +1556,19 @@ def test_drain_unknown_mode_rejected(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_list_paginates_with_cursor(migrated_url: str) -> None:
+@pytest.mark.parametrize(
+    "first_cursor", [pytest.param(None, id="none"), pytest.param("", id="empty")]
+)
+def test_list_paginates_with_cursor(migrated_url: str, first_cursor: str | None) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             for i in range(5):
                 await _register(pool, host_uri=f"qemu:///h{i}")
             seen: list[str] = []
-            cursor: str | None = None
+            cursor: str | None = first_cursor
             for _ in range(10):
                 page = await _list_resources(pool, CTX, kind=None, limit=2, cursor=cursor)
+                assert page.status == "ok"
                 seen.extend(item.object_id for item in page.items)
                 if not page.data["truncated"]:
                     break
@@ -1597,11 +1607,19 @@ def test_list_truncated_count_is_over_visible_rows(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        pytest.param("!!!", id="malformed"),
+        pytest.param(encode_ts_uuid_cursor("jobs.list", STORE_MTIME, UUID(int=1)), id="wrong-tool"),
+    ],
+)
+def test_list_malformed_cursor_is_config_error(migrated_url: str, cursor: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await _list_resources(pool, CTX, kind=None, cursor="!!!")
+            resp = await _list_resources(pool, CTX, kind=None, cursor=cursor)
         assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert resp.object_id == "resources"
         assert resp.data["reason"] == "invalid_cursor"
 

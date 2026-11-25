@@ -29,6 +29,10 @@ from kdive.providers.ports.debug import (
 from kdive.providers.shared.debug_common.gdbmi.commands.disassembly import (
     MAX_DISASSEMBLE_INSTRUCTIONS,
 )
+from kdive.providers.shared.debug_common.gdbmi.commands.modules import (
+    _module_build_id,
+    _module_eval_optional,
+)
 from kdive.providers.shared.debug_common.gdbmi.commands.stack import MAX_BACKTRACE_FRAMES
 from kdive.providers.shared.debug_common.gdbmi.commands.threads import MAX_THREADS
 from kdive.providers.shared.debug_common.gdbmi.core import engine as gdbmi
@@ -2813,7 +2817,7 @@ def test_module_optional_eval_preserves_infrastructure_failure(
 
     monkeypatch.setattr(engine, "execute_mi_command", fail)
     with pytest.raises(CategorizedError) as excinfo:
-        engine._module_eval_optional(attachment, "modules.next")
+        _module_eval_optional(engine, attachment, "modules.next")
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
@@ -2821,8 +2825,10 @@ def test_module_build_id_preserves_memory_transport_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     engine = _engine()
-    attachment = _attachment(_FakeMiController(), tmp_path)
-    monkeypatch.setattr(engine, "_module_eval_optional", lambda _attachment, _expr: 0x2010)
+    controller = _FakeMiController(
+        responses={_de("&((struct module *)0x2000)->build_id"): _eval("0x2010")}
+    )
+    attachment = _attachment(controller, tmp_path)
 
     def fail_memory(_attachment: GdbMiAttachment, *, address: int, byte_count: int) -> bytes:
         del address, byte_count
@@ -2830,7 +2836,7 @@ def test_module_build_id_preserves_memory_transport_failure(
 
     monkeypatch.setattr(engine, "read_memory", fail_memory)
     with pytest.raises(CategorizedError) as excinfo:
-        engine._module_build_id(attachment, 0x2000)
+        _module_build_id(engine, attachment, 0x2000)
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
 
 

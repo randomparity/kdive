@@ -1,20 +1,24 @@
-"""Connection-scoped operations over the durable ``jobs`` queue (ADR-0018, ADR-0533, ADR-0550).
+"""Connection-scoped operations over the durable ``jobs`` queue.
+
+Implements ADR-0018, ADR-0533, ADR-0550 and ADR-0858.
 
 ``enqueue`` admits a job idempotently on ``dedup_key``; ``dequeue`` claims the oldest
 eligible job with ``FOR UPDATE SKIP LOCKED``, charging an attempt and reclaiming a
 lapsed lease; ``heartbeat`` renews a lease; ``complete`` and ``fail`` finalize a
 claimed job. Every worker write goes through a credential-bound database function
 that derives the active incarnation and fences the exact charged attempt. Each
-function wraps its statements in ``conn.transaction()`` so it self-commits on any
-connection, and all assume READ COMMITTED (psycopg's default).
+worker write uses ``conn.transaction()``; read helpers follow the caller's transaction
+context. All assume READ COMMITTED (psycopg's default).
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
+from typing import TypedDict
 from uuid import UUID
 
 from psycopg import AsyncConnection, sql
@@ -25,6 +29,7 @@ from pydantic import SecretStr
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import (
+    ACTIVE_JOB_KINDS,
     DEFAULT_JOB_DISPATCH_LANE,
     PLATFORM_INTERNAL_JOB_KINDS,
     RETIRED_JOB_KINDS,
@@ -34,11 +39,13 @@ from kdive.domain.operations.jobs import (
     JobKind,
     dispatch_lane_for_kind,
 )
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
+    DeadlineResult,
     ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthorityResultV1,
     ExternalBootAuthoritySuccessV1,
+    RecoveryAttemptResult,
 )
 from kdive.jobs.payloads import (
     ActivePayloadModel,
@@ -69,6 +76,18 @@ class JobRecyclePolicy(StrEnum):
     FAILED_OR_LAPSED_EXHAUSTED = "failed_or_lapsed_exhausted"
 
 
+# Running lease eligibility remains exclusively in enqueue's database-clock predicate.
+_RECYCLED_STATES: dict[JobRecyclePolicy, frozenset[JobState]] = {
+    JobRecyclePolicy.NEVER: frozenset(),
+    JobRecyclePolicy.FAILED: frozenset({JobState.FAILED}),
+    JobRecyclePolicy.TERMINAL: frozenset({JobState.FAILED, JobState.SUCCEEDED}),
+    JobRecyclePolicy.TERMINAL_OR_CANCELED: frozenset(
+        {JobState.FAILED, JobState.SUCCEEDED, JobState.CANCELED}
+    ),
+    JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED: frozenset({JobState.FAILED}),
+}
+
+
 class ExternalBootCommitStatus(StrEnum):
     """A non-applied authority-result outcome classified by the database transaction."""
 
@@ -76,6 +95,14 @@ class ExternalBootCommitStatus(StrEnum):
     OBSERVED_IDENTITY_STALE = "observed_identity_stale"
     RESERVATION_NOT_READY = "reservation_not_ready"
     AUTHORITY_SUPERSEDED = "authority_superseded"
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalBootCommitOutcome:
+    """A committed/classified row and its same-claim continuation decision (ADR-0853)."""
+
+    job: Job
+    continue_claim: bool
 
 
 async def enqueue(
@@ -155,11 +182,7 @@ async def enqueue_with_status(
         )
         inserted = await cur.fetchone() is not None
         if recycle is not JobRecyclePolicy.NEVER:
-            recyclable = [JobState.FAILED.value]
-            if recycle in (JobRecyclePolicy.TERMINAL, JobRecyclePolicy.TERMINAL_OR_CANCELED):
-                recyclable.append(JobState.SUCCEEDED.value)
-            if recycle is JobRecyclePolicy.TERMINAL_OR_CANCELED:
-                recyclable.append(JobState.CANCELED.value)
+            recyclable = [state.value for state in _RECYCLED_STATES[recycle]]
             await cur.execute(
                 "UPDATE jobs SET state = %s, payload = %s, "
                 "    attempt = CASE WHEN state = %s THEN attempt ELSE 0 END, "
@@ -212,6 +235,41 @@ async def get_by_dedup_key(conn: AsyncConnection, dedup_key: str) -> Job | None:
         await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
         row = await cur.fetchone()
     return None if row is None else Job.model_validate(row)
+
+
+async def dedup_replay(
+    conn: AsyncConnection,
+    dedup_key: str,
+    *,
+    recycle: JobRecyclePolicy = JobRecyclePolicy.NEVER,
+) -> Job | None:
+    """The job a repeat ``enqueue`` on ``dedup_key`` would return unchanged, else ``None``.
+
+    ``None`` means the call would commit fresh work — a new row, or a recycled terminal one.
+
+    This is what an unkeyed repeat call replays on. ``keyed_mutation`` short-circuits to
+    ``do_work()`` when ``idempotency_key is None``, so on that path there is no stored envelope
+    and the dedup key is the only replay there is. Sites that admit against the external-boot
+    matrix (ADR-0583) must consult this *before* their guard, or an activation that appeared
+    after the work was enqueued turns an agent's poll into a refusal while the job it is
+    polling stays queued and runs.
+
+    This observes the current row; a concurrent update may change a later enqueue outcome.
+
+    Pass the same ``recycle`` the site's own ``enqueue`` passes; the states are derived from it.
+
+    Raises:
+        ValueError: ``recycle`` depends on the database clock (``FAILED_OR_LAPSED_EXHAUSTED``).
+    """
+    if recycle is JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED:
+        raise ValueError(
+            f"recycle policy {recycle.value!r} is decided on the database clock at enqueue; "
+            "read the prior row with queue.get_by_dedup_key instead"
+        )
+    prior = await get_by_dedup_key(conn, dedup_key)
+    if prior is None or prior.state in _RECYCLED_STATES[recycle]:
+        return None
+    return prior
 
 
 async def dequeue(
@@ -328,7 +386,7 @@ async def commit_external_boot_authority_result(
     result: ExternalBootAuthorityResultV1,
     *,
     incarnation_credential: SecretStr,
-) -> Job | ExternalBootCommitStatus:
+) -> ExternalBootCommitOutcome | ExternalBootCommitStatus:
     """Commit an authority result or return its database-classified losing outcome."""
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -363,12 +421,24 @@ async def commit_external_boot_authority_result(
             await cur.execute("SELECT * FROM jobs WHERE id = %s", (job.id,))
             classified_row = await cur.fetchone()
             if classified_row is not None:
-                return Job.model_validate(classified_row)
+                return ExternalBootCommitOutcome(
+                    Job.model_validate(classified_row), continue_claim=False
+                )
         if status_row["status"] != "applied":
             return ExternalBootCommitStatus(status_row["status"])
         await cur.execute("SELECT * FROM jobs WHERE id = %s", (job.id,))
         row = await cur.fetchone()
-    return ExternalBootCommitStatus.SUPERSEDED if row is None else Job.model_validate(row)
+    if row is None:
+        return ExternalBootCommitStatus.SUPERSEDED
+    committed = Job.model_validate(row)
+    return ExternalBootCommitOutcome(
+        committed,
+        continue_claim=(
+            isinstance(result, ExternalBootAuthoritySuccessV1)
+            and isinstance(result.result, (DeadlineResult, RecoveryAttemptResult))
+            and committed.state is JobState.RUNNING
+        ),
+    )
 
 
 async def complete_external_boot(
@@ -377,7 +447,7 @@ async def complete_external_boot(
     result: ExternalBootAuthoritySuccessV1,
     *,
     incarnation_credential: SecretStr,
-) -> Job | ExternalBootCommitStatus:
+) -> ExternalBootCommitOutcome | ExternalBootCommitStatus:
     """Complete an external boot only through its exact authority binding."""
     return await commit_external_boot_authority_result(
         conn, job, result, incarnation_credential=incarnation_credential
@@ -392,9 +462,10 @@ async def fail_external_boot(
     incarnation_credential: SecretStr,
 ) -> Job | ExternalBootCommitStatus:
     """Fail or requeue an external boot only through its exact authority binding."""
-    return await commit_external_boot_authority_result(
+    committed = await commit_external_boot_authority_result(
         conn, job, result, incarnation_credential=incarnation_credential
     )
+    return committed.job if isinstance(committed, ExternalBootCommitOutcome) else committed
 
 
 async def record_external_boot_conflict(
@@ -607,6 +678,38 @@ async def queue_depth(conn: AsyncConnection) -> dict[str, int]:
         await cur.execute("SELECT state, count(*) FROM jobs GROUP BY state")
         rows = await cur.fetchall()
     return {str(state): int(count) for state, count in rows}
+
+
+class QueuedLaneBacklog(TypedDict):
+    """Persisted queued work in one dispatch lane."""
+
+    queued_count: int
+    oldest_queued_age_seconds: float | None
+
+
+async def queued_backlog_by_lane(conn: AsyncConnection) -> dict[str, QueuedLaneBacklog]:
+    """Return all queued rows by lane, independent of eligibility and worker coverage (ADR-0840).
+
+    Age is seconds from the oldest queued creation timestamp to database statement start.
+    Routed lanes with no queued rows are retained with zero count and null age.
+    """
+    lanes = {dispatch_lane_for_kind(kind) for kind in ACTIVE_JOB_KINDS}
+    backlog: dict[str, QueuedLaneBacklog] = {
+        lane: {"queued_count": 0, "oldest_queued_age_seconds": None} for lane in sorted(lanes)
+    }
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT dispatch_lane, COUNT(*), "
+            "EXTRACT(EPOCH FROM statement_timestamp() - MIN(created_at)) "
+            "FROM jobs WHERE state = 'queued' GROUP BY dispatch_lane ORDER BY dispatch_lane"
+        )
+        rows = await cur.fetchall()
+    for lane, count, age in rows:
+        backlog[str(lane)] = {
+            "queued_count": int(count),
+            "oldest_queued_age_seconds": float(age),
+        }
+    return backlog
 
 
 async def recent_jobs(

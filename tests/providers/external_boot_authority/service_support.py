@@ -20,6 +20,7 @@ from kdive.db.external_boot_authority_journal import (
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityAcknowledgementV1,
     AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
@@ -27,16 +28,13 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
+    AuthorityServiceError,
     AuthorityTakeoverRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    AuthorityServiceError,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 
 _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64

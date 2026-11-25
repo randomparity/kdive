@@ -17,7 +17,7 @@ import pytest
 from kdive.config.registry import Registry
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt import settings
-from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
     RecoveryMetadataStore,
     _open_private_directory,
 )

@@ -23,26 +23,24 @@ from psycopg import sql
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.mcp.tools.external_boot.recovery_requests import resolve_recovery_orphan
 from kdive.providers.external_boot_authority.journal import record_digest
 from kdive.providers.external_boot_authority.orphan import RecoveryOrphanAuthorityService
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityCleanupEvidenceContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
+    AuthorityServiceError,
     JournalPhase,
     JournalRecordV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    AuthorityServiceError,
-)
 from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 from tests.jobs.handlers.external_boot.seeding import insert_release_authority, seed_case

@@ -11,19 +11,17 @@ import pytest
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
-from kdive.providers.external_boot_authority.protocol import (
-    AuthorityMutationRequestV1,
-    AuthorityOperation,
-)
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    AuthorityServiceError,
-    ExternalBootAuthorityService,
-)
-from kdive.providers.remote_libvirt.external_boot_authority import (
+from kdive.providers.external_boot_authority.module_protocol import (
     RemoteModuleLifecycleRequestV1,
     RemoteModuleLifecycleResponseV1,
 )
+from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
+    AuthorityMutationRequestV1,
+    AuthorityOperation,
+    AuthorityServiceError,
+)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from tests.providers.external_boot_authority.service_support import (
     _DIGEST_A,
     _DIGEST_B,

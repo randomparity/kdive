@@ -26,7 +26,7 @@ from kdive.jobs.handlers.connectivity.ssh_reachable import (
     serialize_reach_verdict,
 )
 from kdive.providers.ports.handles import SystemHandle
-from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.providers.shared.runtime_paths import domain_name_for, libvirt_system_handle
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.clock import FrozenClock
 
@@ -198,7 +198,9 @@ def _resolver(
 ) -> MagicMock:
     connector = MagicMock()
     connector.recorded_ssh_endpoint = MagicMock(return_value=endpoint, side_effect=raises)
-    binding = SimpleNamespace(runtime=SimpleNamespace(connector=connector))
+    binding = SimpleNamespace(
+        runtime=SimpleNamespace(connector=connector, system_handle=libvirt_system_handle)
+    )
     resolver = MagicMock()
     resolver.binding_for_system = AsyncMock(return_value=binding)
     return resolver

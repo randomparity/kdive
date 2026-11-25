@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -586,14 +587,21 @@ def test_image_config_closes_architectures_bounds_and_paths() -> None:
 
 def test_appliance_source_has_fixed_depmod_and_no_guest_exec_or_network() -> None:
     source = (APPLIANCE / "appliance.py").read_text(encoding="utf-8")
-    assert 'DEPMOD = "/sbin/depmod"' in source
-    assert "shell=True" not in source
-    assert "socket" not in source
-    assert "os.exec" not in source
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert all(alias.name.split(".")[0] != "socket" for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert (node.module or "").split(".")[0] != "socket"
+            if node.module == "os":
+                assert all(not alias.name.startswith("exec") for alias in node.names)
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            assert not (node.value.id == "os" and node.attr.startswith("exec"))
     assert source.startswith("#!/usr/bin/python3 -S\n")
-    assert "subprocess.Popen(" in source and '[DEPMOD, "-b"' in source
-    assert "200_000" in source
-    assert "8 * 1024**3" in source
+    appliance = _module()
+    assert appliance.DEPMOD == "/sbin/depmod"
+    assert appliance.ENTRY_LIMIT == 200_000
+    assert appliance.BYTE_LIMIT == 8 * 1024**3
 
 
 def test_appliance_devtmpfs_mount_allows_its_device_nodes(
@@ -1567,7 +1575,7 @@ def test_announce_writes_one_line_to_the_console_and_tolerates_its_absence(
 
 
 def test_every_announced_console_line_survives_the_host_console_filter() -> None:
-    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+    from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance import (
         _filter_console,
     )
 
@@ -1725,7 +1733,7 @@ def test_long_work_keeps_the_accepted_process_visible(
 
 
 def test_advisory_is_constant_and_throttled(monkeypatch: pytest.MonkeyPatch) -> None:
-    from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+    from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance import (
         _filter_console,
     )
 

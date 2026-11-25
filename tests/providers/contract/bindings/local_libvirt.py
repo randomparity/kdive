@@ -11,19 +11,11 @@ from __future__ import annotations
 import hashlib
 from typing import cast
 
-from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
-    LocalExternalBootIO,
-    LocalLibvirtExternalBoot,
-    LocalObservedState,
-    LocalRecoveryMetadataV1,
-    RecoveryPhase,
-)
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     AbsentComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
-    ExternalBootPorts,
     KernelIdentity,
     MaterializedArtifacts,
     OpaqueProviderRef,
@@ -31,6 +23,18 @@ from kdive.providers.ports.external_boot import (
     ProviderStateIdentity,
     RecoveryPoint,
     RunningKernelObservation,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    LocalExternalBootIO,
+    LocalLibvirtExternalBoot,
+    LocalObservedState,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
+    LocalRecoveryMetadataV1,
+    RecoveryPhase,
+)
+from kdive.providers.ports.external_boot import (
+    ExternalBootPorts,
 )
 from tests.providers.contract.plans import ACTIVATION_ID, RELEASE, sample_plan_data
 from tests.providers.contract.registry import ProviderBinding

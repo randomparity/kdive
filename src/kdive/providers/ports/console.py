@@ -1,16 +1,9 @@
-"""Console provider contracts (ADR-0235, ADR-0429).
+"""Provider-owned console reads and boot snapshots (ADR-0235, ADR-0429, ADR-0864).
 
-A provider that captures its console out-of-band (e.g. remote-libvirt streams it to S3 parts from
-a reconciler-resident collector) exposes a ``ConsoleSnapshotter`` so the boot worker can persist an
-immutable per-Run console artifact at boot completion. Providers whose console is a worker-local
-file (local-libvirt) leave the runtime's ``console_snapshotter`` unset and the boot handler
-captures the file directly.
-
-Separately, :class:`RemoteConsoleReader` is the strict-read counterpart used by a tool whose whole
-output is the console it just read on a *running* System (post-SysRq capture, crash watch). Its
-freshness contract differs from the boot-window ``ConsoleSnapshotter`` (ADR-0429): it reports
-whether the console is being pumped, while the boot handler owns the snapshotter's best-effort
-failure boundary.
+Local files and remote object-store parts use explicit collaborators. Missing ports never imply
+a storage backend. Snapshot registration is best-effort at the boot caller, except for a typed
+fatal source-read failure. Control callers redact buffers before persistence or response, retaining
+local raw byte offsets; remote readers additionally redact at their own seam (ADR-0429).
 """
 
 from __future__ import annotations
@@ -18,8 +11,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple, Protocol
 from uuid import UUID
 
+from kdive.domain.errors import CategorizedError
+
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
+
+
+class ConsoleSnapshotReadError(CategorizedError):
+    """Fatal console-source read failure, distinct from best-effort snapshot registration."""
 
 
 class ConsoleSnapshot(NamedTuple):
@@ -58,25 +57,21 @@ class ConsoleSnapshotter(Protocol):
         history. The artifact row is written on ``conn`` so it commits atomically with the boot
         step. Returns ``None`` when no console bytes are available for the window yet. A part-store
         or database failure propagates to the boot handler, which owns the best-effort boundary so
-        console capture cannot fail the boot.
+        registration cannot fail the boot. ConsoleSnapshotReadError identifies a fatal source
+        read and preserves its categorized operator remediation instead of degrading to no data.
         """
         ...
 
 
 class ConsoleWindowRead(NamedTuple):
-    """Redacted console bytes read over a part-index window on a running System, with freshness.
+    """Internal console buffer and provider-specific cursor/freshness, never a safe-output type.
 
-    Unlike :class:`ConsoleSnapshot` (a persisted per-Run artifact), this is a transient read for a
-    live tool. The fields carry the freshness signal the boot snapshotter cannot:
-
-    - ``data``: the redacted console bytes assembled from parts with index ``>= start_index``.
-    - ``next_index``: the cursor a poller passes as ``start_index`` on its next read to receive
-      only newer parts (the highest part index seen ``+ 1``, or the requested ``start_index`` when
-      the window is empty, so a poll never rewinds).
-    - ``pumped``: whether a console-hosting leader is currently pumping this System's console. When
-      ``False`` the console source is un-pumped/unreachable, so empty ``data`` means "could not be
-      read", **not** "the kernel printed nothing". When ``True``, empty ``data`` is a genuinely
-      silent console.
+    Control consumers must redact ``data`` before publishing or persisting it. Local data remains
+    raw so capture byte offsets retain their meaning; remote data is also redacted by its reader.
+    Remote ``next_index`` is the highest observed part index plus one, or the requested index for
+    an empty window. Local reads are cumulative: start/next index is always zero. ``pumped`` is
+    true after a successful local read, or when the remote console-hosting leader is alive. False
+    means an un-pumped source, rather than a silent console; each control caller owns that policy.
     """
 
     data: bytes
@@ -84,30 +79,22 @@ class ConsoleWindowRead(NamedTuple):
     pumped: bool
 
 
-class RemoteConsoleReader(Protocol):
-    """Read a running System's console over a part-index window (ADR-0429).
+class ConsoleReader(Protocol):
+    """Read a running System's console through its provider (ADR-0429, ADR-0864).
 
-    The strict-read counterpart to :class:`ConsoleSnapshotter`, for a tool whose entire output is
-    the console it just read. Its contract differs deliberately:
-
-    - **Freshness.** Reads the object-store parts as of the call and reports ``pumped`` so the
-      caller can tell an un-pumped/unreachable console from a genuinely silent one — a distinction
-      the boot snapshotter cannot make (it returns ``None`` for both).
-    - **Errors.** Propagates a part-store or database read failure. Unlike a boot snapshot, the
-      caller has no best-effort boundary because the read itself is the tool's result; an empty
-      result must never masquerade as a successful read of a silent console.
-    - **Redaction.** The returned bytes pass the redactor at the seam, upholding the
-      mandatory-redaction invariant regardless of how the underlying parts were produced.
+    Propagate source/database failures; do not return an empty successful result for failed I/O.
+    A missing local log retains the existing empty-file behavior. Control consumers own final
+    redaction and freshness policy; remote readers also re-redact assembled parts at their seam.
     """
 
     async def read_window(
         self, conn: AsyncConnection, system_id: UUID, start_index: int = 0
     ) -> ConsoleWindowRead:
-        """Read redacted console bytes for ``system_id`` over the part-index window.
+        """Read console bytes and freshness; consumers must redact before output.
 
-        Assembles parts with index ``>= start_index`` into redacted bytes and reports whether a
-        console-hosting leader is pumping the System (``pumped``) plus a ``next_index`` cursor for a
-        subsequent poll. Propagates a store/database read failure rather than returning empty, so a
-        caller can distinguish "could not read" from a silent console.
+        Remote reads assemble parts at indices >= ``start_index`` and report a next-part cursor.
+        Local reads accept only zero and return the cumulative raw file with next index zero;
+        a nonzero local index raises ValueError, recoverable by requesting zero. Read failures
+        propagate. Neither errors nor an un-pumped source imply a silent successful console.
         """
         ...

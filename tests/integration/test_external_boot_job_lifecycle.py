@@ -34,9 +34,9 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.handlers.external_boot.router import route_marked
@@ -46,19 +46,18 @@ from kdive.jobs.worker import Worker
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.external_boot.payloads import build_external_boot_payload
 from tests.integration.external_boot_support import (
     CREDENTIAL,
     PreparingProvider,
@@ -117,6 +116,14 @@ class _VehicleExecutor:
         return AuthorityObservationV1(
             observation_id=uuid4(), category=category, composite_state="sha256:" + "8" * 64
         )
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        raise AssertionError("the claim-to-commit vehicle only activates or tears down")
+
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        raise AssertionError("the claim-to-commit vehicle does not re-enter recovery")
 
 
 def _registry(
@@ -297,6 +304,14 @@ class _PublicBootAuthority:
 
     async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         return await self._service.execute_mutation(self._peer, request)
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        return await self._service.execute_conflict_resolution(self._peer, request)
+
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return await self._service.observe_authority(self._peer, request)
 
 
 def _public_boot_registry(resolver: Any, authority: _PublicBootAuthority) -> HandlerRegistry:

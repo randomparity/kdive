@@ -11,21 +11,20 @@ from uuid import uuid4
 import pytest
 
 from kdive.domain.external_boot_activation import ExternalBootReleaseEvidenceV1
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityOperation,
+    AuthorityServiceError,
     AuthorityTeardownMutationRequestV1,
     JournalPhase,
     record_digest,
     teardown_proof_digest,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    AuthorityServiceError,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
@@ -33,14 +32,13 @@ from kdive.providers.external_boot_authority.teardown import (
     ProviderRecoveryRefusal,
     SystemTeardownSupersededError,
 )
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 from kdive.providers.remote_libvirt.external_boot_authority import (
     RemoteExternalBootAuthorityAdapter,
     RemoteExternalBootCoordinator,
-    RemoteModuleVolumePreparationStore,
     RemoteSystemTeardownInspection,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+from kdive.providers.remote_libvirt.external_boot_store import RemoteExternalBootStore
+from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
     RemoteModulePreparationExecutor,
 )
 from tests.providers.external_boot_authority.service_support import _Adapter, _Repository, _takeover
@@ -545,7 +543,7 @@ async def test_takeover_recovers_a_generation_that_never_began_over_an_older_rec
     )
     repository = _TeardownRepository(peer, first)
     (tmp_path / "provider").mkdir(mode=0o700)
-    store = RemoteModuleVolumePreparationStore(tmp_path / "provider")
+    store = RemoteExternalBootStore(tmp_path / "provider")
     host = _RemoteTeardownHost()
     adapter = _DiesBeforeBegin(
         RemoteExternalBootCoordinator(cast(Any, host), store, lambda: 300.0),

@@ -14,9 +14,9 @@ import pytest
 from pydantic import ValidationError
 
 import kdive.config as config
+from kdive.domain.external_boot_values import RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
-from kdive.providers.ports.external_boot import RootSpecV1
 from kdive.providers.system_authority.composition import (
     build_local_authority_system_provider,
     validate_authority_system_installation,

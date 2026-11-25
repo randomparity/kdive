@@ -1,11 +1,4 @@
-"""Tests for the admission-side PCIe resolve/claim helpers (ADR-0068, #162).
-
-These exercise the pure-logic seams the in-lock claim composes: reading + validating a
-host's static descriptors from ``capabilities``, deriving the occupancy set from the
-host's non-terminal allocations' claims, and resolving a requested spec union to distinct
-free devices with the config-vs-capacity split. Real Postgres for ``active_claims`` (it
-queries allocations); the rest is in-memory.
-"""
+"""Active PCIe occupancy from non-terminal allocations (ADR-0068), using real Postgres."""
 
 from __future__ import annotations
 
@@ -22,7 +15,7 @@ from kdive.db.repositories import ALLOCATIONS, RESOURCES
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation
-from kdive.domain.pcie import PCIE_DEVICES_KEY, MatchOutcome, PCIeClaim, PCIeDescriptor
+from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim, PCIeDescriptor
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -31,9 +24,6 @@ _X710 = PCIeDescriptor(
 )
 _X710_B = PCIeDescriptor(
     bdf="0000:3b:00.1", vendor_id="8086", device_id="1572", class_code="020000", label="X710"
-)
-_GPU = PCIeDescriptor(
-    bdf="0000:65:00.0", vendor_id="10de", device_id="2204", class_code="030000", label="GPU"
 )
 
 
@@ -58,75 +48,6 @@ def _resource(devices: object) -> Resource:
         status=ResourceStatus.AVAILABLE,
         host_uri="qemu:///system",
     )
-
-
-# --- descriptors_for -------------------------------------------------------------------
-
-
-def test_descriptors_for_reads_well_formed_list() -> None:
-    out = pcie_claim.descriptors_for(_resource([dict(_X710), dict(_GPU)]))
-    assert [d["bdf"] for d in out] == ["0000:3b:00.0", "0000:65:00.0"]
-
-
-def test_descriptors_for_absent_key_is_empty() -> None:
-    res = _resource([])
-    res.capabilities.pop(PCIE_DEVICES_KEY)
-    assert pcie_claim.descriptors_for(res) == []
-
-
-def test_descriptors_for_skips_malformed_entries() -> None:
-    # A non-dict, a dict missing fields, and a dict with non-string fields are dropped;
-    # the host-derived list is untrusted, so one bad entry never blanks the inventory.
-    out = pcie_claim.descriptors_for(
-        _resource(
-            [
-                "not-a-dict",
-                {"bdf": "x", "vendor_id": "8086"},  # missing fields
-                {**dict(_X710), "vendor_id": 8086},  # non-string
-                dict(_X710),
-            ]
-        )
-    )
-    assert [d["bdf"] for d in out] == ["0000:3b:00.0"]
-
-
-def test_descriptors_for_non_list_is_empty() -> None:
-    assert pcie_claim.descriptors_for(_resource({"not": "a list"})) == []
-
-
-# --- resolve_union ---------------------------------------------------------------------
-
-
-def test_resolve_union_single_match() -> None:
-    out = pcie_claim.resolve_union(["8086:1572"], [_X710], claims=[])
-    assert out.outcome is MatchOutcome.MATCHED
-    assert [d["bdf"] for d in out.devices] == ["0000:3b:00.0"]
-
-
-def test_resolve_union_multiset_distinct() -> None:
-    out = pcie_claim.resolve_union(["8086:1572", "8086:1572"], [_X710, _X710_B], claims=[])
-    assert out.outcome is MatchOutcome.MATCHED
-    assert {d["bdf"] for d in out.devices} == {"0000:3b:00.0", "0000:3b:00.1"}
-
-
-def test_resolve_union_absent_card_is_config() -> None:
-    out = pcie_claim.resolve_union(["8086:1572"], [_GPU], claims=[])
-    assert out.outcome is MatchOutcome.CONFIG
-
-
-def test_resolve_union_all_busy_is_capacity() -> None:
-    claim = PCIeClaim(bdf="0000:3b:00.0", vendor_id="8086", device_id="1572")
-    out = pcie_claim.resolve_union(["8086:1572"], [_X710], claims=[claim])
-    assert out.outcome is MatchOutcome.CAPACITY
-
-
-def test_resolve_union_empty_specs_matches_no_devices() -> None:
-    out = pcie_claim.resolve_union([], [_X710], claims=[])
-    assert out.outcome is MatchOutcome.MATCHED
-    assert out.devices == []
-
-
-# --- active_claims ---------------------------------------------------------------------
 
 
 async def _seed_alloc(

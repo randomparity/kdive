@@ -1,6 +1,6 @@
 """Worker handler for the `watch_for_crash` job (ADR-0367, #984).
 
-Watches a ready local-libvirt guest's serial console for the boot-readiness crash signature
+Watches a ready System's provider console for the boot-readiness crash signature
 (``first_crash_signature``) until a clamped wall-clock deadline, returning on the first hit with a
 redacted matched slice, the matched signature, and elapsed-to-signal. The reproducer loop that
 provokes the crash stays the agent's own code over root SSH — this job supplies only what SSH
@@ -50,7 +50,6 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import WatchForCrashPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
-from kdive.providers.shared.runtime_paths import console_log_path, read_console_log
 from kdive.security import audit
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -174,12 +173,9 @@ def _observed_at() -> str:
 def _console_reader(
     conn: AsyncConnection, system_id: UUID, binding: ProviderBinding
 ) -> Callable[[], Awaitable[bytes]]:
-    """Pick the console source: the remote read seam when the provider exposes one, else the file.
+    """Use the provider's reader; a missing collaborator is unavailable (ADR-0864).
 
-    A provider whose console is a worker-local serial log (local-libvirt) reads the file directly;
-    remote-libvirt's console lives in reconciler-pumped S3 parts the worker cannot reach as a file,
-    so it uses the strict read seam (ADR-0429, #1431), which assembles the parts and returns the
-    redacted cumulative bytes. Crash-watch is a poll loop, so an un-pumped read is not fatal
+    Crash-watch is a poll loop, so an un-pumped read is not fatal
     (``pumped`` is not treated as an error here, unlike the one-shot SysRq capture): the loop
     returns the possibly-empty window and retries until the deadline, so a console that only starts
     being pumped mid-watch can still fire.
@@ -188,14 +184,17 @@ def _console_reader(
     if console is not None and console.reader_factory is not None:
         reader = console.reader_factory()
 
-        async def _read_remote() -> bytes:
+        async def _read() -> bytes:
             window = await reader.read_window(conn, system_id)
             return window.data
 
-        return _read_remote
+        return _read
 
-    log_path = console_log_path(system_id)
-    return lambda: asyncio.to_thread(read_console_log, log_path)
+    raise CategorizedError(
+        "provider has no console reader; configure a console collaborator",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"reason": "console_reader_unavailable"},
+    )
 
 
 async def watch_for_crash_handler(

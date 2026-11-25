@@ -2,7 +2,8 @@
 
 An absent inventory is a quiet no-op; it must not become an empty document that prunes configured
 rows. The file hash only avoids repeated parsing: reconciliation still runs every pass to repair
-database drift (ADR-0021). A malformed present file fails this repair without stopping siblings.
+database drift (ADR-0021). An unreadable or invalid file fails this repair without stopping
+siblings.
 """
 
 from __future__ import annotations
@@ -87,7 +88,7 @@ class InventoryReconcilePass:
             the file is absent — a quiet no-op).
 
         Raises:
-            InventoryError: The file is present but malformed/invalid (logged then re-raised
+            InventoryError: The file is unreadable/malformed/invalid (logged then re-raised
                 so the loop records this pass as failed without aborting siblings).
         """
         path = systems_toml_path()
@@ -108,7 +109,7 @@ class InventoryReconcilePass:
         """Return the parsed doc (from cache when the file is unchanged), or ``None`` if absent.
 
         Raises:
-            InventoryError: The file is present but unreadable/malformed/invalid.
+            InventoryError: The file is unreadable/malformed/invalid.
         """
         try:
             raw = path.read_bytes()
@@ -137,5 +138,5 @@ class InventoryReconcilePass:
         try:
             return load_inventory_optional(path)
         except InventoryError:
-            _log.warning("inventory: %s is present but malformed; pass failed this iteration", path)
+            _log.warning("inventory: cannot load %s; pass failed this iteration", path)
             raise

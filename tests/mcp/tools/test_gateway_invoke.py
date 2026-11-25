@@ -394,6 +394,47 @@ def test_bad_arguments_without_visibility_omits_accepted_fields() -> None:
     assert "tools.search" in content["suggested_next_actions"]
 
 
+@pytest.mark.parametrize("context", ["viewer", "no-grant", "missing-context"])
+def test_binding_recovery_matches_schema_visibility(
+    context: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if context != "missing-context":
+        monkeypatch.setattr(
+            gateway, "current_context", _viewer_ctx if context == "viewer" else _no_grant_ctx
+        )
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> tuple[Any, Any]:
+        invocation = await app.call_tool("tools.invoke", {"name": "runs.get", "arguments": {}})
+        discovery = None
+        if context != "missing-context":
+            discovery = await app.call_tool(
+                "tools.search", {"names": ["runs.get"], "detail": "full"}
+            )
+        return invocation, discovery
+
+    invocation, discovery = asyncio.run(_run())
+    content = _call_result(invocation)
+    assert content["error_category"] == "configuration_error"
+    assert content["suggested_next_actions"] == ["tools.search"]
+    detail = content["detail"]
+    exact_lookup = 'tools.search(names=["runs.get"], detail="full")'
+    if context == "viewer":
+        assert exact_lookup in detail
+        assert "run_id" in content["data"]["accepted_fields"]
+        matches = _call_result(discovery)["data"]["matches"]
+        assert [match["name"] for match in matches] == ["runs.get"]
+    else:
+        assert exact_lookup not in detail
+        assert "discover available tools with tools.search" in detail
+        assert content["data"] == {}
+        if discovery is not None:
+            data = _call_result(discovery)["data"]
+            assert data["matches"] == []
+            assert data["unknown_names"] == ["runs.get"]
+
+
 def test_bad_arguments_scope_denied_omits_accepted_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     """An authenticated caller with no project membership is also withheld the schema.
 

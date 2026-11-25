@@ -23,13 +23,11 @@ from kdive.jobs.handlers.external_boot.stranded import observe_stranded_activati
 from kdive.jobs.worker import _failure_context
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityStrandedObservationRequestV1,
     AuthorityStrandedObservationResponseV1,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.external_boot_authority.stranded import (
     StrandedAuthorityFacts,
     StrandedObservationRepository,

@@ -5,12 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 
-from kdive.providers.assembly import composition
 from kdive.providers.core.runtime import ProviderRuntime, ResourceBindingCapabilities
+from kdive.providers.fault_inject import composition
 
 
 def _base() -> ProviderRuntime:
-    return composition.build_fault_inject_runtime()
+    return composition.build_runtime()
 
 
 def test_a_provider_without_the_hook_ignores_capabilities() -> None:

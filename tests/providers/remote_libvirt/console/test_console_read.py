@@ -10,6 +10,7 @@ object store or a Postgres backend.
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -114,3 +115,91 @@ def test_non_utf8_console_bytes_do_not_raise() -> None:
     reader = _reader(FakeParts({0: b"\xff\xfe panic"}))
     result = asyncio.run(reader.read_window(_CONN, uuid4()))
     assert b"panic" in result.data
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("pumped", [False, True])
+def test_redaction_yields_after_probe_with_current_secrets(
+    monkeypatch: pytest.MonkeyPatch, cancel: bool, pumped: bool
+) -> None:
+    registry = SecretRegistry()
+    secret = "registered-during-probe"  # pragma: allowlist secret — synthetic redaction fixture
+    reader = _reader(FakeParts({2: b"\xff " + secret.encode() + b" console"}), registry=registry)
+    redact = reader._redact
+    release = threading.Event()
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        loop_thread = threading.get_ident()
+        entered = asyncio.Event()
+        probed = False
+
+        async def probe(conn: AsyncConnection, name: str) -> bool:
+            nonlocal probed
+            registry.register(secret, scope=None)
+            probed = True
+            return pumped
+
+        def slow_redact(data: bytes) -> bytes:
+            assert probed, "redaction must follow the leader probe"
+            assert threading.get_ident() != loop_thread, "redaction blocks the event loop"
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5), "event loop did not release the redactor"
+            return redact(data)
+
+        monkeypatch.setattr(reader, "_leader_probe", probe)
+        monkeypatch.setattr(reader, "_redact", slow_redact)
+        task = asyncio.create_task(reader.read_window(_CONN, uuid4(), start_index=2))
+        waiting = asyncio.create_task(entered.wait())
+        try:
+            done, _ = await asyncio.wait(
+                (task, waiting), timeout=5, return_when=asyncio.FIRST_COMPLETED
+            )
+            if task in done:
+                await task
+                pytest.fail("read finished before the event loop released redaction")
+            assert waiting in done, "redaction never started"
+            assert not task.done(), "event loop must advance during redaction"
+            if cancel:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        finally:
+            release.set()
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+            if not task.done():
+                await asyncio.wait_for(task, timeout=5)
+        if not cancel:
+            result = await task
+            assert result.data == "\ufffd [REDACTED] console".encode()
+            assert result.next_index == 3
+            assert result.pumped is pumped
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure_at", ["probe", "redaction"])
+def test_probe_and_redactor_failures_propagate(
+    monkeypatch: pytest.MonkeyPatch, failure_at: str
+) -> None:
+    reader = _reader(FakeParts({0: b"console"}))
+    error = RuntimeError(f"{failure_at} failed")
+    redacted = False
+
+    async def probe(conn: AsyncConnection, name: str) -> bool:
+        if failure_at == "probe":
+            raise error
+        return True
+
+    def redact(data: bytes) -> bytes:
+        nonlocal redacted
+        redacted = True
+        raise error
+
+    monkeypatch.setattr(reader, "_leader_probe", probe)
+    monkeypatch.setattr(reader, "_redact", redact)
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(reader.read_window(_CONN, uuid4()))
+    assert caught.value is error
+    assert redacted is (failure_at == "redaction")

@@ -29,7 +29,7 @@ from pydantic import (
 
 from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     Architecture,
     Digest,
     ExternalBootActivationBinding,
@@ -297,24 +297,6 @@ class RemoteExternalBootDefinition(BaseModel):
         return self
 
 
-def _round_trips_in_xml(value: str) -> bool:
-    """True when every character is XML 1.0 character data that reads back unchanged.
-
-    XML 1.0 forbids the C0 controls other than tab, newline, and carriage return, and forbids lone
-    surrogates and the two noncharacters; a parser also folds a carriage return into a newline, so
-    ``\\r`` is legal but does not round-trip. ``ET.tostring`` emits every one of them without
-    complaint, so a value carrying one composes a target XML that this module's own parse gate
-    then rejects as malformed — naming the domain XML rather than the value that spoiled it.
-    """
-    return all(
-        code in (0x09, 0x0A)
-        or 0x20 <= code <= 0xD7FF
-        or 0xE000 <= code <= 0xFFFD
-        or code >= 0x10000
-        for code in map(ord, value)
-    )
-
-
 def _require_artifact_path(value: str, *, system_id: UUID, what: str) -> str:
     """Shape-check a caller-resolved host path before it is written into the domain XML.
 
@@ -382,17 +364,14 @@ def prepare_target_definition(
             system_id=system_id,
             rule="initrd-presence",
         )
-    # Same shape, different gate: ExternalBootPlan admits a platform argument carrying an XML-
-    # illegal C0 control (it rejects only NUL and whitespace), which composes a target XML that
-    # parse_domain_xml then reports as a malformed *domain XML* — a retryable
-    # INFRASTRUCTURE_FAILURE with no rule and no system_id, so the caller re-dispatches and burns
-    # the readiness deadline re-deriving a definition that can never parse. Name it here instead.
-    if not _round_trips_in_xml(plan.cmdline):
+    try:
+        _definition.require_cmdline(plan.cmdline)
+    except _definition.LibvirtDefinitionError as exc:
         raise _conflict(
             "the plan command line carries a character XML cannot represent",
             system_id=system_id,
             rule="cmdline-xml",
-        )
+        ) from exc
     _require_artifact_path(kernel_path, system_id=system_id, what="kernel")
     if initrd_path is not None:
         _require_artifact_path(initrd_path, system_id=system_id, what="initrd")

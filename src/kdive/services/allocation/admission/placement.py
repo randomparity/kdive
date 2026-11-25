@@ -13,7 +13,7 @@ import kdive.services.allocation.admission.pcie_claim as pcie_claim
 from kdive.db.repositories import RESOURCES
 from kdive.domain.capacity.state import ResourceStatus
 from kdive.domain.catalog.resources import Resource, ResourceKind
-from kdive.domain.pcie import MatchOutcome
+from kdive.domain.pcie import MatchOutcome, resolve_multiset
 from kdive.services.allocation.admission.affinity import project_may_place, resource_supports_arch
 
 
@@ -53,9 +53,9 @@ async def resolve_placement_candidates(
     capacity_candidate: Resource | None = None
     specs = list(request.pcie_specs)
     for candidate in candidates:
-        descriptors = pcie_claim.descriptors_for(candidate)
+        descriptors = candidate.capability_view.pcie_descriptors()
         claims = await pcie_claim.active_claims(conn, candidate.id)
-        resolution = pcie_claim.resolve_union(specs, descriptors, claims=claims)
+        resolution = resolve_multiset(specs, descriptors, claims=claims)
         if resolution.outcome is MatchOutcome.MATCHED:
             resources.append(candidate)
         elif resolution.outcome is MatchOutcome.CAPACITY and capacity_candidate is None:

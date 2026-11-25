@@ -12,7 +12,7 @@ from uuid import uuid4
 import pytest
 
 from kdive.providers.external_boot_authority.orphan import RecoveryOrphanAuthorityService
-from kdive.providers.external_boot_authority.service import AuthorityServiceError
+from kdive.providers.external_boot_authority.protocol import AuthorityServiceError
 
 
 class _Cursor:

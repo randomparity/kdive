@@ -31,7 +31,7 @@ from kdive.config.core_settings import MAX_UPLOAD_BYTES
 from kdive.mcp import MCP_PROTOCOL_VERSION
 from kdive.mcp.tools._common import DEFAULT_WAIT_S
 from kdive.mcp.tools.catalog.artifacts.uploads import SINGLE_PUT_MAX_BYTES
-from scripts.generate.gen_tool_reference import _registry_tools
+from scripts.generate.offline_catalog import registry_tools
 
 _ROOT = Path(__file__).resolve().parents[2]
 _GIB = 1024 * 1024 * 1024
@@ -68,7 +68,7 @@ def _effective_single_put_ceiling() -> str:
 
 def _approx_tool_count() -> str:
     """The live tool count rounded to the nearest ten (the ``~`` prefix is doc context)."""
-    return str(round(len(_registry_tools()), -1))
+    return str(round(len(registry_tools()), -1))
 
 
 def bindings() -> list[Binding]:

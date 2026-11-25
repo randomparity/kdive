@@ -10,18 +10,34 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections.abc import Iterator
+from contextlib import AsyncExitStack
 from typing import Any, cast
+from uuid import UUID
 
 import psycopg
 import pytest
+from fastmcp import FastMCP
+from fastmcp.tools.function_tool import FunctionTool
 from psycopg.types.json import Jsonb
 
+import kdive.mcp.tools.lifecycle.runs.registrar as run_registrar
+import kdive.services.runs.complete_build as build_service
+from kdive.db import migrate
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.lifecycle.runs.complete_build import _IN_FLIGHT, CompleteBuildHandlers
+from kdive.mcp.tools.lifecycle.runs.complete_build import CompleteBuildHandlers
 from kdive.services.runs.steps import BuildStepResult
+
+# Reuse the existing fixture owner for the fresh peer database lifecycle.
+from tests.db.conftest import (
+    _cluster_global_role_lock,  # noqa: PLC2701
+    _drop_worker_db,  # noqa: PLC2701
+    _provision_worker_db,  # noqa: PLC2701
+    _server_url_without_db,  # noqa: PLC2701
+)
 from tests.mcp.complete_build_support import (
     FakeValidator,
     build_output,
@@ -29,6 +45,7 @@ from tests.mcp.complete_build_support import (
     pool,
     seed_external_run_with_manifest,
 )
+from tests.mcp.systems_support import provider_resolver
 
 _JOINED = "joined the in-flight finalize"
 _WAIT_S = 10.0
@@ -144,13 +161,13 @@ def test_cancelled_only_caller_still_commits(migrated_url: str) -> None:
             handlers = CompleteBuildHandlers(validate_complete_build=validator)
 
             await _cancelled_after_start(handlers, conn_pool, run_id, validator)
-            task = _IN_FLIGHT.get(run_id)
+            task = handlers._in_flight.get(run_id)
             validator.release.set()
             if task is not None:
                 await asyncio.wait({task}, timeout=_WAIT_S)
 
             assert await _run_state(conn_pool, run_id) is RunState.SUCCEEDED
-            assert run_id not in _IN_FLIGHT
+            assert run_id not in handlers._in_flight
 
     asyncio.run(_run())
 
@@ -203,7 +220,7 @@ def test_uncategorized_failure_reaches_joiners_and_next_call_retries(
 
             assert [str(o) for o in outcomes] == ["scan crashed"] * 2
             assert all(isinstance(o, RuntimeError) for o in outcomes)
-            assert run_id not in _IN_FLIGHT
+            assert run_id not in handlers._in_flight
             retry = await _call(handlers, conn_pool, run_id)
             assert retry.status == "succeeded"
             assert validator.calls == 2
@@ -227,7 +244,7 @@ def test_failure_with_every_caller_cancelled_logs_one_error(
             await _started(validator)
             joiner = _call(handlers, conn_pool, run_id)
             await _joined(caplog)
-            task = _IN_FLIGHT[run_id]
+            task = handlers._in_flight[run_id]
             await _cancelled(first)
             await _cancelled(joiner)
             validator.release.set()
@@ -332,19 +349,142 @@ def test_finished_task_in_the_map_starts_a_new_finalize(migrated_url: str) -> No
             run_id = await seed_external_run_with_manifest(conn_pool)
             validator = _BlockingValidator(run_id)
             validator.release.set()
+            handlers = CompleteBuildHandlers(validate_complete_build=validator)
             stale: asyncio.Future[ToolResponse] = asyncio.get_running_loop().create_future()
             stale.set_result(
                 ToolResponse.failure(str(run_id), ErrorCategory.CONFIGURATION_ERROR, detail="stale")
             )
-            _IN_FLIGHT[run_id] = cast("asyncio.Task[ToolResponse]", stale)
+            handlers._in_flight[run_id] = cast("asyncio.Task[ToolResponse]", stale)
             try:
-                result = await _start(
-                    CompleteBuildHandlers(validate_complete_build=validator), conn_pool, run_id
-                )
+                result = await _start(handlers, conn_pool, run_id)
             finally:
-                _IN_FLIGHT.pop(run_id, None)
+                handlers._in_flight.pop(run_id, None)
 
             assert result.status == "succeeded"
             assert validator.calls == 1
 
     asyncio.run(_run())
+
+
+@pytest.fixture(params=["shared", "separate"])
+def peer_build_database(
+    request: pytest.FixtureRequest, migrated_url: str, postgres_url: str
+) -> Iterator[str]:
+    if request.param == "shared":
+        yield migrated_url
+        return
+    server = _server_url_without_db(postgres_url)
+    peer_url, name = _provision_worker_db(server)
+    try:
+        with (
+            _cluster_global_role_lock(postgres_url),
+            psycopg.connect(peer_url, autocommit=True) as conn,
+        ):
+            migrate.apply_migrations(conn)
+        yield peer_url
+    finally:
+        _drop_worker_db(server, name)
+
+
+async def _registered_build_call(app: FastMCP, run_id: UUID) -> ToolResponse:
+    tools = await app.list_tools()
+    tool = next(tool for tool in tools if tool.name == "runs.complete_build")
+    assert isinstance(tool, FunctionTool)
+    response = await tool.fn(run_id=str(run_id), build_id=None, cmdline="c")
+    assert isinstance(response, ToolResponse)
+    return response
+
+
+def test_registered_apps_isolate_finalization_and_join_retries(
+    migrated_url: str,
+    peer_build_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+
+    async def run() -> None:
+        monkeypatch.setattr(build_service, "_EXTERNAL_BUILD_VALIDATION_SLOTS", asyncio.Semaphore(2))
+        async with AsyncExitStack() as stack:
+            first_pool = await stack.enter_async_context(pool(migrated_url))
+            peer_pool = (
+                first_pool
+                if peer_build_database == migrated_url
+                else await stack.enter_async_context(pool(peer_build_database))
+            )
+            run_id = await seed_external_run_with_manifest(first_pool)
+            if peer_pool is not first_pool:
+                assert await seed_external_run_with_manifest(peer_pool, run_id=run_id) == run_id
+            first_validator = _BlockingValidator(run_id)
+            peer_validator = _BlockingValidator(run_id)
+            created: list[CompleteBuildHandlers] = []
+
+            def handlers_factory() -> CompleteBuildHandlers:
+                validator = peer_validator if len(created) == 1 else first_validator
+                handlers = CompleteBuildHandlers(validate_complete_build=validator)
+                created.append(handlers)
+                return handlers
+
+            monkeypatch.setattr(run_registrar, "_complete_build_handlers", handlers_factory)
+            monkeypatch.setattr(run_registrar, "current_context", ctx)
+            first_app, peer_app = FastMCP("first-app"), FastMCP("peer-app")
+            run_registrar._register_runs_complete_build(first_app, first_pool, provider_resolver())
+            run_registrar._register_runs_complete_build(peer_app, peer_pool, provider_resolver())
+            calls: list[asyncio.Task[ToolResponse]] = []
+            try:
+                calls.append(asyncio.create_task(_registered_build_call(first_app, run_id)))
+                await _started(first_validator)
+                calls.append(asyncio.create_task(_registered_build_call(peer_app, run_id)))
+                calls.append(asyncio.create_task(_registered_build_call(first_app, run_id)))
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + _WAIT_S
+                while not (peer_validator.started.is_set() and _joined_count(caplog)):
+                    if not peer_validator.started.is_set():
+                        assert _joined_count(caplog) < 2, "another app joined the first app's task"
+                    else:
+                        assert len(created) == 2, "a retry constructed a request-local handler"
+                    assert loop.time() < deadline, (
+                        "independent validation or local join never started"
+                    )
+                    await asyncio.sleep(0.01)
+                assert _joined_count(caplog) == 1
+                assert len(created) == 2
+            finally:
+                first_validator.release.set()
+                peer_validator.release.set()
+                outcomes = await asyncio.gather(*calls, return_exceptions=True)
+            assert len(outcomes) == 3
+            assert all(
+                isinstance(item, ToolResponse) and item.status == "succeeded" for item in outcomes
+            )
+            assert outcomes[0] == outcomes[2]
+            assert first_validator.calls == peer_validator.calls == 1
+            assert all(run_id not in item._in_flight for item in created)
+            assert await _build_rows(first_pool, run_id) == 1
+            assert await _build_rows(peer_pool, run_id) == 1
+            assert await _run_state(first_pool, run_id) is RunState.SUCCEEDED
+            assert await _run_state(peer_pool, run_id) is RunState.SUCCEEDED
+
+    asyncio.run(run())
+
+
+def test_stale_callback_retains_a_newer_finalize() -> None:
+    async def run() -> None:
+        handlers = CompleteBuildHandlers()
+        uid = UUID(int=1)
+        response = ToolResponse.success(str(uid), "succeeded")
+        old = asyncio.create_task(asyncio.sleep(0, result=response))
+        newer = asyncio.create_task(asyncio.sleep(0, result=response))
+        try:
+            await old
+            handlers._in_flight[uid] = newer
+            handlers._forget(uid, old)
+            assert handlers._in_flight[uid] is newer
+            await newer
+            handlers._forget(uid, newer)
+            assert uid not in handlers._in_flight
+        finally:
+            await asyncio.gather(old, newer)
+            handlers._in_flight.pop(uid, None)
+
+    asyncio.run(run())

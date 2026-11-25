@@ -15,6 +15,7 @@ import stat
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import libvirt
@@ -613,7 +614,9 @@ def test_host_dump_over_ceiling_volume_is_configuration_error_before_download(
     tmp_path: Path,
 ) -> None:
     huge = FakeVolume(host_dump_volume_name(_SID), capacity=6 * 1024**3)
-    pool = FakePool(xml=_DIR_POOL_XML, volume=huge)
+    pool = _FailingStaleLookupPool(
+        xml=_DIR_POOL_XML, fresh=huge, error=libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL)
+    )
     conn = FakeHostDumpConn(pool=pool)
     store = FakeStore(head=None)
 
@@ -631,7 +634,9 @@ def test_host_dump_volume_info_failure_is_infrastructure_failure_before_download
     tmp_path: Path,
 ) -> None:
     vol = FakeInfoFailingVolume(host_dump_volume_name(_SID), capacity=4096)
-    pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
+    pool = _FailingStaleLookupPool(
+        xml=_DIR_POOL_XML, fresh=vol, error=libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL)
+    )
     conn = FakeHostDumpConn(pool=pool)
     store = FakeStore(head=None)
 
@@ -647,7 +652,7 @@ def test_host_dump_volume_info_failure_is_infrastructure_failure_before_download
         "error": "libvirtError",
     }
     assert not vol.download_called
-    assert vol.deleted
+    assert vol.delete_calls == 1
 
 
 def test_host_dump_missing_vmcoreinfo_build_id_is_configuration_error(tmp_path: Path) -> None:
@@ -816,3 +821,259 @@ def test_host_dump_spools_to_a_private_mode_file(tmp_path: Path) -> None:
     )
     # The spooled core (guest memory) must not be world/group readable.
     assert captured_mode["mode"] == 0o600
+
+
+def test_host_dump_stream_acquisition_is_categorized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kdive.providers.remote_libvirt.retrieve import host_dump_capture
+
+    original_mkdtemp = host_dump_capture.tempfile.mkdtemp
+    spools: list[Path] = []
+
+    def tracked_mkdtemp(*args: Any, **kwargs: Any) -> str:
+        is_spool = kwargs.get("prefix") == "kdive-host-dump-"
+        if is_spool:
+            kwargs["dir"] = tmp_path
+        created = original_mkdtemp(*args, **kwargs)
+        if is_spool:
+            spools.append(Path(created))
+        return created
+
+    monkeypatch.setattr(host_dump_capture.tempfile, "mkdtemp", tracked_mkdtemp)
+    volume = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    conn = FakeHostDumpConn(pool=FakePool(xml=_DIR_POOL_XML, volume=volume))
+    store = FakeStore(head=None)
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+    aborted: list[bool] = []
+
+    def fail_stream(flags: int = 0) -> FakeStream:
+        raise error
+
+    def abort() -> int:
+        aborted.append(True)
+        return 0
+
+    monkeypatch.setattr(conn, "newStream", fail_stream)
+    monkeypatch.setattr(conn.stream, "abort", abort)
+    with pytest.raises(CategorizedError) as caught:
+        _retrieve(conn, store, tmp_path).capture(
+            _SID,
+            _RID,
+            CaptureMethod.HOST_DUMP,
+            execution_id=UUID(int=1),
+        )
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"system_id": str(_SID)}
+    assert caught.value.__cause__ is error
+    assert not aborted and not volume.download_called
+    assert volume.deleted and not store.stream_requests
+    assert len(spools) == 1 and not spools[0].exists()
+
+
+def test_host_dump_stale_delete_failure_prevents_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    fresh = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = _StalePool(xml=_DIR_POOL_XML, stale=stale, fresh=fresh)
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+    error = libvirt_error(libvirt.VIR_ERR_OPERATION_DENIED)
+
+    def fail_delete(flags: int = 0) -> int:
+        raise error
+
+    monkeypatch.setattr(stale, "delete", fail_delete)
+    with pytest.raises(CategorizedError) as caught:
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.__cause__ is error
+    assert caught.value.details == {
+        "operation": "deleting stale host_dump volume",
+        "volume": host_dump_volume_name(_SID),
+        "error": "libvirtError",
+    }
+    assert not conn.domain.core_dumps and not fresh.download_called
+    assert not store.stream_requests and not pool.refreshed
+
+
+@pytest.fixture
+def host_dump_spools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    from kdive.providers.remote_libvirt.retrieve import host_dump_capture
+
+    native = host_dump_capture.tempfile.mkdtemp
+    spools: list[Path] = []
+
+    def track(*args: Any, **kwargs: Any) -> str:
+        is_spool = kwargs.get("prefix") == "kdive-host-dump-"
+        if is_spool:
+            kwargs["dir"] = tmp_path
+        result = native(*args, **kwargs)
+        if is_spool:
+            spools.append(Path(result))
+        return result
+
+    monkeypatch.setattr(host_dump_capture.tempfile, "mkdtemp", track)
+    return spools
+
+
+@pytest.mark.parametrize("failure", ["unlink", "rmdir", "volume", "combined"])
+@pytest.mark.parametrize("primary", ["success", "categorized", "store", "cancel"])
+def test_host_dump_expected_cleanup_failures_are_independent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    host_dump_spools: list[Path],
+    failure: str,
+    primary: str,
+) -> None:
+    volume = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = _FailingStaleLookupPool(
+        xml=_DIR_POOL_XML,
+        fresh=volume,
+        error=libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL),
+    )
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+    error: BaseException | None = {
+        "success": None,
+        "categorized": CategorizedError(
+            "extract failed", category=ErrorCategory.CONFIGURATION_ERROR
+        ),
+        "store": RuntimeError("store write failed"),
+        "cancel": KeyboardInterrupt(),
+    }[primary]
+    attempts: list[str] = []
+    native_unlink, native_rmdir, native_delete = Path.unlink, Path.rmdir, volume.delete
+
+    def unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path.parent in host_dump_spools:
+            attempts.append("unlink")
+            if failure in {"unlink", "combined"}:
+                raise PermissionError("private-cleanup-diagnostic")
+        native_unlink(path, *args, **kwargs)
+
+    def rmdir(path: Path) -> None:
+        if path in host_dump_spools:
+            attempts.append("rmdir")
+            if failure in {"rmdir", "combined"}:
+                raise PermissionError("private-cleanup-diagnostic")
+        native_rmdir(path)
+
+    def delete(flags: int = 0) -> int:
+        attempts.append("volume")
+        if failure in {"volume", "combined"}:
+            raise libvirt.libvirtError("private-cleanup-diagnostic")
+        return native_delete(flags)
+
+    def fail_write(request: ConditionalArtifactWriteRequest) -> StoredArtifact:
+        assert error is not None
+        raise error
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", unlink)
+        patch.setattr(Path, "rmdir", rmdir)
+        patch.setattr(volume, "delete", delete)
+        if primary in {"store", "cancel"}:
+            patch.setattr(store, "create_if_absent", fail_write)
+        retrieve = _retrieve(
+            conn,
+            store,
+            tmp_path,
+            build_id_error=error if isinstance(error, CategorizedError) else None,
+        )
+        if error is None:
+            assert (
+                retrieve.capture(
+                    _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+                ).vmcore_build_id
+                == "deadbeef"
+            )
+        else:
+            with pytest.raises(type(error)) as caught:
+                retrieve.capture(_SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1))
+            assert caught.value is error
+    assert attempts == ["unlink", "rmdir", "volume"]
+    warnings = [r for r in caplog.records if r.name.endswith("host_dump_capture")]
+    expected = {"unlink", "rmdir", "volume"} if failure == "combined" else {failure}
+    # unlink failure also leaves a non-empty directory; both failures must be visible.
+    if failure == "unlink":
+        expected.add("rmdir")
+    assert len(warnings) == len(expected)
+    assert "private-cleanup-diagnostic" not in caplog.text
+    assert all(r.exc_info is None for r in warnings)
+    assert len(host_dump_spools) == 1
+    for directory in host_dump_spools:
+        native_unlink(directory / host_dump_volume_name(_SID), missing_ok=True)
+        if directory.exists():
+            native_rmdir(directory)
+
+
+@pytest.mark.parametrize("fault", ["refresh", "mkdtemp", "stat"])
+def test_host_dump_preparation_io_failure_is_categorized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host_dump_spools: list[Path],
+    fault: str,
+) -> None:
+    from kdive.providers.remote_libvirt.retrieve import host_dump_capture
+
+    volume = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = _FailingStaleLookupPool(
+        xml=_DIR_POOL_XML, fresh=volume, error=libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL)
+    )
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+    error = (
+        libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR) if fault == "refresh" else PermissionError()
+    )
+    native_mkdtemp, native_stat = host_dump_capture.tempfile.mkdtemp, Path.stat
+
+    def refresh(flags: int = 0) -> int:
+        raise error
+
+    def mkdtemp(*args: Any, **kwargs: Any) -> str:
+        if kwargs.get("prefix") == "kdive-host-dump-":
+            raise error
+        return native_mkdtemp(*args, **kwargs)
+
+    def stat(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+        if path.parent in host_dump_spools and path.name == host_dump_volume_name(_SID):
+            raise error
+        return native_stat(path, *args, **kwargs)
+
+    if fault == "refresh":
+        monkeypatch.setattr(pool, "refresh", refresh)
+    elif fault == "mkdtemp":
+        monkeypatch.setattr(host_dump_capture.tempfile, "mkdtemp", mkdtemp)
+    else:
+        monkeypatch.setattr(Path, "stat", stat)
+    with pytest.raises(CategorizedError) as caught:
+        _retrieve(conn, store, tmp_path).capture(
+            _SID, _RID, CaptureMethod.HOST_DUMP, execution_id=UUID(int=1)
+        )
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.__cause__ is error
+    assert caught.value.details["system_id"] == str(_SID)
+    operation = {
+        "refresh": "refreshing host_dump storage pool",
+        "mkdtemp": "creating host_dump spool",
+        "stat": "reading host_dump spool size",
+    }[fault]
+    assert caught.value.details["operation"] == operation
+    if fault == "stat":
+        assert caught.value.details["path"] == str(
+            host_dump_spools[0] / host_dump_volume_name(_SID)
+        )
+        assert not host_dump_spools[0].exists()
+    else:
+        assert caught.value.details["volume"] == host_dump_volume_name(_SID)
+        assert not host_dump_spools
+    assert volume.delete_calls == (0 if fault == "refresh" else 1)
+    if fault == "refresh":
+        assert pool.looked_up == [host_dump_volume_name(_SID)]
+    assert not store.stream_requests

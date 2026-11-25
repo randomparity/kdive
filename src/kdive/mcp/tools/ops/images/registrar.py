@@ -141,6 +141,9 @@ def _register_images_delete(app: FastMCP, pool: AsyncConnectionPool) -> None:
         asynchronously by the leaked-object sweep, not at delete time. Returns ``conflict`` while
         publication is in progress or the row changes before deletion. A shared reference guard
         rejects deletion while the image is still referenced by a live system.
+
+        Requires ``operator`` on the owning project. Private IDs outside the caller's projects
+        receive the same ``configuration_error`` as unknown IDs.
         """
         return await delete(pool, current_context(), image_id=image_id)
 

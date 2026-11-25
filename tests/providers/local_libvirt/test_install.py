@@ -2483,3 +2483,45 @@ def test_persistent_staging_shares_system_and_run_but_not_separate_scratch(
     for path in (staging / str(_SYS), staging / str(_SYS) / str(_RUN)):
         assert stat.S_IMODE(path.stat().st_mode) == (0o777 & ~mask) | 0o070
     assert stat.S_IMODE((scratch / str(_SYS)).stat().st_mode) == 0o777 & ~mask
+
+
+def test_direct_kernel_render_restores_prefixes_after_domain_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kdive.providers.shared.libvirt_xml import (
+        KDIVE_METADATA_NS,
+        QEMU_NS,
+        recorded_gdb_port,
+        recorded_ssh_port,
+    )
+
+    monkeypatch.setattr(ET, "_namespace_map", vars(ET)["_namespace_map"].copy())
+    current = (
+        f'<domain xmlns:kdive="{KDIVE_METADATA_NS}" xmlns:qemu="{QEMU_NS}">'
+        f"<name>kdive-{_SYS}</name><metadata><kdive:system>{_SYS}</kdive:system></metadata>"
+        "<qemu:commandline><qemu:arg value='-gdb'/><qemu:arg value='tcp:127.0.0.1:4444'/>"
+        "<qemu:arg value='-netdev'/>"
+        "<qemu:arg value='user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:40022-:22'/>"
+        "</qemu:commandline></domain>"
+    )
+    domain = FakeDomain(domain_name=f"kdive-{_SYS}", system_id=str(_SYS))
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    installer = _install(conn=conn, staging_root=tmp_path)
+    for replacement in ("foreign", "another"):
+
+        def read_domain(_flags: int, *, replacement: str = replacement) -> str:
+            ET.register_namespace(f"{replacement}_metadata", KDIVE_METADATA_NS)
+            ET.register_namespace(f"{replacement}_qemu", QEMU_NS)
+            return current
+
+        monkeypatch.setattr(domain, "XMLDesc", read_domain)
+        installer.install(_request(initrd_ref=_INITRD_REF))
+        xml = conn.defined_xml[-1]
+        assert "<kdive:system>" in xml and "<qemu:commandline>" in xml
+        root = ET.fromstring(xml)
+        assert root.findtext(f"./metadata/{{{KDIVE_METADATA_NS}}}system") == str(_SYS)
+        assert recorded_gdb_port(xml) == 4444
+        assert recorded_ssh_port(xml) == 40022
+        kernel = root.findtext("os/kernel")
+        assert kernel is not None and Path(kernel).is_file()
+        assert root.findtext("os/cmdline") == _CMDLINE

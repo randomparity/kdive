@@ -45,6 +45,12 @@ A check that could not be run (a down dependency) reports an
 ``error`` distinctly — it is not a contract failure. ``with_egress`` adds the mutating
 probe (off by default; the provisioning is audited distinctly).
 
+The default report execution shares a 30-second budget measured from
+report start by the server's monotonic clock, including worker queue waits.
+Unfinished checks report ``error`` on expiry; retry ``ops.diagnostics`` after
+restoring readiness.
+A timed-out report does not cancel a queued or running worker diagnostic job.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `provider` | string (nullable) | no | Diagnose one exact enabled registered provider; omit for all enabled. Unknown or disabled targets return an audited diagnostic error. |
@@ -105,6 +111,13 @@ Cross-project queue depth and a bounded newest-first job page. Requires operator
 opaque `data.next_cursor` back as `request.cursor` to read the next page. A terminal
 page returns `data.truncated=false` and `data.next_cursor=null`. The depth fields
 always summarize the whole queue, independent of the page and state filters.
+
+`data.queued_by_lane` maps each dispatch lane to `queued_count` and
+`oldest_queued_age_seconds`. Counts cover persisted queued rows across all projects,
+independent of worker eligibility, state filters and pagination. Age is seconds since
+the oldest queued row's current `created_at`, measured at database statement start.
+Empty routed lanes have count 0 and age null; other persisted queued lanes also appear.
+These observations do not assert worker coverage, claimability or a lease deadline.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

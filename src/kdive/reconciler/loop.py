@@ -246,9 +246,21 @@ class _RepairSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class _RepairState:
+    """References to one runner's observations; configuration never owns them (ADR-0841)."""
+
+    external_boot_cursors: external_boot_repairs.RepairCursors
+    teardown_warnings: system_repairs.TeardownWarningHistory
+    system_repair_progress: system_repairs.SystemRepairProgress
+
+
+@dataclass(frozen=True, slots=True)
 class _RepairCatalogEntry:
     name: str
-    factory: Callable[[InfraReaper, ReconcileConfig, timedelta], _AnyRepairFn | None]
+    factory: Callable[
+        [InfraReaper, ReconcileConfig, timedelta, _RepairState],
+        _AnyRepairFn | None,
+    ]
     report_field: str | None = None
 
 
@@ -419,37 +431,55 @@ class ReconcileConfig:
 
 
 def _reconcile_inventory_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return _INVENTORY_PASS.make_repair(config.image_store)
 
 
 def _leaked_images_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return lambda conn: _repair_leaked_images(conn, config.image_store, image_publish_grace)
 
 
 def _dangling_images_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return lambda conn: _repair_dangling_images(conn, config.image_store, image_publish_grace)
 
 
 def _expired_private_images_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return lambda conn: _repair_expired_private_images(conn, config.image_store)
 
 
 def _abandoned_uploads_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return lambda conn: _repair_abandoned_uploads(conn, config.upload_store)
 
 
 def _leaked_upload_objects_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return lambda conn: _repair_leaked_upload_objects(
         conn, config.upload_store, _upload_orphan_grace(), _upload_window_ttl()
@@ -457,7 +487,10 @@ def _leaked_upload_objects_repair(
 
 
 def _report_artifacts_gc_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return lambda conn: _gc_report_artifacts(
         conn,
@@ -467,7 +500,10 @@ def _report_artifacts_gc_repair(
 
 
 def _investigation_artifacts_gc_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return lambda conn: _gc_investigation_artifacts(
         conn,
@@ -477,7 +513,10 @@ def _investigation_artifacts_gc_repair(
 
 
 def _expired_build_artifacts_gc_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return lambda conn: _gc_expired_build_artifacts(
         conn,
@@ -487,7 +526,10 @@ def _expired_build_artifacts_gc_repair(
 
 
 def _investigation_rootfs_reclaim_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return lambda conn: _sweep_investigation_rootfs_reclaim(
         conn, config.investigation_cleanup_grace
@@ -495,7 +537,10 @@ def _investigation_rootfs_reclaim_repair(
 
 
 def _expired_investigation_rootfs_reclaim_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return lambda conn: _sweep_expired_investigation_rootfs_reclaim(
         conn, config.investigation_rootfs_retention
@@ -503,7 +548,10 @@ def _expired_investigation_rootfs_reclaim_repair(
 
 
 def _unowned_investigation_rootfs_staging_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return lambda conn: _sweep_unowned_investigation_rootfs_staging(
         conn, config.investigation_rootfs_retention
@@ -511,7 +559,10 @@ def _unowned_investigation_rootfs_staging_repair(
 
 
 def _console_collectors_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     gate = config.system_object_hosting_gate
     if gate is None:
@@ -520,19 +571,28 @@ def _console_collectors_repair(
 
 
 def _local_system_object_versions_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return lambda conn: sweep_local_system_object_versions(conn, config.upload_store)
 
 
 def _system_artifact_rows_gc_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     return lambda conn: _gc_system_artifacts(conn, config.upload_store)
 
 
 def _remote_system_object_versions_repair(
-    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     gate = config.system_object_hosting_gate
     if gate is None:
@@ -541,10 +601,16 @@ def _remote_system_object_versions_repair(
 
 
 def _external_boot_repair(
-    lane: Literal["activation", "recovery", "release", "cleanup"],
-) -> Callable[[InfraReaper, ReconcileConfig, timedelta], _AnyRepairFn | None]:
+    lane: external_boot_repairs.RepairLane,
+) -> Callable[
+    [InfraReaper, ReconcileConfig, timedelta, _RepairState],
+    _AnyRepairFn | None,
+]:
     def factory(
-        _reaper: InfraReaper, config: ReconcileConfig, _grace: timedelta
+        _reaper: InfraReaper,
+        config: ReconcileConfig,
+        _grace: timedelta,
+        state: _RepairState,
     ) -> _AnyRepairFn | None:
         resolver = config.provider_resolver
         authority_instance = config.external_boot_authority_instance
@@ -555,13 +621,17 @@ def _external_boot_repair(
             lane=lane,
             resolver=resolver,
             authority_instance=authority_instance,
+            cursors=state.external_boot_cursors,
         )
 
     return factory
 
 
 def _vmcore_retention_repair(
-    _reaper: InfraReaper, reconcile_config: ReconcileConfig, _image_publish_grace: timedelta
+    _reaper: InfraReaper,
+    reconcile_config: ReconcileConfig,
+    _image_publish_grace: timedelta,
+    _state: _RepairState,
 ) -> _RepairFn | None:
     days = config.get(VMCORE_RETENTION_DAYS)
     if days is None:
@@ -572,12 +642,12 @@ def _vmcore_retention_repair(
 _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     _RepairCatalogEntry(
         "expired_allocations",
-        lambda _r, _c, _g: _sweep_expired_allocations,
+        lambda _r, _c, _g, _state: _sweep_expired_allocations,
         report_field="expired_allocations",
     ),
     _RepairCatalogEntry(
         "reaped_active_allocations",
-        lambda _r, c, _g: (
+        lambda _r, c, _g, _state: (
             lambda conn: _reap_orphaned_active_allocations(
                 conn, crashed_idle_grace=c.crashed_idle_grace
             )
@@ -586,44 +656,59 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     ),
     _RepairCatalogEntry(
         "promoted_allocations",
-        lambda _r, c, _g: lambda conn: _promote_pending(conn, c.admission_metrics),
+        lambda _r, c, _g, _state: lambda conn: _promote_pending(conn, c.admission_metrics),
         report_field="promoted_allocations",
     ),
     _RepairCatalogEntry(
         "queue_timeouts",
-        lambda _r, c, _g: _reap_queue_timeouts_for(c.queue_max_wait, c.admission_metrics),
+        lambda _r, c, _g, _state: _reap_queue_timeouts_for(c.queue_max_wait, c.admission_metrics),
         report_field="queue_timeouts",
     ),
     _RepairCatalogEntry(
         "orphaned_systems",
-        lambda _r, _c, _g: _repair_orphaned_systems,
+        lambda _r, _c, _g, _state: _repair_orphaned_systems,
         report_field="orphaned_systems",
     ),
     _RepairCatalogEntry(
         "abandoned_jobs",
-        lambda _r, _c, _g: _repair_abandoned_jobs,
+        lambda _r, _c, _g, _state: _repair_abandoned_jobs,
         report_field="abandoned_jobs",
     ),
     # After abandoned_jobs, which may dead-letter an orphan's teardown this pass (#2978). The count
     # is new warnings, one per System per failure; no report field.
     _RepairCatalogEntry(
-        "stranded_orphan_teardowns", lambda _r, _c, _g: _report_stranded_orphan_teardowns
+        "stranded_orphan_teardowns",
+        lambda _r, _c, _g, state: (
+            lambda conn: _report_stranded_orphan_teardowns(conn, warnings=state.teardown_warnings)
+        ),
     ),
     # Runs after abandoned_jobs, which dead-letters a lease-lapsed teardown job — and a teardown
     # job that is active or recently terminal is what defers this repair's candidate (ADR-0634,
     # #2326). No report field: the count reaches operators through repair_counts, as the
     # stalled-state repairs do.
     _RepairCatalogEntry(
-        "leaked_mutation_obligations", lambda _r, _c, _g: _repair_leaked_mutation_obligations
+        "leaked_mutation_obligations",
+        lambda _r, _c, _g, state: (
+            lambda conn: _repair_leaked_mutation_obligations(
+                conn, progress=state.system_repair_progress
+            )
+        ),
     ),
     # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted teardown job.
-    # A fenced System then gets one bounded replay while preserving operator cancellation.
+    # Replays stranded ordinary teardowns while preserving operator cancellation.
     _RepairCatalogEntry(
-        "stalled_tearing_down_systems", lambda _r, _c, _g: _repair_stalled_tearing_down_systems
+        "stalled_tearing_down_systems",
+        lambda _r, _c, _g, state: (
+            lambda conn: _repair_stalled_tearing_down_systems(
+                conn,
+                warnings=state.teardown_warnings,
+                progress=state.system_repair_progress,
+            )
+        ),
     ),
     _RepairCatalogEntry(
         "terminal_authority_system_attempts",
-        lambda _r, c, _g: (
+        lambda _r, c, _g, _state: (
             lambda conn: _repair_terminal_authority_system_attempts(conn, c.upload_store)
         ),
         report_field="terminal_authority_system_attempts",
@@ -650,39 +735,50 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     ),
     _RepairCatalogEntry(
         "module_volume_reap_jobs_enqueued",
-        lambda _r, _c, _g: _enqueue_remote_module_volume_reap,
+        lambda _r, _c, _g, _state: _enqueue_remote_module_volume_reap,
         report_field="module_volume_reap_jobs_enqueued",
     ),
     # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted force_crash job.
     _RepairCatalogEntry(
-        "stalled_crashing_systems", lambda _r, _c, _g: _repair_stalled_crashing_systems
+        "stalled_crashing_systems", lambda _r, _c, _g, _state: _repair_stalled_crashing_systems
     ),
     # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted restore/snapshot
     # job (ADR-0378): a stranded RESTORING System -> failed, a stranded creating snapshot -> failed.
     _RepairCatalogEntry(
-        "stalled_restoring_systems", lambda _r, _c, _g: _repair_stalled_restoring_systems
+        "stalled_restoring_systems", lambda _r, _c, _g, _state: _repair_stalled_restoring_systems
     ),
     # Also after `abandoned_jobs` (#2980): a stranded REPROVISIONING System -> failed once no
     # reprovision job can still write its disk.
     _RepairCatalogEntry(
         "stalled_reprovisioning_systems",
-        lambda _r, _c, _g: _repair_stalled_reprovisioning_systems,
+        lambda _r, _c, _g, state: (
+            lambda conn: _repair_stalled_reprovisioning_systems(
+                conn, progress=state.system_repair_progress
+            )
+        ),
     ),
     _RepairCatalogEntry(
-        "stalled_creating_snapshots", lambda _r, _c, _g: _repair_stalled_creating_snapshots
+        "stalled_creating_snapshots",
+        lambda _r, _c, _g, _state: _repair_stalled_creating_snapshots,
     ),
     # Also after `abandoned_jobs`: a plugging/unplugging device row with no active plug/un-plug
     # job -> failed, with no provider call (ADR-0823).
-    _RepairCatalogEntry("stalled_device_ops", lambda _r, _c, _g: _repair_stalled_device_ops),
-    _RepairCatalogEntry("console_rotations_enqueued", lambda _r, _c, _g: _sweep_console_rotation),
+    _RepairCatalogEntry(
+        "stalled_device_ops", lambda _r, _c, _g, _state: _repair_stalled_device_ops
+    ),
+    _RepairCatalogEntry(
+        "console_rotations_enqueued", lambda _r, _c, _g, _state: _sweep_console_rotation
+    ),
     _RepairCatalogEntry(
         "reaped_runtime_resources",
-        lambda _r, c, _g: lambda conn: _reap_expired_runtime_resources(conn, c.resource_probe),
+        lambda _r, c, _g, _state: (
+            lambda conn: _reap_expired_runtime_resources(conn, c.resource_probe)
+        ),
         report_field="reaped_runtime_resources",
     ),
     _RepairCatalogEntry(
         "dead_sessions",
-        lambda _r, c, _g: (
+        lambda _r, c, _g, _state: (
             lambda conn: _repair_dead_sessions(
                 conn,
                 c.debug_session_stale_after,
@@ -694,23 +790,23 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     ),
     _RepairCatalogEntry(
         "leaked_domains",
-        lambda r, _c, _g: lambda conn: _repair_leaked_domains(conn, r),
+        lambda r, _c, _g, _state: lambda conn: _repair_leaked_domains(conn, r),
         report_field="leaked_domains",
     ),
     _RepairCatalogEntry(
         "leaked_probe_guests",
-        lambda r, _c, _g: lambda conn: _repair_leaked_probe_guests(conn, r),
+        lambda r, _c, _g, _state: lambda conn: _repair_leaked_probe_guests(conn, r),
         report_field="leaked_probe_guests",
     ),
     _RepairCatalogEntry("vmcore_executions_retired_count", _vmcore_retention_repair),
     _RepairCatalogEntry(
         "idempotency_keys_gc_count",
-        lambda _r, c, _g: lambda conn: _gc_idempotency_keys(conn, c.idempotency_retention),
+        lambda _r, c, _g, _state: lambda conn: _gc_idempotency_keys(conn, c.idempotency_retention),
         report_field="idempotency_keys_gc_count",
     ),
     _RepairCatalogEntry(
         "reaped_dump_volumes",
-        lambda _r, c, _g: (
+        lambda _r, c, _g, _state: (
             lambda conn: _reap_orphaned_dump_volumes(
                 conn, c.dump_volume_reaper, c.dump_volume_grace, budget=c.lane_budget
             )
@@ -723,7 +819,7 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     # but the two share no state and either order would be correct.
     _RepairCatalogEntry(
         "reaped_captures",
-        lambda _r, c, _g: (
+        lambda _r, c, _g, _state: (
             lambda conn: _reap_orphaned_captures(
                 conn,
                 c.capture_reapers,
@@ -741,7 +837,7 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     # nothing and running late costs no correctness — unlike the ADR-0444 window reaper. The growth
     # is guaranteed rather than exceptional, because capture_handler's `except` releases no lease.
     # Placed ahead of the sweep for readability only; the two are independent by that same argument.
-    _RepairCatalogEntry("stale_write_leases", lambda _r, _c, _g: _reap_stale_write_leases),
+    _RepairCatalogEntry("stale_write_leases", lambda _r, _c, _g, _state: _reap_stale_write_leases),
     _RepairCatalogEntry(
         "abandoned_uploads", _abandoned_uploads_repair, report_field="abandoned_uploads"
     ),
@@ -815,10 +911,23 @@ def _repair_plan(
     reaper: InfraReaper,
     config: ReconcileConfig,
     image_publish_grace: timedelta,
+    external_boot_cursors: external_boot_repairs.RepairCursors | None = None,
+    teardown_warnings: system_repairs.TeardownWarningHistory | None = None,
+    stalled_teardown_progress: system_repairs.SystemRepairProgress | None = None,
 ) -> tuple[_RepairSpec, ...]:
+    cursors = {} if external_boot_cursors is None else external_boot_cursors
+    warnings = (
+        system_repairs.TeardownWarningHistory() if teardown_warnings is None else teardown_warnings
+    )
+    progress = (
+        system_repairs.SystemRepairProgress()
+        if stalled_teardown_progress is None
+        else stalled_teardown_progress
+    )
+    state = _RepairState(cursors, warnings, progress)
     repairs: list[_RepairSpec] = []
     for entry in _REPAIR_CATALOG:
-        repair = entry.factory(reaper, config, image_publish_grace)
+        repair = entry.factory(reaper, config, image_publish_grace, state)
         if repair is not None:
             repairs.append(_RepairSpec(entry.name, repair))
     return tuple(repairs)
@@ -854,11 +963,17 @@ async def reconcile_once(
     reaper: InfraReaper,
     *,
     config: ReconcileConfig,
+    external_boot_cursors: external_boot_repairs.RepairCursors | None = None,
+    teardown_warnings: system_repairs.TeardownWarningHistory | None = None,
+    stalled_teardown_progress: system_repairs.SystemRepairProgress | None = None,
 ) -> ReconcileReport:
     """Run the repairs once, each isolated, each on a fresh pooled connection.
 
     A repair that raises is logged, its name recorded in ``failures``, and the pass
     continues — one repair never starves the others. Returns the partial counts.
+    Repeat standalone callers may supply cursor/progress state and teardown warning history;
+    omitted state is one-shot. Reconciler owns and supplies independent observations
+    (ADR-0839, ADR-0841, ADR-0842, ADR-0852).
 
     The ``→expired`` allocation sweep runs **first** so that the allocations it moves to
     ``expired`` are seen as orphaning their System by :func:`_repair_orphaned_systems` in
@@ -879,6 +994,9 @@ async def reconcile_once(
             reaper=reaper,
             config=config,
             image_publish_grace=_image_publish_grace(),
+            external_boot_cursors=external_boot_cursors,
+            teardown_warnings=teardown_warnings,
+            stalled_teardown_progress=stalled_teardown_progress,
         ),
     )
 
@@ -971,6 +1089,9 @@ class Reconciler:
         self._pool = pool
         self._reaper = reaper
         self._config = config
+        self._external_boot_cursors: external_boot_repairs.RepairCursors = {}
+        self._teardown_warnings = system_repairs.TeardownWarningHistory()
+        self._system_repair_progress = system_repairs.SystemRepairProgress()
         self._heartbeat_tick = config.heartbeat_tick.total_seconds()
         self._telemetry = config.telemetry or ReconcilerTelemetry.disabled()
         self._fleet_telemetry = config.fleet_telemetry or FleetTelemetry.disabled()
@@ -981,6 +1102,9 @@ class Reconciler:
             self._pool,
             self._reaper,
             config=self._config,
+            external_boot_cursors=self._external_boot_cursors,
+            teardown_warnings=self._teardown_warnings,
+            stalled_teardown_progress=self._system_repair_progress,
         )
 
     async def run(self, stop: asyncio.Event) -> None:

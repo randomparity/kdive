@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ExternalBootMaterialization,
     ExternalBootPlan,
     MaterializedArtifacts,

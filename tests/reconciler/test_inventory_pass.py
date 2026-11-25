@@ -5,15 +5,17 @@ mutated pass code is never executed at import time via loop.py's module-level
 ``_INVENTORY_PASS = InventoryReconcilePass()`` singleton — which otherwise trips mutmut's
 trampoline hit-recorder on the frozen-importlib pseudo-filename and aborts the baseline.
 
-``reconcile_all`` and ``load_inventory_optional`` are stubbed so the pass's file-hash cache,
+Most tests stub ``reconcile_all`` and ``load_inventory_optional`` so the pass's file-hash cache,
 absent-file no-op, drift-repair-every-pass, OSError deferral, and CWD-shadow warn-once logic are
 exercised without a Postgres fixture. End-to-end DB coverage lives in
-``tests/integration/test_reconcile_inventory.py``.
+``tests/integration/test_reconcile_inventory.py``. The unreadable-file regression uses the real
+loader and filesystem to exercise the fallback boundary.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -263,3 +265,32 @@ def test_make_repair_forwards_conn_and_store(
 
     assert result == 1
     assert calls[0][0] is _CONN and calls[0][2] is store  # both forwarded unchanged
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses filesystem DAC permissions")
+def test_inaccessible_inventory_fails_the_pass_without_reconciling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    parent = tmp_path / "private"
+    parent.mkdir()
+    path = parent / "systems.toml"
+    path.write_text("schema_version = 2\n")
+    monkeypatch.setattr(inv, "systems_toml_path", lambda: path)
+    calls: list[Any] = []
+    _stub_reconcile_all(monkeypatch, ReconcileDiff(), calls)
+    parent.chmod(0)
+    try:
+        with (
+            caplog.at_level("WARNING", logger="kdive.reconciler.inventory"),
+            pytest.raises(InventoryError) as caught,
+        ):
+            asyncio.run(InventoryReconcilePass().run(_CONN, _store()))
+        assert caught.value.entry == str(path)
+        assert caught.value.field == "file"
+        assert isinstance(caught.value.__cause__, PermissionError)
+        assert calls == []
+        warnings = [record for record in caplog.records if "pass failed" in record.getMessage()]
+        assert len(warnings) == 1
+        assert str(path) in warnings[0].getMessage()
+    finally:
+        parent.chmod(0o700)

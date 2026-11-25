@@ -47,14 +47,19 @@ requires viewer. These operations return jobs; poll them rather than assuming im
 
 - `systems.plug_device` adds a `nic` or a new empty scratch `disk` (`size_gb` 1 to 32) to a READY
   System. It returns `status: running` with a `job_id` and a `device_id`; poll `jobs.wait`, then
-  read the result with `systems.list_devices`. A plug settles within 60 s of the job starting.
+  read the result with `systems.list_devices`. A plug has a 60 s observation window per attempt,
+  measured on the worker's monotonic clock from provider-step start; queue and System-lock wait
+  are excluded. A started mutation keeps its System lock until completion, so settlement can
+  be later than the observation deadline.
 - `systems.list_devices` reads the System's device rows (`plugging`, `attached`, `unplugging`,
   `failed`, `lost`) from the database. Compare `settle_deadline` with the response's
   `server_time`, not your own clock. The boot disk and SSH NIC are never listed.
-- `systems.unplug_device` gracefully removes an `attached`, `failed` or `lost` device within 30 s
-  of the job starting. A guest or HMC refusal returns the row to its prior state; a timeout marks
-  it `failed` and the device may still be in the guest. Repeat the call to clear a `failed` or
-  `lost` row.
+- `systems.unplug_device` gracefully removes an `attached`, `failed` or `lost` device with a 30 s
+  observation window under the same clock and scope. Started mutations, including disk absence
+  cleanup, finish before settlement. A known completed outcome is recorded; a pending outcome
+  at expiry marks the row `failed` and the device may still be in the guest. A guest or HMC
+  refusal returns the row to its prior state. Read `systems.list_devices`, then repeat unplug
+  to clear a `failed` or `lost` row.
 - `systems.force_unplug_device` is the admin-only, destructive variant: it removes an `attached`
   or `failed` device without waiting for the guest to release it, and can wedge or crash the
   guest. It needs the project `admin` role and a profile that lists `force_unplug_device` in its

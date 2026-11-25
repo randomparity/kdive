@@ -12,9 +12,11 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding
-from kdive.providers.external_boot_authority.protocol import AuthorityMutationRequestV1
+from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
+    AuthorityMutationRequestV1,
+)
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from tests.db.external_boot_authority_support import (
     _JOURNAL,
     _PLAN,

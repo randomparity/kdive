@@ -17,10 +17,13 @@ import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.repositories import SYSTEM_DEVICES
+from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.repositories import JOBS, SYSTEM_DEVICES, settle_device
 from kdive.domain.capacity.state import JobState, SystemDeviceState
 from kdive.domain.lifecycle.records import SystemDevice
 from kdive.domain.operations.jobs import JobKind
+from kdive.jobs import queue
+from kdive.jobs.payloads import Authorizing, UnplugDevicePayload
 from kdive.reconciler import loop
 from kdive.reconciler.repairs.systems import repair_stalled_device_ops
 from tests.conftest import _RoleDsns
@@ -250,3 +253,61 @@ def test_the_repair_is_registered_after_abandoned_jobs() -> None:
 
     assert "stalled_device_ops" in kinds
     assert kinds.index("abandoned_jobs") < kinds.index("stalled_device_ops")
+
+
+@pytest.mark.parametrize("kind", [JobKind.UNPLUG_DEVICE, JobKind.FORCE_UNPLUG_DEVICE])
+def test_stale_repair_selection_preserves_new_unplug_attempt(
+    migrated_url: str, authority_role_dsns: _RoleDsns, kind: JobKind
+) -> None:
+    async def main() -> None:
+        async with (
+            await connect(migrated_url) as holder,
+            await connect(authority_role_dsns("kdive_reconciler")) as repair,
+        ):
+            system_id = await seed_system(holder)
+            device_id = await _seed_device(holder, system_id, _UNPLUGGING)
+            task = None
+            try:
+                async with (
+                    holder.transaction(),
+                    advisory_xact_lock(holder, LockScope.SYSTEM, system_id),
+                ):
+                    task = asyncio.create_task(repair_stalled_device_ops(repair))
+                    async with asyncio.timeout(5):
+                        while True:
+                            assert not task.done(), "device repair did not wait for the System lock"
+                            cur = await holder.execute(
+                                "SELECT pg_blocking_pids(%s)", (repair.info.backend_pid,)
+                            )
+                            row = await cur.fetchone()
+                            assert row is not None
+                            if holder.info.backend_pid in row[0]:
+                                break
+                            await asyncio.sleep(0.01)
+                    await settle_device(
+                        holder, device_id, SystemDeviceState.FAILED, detail="old attempt ended"
+                    )
+                    await SYSTEM_DEVICES.update_state(holder, device_id, _UNPLUGGING)
+                    job = await queue.enqueue(
+                        holder,
+                        kind,
+                        UnplugDevicePayload(
+                            system_id=str(system_id),
+                            device_id=str(device_id),
+                            from_state=SystemDeviceState.FAILED,
+                        ),
+                        Authorizing(principal="p", agent_session=None, project="test"),
+                        f"retry:{device_id}",
+                        max_attempts=1,
+                    )
+                    current = await _row(holder, device_id)
+                assert await asyncio.wait_for(task, 5) == 0
+            finally:
+                if task is not None:
+                    if not task.done():
+                        task.cancel()
+                    await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+            assert await _row(holder, device_id) == current
+            assert await JOBS.get(holder, job.id) == job
+
+    asyncio.run(main())

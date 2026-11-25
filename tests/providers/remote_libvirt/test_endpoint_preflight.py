@@ -88,3 +88,21 @@ def test_blank_endpoint_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(CategorizedError) as ei:
         validate_guest_routable_endpoint()
     assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["http://[::1", "http://[invalid]", "storage.invalid:abc", "https://storage.invalid:65536"],
+)
+def test_malformed_endpoint_is_chained_configuration_error(
+    endpoint: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", endpoint)
+    with pytest.raises(CategorizedError) as excinfo:
+        validate_guest_routable_endpoint()
+    error = excinfo.value
+    assert error.category is ErrorCategory.CONFIGURATION_ERROR
+    assert isinstance(error.__cause__, ValueError)
+    assert error.details["env_var"] == "KDIVE_S3_ENDPOINT_URL"
+    assert error.details["configured_endpoint"] == endpoint
+    assert "KDIVE_S3_ENDPOINT_URL" in str(error.details["next_action"])

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from kdive.build_artifacts import validation as build_validation
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ArtifactSource,
     BundleSource,
     DebuginfoSource,

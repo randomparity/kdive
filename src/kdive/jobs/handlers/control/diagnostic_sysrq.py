@@ -33,7 +33,6 @@ from kdive.db.repositories import ARTIFACTS, SYSTEMS, ArtifactClaimConflict
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.domain.operations.sysrq import SysRqCommand
 from kdive.jobs.context import context_from_job as job_context_from_job
@@ -41,13 +40,8 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import SysRqPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports.console import RemoteConsoleReader
+from kdive.providers.ports.console import ConsoleReader
 from kdive.providers.ports.lifecycle import Controller
-from kdive.providers.shared.runtime_paths import (
-    console_log_path,
-    domain_name_for,
-    read_console_log,
-)
 from kdive.security import audit
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -82,7 +76,7 @@ prefix is synthesized from ``KBUILD_MODNAME`` at build time (ADR-0292, #952)."""
 
 @dataclass(frozen=True, slots=True)
 class CaptureResult:
-    """The redacted-input console slice and why the capture poll ended."""
+    """Captured console bytes and poll exit reason; the caller redacts before persistence."""
 
     raw: bytes
     exit_reason: str  # "stabilized" | "hit_bound" | "no_output" | "disabled"
@@ -142,15 +136,14 @@ class _Snapshot(NamedTuple):
     domain_name: str
     project: str
     controller: Controller
-    # The strict console read seam when the provider exposes one (remote-libvirt, ADR-0429/0433);
-    # ``None`` for a provider whose console is a worker-local file (local-libvirt).
-    reader: RemoteConsoleReader | None
+    # An absent collaborator is unavailable; it never selects worker-local storage.
+    reader: ConsoleReader | None
 
 
 def _console_reader(
-    conn: AsyncConnection, system_id: UUID, reader: RemoteConsoleReader | None
+    conn: AsyncConnection, system_id: UUID, reader: ConsoleReader | None
 ) -> Callable[[], Awaitable[bytes]]:
-    """Pick the console source: the remote read seam when present, else the worker-local log file.
+    """Read the provider console, rejecting an absent reader or an un-pumped source.
 
     Remote-libvirt's console lives in reconciler-pumped S3 parts the worker cannot reach as a file
     (ADR-0429). A SysRq capture is one-shot — the whole output is the dump it just triggered — so
@@ -159,9 +152,13 @@ def _console_reader(
     as "the kernel printed nothing". It raises so the handler fails with a ``configuration_error``.
     """
     if reader is None:
-        return lambda: asyncio.to_thread(read_console_log, console_log_path(system_id))
+        raise CategorizedError(
+            "provider has no console reader; configure a console collaborator",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"reason": "console_reader_unavailable"},
+        )
 
-    async def _read_remote() -> bytes:
+    async def _read() -> bytes:
         window = await reader.read_window(conn, system_id)
         if not window.pumped:
             raise CategorizedError(
@@ -171,11 +168,7 @@ def _console_reader(
             )
         return window.data
 
-    return _read_remote
-
-
-def _resolved_domain_name(system: System) -> str:
-    return system.domain_name or domain_name_for(system.id)
+    return _read
 
 
 def _changed_state_error(system_id: UUID) -> CategorizedError:
@@ -216,7 +209,7 @@ async def _snapshot(
             else None
         )
         return _Snapshot(
-            domain_name=_resolved_domain_name(system),
+            domain_name=binding.runtime.system_handle(system.id, system.domain_name),
             project=system.project,
             controller=binding.runtime.controller,
             reader=reader,

@@ -54,6 +54,7 @@ from kdive.domain.catalog.resource_capabilities import (
     resolve_accel_emulator,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import Architecture
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
 from kdive.images.drgn_support import DrgnVersion
 from kdive.images.families import family_for
@@ -129,7 +130,6 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.customization_boot import (
 )
 from kdive.providers.local_libvirt.lifecycle.xml import render_customization_domain_xml
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
-from kdive.providers.ports.external_boot import Architecture
 from kdive.providers.shared.build_timeouts import slow_build_tool_timeout_s
 from kdive.providers.shared.libvirt_xml import parse_guest_arches
 

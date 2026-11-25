@@ -83,6 +83,9 @@ supports a cursor, while `shapes.list` returns its catalog without pagination pa
 
 For tools using the common keyset pagination contract:
 
+To start at the first page, omit `cursor` or pass `null`. Core collection tools also
+accept `""`; `ops.jobs_list` and `ops.build_uses_list` reject an empty string.
+
 | `data` field | Meaning |
 |---|---|
 | `count` | Items in this response. |

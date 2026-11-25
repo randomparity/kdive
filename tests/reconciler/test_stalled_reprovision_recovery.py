@@ -16,11 +16,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import psycopg
 import pytest
-from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope
@@ -31,40 +30,11 @@ from kdive.reconciler.repairs import systems as repairs_systems
 from kdive.reconciler.repairs.systems import repair_stalled_reprovisioning_systems
 from tests.db.external_boot_authority_support import _RoleDsns
 from tests.reconciler.conftest import connect, run_repair, seed_system
+from tests.reconciler.recovery_support import seed_reprovision_job as _seed_job
 
 _SETTLED_AGE = 16 * 60
 _LEASE_EXPIRED = ErrorCategory.LEASE_EXPIRED.value
 _INFRA = ErrorCategory.INFRASTRUCTURE_FAILURE.value
-
-
-async def _seed_job(
-    conn: psycopg.AsyncConnection,
-    system_id: UUID,
-    *,
-    state: str,
-    error_category: str | None = None,
-    attempt: int = 1,
-    age_seconds: int = 0,
-) -> None:
-    """A reprovision job for ``system_id``, last written ``age_seconds`` ago.
-
-    ``updated_at`` is backdated in the INSERT because `jobs_set_updated_at` is a BEFORE UPDATE
-    trigger that overwrites the column on any later UPDATE.
-    """
-    await conn.execute(
-        "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, authorizing, dedup_key, "
-        "    error_category, updated_at) "
-        "VALUES ('reprovision', %s, %s, %s, 3, %s, %s, %s, now() - make_interval(secs => %s))",
-        (
-            Jsonb({"system_id": str(system_id), "profile_digest": "d"}),
-            state,
-            attempt,
-            Jsonb({"principal": "alice", "agent_session": None, "project": "proj"}),
-            f"{system_id}:reprovision:{uuid4()}",
-            error_category,
-            age_seconds,
-        ),
-    )
 
 
 async def _state_and_category(

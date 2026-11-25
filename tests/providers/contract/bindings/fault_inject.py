@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
     ExternalBootPlan,
-    ExternalBootPorts,
     OpaqueProviderRef,
+)
+from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
+from kdive.providers.ports.external_boot import (
+    ExternalBootPorts,
 )
 from tests.providers.contract.plans import ACTIVATION_ID, sample_plan_data
 from tests.providers.contract.registry import ProviderBinding

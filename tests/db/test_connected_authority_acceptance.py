@@ -18,37 +18,7 @@ from pydantic import SecretStr
 
 import kdive.config as runtime_config
 from kdive.domain.errors import CategorizedError
-from kdive.jobs.authority_sender import AuthorityRequestSender
-from kdive.providers.assembly import composition as provider_composition
-from kdive.providers.external_boot_authority import host, transport
-from kdive.providers.external_boot_authority.host import AuthorityHostConfig
-from kdive.providers.external_boot_authority.local_client import (
-    LocalAuthorityBinding,
-    _AuthorityUnixTransport,
-)
-from kdive.providers.external_boot_authority.network_client import _resolve_tls_material
-from kdive.providers.external_boot_authority.protocol import (
-    GENESIS_DIGEST,
-    AuthorityMutationRequestV1,
-    AuthorityStrandedObservationRequestV1,
-    AuthorityTakeoverRequestV1,
-    JournalPhase,
-    JournalRecordV1,
-    canonical_record_bytes,
-)
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer, AuthorityServiceError
-from kdive.providers.local_libvirt import composition as local_composition
-from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
-    LocalObservedState,
-    LocalRecoveryMetadataV1,
-    RealLocalExternalBootIO,
-    RecoveryPhase,
-)
-from kdive.providers.local_libvirt.settings import (
-    LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES,
-    LIBVIRT_RECOVERY_ROOT,
-)
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     AbsentComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
@@ -61,6 +31,39 @@ from kdive.providers.ports.external_boot import (
     ProviderStateIdentity,
     RecoveryPoint,
     RunningKernelObservation,
+)
+from kdive.jobs.authority_sender import AuthorityRequestSender
+from kdive.providers.assembly import composition as provider_composition
+from kdive.providers.external_boot_authority import host, transport
+from kdive.providers.external_boot_authority.host import AuthorityHostConfig
+from kdive.providers.external_boot_authority.local_client import (
+    LocalAuthorityBinding,
+    _AuthorityUnixTransport,
+)
+from kdive.providers.external_boot_authority.network_client import _resolve_tls_material
+from kdive.providers.external_boot_authority.protocol import (
+    GENESIS_DIGEST,
+    AuthenticatedPeer,
+    AuthorityMutationRequestV1,
+    AuthorityServiceError,
+    AuthorityStrandedObservationRequestV1,
+    AuthorityTakeoverRequestV1,
+    JournalPhase,
+    JournalRecordV1,
+    canonical_record_bytes,
+)
+from kdive.providers.local_libvirt import composition as local_composition
+from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    LocalObservedState,
+    RealLocalExternalBootIO,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
+    LocalRecoveryMetadataV1,
+    RecoveryPhase,
+)
+from kdive.providers.local_libvirt.settings import (
+    LIBVIRT_EXTERNAL_BOOT_CAPACITY_BYTES,
+    LIBVIRT_RECOVERY_ROOT,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend

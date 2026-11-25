@@ -1624,3 +1624,31 @@ def test_reprovision_wipes_then_provisions(tmp_path: Path) -> None:
     # The old overlay was deleted and a fresh one created for the new profile.
     assert conn.pools["default"].deleted == [overlay_volume_name(SYSTEM_ID)]
     assert len(conn.pools["default"].created_xml) == first_overlay_creates + 1
+
+
+def test_remote_render_restores_replaced_namespace_prefixes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ET, "_namespace_map", vars(ET)["_namespace_map"].copy())
+    for replacement in ("foreign", "another"):
+        ET.register_namespace(f"{replacement}_metadata", KDIVE_METADATA_NS)
+        ET.register_namespace(f"{replacement}_qemu", QEMU_NS)
+        xml = render_domain_xml(
+            SYSTEM_ID,
+            _remote_profile(),
+            pool="kdive-pool",
+            volume=overlay_volume_name(SYSTEM_ID),
+            overlay_path="/pool/overlay.qcow2",
+            backing_path="/pool/base.qcow2",
+            gdb_addr="127.0.0.1",
+            gdb_port=47001,
+            ssh_addr="127.0.0.1",
+            ssh_port=40022,
+        )
+        assert "<kdive:domain>" in xml and "<qemu:commandline>" in xml
+        root = fromstring(xml)
+        assert root.findtext(
+            f"./metadata/{{{KDIVE_METADATA_NS}}}domain/{{{KDIVE_METADATA_NS}}}system"
+        ) == str(SYSTEM_ID)
+        assert recorded_gdb_port(xml) == 47001
+        assert recorded_ssh_port(xml) == 40022

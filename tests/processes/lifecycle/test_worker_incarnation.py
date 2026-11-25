@@ -7,6 +7,7 @@ import pytest
 import kdive.config as config
 import kdive.worker_lifecycle.worker_incarnation as worker_incarnations
 from kdive.worker_lifecycle.worker_incarnation import (
+    DockerWorkerDeathVerifier,
     LocalWorkerDeathVerifier,
     worker_death_verifier_from_env,
     worker_incarnation_id,
@@ -141,9 +142,9 @@ def test_configured_recovery_gate_has_no_direct_death_verification(monkeypatch, 
     assert not hasattr(gate, "verify_dead")
 
 
-def test_docker_registration_gate_preserves_endpoint_validation(monkeypatch) -> None:
+def test_docker_registration_gate_ignores_a_stale_proxy_endpoint(monkeypatch) -> None:
+    """An environment carried over from the retired proxy still starts the server (ADR-0849)."""
     monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "docker")
     monkeypatch.setenv("KDIVE_DOCKER_DEATH_API", "https://authority.example")
 
-    with pytest.raises(RuntimeError, match="must use http:// on a private network"):
-        worker_death_verifier_from_env()
+    assert worker_death_verifier_from_env() == DockerWorkerDeathVerifier()

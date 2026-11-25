@@ -4,24 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any, cast
+from types import SimpleNamespace
+from typing import Any, Literal, cast
 
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_preparation import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_preparation import (
     CompletionDeadlineExecutor,
     RemoteModulePreparationExecutor,
 )
 from kdive.services.remote_module_volume_preparation import prepare_verified_remote_module_attempt
-
-
-@pytest.fixture(autouse=True)
-def _identity_builder(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "kdive.services.remote_module_volume_preparation.build_remote_device_identity_port",
-        lambda authority, _deadline: authority,
-    )
 
 
 def test_asyncio_runner_shutdown_waits_for_provider_completion() -> None:
@@ -218,13 +211,13 @@ async def test_queued_shutdown_preserves_repeated_caller_cancellation() -> None:
 
 
 @pytest.mark.anyio
-async def test_verified_consumer_runs_inline_with_identity(
+@pytest.mark.parametrize("kind", ["coroutine", "future"])
+async def test_verified_consumer_receives_attempt_and_deadline(
     monkeypatch: pytest.MonkeyPatch,
+    kind: str,
 ) -> None:
-    executor = RemoteModulePreparationExecutor()
-    observed: list[tuple[object, object]] = []
+    observed: list[object] = []
     expected_attempt = object()
-    identity = object()
 
     async def verify(
         _pool: object,
@@ -241,32 +234,37 @@ async def test_verified_consumer_runs_inline_with_identity(
         "kdive.services.remote_module_volume_preparation.run_verified_module_attempt_preparation",
         verify,
     )
+
+    async def completed() -> str:
+        return "done"
+
+    def operation(attempt: object, check_deadline: Any) -> Any:
+        check_deadline()
+        observed.append(attempt)
+        if kind == "coroutine":
+            return completed()
+        future = asyncio.get_running_loop().create_future()
+        future.set_result("done")
+        return future
+
     result = await prepare_verified_remote_module_attempt(
         cast(Any, object()),
         cast(Any, object()),
         cast(Any, object()),
         cast(Any, expected_attempt),
-        executor,
-        cast(Any, identity),
         10.0,
-        lambda attempt, identity, check_deadline: (
-            check_deadline(),
-            observed.append((attempt, identity)),
-            "done",
-        )[-1],
+        operation,
         clock=lambda: 9.0,
     )
 
     assert result == "done"
-    assert observed == [(expected_attempt, identity)]
-    executor.shutdown()
+    assert observed == [expected_attempt]
 
 
 @pytest.mark.anyio
 async def test_awaited_consumer_cancellation_retains_verifier_until_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    executor = RemoteModulePreparationExecutor()
     started = asyncio.Event()
     release = asyncio.Event()
     verifier_exited = asyncio.Event()
@@ -284,8 +282,8 @@ async def test_awaited_consumer_cancellation_retains_verifier_until_terminal(
         finally:
             verifier_exited.set()
 
-    async def operation(attempt: object, identity: object, check_deadline: Any) -> str:
-        del attempt, identity
+    async def operation(attempt: object, check_deadline: Any) -> str:
+        del attempt
         check_deadline()
         started.set()
         await release.wait()
@@ -301,11 +299,8 @@ async def test_awaited_consumer_cancellation_retains_verifier_until_terminal(
             cast(Any, object()),
             cast(Any, object()),
             cast(Any, object()),
-            executor,
-            cast(Any, object()),
             10.0,
-            None,
-            awaited_operation=operation,
+            operation,
             clock=lambda: 9.0,
         )
     )
@@ -321,16 +316,14 @@ async def test_awaited_consumer_cancellation_retains_verifier_until_terminal(
     assert caught.value.args == ("caller stopped",)
     assert task.cancelling() == 2
     assert verifier_exited.is_set()
-    executor.shutdown()
 
 
 @pytest.mark.anyio
 async def test_cancellation_retains_verified_consumer_until_completion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    executor = RemoteModulePreparationExecutor()
-    started = threading.Event()
-    release = threading.Event()
+    started = asyncio.Event()
+    release = asyncio.Event()
     verifier_active = False
 
     async def verify(
@@ -353,10 +346,10 @@ async def test_cancellation_retains_verified_consumer_until_completion(
         verify,
     )
 
-    def blocked(_attempt: object, _identity: object, check_deadline: Any) -> None:
+    async def blocked(_attempt: object, check_deadline: Any) -> None:
         check_deadline()
         started.set()
-        release.wait()
+        await release.wait()
 
     task = asyncio.create_task(
         prepare_verified_remote_module_attempt(
@@ -364,14 +357,12 @@ async def test_cancellation_retains_verified_consumer_until_completion(
             cast(Any, object()),
             cast(Any, object()),
             cast(Any, object()),
-            executor,
-            cast(Any, object()),
             10.0,
             cast(Any, blocked),
             clock=lambda: 9.0,
         )
     )
-    await asyncio.to_thread(started.wait)
+    await started.wait()
     task.cancel()
     await asyncio.sleep(0)
     assert verifier_active
@@ -381,14 +372,12 @@ async def test_cancellation_retains_verified_consumer_until_completion(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert not verifier_active
-    executor.shutdown()
 
 
 @pytest.mark.anyio
 async def test_expired_deadline_reaches_no_provider_operation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    executor = RemoteModulePreparationExecutor()
 
     async def verify(
         _pool: object,
@@ -406,7 +395,7 @@ async def test_expired_deadline_reaches_no_provider_operation(
     )
     reached = False
 
-    def operation(_attempt: object, _identity: object, check_deadline: Any) -> None:
+    async def operation(_attempt: object, check_deadline: Any) -> None:
         nonlocal reached
         check_deadline()
         reached = True
@@ -417,33 +406,69 @@ async def test_expired_deadline_reaches_no_provider_operation(
             cast(Any, object()),
             cast(Any, object()),
             cast(Any, object()),
-            executor,
-            cast(Any, object()),
             10.0,
             cast(Any, operation),
             clock=lambda: 10.0,
         )
     assert not reached
-    executor.shutdown()
 
 
 @pytest.mark.anyio
-async def test_missing_resource_bound_authority_reaches_no_verifier() -> None:
-    executor = RemoteModulePreparationExecutor()
-    with pytest.raises(CategorizedError) as caught:
-        await prepare_verified_remote_module_attempt(
+async def test_completion_edge_cancellation_precedes_verifier_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    committed = False
+
+    class CompletionEdgeEvent(asyncio.Event):
+        async def wait(self) -> Literal[True]:
+            ready = await super().wait()
+            # Inject cancellation in the scheduler boundary after completion wakes the waiter.
+            caller = asyncio.current_task()
+            assert caller is not None
+            caller.cancel("completion edge")
+            return ready
+
+    async def verify(
+        _pool: object,
+        _repository: object,
+        _request: object,
+        attempt: object,
+        consumer: Any,
+        **_kwargs: object,
+    ) -> object:
+        nonlocal committed
+        result = await consumer(attempt)
+        committed = True
+        return result
+
+    async def operation(_attempt: object, check_deadline: Any) -> str:
+        check_deadline()
+        return "terminal"
+
+    monkeypatch.setattr(
+        "kdive.services.remote_module_volume_preparation.run_verified_module_attempt_preparation",
+        verify,
+    )
+    monkeypatch.setattr(
+        "kdive.services.remote_module_volume_preparation.asyncio",
+        SimpleNamespace(**{**vars(asyncio), "Event": CompletionEdgeEvent}),
+    )
+    task = asyncio.create_task(
+        prepare_verified_remote_module_attempt(
             cast(Any, object()),
             cast(Any, object()),
             cast(Any, object()),
             cast(Any, object()),
-            executor,
-            None,
             10.0,
-            cast(Any, lambda: None),
+            operation,
             clock=lambda: 9.0,
         )
-    assert caught.value.category is ErrorCategory.CONFLICT
-    executor.shutdown()
+    )
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await task
+    assert caught.value.args == ("completion edge",)
+    assert task.cancelling() == 1
+    assert not committed
 
 
 class Clock:

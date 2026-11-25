@@ -42,7 +42,10 @@ from kdive.providers.shared.debug_common.gdbmi.commands.breakpoints import GdbMi
 from kdive.providers.shared.debug_common.gdbmi.commands.disassembly import GdbMiDisassemblyCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.modules import GdbMiModuleCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.registers import GdbMiRegisterCommands
-from kdive.providers.shared.debug_common.gdbmi.commands.stack import GdbMiStackCommands
+from kdive.providers.shared.debug_common.gdbmi.commands.stack import (
+    GdbMiStackCommands,
+    _frame_from,
+)
 from kdive.providers.shared.debug_common.gdbmi.commands.symbols import GdbMiSymbolCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.threads import GdbMiThreadCommands
 from kdive.providers.shared.debug_common.gdbmi.commands.watchpoints import GdbMiWatchpointCommands
@@ -357,7 +360,7 @@ class GdbMiEngine(
             )
         frame_payload = payload.get("frame")
         frame_payload = payload_dict(frame_payload)
-        frame = self._frame_from(frame_payload) if frame_payload else None
+        frame = _frame_from(frame_payload) if frame_payload else None
         thread = payload.get("stopped-threads")
         signal_name = payload.get("signal-name")
         return GdbStopRecord(

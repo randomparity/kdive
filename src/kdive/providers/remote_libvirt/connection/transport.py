@@ -173,7 +173,7 @@ def remote_connection[C: ClosableConn](
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` for an unsafe URI or unresolvable
-            secret refs, or ``TRANSPORT_FAILURE`` when the TLS connect fails.
+            secret refs, or ``TRANSPORT_FAILURE`` when the TLS connect or close fails.
     """
     validate_remote_uri(config.uri)
     with materialized_pkipath(secret_backend, config.cert_refs, base_dir=pki_base_dir) as pki:
@@ -190,7 +190,14 @@ def remote_connection[C: ClosableConn](
             yield conn
         finally:
             if sys.exc_info()[0] is None:
-                conn.close()
+                try:
+                    conn.close()
+                except libvirt.libvirtError as exc:
+                    raise CategorizedError(
+                        f"qemu+tls connection close for {config.uri!r} failed",
+                        category=ErrorCategory.TRANSPORT_FAILURE,
+                        details={"uri": config.uri},
+                    ) from exc
             else:
                 _close_best_effort(conn)
 

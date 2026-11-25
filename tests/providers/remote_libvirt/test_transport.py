@@ -90,6 +90,22 @@ def test_validate_accepts_plain_tls_uri() -> None:
     validate_remote_uri("qemu+tls://host.example/system")
 
 
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "qemu+tls://[::1/system",
+        "qemu+tls://[invalid]/system",
+        "qemu+tls://example.invalid:abc/system",
+        "qemu+tls://example.invalid:65536/system",
+    ],
+)
+def test_malformed_remote_uri_is_chained_configuration_error(uri: str) -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        validate_remote_uri(uri)
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
 def test_validate_scheme_error_names_the_uri_and_required_scheme() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         validate_remote_uri("qemu+tcp://host.example/system")
@@ -268,6 +284,32 @@ def test_remote_connection_closes_conn_when_body_raises(tmp_path: Path) -> None:
         ),
     ):
         raise RuntimeError("op failed")
+    assert conn.closed
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_remote_connection_close_failure_is_chained_transport_error(tmp_path: Path) -> None:
+    failure = libvirt.libvirtError("close failed")
+
+    class _CloseFails(FakeConn):
+        def close(self) -> None:
+            self.closed = True
+            raise failure
+
+    conn = _CloseFails()
+    with (
+        pytest.raises(CategorizedError) as excinfo,
+        remote_connection(
+            _config(),
+            RecordingBackend(),
+            open_connection=lambda _uri: conn,
+            pki_base_dir=tmp_path,
+        ),
+    ):
+        pass
+    assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert excinfo.value.__cause__ is failure
+    assert "close" in str(excinfo.value)
     assert conn.closed
     assert list(tmp_path.iterdir()) == []
 

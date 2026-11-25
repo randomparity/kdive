@@ -38,6 +38,7 @@ from kdive.jobs.payloads import (
     SystemPayload,
     UnplugDevicePayload,
 )
+from kdive.mcp.tools.lifecycle.support import _idempotency
 from kdive.worker_lifecycle.authority_store import CURRENT_WORKER_FENCE_PROTOCOL
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
@@ -1014,6 +1015,71 @@ def test_enqueue_recycle_failed_resets_only_a_failed_job(migrated_url: str) -> N
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("entrypoint", ["queue", "mcp"])
+@pytest.mark.parametrize("state", [None, *JobState])
+@pytest.mark.parametrize(
+    ("policy", "recycled_states"),
+    [
+        (queue.JobRecyclePolicy.NEVER, ()),
+        (queue.JobRecyclePolicy.FAILED, (JobState.FAILED,)),
+        (queue.JobRecyclePolicy.TERMINAL, (JobState.FAILED, JobState.SUCCEEDED)),
+        (
+            queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
+            (JobState.FAILED, JobState.SUCCEEDED, JobState.CANCELED),
+        ),
+    ],
+)
+def test_dedup_replay_matches_admission(
+    migrated_url: str,
+    entrypoint: str,
+    state: JobState | None,
+    policy: queue.JobRecyclePolicy,
+    recycled_states: tuple[JobState, ...],
+) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            key = "replay-matrix"
+            if state is JobState.RUNNING:
+                await _job_in(
+                    conn,
+                    key,
+                    "state = 'running', attempt = 1, worker_id = 'w-live', "
+                    "lease_expires_at = clock_timestamp() + interval '5 minutes', "
+                    "heartbeat_at = now()",
+                )
+            elif state is not None:
+                job = await queue.enqueue(
+                    conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, key
+                )
+                await conn.execute(
+                    "UPDATE jobs SET state = %s WHERE id = %s", (state.value, job.id)
+                )
+            before = await queue.get_by_dedup_key(conn, key)
+            replay = queue.dedup_replay if entrypoint == "queue" else _idempotency.dedup_replay
+            predicted = await replay(conn, key, recycle=policy)
+            should_admit = state is None or state in recycled_states
+            assert predicted == (None if should_admit else before)
+            assert await queue.get_by_dedup_key(conn, key) == before
+
+            payload = _build_payload()
+            admitted_job, admitted = await queue.enqueue_with_status(
+                conn, JobKind.INSTALL, payload, _AUTHORIZING, key, recycle=policy
+            )
+            assert admitted is should_admit
+            if before is not None:
+                assert admitted_job.id == before.id
+            if admitted:
+                assert admitted_job.state is JobState.QUEUED
+                assert admitted_job.payload == payload.model_dump(
+                    mode="json", exclude_none=True, by_alias=True
+                )
+            else:
+                assert admitted_job == predicted == before
+            assert await _count_jobs(conn) == 1
+
+    asyncio.run(_run())
+
+
 _LAPSED_POLICY = queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED
 
 
@@ -1877,3 +1943,55 @@ def test_is_queue_paused_fails_closed_when_row_missing(migrated_url: str) -> Non
             assert await queue.is_queue_paused(conn) is True  # missing row → fail closed (paused)
 
     asyncio.run(_run())
+
+
+def test_queued_backlog_uses_statement_clock_inside_an_older_transaction(
+    migrated_url: str,
+) -> None:
+    async def run() -> None:
+        async with await _connect(migrated_url) as conn:
+            job = await queue.enqueue(
+                conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "backlog-clock"
+            )
+            async with conn.transaction():
+                await conn.execute("SELECT pg_sleep(0.05)")
+                before = await (
+                    await conn.execute(
+                        "SELECT EXTRACT(EPOCH FROM statement_timestamp()-created_at) "
+                        "FROM jobs WHERE id=%s",
+                        (job.id,),
+                    )
+                ).fetchone()
+                stats = (await queue.queued_backlog_by_lane(conn))[DEFAULT_JOB_DISPATCH_LANE]
+                after = await (
+                    await conn.execute(
+                        "SELECT EXTRACT(EPOCH FROM statement_timestamp()-created_at) "
+                        "FROM jobs WHERE id=%s",
+                        (job.id,),
+                    )
+                ).fetchone()
+            age = stats["oldest_queued_age_seconds"]
+            assert isinstance(age, float)
+            assert before is not None and after is not None
+            assert float(before[0]) <= age <= float(after[0])
+            assert stats["queued_count"] == 1
+
+    asyncio.run(run())
+
+
+def test_queued_backlog_retains_unrecognized_persisted_lanes(migrated_url: str) -> None:
+    async def run() -> None:
+        async with await _connect(migrated_url) as conn:
+            job = await queue.enqueue(
+                conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "backlog-unknown"
+            )
+            await conn.execute(
+                "UPDATE jobs SET dispatch_lane=%s WHERE id=%s", ("unrecognized-lane", job.id)
+            )
+            backlog = await queue.queued_backlog_by_lane(conn)
+        assert backlog["unrecognized-lane"]["queued_count"] == 1
+        assert isinstance(backlog["unrecognized-lane"]["oldest_queued_age_seconds"], float)
+        for lane in (DEFAULT_JOB_DISPATCH_LANE, STATE_FENCED_JOB_DISPATCH_LANE):
+            assert backlog[lane] == {"queued_count": 0, "oldest_queued_age_seconds": None}
+
+    asyncio.run(run())

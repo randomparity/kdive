@@ -1,4 +1,6 @@
-# Stuck `tearing_down` System with external-boot history
+# Stuck `tearing_down` System
+
+## External-boot history
 
 This runbook covers a System that sits in `tearing_down` and has at least one external-boot
 activation row. Such a System is residue from an ordinary teardown that ran before the worker
@@ -7,7 +9,7 @@ began refusing ordinary teardowns for any external-boot history
 state. Only the authority teardown may finish it, because the provider-host authority owns the
 host domain.
 
-## Symptom
+### Symptom
 
 The reconciler logs one WARNING per System and cause:
 
@@ -26,7 +28,7 @@ reconciler: system <system-id> is stuck in tearing_down behind authority-marked 
 The reconciler does not log a System whose teardown job is `queued`, `running`, or `canceled`.
 Use the queries below to find one.
 
-## Confirm the state
+### Confirm the state
 
 With authorized read-only database access, list each such System with its Allocation,
 Investigation, and newest activation:
@@ -65,7 +67,7 @@ Read the job row as follows:
 - **Authority-marked and `running`, with `attempt` at `max_attempts` and a past
   `lease_expires_at`.** It is exhausted. Re-run the teardown as described below.
 
-## Recover
+### Recover
 
 The authority teardown runs whatever the Allocation state, including after the lease expired.
 
@@ -80,7 +82,7 @@ The authority teardown runs whatever the Allocation state, including after the l
 3. If the Allocation is still `active`, release it with `allocations.release`. Close any bound
    Investigation with `investigations.close`.
 
-## Limits
+### Limits
 
 - **No route.** `external_boot_teardown_authority_unresolved` means the System has no
   unambiguous authority route. `systems.teardown` refuses it, as it does for a System in any
@@ -92,3 +94,24 @@ The authority teardown runs whatever the Allocation state, including after the l
   direct write to `torn_down` skips the authority teardown that destroys the host domain and lets
   `allocations.release` succeed while that domain still runs. A direct write to any other state
   uses a transition the System state machine does not have.
+
+## Ordinary teardown after automatic recovery stops
+
+For an ordinary teardown without an authority marker or unsettled activation, automatic repair
+has one recovery admission per current teardown request. Each admission uses that job's existing
+attempt budget. The allowance is durable across restarts and has no timed retry promise.
+A missing teardown job consumes its admission when repair creates it. A prior failed job needs
+positive worker evidence of retryable exhaustion; succeeded or canceled work is not reopened.
+
+Read the failed job with `jobs.get`. Its `teardown_recovery_reason` is
+`teardown_automatic_replay_exhausted` after consumed recovery fails, or
+`teardown_terminal_failure` for a permanent failure. Older or abandoned failures without positive
+worker evidence also stop for operator inspection. The reconciler warning names the stable
+reason and this runbook. Original provider diagnostics remain on the failed job.
+
+After correcting the cause, an admin invokes `systems.teardown` with a new or omitted
+`idempotency_key`, then polls `jobs.wait` and confirms `systems.get` reports `torn_down` before
+releasing the Allocation. Reusing the original key replays its recorded response. Replaying a
+live job preserves the allowance; only an actual explicit failed-job restart resets it.
+A platform admin can use the existing audited `ops.force_teardown` path across projects.
+The external-boot authority recovery and safety limits above remain separate.

@@ -45,8 +45,8 @@ _POSTGRES_IMAGE = (
 
 def _start_postgres(labels: Mapping[str, str]) -> tuple[str, str]:
     """Start one shared Postgres testcontainer; return (server_url, container_id)."""
+    from testcontainers.community.postgres import PostgresContainer
     from testcontainers.core.config import testcontainers_config
-    from testcontainers.postgres import PostgresContainer
 
     # Ryuk stays disabled: its reap is keyed to the creating process, and this container is
     # deliberately shared across xdist workers (ADR-0401). Crash coverage comes instead from
@@ -182,7 +182,7 @@ def _acquire_pg_server(
         return
 
     try:
-        import testcontainers.postgres  # noqa: F401
+        import testcontainers.community.postgres  # noqa: F401
     except ImportError as exc:  # pragma: no cover - dev dep always present
         if require_docker:
             raise

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from kdive.domain.catalog.images import Capability
-from kdive.providers.ports.external_boot import RootSpecV1
+from kdive.domain.external_boot_values import RootSpecV1
 
 PROVENANCE_BOOT_KERNEL_COUNT = "boot_kernel_count"
 PROVENANCE_DEFAULT_KERNEL_VERSION = "default_kernel_version"

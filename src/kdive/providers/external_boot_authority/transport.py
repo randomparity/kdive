@@ -25,6 +25,14 @@ from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityResponseV1,
     decode_device_identity_request,
 )
+from kdive.providers.external_boot_authority.module_protocol import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     ModuleVolumeSweepRequestV1,
     ModuleVolumeSweepResponseV1,
@@ -32,6 +40,7 @@ from kdive.providers.external_boot_authority.module_volume_sweep import (
 )
 from kdive.providers.external_boot_authority.protocol import (
     MAX_ENVELOPE_BYTES,
+    AuthenticatedPeer,
     AuthorityAcknowledgementV1,
     AuthorityConflictResolutionRequestV1,
     AuthorityHealthAcknowledgementV1,
@@ -43,6 +52,7 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
+    AuthorityServiceError,
     AuthorityStrandedObservationRequestV1,
     AuthorityStrandedObservationResponseV1,
     AuthorityTakeoverRequestV1,
@@ -52,26 +62,14 @@ from kdive.providers.external_boot_authority.protocol import (
     decode_authority_request,
     read_frame,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    AuthorityServiceError,
-)
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModulePreparationBeginRequestV1,
-    RemoteModulePreparationBeginResponseV1,
-    RemoteModuleTerminalPreparationResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
-)
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemAcknowledgementV1,
     AuthoritySystemExecutionV1,
     AuthoritySystemMutationRequestV1,
     AuthoritySystemResponseV1,
+    AuthoritySystemServiceError,
     AuthoritySystemTakeoverRequestV1,
 )
-from kdive.providers.system_authority.service import AuthoritySystemServiceError
 
 if TYPE_CHECKING:
     from kdive.providers.external_boot_authority.host import AuthorityHostConfig
@@ -242,7 +240,30 @@ def _decode_operation_request(operation: Operation, payload: bytes) -> object:
         return RemoteModuleVolumePreparationRequestV1.from_canonical_json(payload)
     if operation == "begin-remote-module-preparation":
         return RemoteModulePreparationBeginRequestV1.model_validate_json(payload)
-    return decode_authority_request(payload)
+    request = decode_authority_request(payload)
+    if operation == "acknowledge-takeover" and isinstance(request, AuthorityTakeoverRequestV1):
+        return request
+    if operation in {"execute-mutation", "observe-authority", "observe-running"} and isinstance(
+        request, AuthorityMutationRequestV1
+    ):
+        return request
+    if operation == "execute-conflict-resolution" and isinstance(
+        request, AuthorityConflictResolutionRequestV1
+    ):
+        return request
+    if operation == "execute-preparation" and isinstance(
+        request, AuthorityPreparationMutationRequestV1
+    ):
+        return request
+    if operation == "execute-teardown" and isinstance(request, AuthorityTeardownMutationRequestV1):
+        return request
+    if operation == "resolve-recovery-orphan" and isinstance(
+        request, AuthorityRecoveryOrphanDispositionRequestV1
+    ):
+        return request
+    if operation == "health" and isinstance(request, AuthorityHealthRequestV1):
+        return request
+    raise ValueError("invalid-request")
 
 
 def encode_request_envelope(
@@ -253,59 +274,7 @@ def encode_request_envelope(
     if not credential_bytes or len(credential_bytes) > MAX_CREDENTIAL_BYTES:
         raise ValueError("credential must contain 1 through 4096 UTF-8 bytes")
     request_bytes = _canonical_json(request)
-    decoded = _decode_operation_request(operation, request_bytes)
-    if operation == "acknowledge-takeover" and not isinstance(decoded, AuthorityTakeoverRequestV1):
-        raise ValueError("invalid-request")
-    if operation in {"execute-mutation", "observe-authority", "observe-running"} and not isinstance(
-        decoded, AuthorityMutationRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "execute-conflict-resolution" and not isinstance(
-        decoded, AuthorityConflictResolutionRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "execute-preparation" and not isinstance(
-        decoded, AuthorityPreparationMutationRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "execute-teardown" and not isinstance(
-        decoded, AuthorityTeardownMutationRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "begin-remote-module-preparation" and not isinstance(
-        decoded, RemoteModulePreparationBeginRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "execute-remote-module-preparation" and not isinstance(
-        decoded, RemoteModuleVolumePreparationRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "execute-remote-module-lifecycle" and not isinstance(
-        decoded, RemoteModuleLifecycleRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "resolve-recovery-orphan" and not isinstance(
-        decoded, AuthorityRecoveryOrphanDispositionRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "observe-stranded-activation" and not isinstance(
-        decoded, AuthorityStrandedObservationRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "health" and not isinstance(decoded, AuthorityHealthRequestV1):
-        raise ValueError("invalid-request")
-    if operation == "resolve-device-identity" and not isinstance(decoded, DeviceIdentityRequestV1):
-        raise ValueError("invalid-request")
-    if operation == "sweep-module-volumes" and not isinstance(decoded, ModuleVolumeSweepRequestV1):
-        raise ValueError("invalid-request")
-    if operation == "acknowledge-system-takeover" and not isinstance(
-        decoded, AuthoritySystemTakeoverRequestV1
-    ):
-        raise ValueError("invalid-request")
-    if operation == "execute-system-operation" and not isinstance(
-        decoded, AuthoritySystemExecutionV1
-    ):
-        raise ValueError("invalid-request")
+    _decode_operation_request(operation, request_bytes)
     return _canonical_json({"credential": credential, "operation": operation, "request": request})
 
 
@@ -377,66 +346,6 @@ def _decode_envelope(payload: bytes) -> tuple[Operation, object, SecretStr]:
             raise ValueError
         request_bytes = _canonical_json(request_value)
         request = _decode_operation_request(operation, request_bytes)
-        if operation == "acknowledge-takeover" and not isinstance(
-            request, AuthorityTakeoverRequestV1
-        ):
-            raise ValueError
-        if operation in {
-            "execute-mutation",
-            "observe-authority",
-            "observe-running",
-        } and not isinstance(request, AuthorityMutationRequestV1):
-            raise ValueError
-        if operation == "execute-conflict-resolution" and not isinstance(
-            request, AuthorityConflictResolutionRequestV1
-        ):
-            raise ValueError
-        if operation == "execute-preparation" and not isinstance(
-            request, AuthorityPreparationMutationRequestV1
-        ):
-            raise ValueError
-        if operation == "execute-teardown" and not isinstance(
-            request, AuthorityTeardownMutationRequestV1
-        ):
-            raise ValueError
-        if operation == "begin-remote-module-preparation" and not isinstance(
-            request, RemoteModulePreparationBeginRequestV1
-        ):
-            raise ValueError
-        if operation == "execute-remote-module-preparation" and not isinstance(
-            request, RemoteModuleVolumePreparationRequestV1
-        ):
-            raise ValueError
-        if operation == "execute-remote-module-lifecycle" and not isinstance(
-            request, RemoteModuleLifecycleRequestV1
-        ):
-            raise ValueError
-        if operation == "resolve-recovery-orphan" and not isinstance(
-            request, AuthorityRecoveryOrphanDispositionRequestV1
-        ):
-            raise ValueError
-        if operation == "observe-stranded-activation" and not isinstance(
-            request, AuthorityStrandedObservationRequestV1
-        ):
-            raise ValueError
-        if operation == "health" and not isinstance(request, AuthorityHealthRequestV1):
-            raise ValueError
-        if operation == "resolve-device-identity" and not isinstance(
-            request, DeviceIdentityRequestV1
-        ):
-            raise ValueError
-        if operation == "sweep-module-volumes" and not isinstance(
-            request, ModuleVolumeSweepRequestV1
-        ):
-            raise ValueError
-        if operation == "acknowledge-system-takeover" and not isinstance(
-            request, AuthoritySystemTakeoverRequestV1
-        ):
-            raise ValueError
-        if operation == "execute-system-operation" and not isinstance(
-            request, AuthoritySystemExecutionV1
-        ):
-            raise ValueError
     except RecursionError, TypeError, UnicodeError, ValueError, json.JSONDecodeError:
         raise _TransportError("invalid-request") from None
     return operation, request, SecretStr(credential)
@@ -560,33 +469,25 @@ async def _dispatch(
         except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
             _log.exception("authority transport %s failed unexpectedly", operation)
             return _error("provider-conflict")
-    if operation == "execute-remote-module-lifecycle":
+    if operation in {"execute-remote-module-lifecycle", "execute-remote-module-preparation"}:
         if remote_module_service is None:
             return _error("provider-not-configured")
-        if not isinstance(request, RemoteModuleLifecycleRequestV1):
+        if (
+            operation == "execute-remote-module-lifecycle"
+            and not isinstance(request, RemoteModuleLifecycleRequestV1)
+        ) or (
+            operation == "execute-remote-module-preparation"
+            and not isinstance(request, RemoteModuleVolumePreparationRequestV1)
+        ):
             raise _TransportError("invalid-request")
         try:
-            result = await remote_module_service.execute_remote_module_lifecycle(peer, request)
-            return _success(result)
-        except AuthorityServiceError as exc:
-            return _service_error(exc)
-        except CategorizedError as exc:
-            _log_module_completion(operation, exc)
-            if exc.details.get("completion") == "failed-after-mutation":
-                return _error("remote-module-failed")
-            if exc.details.get("completion") == "refused-before-mutation":
-                return _error("remote-module-refused")
-            return _error("provider-conflict")
-        except Exception:  # noqa: BLE001 -- provider details never cross the authority boundary
-            _log.exception("authority transport %s failed unexpectedly", operation)
-            return _error("provider-conflict")
-    if operation == "execute-remote-module-preparation":
-        if remote_module_service is None:
-            return _error("provider-not-configured")
-        if not isinstance(request, RemoteModuleVolumePreparationRequestV1):
-            raise _TransportError("invalid-request")
-        try:
-            result = await remote_module_service.execute_remote_module_preparation(peer, request)
+            if isinstance(request, RemoteModuleLifecycleRequestV1):
+                result = await remote_module_service.execute_remote_module_lifecycle(peer, request)
+            else:
+                assert isinstance(request, RemoteModuleVolumePreparationRequestV1)
+                result = await remote_module_service.execute_remote_module_preparation(
+                    peer, request
+                )
             return _success(result)
         except AuthorityServiceError as exc:
             return _service_error(exc)
@@ -1064,9 +965,3 @@ def _tls_fingerprints(config: AuthorityHostConfig) -> dict[Path, tuple[int, int,
             config.health_client_key,
         )
     }
-
-    async def open_remote_module_attempt(
-        self,
-        peer: AuthenticatedPeer,
-        request: RemoteModulePreparationBeginRequestV1,
-    ) -> RemoteModulePreparationBeginResponseV1: ...

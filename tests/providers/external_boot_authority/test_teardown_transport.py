@@ -9,9 +9,9 @@ from pydantic import SecretStr
 from kdive.domain.errors import CategorizedError
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.external_boot_authority_client import ExternalBootAuthorityClient
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1
+from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
 from kdive.providers.external_boot_authority import protocol, transport
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+from kdive.providers.external_boot_authority.protocol import AuthenticatedPeer
 
 
 def _request() -> protocol.AuthorityTeardownMutationRequestV1:

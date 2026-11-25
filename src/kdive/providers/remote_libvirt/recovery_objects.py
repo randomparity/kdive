@@ -8,22 +8,20 @@ from typing import Protocol
 
 import libvirt
 
-from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     OpaqueProviderRef,
     RecoveryObjectBinding,
     RecoveryObjectObservation,
 )
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    RemoteModuleVolumePreparationStore,
-)
+from kdive.providers.external_boot_authority.teardown import ProviderRecoveryRefusal
+from kdive.providers.remote_libvirt.external_boot_store import RemoteExternalBootStore
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_name import (
     parse_boot_artifact_name,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
+from kdive.providers.shared.module_volume_names import (
     parse_module_volume_name,
 )
 
@@ -48,7 +46,7 @@ class RemoteExternalBootRecoveryObjects:
     def __init__(
         self,
         *,
-        store: RemoteModuleVolumePreparationStore,
+        store: RemoteExternalBootStore,
         connection: RecoveryObjectConnection,
         boot_artifact_pool: str,
         inspect_attachments: Callable[[], AttachmentInspection],

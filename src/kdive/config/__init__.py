@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib
 import os
 from collections.abc import Mapping
+from functools import cache
 from typing import Any
 
 from kdive.config.manifest import SETTING_MODULES
@@ -33,7 +34,9 @@ __all__ = [
 ]
 
 
-def _build_registry() -> Registry:
+@cache
+def _registry() -> Registry:
+    """Assemble after setting modules can finish importing the registry types."""
     settings: list[Setting[Any]] = []
     for path in SETTING_MODULES:
         module = importlib.import_module(path)
@@ -41,32 +44,29 @@ def _build_registry() -> Registry:
     return Registry(settings)
 
 
-_REGISTRY = _build_registry()
-
-
 def load(env: Mapping[str, str] | None = None) -> None:
-    _REGISTRY.load(os.environ if env is None else env)
+    _registry().load(os.environ if env is None else env)
 
 
 def reset() -> None:
-    _REGISTRY.reset()
+    _registry().reset()
 
 
 def get[T](setting: Setting[T]) -> T | None:
-    return _REGISTRY.get(setting)
+    return _registry().get(setting)
 
 
 def require[T](setting: Setting[T]) -> T:
-    return _REGISTRY.require(setting)
+    return _registry().require(setting)
 
 
 def validate(process: str) -> None:
-    _REGISTRY.validate(process)
+    _registry().validate(process)
 
 
 def all_settings() -> tuple[Setting, ...]:
-    return _REGISTRY.all_settings()
+    return _registry().all_settings()
 
 
 def env_snapshot() -> dict[str, str]:
-    return _REGISTRY.env_snapshot()
+    return _registry().env_snapshot()

@@ -11,9 +11,12 @@ import pytest
 from pydantic import SecretStr
 
 from kdive.domain.operations.jobs import JobKind
+from kdive.jobs.external_boot_models import (
+    ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthoritySuccessV1,
+)
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1, ExternalBootAuthoritySuccessV1
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
 from tests.jobs.handlers.external_boot.seeding import RecordingAcknowledger, seed_case

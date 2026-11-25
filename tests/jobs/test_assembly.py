@@ -10,12 +10,14 @@ from typing import cast
 from uuid import uuid4
 
 import pytest
+from psycopg import AsyncConnection
 from pydantic import SecretStr
 
 from kdive.domain.errors import CategorizedError
-from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, RETIRED_JOB_KINDS, JobKind
+from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, RETIRED_JOB_KINDS, Job, JobKind
 from kdive.jobs.assembly import WorkerHandlerAssembly, register_all_handlers
 from kdive.jobs.capture_operations.supervisor import CaptureOperationSupervisor
+from kdive.jobs.handlers import devices
 from kdive.jobs.models import HandlerRegistry
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.infra.reaping import NullModuleVolumeReaper
@@ -28,9 +30,9 @@ from tests.support.object_store import INERT_OBJECT_STORE
 async def test_worker_routes_borrow_their_assembly_and_process_routes_remain_empty(monkeypatch):
     from kdive.assembly import ProcessAssembly
     from kdive.domain.catalog.resources import ResourceKind
+    from kdive.jobs import assembly as authority_sender
     from kdive.jobs.assembly import build_worker_handler_assembly
-    from kdive.jobs.models import ExternalBootAuthorityMarkerV1
-    from kdive.providers.assembly import authority as authority_sender
+    from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
     from kdive.providers.assembly import composition as providers
     from kdive.providers.core.resolver import ProviderBinding
     from kdive.providers.infra.reaping import NullModuleVolumeReaper
@@ -158,7 +160,10 @@ async def test_worker_routes_borrow_their_assembly_and_process_routes_remain_emp
     assert server_authority is not None and server_authority.sender is None
 
 
-def test_register_all_handlers_registers_active_and_no_retired_job_kinds() -> None:
+@pytest.mark.anyio
+async def test_register_all_handlers_registers_active_and_no_retired_job_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     registry = HandlerRegistry()
     credential = SecretStr("worker-test-incarnation-credential")
     assembly = WorkerHandlerAssembly(
@@ -179,3 +184,28 @@ def test_register_all_handlers_registers_active_and_no_retired_job_kinds() -> No
     registered = frozenset(kind for kind in JobKind if registry.get(kind) is not None)
     assert registered == ACTIVE_JOB_KINDS
     assert registered.isdisjoint(RETIRED_JOB_KINDS)
+
+    calls: list[SecretStr] = []
+
+    async def device_boundary(
+        conn: AsyncConnection,
+        job: Job,
+        *,
+        resolver: ProviderResolver,
+        secret_registry: SecretRegistry,
+        incarnation_credential: SecretStr,
+    ) -> str:
+        assert resolver is assembly.resolver
+        assert secret_registry is assembly.secret_registry
+        calls.append(incarnation_credential)
+        return "device-result"
+
+    monkeypatch.setattr(devices, "plug_device_handler", device_boundary)
+    monkeypatch.setattr(devices, "unplug_device_handler", device_boundary)
+    for kind in (JobKind.PLUG_DEVICE, JobKind.UNPLUG_DEVICE, JobKind.FORCE_UNPLUG_DEVICE):
+        handler = registry.get(kind)
+        assert handler is not None
+        assert (
+            await handler(cast(AsyncConnection, object()), cast(Job, object())) == "device-result"
+        )
+    assert calls == [credential] * 3

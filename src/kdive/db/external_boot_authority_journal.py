@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -12,7 +12,9 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
+from kdive.domain.external_boot_values import ExternalBootPlan
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityOperation,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
@@ -20,11 +22,7 @@ from kdive.providers.external_boot_authority.protocol import (
     JournalRecordV1,
     canonical_record_bytes,
 )
-from kdive.providers.ports.external_boot import ExternalBootPlan
 from kdive.serialization import validate_stored
-
-if TYPE_CHECKING:
-    from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 
 type AdvanceStatus = Literal["advanced", "superseded", "conflict"]
 type PreparationCommitStatus = Literal["applied", "superseded", "conflict"]
@@ -415,8 +413,6 @@ async def authenticate_authority_peer(
         raise AuthorityPeerAuthenticationError(
             "worker credential does not identify an active fence-protocol-4 incarnation"
         )
-    from kdive.providers.external_boot_authority.service import AuthenticatedPeer
-
     return AuthenticatedPeer(incarnation_id=_bounded(row[0], 512))
 
 

@@ -26,11 +26,9 @@ from kdive.jobs.worker import Worker
 from kdive.mcp.tools.external_boot.recovery_requests import request_release
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.protocol import AuthenticatedPeer
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.external_boot_authority.transport import _dispatch
 from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
 from kdive.security.secrets.secret_registry import SecretRegistry

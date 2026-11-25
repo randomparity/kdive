@@ -42,24 +42,30 @@ from kdive.domain.external_boot_activation import (
     ExternalBootReleaseEvidenceV1,
     ExternalBootTeardownEvidenceV1,
 )
+from kdive.domain.external_boot_values import (
+    OpaqueProviderRef,
+    RecoveryPoint,
+    RunningKernelObservation,
+)
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.jobs import queue
-from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
-from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
-from kdive.jobs.handlers.external_boot.registrar import build_operations
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
+    ActivateResult,
     ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureV1,
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthorityResultV1,
     ExternalBootAuthoritySuccessV1,
-    _ActivateResult,
+    ExternalBootDerivedTeardownCompletion,
+    RecoveryAttemptResult,
+    TeardownResult,
     _FailureResult,
-    _RecoveryAttemptResult,
-    _TeardownResult,
 )
+from kdive.jobs.handlers.external_boot.operations import ExternalBootOperations
+from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
+from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.worker import _authority_binding_matches
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.systems.admin import teardown_system
@@ -78,11 +84,6 @@ from kdive.providers.external_boot_authority.protocol import (
     teardown_proof_digest,
 )
 from kdive.providers.ports.authority import AuthorityCapability
-from kdive.providers.ports.external_boot import (
-    OpaqueProviderRef,
-    RecoveryPoint,
-    RunningKernelObservation,
-)
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.db.remote_module_attempt_obligations_support import _attempt as _module_attempt
@@ -214,7 +215,7 @@ class _VehicleExecutor:
             observation_id=uuid4(), category=category, composite_state="sha256:" + "8" * 64
         )
 
-    async def observe(self, _request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         return AuthorityObservationV1(
             observation_id=uuid4(),
             category="source",
@@ -448,7 +449,7 @@ def test_post_provider_interruption_replays_without_a_second_mutation(
                 replayed,
                 incarnation_credential=SecretStr(case.credential),
             )
-            assert committed is not None
+            assert isinstance(committed, queue.ExternalBootCommitOutcome)
             before = await _durable_rows(seed, case.vehicle.activation_id)
 
             # Exact finalizer replay must not duplicate durable effects or leak a transition.
@@ -520,7 +521,8 @@ async def _run_to_terminal(
                 result,
                 incarnation_credential=SecretStr(case.credential),
             )
-            assert committed is not None
+            assert isinstance(committed, queue.ExternalBootCommitOutcome)
+            assert committed.continue_claim is True
             result = await handler(
                 worker, _job(case), ExternalBootAuthorityMarkerV1.model_validate(case.marker)
             )
@@ -589,7 +591,7 @@ def test_operation_calls_its_port_commits_and_leaves_the_job_succeeded(
                     result,
                     incarnation_credential=SecretStr(case.credential),
                 )
-            assert committed is not None
+            assert isinstance(committed, queue.ExternalBootCommitOutcome)
         row = await _activation_row(seed, case.vehicle.activation_id)
         assert row["state"] == ("torn_down" if operation == "teardown" else spec["after"])
         if operation == "resolve-conflict":
@@ -635,7 +637,7 @@ def test_activate_reuses_the_persisted_readiness_deadline(
         result = await _run_operation(authority_role_dsns, seed, case, "activate")
 
         payload = result.result
-        assert isinstance(payload, _ActivateResult)
+        assert isinstance(payload, ActivateResult)
         assert payload.activation_readiness_deadline == datetime(2027, 1, 1, tzinfo=UTC)
 
     _drive(migrated_url, authority_role_dsns, "activate", body)
@@ -1098,9 +1100,10 @@ def test_an_authority_superseded_commit_terminalizes_once_in_the_classifying_tra
                 worker, _job(case), stale, incarnation_credential=SecretStr(case.credential)
             )
 
-        assert isinstance(committed, Job)
-        assert committed.state.value == "failed"
-        assert committed.error_category == "stale_handle"
+        assert isinstance(committed, queue.ExternalBootCommitOutcome)
+        assert committed.job.state.value == "failed"
+        assert committed.continue_claim is False
+        assert committed.job.error_category == "stale_handle"
         assert await _job_state(seed, case.job_id) == "failed"
         async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
             replay = await queue.complete_external_boot(
@@ -1125,9 +1128,10 @@ def test_observed_identity_stale_terminalizes_once_in_the_classifying_transactio
                 worker, _job(case), stale, incarnation_credential=SecretStr(case.credential)
             )
 
-        assert isinstance(committed, Job)
-        assert committed.state.value == "failed"
-        assert committed.error_category == "stale_handle"
+        assert isinstance(committed, queue.ExternalBootCommitOutcome)
+        assert committed.job.state.value == "failed"
+        assert committed.continue_claim is False
+        assert committed.job.error_category == "stale_handle"
         assert await _job_state(seed, case.job_id) == "failed"
         async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
             replay = await queue.complete_external_boot(
@@ -1146,6 +1150,7 @@ def test_teardown_consumes_the_typed_authority_response_and_terminal_head(
     async def body(seed: AsyncConnection, case: SeededCase) -> None:
         await _seed_core_owned_teardown_rows(seed, case)
         result = await _run_operation(authority_role_dsns, seed, case, "teardown")
+        assert isinstance(result, ExternalBootDerivedTeardownCompletion)
         assert result.result.operation == "teardown"
         response = result.result.response
 
@@ -1168,6 +1173,10 @@ def test_teardown_consumes_the_typed_authority_response_and_terminal_head(
             "consumed": True,
         }
         assert (head["sequence"], head["digest"]) == (
+            response.journal_sequence,
+            response.journal_digest,
+        )
+        assert (result.journal_sequence, result.journal_digest) == (
             response.journal_sequence,
             response.journal_digest,
         )
@@ -1199,7 +1208,7 @@ def test_teardown_quarantine_retains_core_owned_state(
                 _job(case),
                 ExternalBootAuthorityMarkerV1.model_validate(case.marker),
             )
-        assert cast(_TeardownResult, result.result).response.proof.disposition == (
+        assert cast(TeardownResult, result.result).response.proof.disposition == (
             "retained_quarantine"
         )
         assert await _core_owned_teardown_row_counts(seed, case) == (1, 1)
@@ -1675,6 +1684,7 @@ def test_a_cleanup_job_parses_a_plain_json_receipt_for_the_module_lifecycle(
             resolver=ProviderResolver(
                 {ResourceKind.LOCAL_LIBVIRT: replace(local, authority=modules)}
             ),
+            module_authority=modules.modules,
         )
         job = _job(case)
         job = job.model_copy(
@@ -1715,8 +1725,11 @@ def test_remote_module_lifecycle_steps_per_operation(
     from types import SimpleNamespace
 
     actions: list[tuple[str, AuthorityOperation]] = []
+    modules = object()
+    bound_client = object()
 
     async def record(**values: Any) -> None:
+        assert values["sender"] is bound_client
         actions.append((values["action"], values["authority"].operation))
 
     monkeypatch.setattr(
@@ -1725,8 +1738,9 @@ def test_remote_module_lifecycle_steps_per_operation(
     attempt = _module_attempt(uuid4(), uuid4())
     context = SimpleNamespace(
         binding=SimpleNamespace(
-            runtime=SimpleNamespace(authority=SimpleNamespace(modules=object()))
+            runtime=SimpleNamespace(authority=SimpleNamespace(modules=modules))
         ),
+        module_authority=bound_client,
         job=SimpleNamespace(
             id=uuid4(), attempt=1, payload={"remote_module_attempt_v1": _receipt(attempt)}
         ),
@@ -1736,12 +1750,62 @@ def test_remote_module_lifecycle_steps_per_operation(
     request = SimpleNamespace(operation=operation)
 
     asyncio.run(
-        lifecycle_module._execute_remote_module_lifecycle(
-            cast(Any, context), cast(Any, request), cast(Any, object())
-        )
+        lifecycle_module._execute_remote_module_lifecycle(cast(Any, context), cast(Any, request))
     )
 
     assert actions == [(action, operation) for action in expected]
+
+
+@pytest.mark.parametrize("guard", ["no-authority", "no-modules", "unsupported-operation"])
+def test_remote_module_lifecycle_skips_without_supported_capability(
+    guard: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    async def unexpected(**values: Any) -> None:
+        pytest.fail("a missing or unsupported module capability must not dispatch")
+
+    monkeypatch.setattr(
+        lifecycle_module, "execute_remote_module_lifecycle_on_authority_host", unexpected
+    )
+    authority = (
+        None
+        if guard == "no-authority"
+        else SimpleNamespace(modules=None if guard == "no-modules" else object())
+    )
+    context = SimpleNamespace(binding=SimpleNamespace(runtime=SimpleNamespace(authority=authority)))
+    request = SimpleNamespace(
+        operation=AuthorityOperation.ACTIVATE
+        if guard == "unsupported-operation"
+        else AuthorityOperation.RECOVER
+    )
+    asyncio.run(
+        lifecycle_module._execute_remote_module_lifecycle(cast(Any, context), cast(Any, request))
+    )
+
+
+def test_remote_module_lifecycle_refuses_missing_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    async def unexpected(**values: Any) -> None:
+        pytest.fail("module lifecycle must refuse before dispatch without its receipt")
+
+    monkeypatch.setattr(
+        lifecycle_module, "execute_remote_module_lifecycle_on_authority_host", unexpected
+    )
+    context = SimpleNamespace(
+        binding=SimpleNamespace(
+            runtime=SimpleNamespace(authority=SimpleNamespace(modules=object()))
+        ),
+        job=SimpleNamespace(payload={}),
+    )
+    request = SimpleNamespace(operation=AuthorityOperation.RECOVER)
+    with pytest.raises(CategorizedError, match="authority inputs are incomplete"):
+        asyncio.run(
+            lifecycle_module._execute_remote_module_lifecycle(
+                cast(Any, context), cast(Any, request)
+            )
+        )
 
 
 # Recover / resolve-conflict re-entry takes a fresh deadline (#3465)
@@ -1807,7 +1871,7 @@ def test_reentry_gets_a_fresh_deadline_not_a_refusal(
     result = _run_reentry(migrated_url, authority_role_dsns, operation, job_attempt=2)
 
     assert isinstance(result, ExternalBootAuthoritySuccessV1)
-    assert isinstance(result.result, _RecoveryAttemptResult)
+    assert isinstance(result.result, RecoveryAttemptResult)
     assert result.result.deadline == _REENTRY_NOW + _REENTRY_TIMEOUT
 
 

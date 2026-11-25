@@ -9,8 +9,7 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
-from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     AbsentComponentState,
     ExternalBootActivationBinding,
     ExternalBootMaterialization,
@@ -24,6 +23,7 @@ from kdive.providers.ports.external_boot import (
     RootSpecV1,
     RunningKernelObservation,
 )
+from kdive.providers.fault_inject.lifecycle.external_boot import FaultInjectExternalBoot
 
 ZERO_DIGEST = "sha256:" + "0" * 64
 SYSTEM_ID = "00000000-0000-0000-0000-000000000003"

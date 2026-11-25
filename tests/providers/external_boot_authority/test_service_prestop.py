@@ -14,24 +14,22 @@ from kdive.domain.remote_module_attempt_preparation import (
     ModuleAttemptPreparationRequestV1,
 )
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
-from kdive.providers.external_boot_authority.protocol import (
-    AuthorityPreparationMutationRequestV1,
-    AuthorityTakeoverRequestV1,
-    JournalPhase,
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleOperationV1,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    AuthorityServiceError,
-    ExternalBootAuthorityService,
-)
-from kdive.providers.remote_libvirt.external_boot_authority import (
+from kdive.providers.external_boot_authority.module_protocol import (
     RemoteModulePreparationBeginRequestV1,
     RemoteModulePreparationBeginResponseV1,
     RemoteModuleVolumePreparationRequestV1,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
-    RemoteModuleOperationV1,
+from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
+    AuthorityPreparationMutationRequestV1,
+    AuthorityServiceError,
+    AuthorityTakeoverRequestV1,
+    JournalPhase,
 )
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from tests.providers.external_boot_authority.service_support import (
     _Adapter,
     _Repository,

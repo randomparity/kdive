@@ -17,7 +17,7 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ExternalBootActivationBinding,
     ExternalBootPlan,
     RunningKernelObservation,
@@ -37,6 +37,7 @@ from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     require_disk_grub_source,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
+from kdive.providers.shared.libvirt_external_boot import LibvirtDefinitionError
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
 from kdive.providers.shared.runtime_paths import domain_name_for
 from tests.providers.remote_libvirt.lifecycle.external_boot_support import (
@@ -775,8 +776,8 @@ def test_boot_projection_distinguishes_an_empty_element_from_an_absent_one() -> 
     assert empty != absent
 
 
-def test_prepare_preserves_a_decomposed_plan_command_line() -> None:
-    debug_cmdline = "debug=cafe\u0301"
+@pytest.mark.parametrize("debug_cmdline", ["debug=cafe\u0301", "debug=\U0001f600"])
+def test_prepare_preserves_unicode_plan_command_line(debug_cmdline: str) -> None:
     plan_data = _plan().model_dump(mode="json", by_alias=True)
     plan_data["debug_cmdline"] = debug_cmdline
     plan_data["cmdline"] = f"{plan_data['cmdline']} {debug_cmdline}"
@@ -785,6 +786,22 @@ def test_prepare_preserves_a_decomposed_plan_command_line() -> None:
     prepared = _prepare(plan=plan, materialization=_materialization(plan=plan))
 
     assert ET.fromstring(prepared.target_xml).findtext("./os/cmdline") == plan.cmdline
+
+
+def test_prepare_preserves_defensive_cmdline_error_before_artifact_validation() -> None:
+    # model_copy bypasses domain validation to exercise the defensive provider guard.
+    valid = _plan()
+    plan = valid.model_copy(update={"cmdline": valid.cmdline + "\x01"})
+    with pytest.raises(CategorizedError) as caught:
+        _prepare(plan=plan, kernel_path="relative")
+    assert caught.value.category is ErrorCategory.CONFLICT
+    assert caught.value.details == {"system_id": str(_SYSTEM_ID), "rule": "cmdline-xml"}
+    assert str(caught.value) == (
+        "remote-libvirt external-boot source is not the owned disk/GRUB baseline: "
+        "the plan command line carries a character XML cannot represent"
+    )
+    assert isinstance(caught.value.__cause__, LibvirtDefinitionError)
+    assert caught.value.__cause__.retryable is False
 
 
 def test_plan_rejects_a_command_line_xml_cannot_represent() -> None:

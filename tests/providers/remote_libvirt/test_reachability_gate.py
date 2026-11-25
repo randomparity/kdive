@@ -276,6 +276,7 @@ def test_no_failure_path_reports_the_composed_pkipath_or_userinfo() -> None:
         lambda: remote_endpoint(
             f"qemu+tls://{_USERINFO}@down.example:notanum/system?pkipath={pki}"
         ),
+        lambda: remote_endpoint(f"qemu+tcp://{_USERINFO}@down.example/system?pkipath={pki}"),
     ]
     for case in cases:
         with pytest.raises(CategorizedError) as excinfo:

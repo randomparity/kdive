@@ -21,12 +21,11 @@ from kdive.providers.local_libvirt.lifecycle.host_tool_search import (
     resolve_provider_tool,
 )
 
-# ``ROOTFS_DIR``/``UPLOADS_DIR``/``overlay_name``/``overlay_path`` are re-exported here (the
+# ``rootfs_dir``/``UPLOADS_DIR``/``overlay_name``/``overlay_path`` are re-exported here (the
 # explicit ``as`` aliases mark the re-export) for provider consumers (provisioning, tests). Their
 # canonical home — and the reconciler's provider-neutral access — is
 # ``kdive.providers.shared.runtime_paths``, keeping the reconciler off
 # ``kdive.providers.local_libvirt`` (the provider-boundary guard).
-from kdive.providers.shared.runtime_paths import ROOTFS_DIR as ROOTFS_DIR
 from kdive.providers.shared.runtime_paths import UPLOADS_DIR as UPLOADS_DIR
 from kdive.providers.shared.runtime_paths import (
     console_boot_marker_path,
@@ -35,6 +34,7 @@ from kdive.providers.shared.runtime_paths import (
 )
 from kdive.providers.shared.runtime_paths import overlay_name as overlay_name
 from kdive.providers.shared.runtime_paths import overlay_path as overlay_path
+from kdive.providers.shared.runtime_paths import rootfs_dir as rootfs_dir
 
 _QEMU_IMG_TIMEOUT_S = 5 * 60
 _QEMU_IMG = "qemu-img"
@@ -79,7 +79,7 @@ def ensure_shared_artifact_directory(path: Path) -> None:
 
 def baseline_dir(system_id: UUID | str) -> str:
     """The per-System directory holding the extracted baseline kernel/initrd (ADR-0272)."""
-    return f"{ROOTFS_DIR}/{system_id}-baseline"
+    return f"{rootfs_dir()}/{system_id}-baseline"
 
 
 def _real_remove_baseline(baseline: str) -> None:

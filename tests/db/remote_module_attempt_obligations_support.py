@@ -10,8 +10,8 @@ from kdive.db.remote_module_attempt_obligations import (
     ModuleAttemptRestoredEvidence,
     ModuleAttemptTerminalEvidence,
 )
-from kdive.providers.ports.external_boot import OpaqueProviderRef
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
+from kdive.domain.external_boot_values import OpaqueProviderRef
+from kdive.providers.external_boot_authority.module_documents import (
     RemoteModuleOperationV1,
     RemoteModuleRecoveryRefV2,
     RemoteModuleResultV1,

@@ -22,44 +22,7 @@ from uuid import UUID, uuid5
 
 from pydantic import ValidationError
 
-from kdive.providers.external_boot_authority.protocol import (
-    AuthorityCommitContextV1,
-    AuthorityConflictResolutionRequestV1,
-    AuthorityInstallRefusalV1,
-    AuthorityMutationRequestV1,
-    AuthorityObservationV1,
-    AuthorityOperation,
-    AuthorityPreparationMutationRequestV1,
-    AuthorityRecoveryObservationContextV1,
-    AuthorityTeardownMutationRequestV1,
-    ObservationCategory,
-    operation_is_permitted,
-)
-from kdive.providers.external_boot_authority.service import AuthorityServiceError
-from kdive.providers.external_boot_authority.stranded import (
-    StrandedAuthorityFacts,
-    StrandedTarget,
-)
-from kdive.providers.external_boot_authority.teardown import (
-    AuthoritySystemTeardownFacts,
-    AuthorityTeardownReservationV1,
-)
-from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
-    FinalizeCleanupProof,
-    LocalLibvirtExternalBoot,
-    LocalObservedState,
-    LocalSystemTeardownAnchorV1,
-    LocalSystemTeardownIntentV1,
-    RecoveryIntentAbsentError,
-)
-from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import GuestFreeSpaceRefusal
-from kdive.providers.local_libvirt.lifecycle.boot.session import (
-    LocalExternalBootTimingConfigurationError,
-)
-from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
-    LocalOperationLeaseScope,
-)
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ExternalBootActivationBinding,
     ExternalBootPreparationObservation,
     ExternalBootPreparationRequest,
@@ -69,6 +32,46 @@ from kdive.providers.ports.external_boot import (
     RecoveryObjectObservation,
     RecoveryPoint,
     RunningKernelObservation,
+)
+from kdive.providers.external_boot_authority.protocol import (
+    AuthorityCommitContextV1,
+    AuthorityConflictResolutionRequestV1,
+    AuthorityInstallRefusalV1,
+    AuthorityMutationRequestV1,
+    AuthorityObservationV1,
+    AuthorityOperation,
+    AuthorityPreparationMutationRequestV1,
+    AuthorityRecoveryObservationContextV1,
+    AuthorityServiceError,
+    AuthorityTeardownMutationRequestV1,
+    ObservationCategory,
+    operation_is_permitted,
+)
+from kdive.providers.external_boot_authority.stranded import (
+    StrandedAuthorityFacts,
+    StrandedTarget,
+)
+from kdive.providers.external_boot_authority.teardown import (
+    AuthoritySystemTeardownFacts,
+    AuthorityTeardownReservationV1,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+    LocalLibvirtExternalBoot,
+    LocalObservedState,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import GuestFreeSpaceRefusal
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
+    FinalizeCleanupProof,
+    LocalSystemTeardownAnchorV1,
+    LocalSystemTeardownIntentV1,
+    RecoveryIntentAbsentError,
+    recovery_point_digest,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.session import (
+    LocalExternalBootTimingConfigurationError,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.session_mechanisms import (
+    LocalOperationLeaseScope,
 )
 
 logger = logging.getLogger(__name__)
@@ -995,7 +998,7 @@ def _cleanup_proof(context: AuthorityCommitContextV1, point: RecoveryPoint) -> F
     anchored record, so they identify the operation but authenticate nothing.
     """
     return FinalizeCleanupProof(
-        point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        point_digest=recovery_point_digest(point),
         binding=point.binding,
         operation_id=context.operation_identity,
         attempt_id=str(context.attempt_id),

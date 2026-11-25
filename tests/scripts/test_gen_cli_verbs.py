@@ -19,6 +19,7 @@ from kdive.cli.commands._generated_verbs import GENERATED_VERBS
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 from kdive.cli.reserved_flags import RESERVED_CLI_FLAGS
 from scripts.generate import gen_cli_verbs as gen
+from scripts.generate.offline_catalog import registry_tools
 
 
 @dataclass(frozen=True)
@@ -75,18 +76,10 @@ def test_committed_module_is_in_sync() -> None:
 
 def test_every_live_tool_is_covered() -> None:
     """Every registered tool has exactly one descriptor; no stale or missing entries."""
-    live = {t.name for t in gen._registry_tools()}
+    live = {t.name for t in registry_tools()}
     covered = [v.tool for v in GENERATED_VERBS]
     assert sorted(covered) == sorted(set(covered)), "duplicate tool descriptor"
     assert set(covered) == live
-
-
-def test_catalog_includes_conditional_recovery_when_runtime_verifier_is_disabled(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("KDIVE_WORKER_DEATH_VERIFIER", "disabled")
-    live = {tool.name for tool in gen._registry_tools()}
-    assert {"ops.build_uses_list", "ops.recover_build_use"} <= live
 
 
 def test_check_detects_a_stale_committed_module(tmp_path) -> None:

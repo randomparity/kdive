@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityOperation,
     AuthorityTeardownMutationRequestV1,
@@ -15,7 +16,6 @@ from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
 )
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 from tests.providers.external_boot_authority.service_support import _takeover
 
 

@@ -225,49 +225,86 @@ type _PathProbe = Callable[[Path], object]
 
 
 @pytest.mark.parametrize(
-    "probe",
+    ("probe", "message"),
     [
-        probes.probe_makedumpfile_marker,
-        probes.probe_drgn_marker,
-        lambda path: probes.probe_kernel_config(path, "6.12.0"),
-        probes.probe_boot_entries,
-        probes.probe_os_release,
+        (
+            probes.probe_makedumpfile_marker,
+            "guestfish is not installed; cannot read the makedumpfile-version marker",
+        ),
+        (
+            probes.probe_drgn_marker,
+            "guestfish is not installed; cannot read the drgn-version marker",
+        ),
+        (
+            lambda path: probes.probe_kernel_config(path, "6.12.0"),
+            "guestfish is not installed; cannot read the kernel config",
+        ),
+        (
+            probes.probe_boot_entries,
+            "guestfish is not installed; cannot list /boot to count baseline kernels",
+        ),
+        (
+            probes.probe_os_release,
+            "guestfish is not installed; cannot read /etc/os-release",
+        ),
     ],
 )
 def test_guestfish_probes_missing_executable(
-    probe: _PathProbe, monkeypatch: pytest.MonkeyPatch
+    probe: _PathProbe, message: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_run(monkeypatch, [FileNotFoundError("guestfish")])
+    fault = FileNotFoundError("guestfish")
+    calls = _patch_run(monkeypatch, [fault])
 
     with pytest.raises(CategorizedError) as caught:
         probe(Path("image.qcow2"))
 
     assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
     assert caught.value.details == {"tool": "guestfish"}
+    assert str(caught.value) == message
+    assert caught.value.__cause__ is fault
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(
-    "probe",
+    ("probe", "message"),
     [
-        probes.probe_makedumpfile_marker,
-        probes.probe_drgn_marker,
-        lambda path: probes.probe_kernel_config(path, "6.12.0"),
-        probes.probe_boot_entries,
-        probes.probe_os_release,
+        (
+            probes.probe_makedumpfile_marker,
+            "guestfish exceeded its timeout reading the makedumpfile-version marker",
+        ),
+        (
+            probes.probe_drgn_marker,
+            "guestfish exceeded its timeout reading the drgn-version marker",
+        ),
+        (
+            lambda path: probes.probe_kernel_config(path, "6.12.0"),
+            "guestfish exceeded its timeout reading the kernel config",
+        ),
+        (
+            probes.probe_boot_entries,
+            "guestfish exceeded its timeout listing /boot",
+        ),
+        (
+            probes.probe_os_release,
+            "guestfish exceeded its timeout reading os-release",
+        ),
     ],
 )
 @pytest.mark.usefixtures("kvm_host")
-def test_guestfish_probes_timeout(probe: _PathProbe, monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_run(
-        monkeypatch,
-        [subprocess.TimeoutExpired(cmd="guestfish", timeout=probes._GUESTFISH_TIMEOUT_S)],
-    )
+def test_guestfish_probes_timeout(
+    probe: _PathProbe, message: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fault = subprocess.TimeoutExpired(cmd="guestfish", timeout=probes._GUESTFISH_TIMEOUT_S)
+    calls = _patch_run(monkeypatch, [fault])
 
     with pytest.raises(CategorizedError) as caught:
         probe(Path("image.qcow2"))
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details == {"timeout_s": probes._GUESTFISH_TIMEOUT_S}
+    assert str(caught.value) == message
+    assert caught.value.__cause__ is fault
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -342,6 +379,9 @@ def test_probe_drgn_marker_missing_and_success_outputs(
         (_completed(returncode=1, stdout=b"CONFIG_X=y\n"), None),
         (_completed(stdout=b""), None),
         (_completed(stdout=b"CONFIG_X=y\n"), b"CONFIG_X=y\n"),
+        (_completed(stdout=b"CONFIG_X=y\r\n"), b"CONFIG_X=y\r\n"),
+        (_completed(stdout=b"# \xff\n"), b"# \xff\n"),
+        (_completed(stdout=b" \r\n"), b" \r\n"),
     ],
 )
 def test_probe_kernel_config_missing_and_success_outputs(
@@ -402,3 +442,72 @@ def test_probe_os_release_returns_none_when_both_paths_missing(
     _patch_run(monkeypatch, [_completed(returncode=1), _completed(returncode=1)])
 
     assert probes.probe_os_release(Path("image.qcow2")) is None
+
+
+@pytest.mark.parametrize(
+    ("probe", "command", "guest_path", "text"),
+    [
+        (probes.probe_makedumpfile_marker, "cat", probes.MAKEDUMPFILE_MARKER_GUEST_PATH, True),
+        (probes.probe_drgn_marker, "cat", probes.DRGN_MARKER_GUEST_PATH, True),
+        (
+            lambda path: probes.probe_kernel_config(path, "6.12.0"),
+            "cat",
+            "/boot/config-6.12.0",
+            False,
+        ),
+        (probes.probe_boot_entries, "ls", "/boot", True),
+        (probes.probe_os_release, "cat", "/etc/os-release", True),
+    ],
+)
+@pytest.mark.usefixtures("kvm_host")
+def test_guestfish_process_arguments(
+    probe: _PathProbe, command: str, guest_path: str, text: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _patch_run(monkeypatch, [_completed(stdout="value" if text else b"value")])
+    probe(Path("image with spaces.qcow2"))
+    assert len(calls) == 1
+    argv, options = calls[0]
+    assert argv == ["guestfish", "--ro", "-a", "image with spaces.qcow2", "-i", command, guest_path]
+    assert options.get("text", False) is text
+    assert {key: value for key, value in options.items() if key != "text"} == {
+        "capture_output": True,
+        "timeout": probes._GUESTFISH_TIMEOUT_S,
+        "check": False,
+    }
+
+
+def test_probe_os_release_reuses_one_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    budgets: list[float] = []
+
+    def budget(base: float) -> float:
+        budgets.append(base)
+        return 37.0 + len(budgets)
+
+    monkeypatch.setattr(probes, "appliance_budget_s", budget)
+    raw = ' \nID="fedora"\n\n'
+    calls = _patch_run(monkeypatch, [_completed(stdout=" \t\n"), _completed(stdout=raw)])
+    assert probes.probe_os_release(Path("image.qcow2")) == raw
+    assert budgets == [probes._GUESTFISH_TIMEOUT_S]
+    assert [argv[-1] for argv, _ in calls] == ["/etc/os-release", "/usr/lib/os-release"]
+    assert [options["timeout"] for _, options in calls] == [38.0, 38.0]
+
+
+def test_probe_os_release_preserves_etc_text_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = ' \nID="fedora"\n\n'
+    calls = _patch_run(monkeypatch, [_completed(stdout=raw)])
+    assert probes.probe_os_release(Path("image.qcow2")) == raw
+    assert len(calls) == 1
+    assert calls[0][0][-1] == "/etc/os-release"
+
+
+def test_probe_os_release_propagates_unexpected_process_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault = PermissionError("cannot execute")
+    calls = _patch_run(monkeypatch, [fault])
+    with pytest.raises(PermissionError) as caught:
+        probes.probe_os_release(Path("image.qcow2"))
+    assert caught.value is fault
+    assert len(calls) == 1

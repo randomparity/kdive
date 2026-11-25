@@ -9,15 +9,17 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from uuid import UUID
 
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ActivationOwnership,
     ExternalBootActivationBinding,
-    ExternalBootArtifactStager,
     ExternalBootMaterialization,
     ExternalBootPlan,
     KernelIdentity,
     MaterializedArtifacts,
     OpaqueProviderRef,
+)
+from kdive.providers.ports.external_boot import (
+    ExternalBootArtifactStager,
 )
 from kdive.providers.remote_libvirt.lifecycle.rootfs.boot_artifact_volumes import (
     BootArtifactVolumeConn,

@@ -22,15 +22,14 @@ from kdive.jobs.payloads import BootPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import SystemHandleResolver
 from kdive.providers.ports.console import ConsoleSnapshotter
 from kdive.providers.ports.lifecycle import (
     Booter,
     Connector,
 )
 from kdive.security.authz.context import RequestContext
-from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
-from kdive.store.objectstore import ObjectStore
 
 
 async def _resolve_system_accel(conn: AsyncConnection, system_id: UUID) -> str | None:
@@ -51,12 +50,11 @@ async def _run_boot_and_capture_outcome(
     booter: Booter,
     connector: Connector,
     profile_policy: ProfilePolicy,
-    secret_registry: SecretRegistry,
-    artifact_store: ObjectStore,
     snapshotter: ConsoleSnapshotter | None,
     mark: int,
     *,
     accel: str | None,
+    system_handle: SystemHandleResolver,
 ) -> BootStepResult:
     system_id = run.require_system_id()
     try:
@@ -71,8 +69,6 @@ async def _run_boot_and_capture_outcome(
                 conn,
                 system_id,
                 run.id,
-                secret_registry=secret_registry,
-                artifact_store=artifact_store,
                 snapshotter=snapshotter,
                 mark=mark,
             )
@@ -88,6 +84,7 @@ async def _run_boot_and_capture_outcome(
                 run,
                 system_id=system_id,
                 profile_policy=profile_policy,
+                system_handle=system_handle,
                 artifact=artifact,
                 matched_line=matched_line,
                 # Only this call site probes the stub (ADR-0628): the boot raised
@@ -103,8 +100,7 @@ async def _run_boot_and_capture_outcome(
                 system_id=system_id,
                 connector=connector,
                 profile_policy=profile_policy,
-                secret_registry=secret_registry,
-                artifact_store=artifact_store,
+                system_handle=system_handle,
                 snapshotter=snapshotter,
                 mark=mark,
             )
@@ -115,8 +111,6 @@ async def _run_boot_and_capture_outcome(
         conn,
         system_id,
         run.id,
-        secret_registry=secret_registry,
-        artifact_store=artifact_store,
         snapshotter=snapshotter,
         mark=mark,
     )
@@ -126,6 +120,7 @@ async def _run_boot_and_capture_outcome(
         run,
         system_id=system_id,
         profile_policy=profile_policy,
+        system_handle=system_handle,
         artifact=artifact,
     )
     if downgraded is not None:
@@ -145,8 +140,6 @@ async def boot_handler(
     job: Job,
     *,
     resolver: ProviderResolver,
-    secret_registry: SecretRegistry,
-    artifact_store: ObjectStore,
 ) -> str | None:
     """Boot the installed kernel and confirm run-readiness, recording the `boot` step."""
     run_id = UUID(load_payload(job, BootPayload).run_id)
@@ -177,11 +170,10 @@ async def boot_handler(
             booter,
             binding.runtime.connector,
             binding.runtime.profile_policy,
-            secret_registry,
-            artifact_store,
             snapshotter,
             mark,
             accel=accel,
+            system_handle=binding.runtime.system_handle,
         )
     except CategorizedError:
         await abandon_run_step_best_effort(conn, run_id, "boot")
@@ -190,8 +182,6 @@ async def boot_handler(
                 conn,
                 system_id,
                 run_id,
-                secret_registry=secret_registry,
-                artifact_store=artifact_store,
                 snapshotter=snapshotter,
                 mark=mark,
             )

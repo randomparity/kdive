@@ -38,6 +38,7 @@ from kdive.jobs.worker import Worker
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime, RootfsCapabilities
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.clock import STORE_MTIME
 from tests.support.worker_fence import incarnation_credential, register_worker
@@ -119,6 +120,7 @@ def _none_present(_path: Path, _candidates: Sequence[str]) -> set[str]:
 
 def _resolver_with_plane(plane: _FakePlane | None) -> ProviderResolver:
     runtime = ProviderRuntime(
+        system_handle=libvirt_system_handle,
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=cast(Any, object()),
         installer=cast(Any, object()),

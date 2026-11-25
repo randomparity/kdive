@@ -211,9 +211,10 @@ from the tail).
 
 Pass `find` to jump to the nearest literal match instead of reading a fixed window: the
 response then carries `data.match_found` plus, on a hit, `data.match_offset`/
-`data.match_line`, the surrounding `data.content`, and `data.next_offset` to continue in
-`direction`. Use it to locate a crash signature in a large console log without paging the
-whole file.
+`data.match_line` and the surrounding `data.content`. When present, `data.next_offset`
+continues beyond the matched line in `direction`. Stop when `data.match_found` is false
+or `data.next_offset` is absent, including on a successful hit. Use it to locate a crash
+signature in a large console log without paging the whole file.
 
 An artifact above the fetch ceiling sets `content_omitted` and is retrieved via presigned
 `refs.download_uri` when the store is reachable and redaction checks pass; a `find` over
@@ -244,8 +245,8 @@ remains available; after retirement use runs.get.
 `request` fields:
 
 - `artifact_id` (`string`, required) — The redacted artifact to fetch (sensitive ids are not-found).
-- `find` (`string (nullable)`, optional) — Optional literal search terms; omit for a plain windowed read. '|' separates alternatives (e.g. 'BUG: KASAN|Call Trace'); the nearest term in direction is returned with data.match_offset, data.match_line, the surrounding data.content, and data.next_offset to continue (data.match_found is false when none remain). Per-line literal substring, case-sensitive, no regex and no Unicode normalization — match the artifact's exact bytes (kernel signatures are ASCII). An artifact above the fetch ceiling cannot be searched and is rejected with configuration_error data.reason=artifact_too_large, never a silent match_found=false.
-- `byte_offset` (`integer`, optional) — Start byte of the window, or of the search cursor when find is set (0-based). With direction=forward (default) a negative value starts from the beginning; with direction=backward the window (or search) runs up from this byte and an omitted (0) or negative value means end-of-artifact. Page with the returned data.next_offset until data.content_truncated is false, or — with find — until data.match_found is false.
+- `find` (`string (nullable)`, optional) — Optional literal search terms; omit for a plain windowed read. '|' separates alternatives (e.g. 'BUG: KASAN|Call Trace'); the nearest term in direction is returned with data.match_offset, data.match_line and the surrounding data.content. When present, data.next_offset continues beyond the matched line in direction. Stop when data.match_found is false or data.next_offset is absent, including on a successful hit. Per-line literal substring, case-sensitive, no regex and no Unicode normalization — match the artifact's exact bytes (kernel signatures are ASCII). An artifact above the fetch ceiling cannot be searched and is rejected with configuration_error data.reason=artifact_too_large, never a silent match_found=false.
+- `byte_offset` (`integer`, optional) — Start byte of the window, or of the search cursor when find is set (0-based). With direction=forward (default) a negative value starts from the beginning; with direction=backward the window (or search) runs up from this byte and an omitted (0) or negative value means end-of-artifact. Page with the returned data.next_offset until data.content_truncated is false. With find, stop when data.match_found is false or data.next_offset is absent; continuation skips the matched line.
 - `max_bytes` (`integer`, optional) — Maximum inline window bytes, or surrounding content bytes on a find match; default 16384, sized to the tool-result token budget. The server caps the window at the smaller of a hard 24576-byte token-safe ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES, so a larger value still returns at most 24576 bytes with data.next_offset to page the rest; an artifact above the fetch ceiling omits inline content — use refs.download_uri for the whole object when present. Store or redaction failures set data.content_unavailable and omit download_uri.
 - `direction` (``forward`, `backward``, optional) — Cursor direction for paging and for find. forward starts at byte_offset (the artifact start when omitted). backward starts at end-of-artifact when byte_offset is omitted (read the tail and page up); a positive byte_offset bounds it.
 

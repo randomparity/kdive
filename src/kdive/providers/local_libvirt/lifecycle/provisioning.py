@@ -79,10 +79,10 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.upload_acquisition import (
     rootfs_upload_fetch_from_env,
 )
 from kdive.providers.local_libvirt.lifecycle.storage import (
-    ROOTFS_DIR,
     UPLOADS_DIR,
     ProvisioningFiles,
     overlay_path,
+    rootfs_dir,
 )
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S, LIBVIRT_URI
@@ -224,7 +224,7 @@ class LocalLibvirtProvisioning:
     ) -> None:
         self._connect = connect
         self._files = files or ProvisioningFiles()
-        self._allowed_roots = allowed_roots or [Path(ROOTFS_DIR)]
+        self._allowed_roots = allowed_roots or [Path(rootfs_dir())]
         self._catalog_fetch = catalog_fetch
         self._upload_fetch = upload_fetch
         self._materialize_rootfs = materialize_rootfs or self._materialize_rootfs_base
@@ -259,7 +259,7 @@ class LocalLibvirtProvisioning:
         Resource this provisioner serves; the host-agnostic default is ``False`` (``restrict=on``).
         """
         host_uri = config.require(LIBVIRT_URI)
-        allowed_roots = [Path(ROOTFS_DIR)]
+        allowed_roots = [Path(rootfs_dir())]
         # `virConnect` structurally satisfies the narrow `_LibvirtConn` Protocol (only
         # `defineXML`/`lookupByName`), so no suppression is needed at this seam.
         return cls(
@@ -773,17 +773,16 @@ class LocalLibvirtProvisioning:
         defines+starts the new profile under the **same** deterministic domain name (the
         ``system_id`` is stable). Built from the idempotent ``teardown``/``provision``
         primitives — an absent prior domain is swallowed by ``teardown`` (so a retry after a
-        partial wipe still provisions), and a ``provision`` failure surfaces as
-        ``PROVISIONING_FAILURE`` (so the handler drives ``reprovisioning -> failed``).
+        partial wipe still provisions). Provision can fail after the prior domain has been
+        removed; its categorized failure propagates without restoring that domain.
 
         ``overlay_customizers`` (ADR-0289, #963) are forwarded to the internal ``provision``
         call: since ``teardown`` above always removes the prior overlay, ``provision`` always
         recreates it here, so the customizers always run.
 
         Raises:
-            CategorizedError: ``PROVISIONING_FAILURE`` if the new domain cannot be
-                defined/started or its first boot does not reach the readiness marker
-                (ADR-0680); ``INFRASTRUCTURE_FAILURE`` if the wipe cannot be completed.
+            CategorizedError: as :meth:`teardown` and :meth:`provision`, including missing
+                dependencies, invalid configuration, provisioning and infrastructure failures.
         """
         del bootstrap_pubkey  # local injects pre-boot via overlay_customizers (ADR-0291)
         self.teardown(domain_name_for(system_id))

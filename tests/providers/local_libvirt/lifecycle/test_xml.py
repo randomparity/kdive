@@ -6,8 +6,11 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from uuid import UUID
 
+import pytest
+
 from kdive.providers.local_libvirt.lifecycle import xml as xmlmod
 from kdive.providers.local_libvirt.lifecycle.xml import render_customization_domain_xml
+from kdive.providers.shared.libvirt_xml import QEMU_NS
 
 
 def test_ssh_netdev_id_is_shared_constant() -> None:
@@ -61,3 +64,27 @@ def test_customization_domain_x86_kvm_has_no_emulator_and_egress_on() -> None:
     vals = [a.get("value") or "" for a in root.iter()]
     assert any("restrict=off" in v for v in vals)
     assert any("virtio-net-pci" in v and "addr=0x10" in v for v in vals)  # q35 slot pin
+
+
+def test_customization_restores_replaced_qemu_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ET, "_namespace_map", vars(ET)["_namespace_map"].copy())
+    for replacement in ("foreign", "another"):
+        ET.register_namespace(replacement, QEMU_NS)
+        xml = render_customization_domain_xml(
+            BID,
+            arch="x86_64",
+            disk_path="/d.qcow2",
+            kernel_path=Path("/k/vmlinuz"),
+            initrd_path=None,
+            accel="kvm",
+            emulator=None,
+        )
+        assert "<qemu:commandline>" in xml
+        root = ET.fromstring(xml)
+        args = [
+            arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
+        ]
+        assert "-netdev" in args
+        assert "user,id=kdivebuild,restrict=off" in args
+        assert root.findtext("name") == f"kdive-build-{BID}"
+        assert root.findtext("os/kernel") == "/k/vmlinuz"

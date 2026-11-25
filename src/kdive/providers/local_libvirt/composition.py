@@ -26,6 +26,7 @@ from kdive.providers.core.discovery_registration import (
 )
 from kdive.providers.core.runtime import (
     BootstrapKeyCapabilities,
+    ConsoleCapabilities,
     DebugCapabilities,
     ProviderRuntime,
     ProviderSupport,
@@ -45,17 +46,23 @@ from kdive.providers.external_boot_authority.settings import (
 )
 from kdive.providers.infra.reaping import CaptureReaper, InfraReaper
 from kdive.providers.local_libvirt.config import local_guest_egress_for_resource
+from kdive.providers.local_libvirt.console import (
+    LocalLibvirtConsoleReader,
+    LocalLibvirtConsoleSnapshotter,
+)
 from kdive.providers.local_libvirt.debug.fault_inject import LocalLibvirtFaultInjection
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import LocalLibvirtVmcoreIntrospect
 from kdive.providers.local_libvirt.debug.live_introspect import LocalLibvirtLiveIntrospect
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.external_boot_authority import LocalExternalBootAuthorityAdapter
+from kdive.providers.local_libvirt.lifecycle.boot._artifact_staging import (
+    RealLocalExternalBootMaterializer,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     LocalExternalBootIO,
     LocalLibvirtExternalBoot,
     RealLocalExternalBootIO,
-    RealLocalExternalBootMaterializer,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     LocalExternalBootReadiness,
@@ -122,6 +129,7 @@ from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     real_module_debuginfo_resolver,
 )
+from kdive.providers.shared.runtime_paths import libvirt_system_handle
 from kdive.providers.shared.traffic_capture.execution import CaptureExecutor
 from kdive.providers.system_authority.manifest import (
     LocalAuthoritySystemManifestV1,
@@ -322,7 +330,7 @@ def authority_system_path_resolvers() -> tuple[SystemPath, SystemPath]:
 
     A host with an installed local System manifest provisions every local System under
     ``<authority_system_local_root>/rootfs`` (ADR-0623); any other host keeps the worker's
-    legacy ``ROOTFS_DIR`` layout. The session's ownership check compares against these exact
+    legacy rootfs directory layout. The session's ownership check compares against these exact
     strings, so they must equal ``build_local_authority_system_provider``'s ``ProvisioningFiles``.
     """
     host = AuthorityHostConfig.from_environment()
@@ -478,6 +486,11 @@ def build_runtime(
     live_introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=secret_registry)
     external_boot = build_external_boot(external_boot_io)
     return ProviderRuntime(
+        system_handle=libvirt_system_handle,
+        console=ConsoleCapabilities(
+            snapshotter=LocalLibvirtConsoleSnapshotter(store, secret_registry=secret_registry),
+            reader_factory=LocalLibvirtConsoleReader,
+        ),
         authority=build_authority_capability(authority_sender),
         profile_policy=LocalLibvirtProfilePolicy(),
         provisioner=provisioner,

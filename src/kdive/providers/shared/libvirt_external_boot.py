@@ -65,6 +65,10 @@ def parse_projected_domain_xml(domain_xml: str) -> ET.Element:
 
 
 def _round_trips_in_xml(value: str) -> bool:
+    """Carriage returns are legal XML but parse as newlines.
+
+    ElementTree serialization alone does not reject illegal control characters.
+    """
     return all(
         code in (0x09, 0x0A)
         or 0x20 <= code <= 0xD7FF
@@ -94,7 +98,8 @@ def require_artifact_path(value: str, *, what: str) -> str:
     return value
 
 
-def _require_cmdline(value: str) -> str:
+def require_cmdline(value: str) -> str:
+    """Require command-line text that XML preserves without normalization."""
     if not _round_trips_in_xml(value):
         raise LibvirtDefinitionError(
             "command line must be text representable in XML", retryable=False
@@ -108,7 +113,7 @@ def render_target_xml(source: str, *, kernel: str, initrd: str | None, cmdline: 
     require_artifact_path(kernel, what="kernel")
     if initrd is not None:
         require_artifact_path(initrd, what="initrd")
-    _require_cmdline(cmdline)
+    require_cmdline(cmdline)
     os_element = root.find("os")
     if os_element is None:
         os_element = ET.SubElement(root, "os")

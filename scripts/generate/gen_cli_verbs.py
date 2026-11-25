@@ -31,7 +31,6 @@ Run via ``just cli-verbs`` (write) / ``just cli-verbs-check`` (verify; joins ``j
 
 from __future__ import annotations
 
-import asyncio
 import subprocess
 import sys
 import tempfile
@@ -39,20 +38,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any
 
-from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
-from psycopg_pool import AsyncConnectionPool
-
-from kdive.assembly import ProcessAssembly
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedLocalFlag, GeneratedVerb
 from kdive.cli.reserved_flags import RESERVED_CLI_FLAGS, derive_cli_flag
-from kdive.mcp.assembly.app import build_app_from_assembly
-from kdive.mcp.assembly.schema_catalog import CatalogWorkerDeathVerifier
-from kdive.providers.assembly.composition import ProviderComposition
-from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.assembly import ObjectStoreAssembly
-from kdive.store.objectstore import ObjectStore
+from scripts.generate.offline_catalog import registry_tools
 
 _COMMANDS_DIR = Path(__file__).resolve().parents[2] / "src" / "kdive" / "cli" / "commands"
 _MODULE = _COMMANDS_DIR / "_generated_verbs.py"
@@ -471,30 +461,9 @@ def _ruff_format(source: str) -> str:
     return proc.stdout
 
 
-def _registry_tools() -> list[Any]:
-    # Offline schema extraction (mirrors gen_tool_reference): the pool and injected store are
-    # never invoked; the app is built purely to read tool schemas.
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    kp = RSAKeyPair.generate()
-    verifier = JWTVerifier(public_key=kp.public_key, issuer="https://gen.local", audience="kdive")
-    registry = SecretRegistry()
-    object_stores = ObjectStoreAssembly(store=cast(ObjectStore, object()))
-    process = ProcessAssembly(
-        object_stores,
-        ProviderComposition(secret_registry=registry, object_store=object_stores.store),
-    )
-    app = build_app_from_assembly(
-        pool,
-        verifier=verifier,
-        process_assembly=process,
-        worker_death_verifier=CatalogWorkerDeathVerifier(),
-    )
-    return cast(list[Any], asyncio.run(app.list_tools()))
-
-
 def build_module() -> str:
     """Build the fully formatted committed-module source from the live registry."""
-    return _ruff_format(render_module(verb_specs(_registry_tools())))
+    return _ruff_format(render_module(verb_specs(registry_tools())))
 
 
 def _atomic_write_text(path: Path, text: str) -> None:

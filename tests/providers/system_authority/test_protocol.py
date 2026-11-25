@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -225,3 +227,40 @@ def test_ready_proof_refuses_a_forged_or_out_of_range_port(port: object) -> None
                 "ssh_forward_port": port,
             }
         )
+
+
+def test_protocol_values_do_not_initialize_the_service_and_exports_still_work() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            "\n".join(
+                [
+                    "import importlib, sys",
+                    "p = importlib.import_module('kdive.providers.system_authority.protocol')",
+                    "assert 'kdive.providers.system_authority.service' not in sys.modules",
+                    "assert 'kdive.providers.system_authority.repository' not in sys.modules",
+                    "assert p.AuthoritySystemServiceError.__module__ == p.__name__",
+                    "package = importlib.import_module('kdive.providers.system_authority')",
+                    "assert package.AuthoritySystemServiceError is p.AuthoritySystemServiceError",
+                    "missing = object()",
+                    "assert getattr(package, 'missing_export', missing) is missing",
+                    "service = package.AuthoritySystemService",
+                    "concrete = importlib.import_module("
+                    "'kdive.providers.system_authority.service')",
+                    "assert service is concrete.AuthoritySystemService",
+                    "namespace = {}",
+                    "exec('from kdive.providers.system_authority import *', namespace)",
+                    "assert all(name in namespace for name in package.__all__)",
+                    "assert namespace['AuthoritySystemService'] is service",
+                    "assert namespace['AuthoritySystemServiceError'] is "
+                    "p.AuthoritySystemServiceError",
+                ]
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

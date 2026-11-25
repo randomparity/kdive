@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from kdive.domain.catalog.images import Capability
+from kdive.domain.external_boot_values import RootSource, RootSpecV1
 from kdive.images.planes.base import (
     PROVENANCE_BOOT_KERNEL_COUNT,
     PROVENANCE_DEFAULT_KERNEL_VERSION,
@@ -12,7 +13,6 @@ from kdive.images.planes.base import (
     RootfsBuildProvenance,
     RootfsBuildSpec,
 )
-from kdive.providers.ports.external_boot import RootSource, RootSpecV1
 
 
 def _local_root() -> RootSpecV1:

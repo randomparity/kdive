@@ -16,8 +16,22 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from kdive.db.external_boot_authority_journal import AuthorityBinding, JournalHead, PrestopHolders
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import (
+    ExternalBootPreparationObservation,
+    RecoveryObjectObservation,
+    RunningKernelObservation,
+)
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
+from kdive.providers.external_boot_authority.module_protocol import (
+    PREPARATION_ABANDONED,
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
+)
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     ModuleVolumeSweepRequestV1,
     ModuleVolumeSweepResponseV1,
@@ -25,11 +39,11 @@ from kdive.providers.external_boot_authority.module_volume_sweep import (
 from kdive.providers.external_boot_authority.protocol import (
     _TAKEOVER_PHASES,
     GENESIS_DIGEST,
+    AuthenticatedPeer,
     AuthorityAcknowledgementV1,
     AuthorityCleanupEvidenceContextV1,
     AuthorityCommitContextV1,
     AuthorityConflictResolutionRequestV1,
-    AuthorityInstallRefusalV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityOperation,
@@ -39,12 +53,14 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityRecoveryOrphanDispositionRequestV1,
     AuthorityRecoveryOrphanDispositionResponseV1,
     AuthorityRunningObservationV1,
+    AuthorityServiceError,
     AuthorityStrandedObservationRequestV1,
     AuthorityStrandedObservationResponseV1,
     AuthorityTakeoverRequestV1,
     AuthorityTeardownMutationRequestV1,
     AuthorityTeardownProofV1,
     AuthorityTeardownResponseV1,
+    JournalConflictReason,
     JournalPhase,
     JournalRecordV1,
     record_digest,
@@ -63,20 +79,6 @@ from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownSnapshot,
     ProviderRecoveryRefusal,
     SystemTeardownSupersededError,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootPreparationObservation,
-    RecoveryObjectObservation,
-    RunningKernelObservation,
-)
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    PREPARATION_ABANDONED,
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModulePreparationBeginRequestV1,
-    RemoteModulePreparationBeginResponseV1,
-    RemoteModuleTerminalPreparationResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
 )
 from kdive.providers.system_authority.service import AuthoritySystemService
 from kdive.security.secrets.redaction import REDACTION
@@ -103,13 +105,6 @@ _CLEANUP_EVIDENCE_COMMITS = frozenset(
         ("teardown", AuthorityOperation.TEARDOWN),
     }
 )
-
-
-@dataclass(frozen=True, slots=True)
-class AuthenticatedPeer:
-    """Identity established by the hosting authentication boundary."""
-
-    incarnation_id: UUID | str
 
 
 class AuthorityMutationAdapter(Protocol):
@@ -383,82 +378,6 @@ class AuthorityReleasePhaseRepository(Protocol):
         acknowledgement_sequence: int,
         acknowledgement_digest: str,
     ) -> AuthorityBinding | None: ...
-
-
-JournalConflictReason = Literal[
-    "ack_watermark_missing",
-    "checkpoint_refused",
-    "completion_evidence_missing",
-    "finish_mutation_started_missing",
-    "head_absent_records_present",
-    "head_mismatch_observe",
-    "head_mismatch_recover",
-    "head_present_records_empty",
-    "head_unanchored_commit",
-    "head_unanchored_terminal",
-    "lane_failed_current_read",
-    "lane_failed_lifecycle",
-    "lane_failed_mutation",
-    "lane_failed_observe",
-    "lane_failed_takeover",
-    "lane_failed_terminal_preparation",
-    "latest_not_mutation_started",
-    "mutation_started_missing",
-    "observation_missing",
-    "observe_records_empty",
-    "orphan_binding_changed",
-    "orphan_binding_changed_after_disposition",
-    "orphan_digest_changed",
-    "orphan_row_foreign_authority",
-    "orphan_selection_malformed",
-    "orphan_system_mismatch",
-    "pending_predecessor_missing",
-    "phase_not_replayable",
-    "predecessor_not_target",
-    "predecessor_operation_mismatch",
-    "preparation_plan_missing",
-    "release_phase_mismatch",
-    "replay_mutation_started_missing",
-    "stranded_head_mismatch",
-    "stranded_lane_failed",
-    "suspended_state_mismatch",
-    "takeover_head_missing",
-    "takeover_head_missing_after_watermark",
-    "terminal_operation_mismatch",
-    "terminal_record_missing",
-    "terminal_replay_mismatch",
-    "unresolved_binding_mismatch",
-    "unresolved_head_missing",
-]
-"""Closed set naming the check behind a `journal_conflict`; a log field, never a metric label."""
-
-
-class AuthorityServiceError(RuntimeError):
-    """Bounded failure safe to expose across the authority boundary."""
-
-    def __init__(
-        self,
-        category: Literal[
-            "unauthenticated",
-            "superseded",
-            "journal_conflict",
-            "provider_conflict",
-            "system_held",
-            "configuration_error",
-            "install_failure",
-        ],
-        *,
-        reason: JournalConflictReason | None = None,
-        telemetry_recorded: bool = False,
-        install_refusal: AuthorityInstallRefusalV1 | None = None,
-    ):
-        if (category == "install_failure") is (install_refusal is None):
-            raise ValueError("install_failure and install_refusal are a pair")
-        self.category = category
-        self.reason = reason
-        self.install_refusal = install_refusal
-        self.telemetry_recorded = telemetry_recorded
-        super().__init__(category)
 
 
 @dataclass(slots=True)
@@ -918,7 +837,10 @@ class ExternalBootAuthorityService:
         )
 
     @staticmethod
-    def _operation_matches(record: JournalRecordV1, request: AuthorityMutationRequestV1) -> bool:
+    def _operation_matches(
+        record: JournalRecordV1,
+        request: AuthorityMutationRequestV1 | AuthorityPreparationMutationRequestV1,
+    ) -> bool:
         """Match immutable operation facts while allowing a successor authority generation."""
         return (
             record.system_id == request.system_id
@@ -1062,7 +984,7 @@ class ExternalBootAuthorityService:
             raise AuthorityServiceError("journal_conflict", reason="head_mismatch_recover")
         return records
 
-    async def _observation_head_is_current(
+    async def _require_current_observation_head(
         self, binding: AuthorityBinding, records: list[JournalRecordV1]
     ) -> None:
         """Refuse an observation unless its local journal ends at the trusted exact head.
@@ -1241,7 +1163,10 @@ class ExternalBootAuthorityService:
                 (JournalPhase.TERMINAL, {"observation": observation, "outcome": "conflict"}),
             ):
                 records = await self._anchor(
-                    binding, journal, records, self._record(request, records, phase, **changes)
+                    binding,
+                    journal,
+                    records,
+                    self._build_journal_record(request, records, phase, **changes),
                 )
             try:
                 await self._finalize_adapter(request, records)
@@ -1324,7 +1249,7 @@ class ExternalBootAuthorityService:
         )
 
     @staticmethod
-    def _record(
+    def _build_journal_record(
         request: AuthorityTakeoverRequestV1 | AuthorityMutationRequestV1,
         records: list[JournalRecordV1],
         phase: JournalPhase,
@@ -1450,7 +1375,9 @@ class ExternalBootAuthorityService:
     ) -> list[JournalRecordV1]:
         request = self._mutation_from_record(prior, binding)
         if prior.phase is JournalPhase.ADMITTED:
-            terminal = self._record(request, records, JournalPhase.TERMINAL, outcome="never-began")
+            terminal = self._build_journal_record(
+                request, records, JournalPhase.TERMINAL, outcome="never-began"
+            )
             return await self._anchor(binding, journal, records, terminal)
         if prior.phase is JournalPhase.MUTATION_STARTED:
             try:
@@ -1465,7 +1392,7 @@ class ExternalBootAuthorityService:
                 binding,
                 journal,
                 records,
-                self._record(request, records, JournalPhase.PROVIDER_RETURNED),
+                self._build_journal_record(request, records, JournalPhase.PROVIDER_RETURNED),
             )
         elif prior.phase is JournalPhase.PROVIDER_RETURNED:
             try:
@@ -1487,7 +1414,9 @@ class ExternalBootAuthorityService:
                 binding,
                 journal,
                 records,
-                self._record(request, records, JournalPhase.OBSERVED, observation=observation),
+                self._build_journal_record(
+                    request, records, JournalPhase.OBSERVED, observation=observation
+                ),
             )
         outcome = (
             observation.category
@@ -1498,7 +1427,7 @@ class ExternalBootAuthorityService:
             binding,
             journal,
             records,
-            self._record(
+            self._build_journal_record(
                 request,
                 records,
                 JournalPhase.TERMINAL,
@@ -1691,7 +1620,7 @@ class ExternalBootAuthorityService:
                     elif pending.generation >= request.generation:
                         raise AuthorityServiceError("superseded")
                     else:
-                        superseded = self._record(
+                        superseded = self._build_journal_record(
                             request,
                             records,
                             JournalPhase.TAKEOVER_SUPERSEDED,
@@ -1701,7 +1630,9 @@ class ExternalBootAuthorityService:
                         )
                         records = await self._anchor(binding, journal, records, superseded)
                 if watermark is None:
-                    watermark = self._record(request, records, JournalPhase.WATERMARK_INSTALLED)
+                    watermark = self._build_journal_record(
+                        request, records, JournalPhase.WATERMARK_INSTALLED
+                    )
                     records = await self._anchor(binding, journal, records, watermark)
                 lane.watermark_generation = request.generation
                 active = lane.active
@@ -1788,7 +1719,7 @@ class ExternalBootAuthorityService:
                     for phase in phases.values()
                 ):
                     raise AuthorityServiceError("provider_conflict")
-                acknowledgement = self._record(
+                acknowledgement = self._build_journal_record(
                     request,
                     records,
                     JournalPhase.TAKEOVER_ACKNOWLEDGED,
@@ -1811,6 +1742,86 @@ class ExternalBootAuthorityService:
             if projected is None or projected != response:
                 raise AuthorityServiceError("superseded")
             return projected
+
+    def _preparation_predecessor(
+        self,
+        request: AuthorityPreparationMutationRequestV1,
+        records: list[JournalRecordV1],
+    ) -> tuple[AuthorityPreparationMutationRequestV1 | None, str | None]:
+        predecessor: AuthorityPreparationMutationRequestV1 | None = None
+        predecessor_receipt_identity: str | None = None
+        predecessor_record = next(
+            (
+                record
+                for record in reversed(records)
+                if record.phase is JournalPhase.TERMINAL
+                and record.operation == request.operation
+                and record.activation_id == request.activation_id
+                and record.generation < request.generation
+            ),
+            None,
+        )
+        if predecessor_record is not None:
+            if (
+                predecessor_record.outcome != "target"
+                or predecessor_record.observation is None
+                or predecessor_record.observation.category != "target"
+            ):
+                raise AuthorityServiceError("journal_conflict", reason="predecessor_not_target")
+            predecessor_receipt_identity = predecessor_record.observation.composite_state
+            predecessor = request.model_copy(
+                update={
+                    "authority_id": predecessor_record.authority_id,
+                    "generation": predecessor_record.generation,
+                    "attempt_id": predecessor_record.attempt_id,
+                    "operation_identity": predecessor_record.operation_identity,
+                    "operation_digest": predecessor_record.operation_digest,
+                    "expected_source_identity": predecessor_record.expected_source_identity,
+                    "intended_target_identity": predecessor_record.intended_target_identity,
+                    "recovery_objects": predecessor_record.recovery_objects,
+                }
+            )
+            if not self._operation_matches(predecessor_record, predecessor):
+                raise AuthorityServiceError(
+                    "journal_conflict", reason="predecessor_operation_mismatch"
+                )
+        return predecessor, predecessor_receipt_identity
+
+    def _adopted_release_phase(
+        self, request: AuthorityMutationRequestV1, records: list[JournalRecordV1]
+    ) -> AuthorityObservationV1 | None:
+        adopted_release_phase: AuthorityObservationV1 | None = None
+        if request.purpose == "release" and request.operation in {
+            AuthorityOperation.RECOVER,
+            AuthorityOperation.CLEANUP,
+        }:
+            prior_release_terminals = self._prior_release_terminals(records, request)
+            prior_release_phase = prior_release_terminals[-1] if prior_release_terminals else None
+            if prior_release_phase is not None:
+                candidate = request.model_copy(
+                    update={
+                        "authority_id": prior_release_phase.authority_id,
+                        "generation": prior_release_phase.generation,
+                        "attempt_id": prior_release_phase.attempt_id,
+                        "operation_identity": prior_release_phase.operation_identity,
+                        "operation_digest": prior_release_phase.operation_digest,
+                        "expected_source_identity": prior_release_phase.expected_source_identity,
+                        "intended_target_identity": prior_release_phase.intended_target_identity,
+                        "recovery_objects": prior_release_phase.recovery_objects,
+                    }
+                )
+                expected_outcome = (
+                    "source" if request.operation is AuthorityOperation.RECOVER else "absent"
+                )
+                if (
+                    prior_release_phase.outcome != expected_outcome
+                    or prior_release_phase.observation is None
+                    or prior_release_phase.observation.category != expected_outcome
+                    or not self._operation_matches(prior_release_phase, candidate)
+                ):
+                    raise AuthorityServiceError("journal_conflict", reason="release_phase_mismatch")
+                adopted_release_phase = prior_release_phase.observation
+        return adopted_release_phase
 
     async def execute_mutation(
         self, peer: AuthenticatedPeer | None, request: AuthorityMutationRequestV1
@@ -1873,91 +1884,11 @@ class ExternalBootAuthorityService:
                         return prior.observation
                     predecessor: AuthorityPreparationMutationRequestV1 | None = None
                     predecessor_receipt_identity: str | None = None
-                    adopted_release_phase: AuthorityObservationV1 | None = None
                     if isinstance(request, AuthorityPreparationMutationRequestV1):
-                        predecessor_record = next(
-                            (
-                                record
-                                for record in reversed(records)
-                                if record.phase is JournalPhase.TERMINAL
-                                and record.operation == request.operation
-                                and record.activation_id == request.activation_id
-                                and record.generation < request.generation
-                            ),
-                            None,
+                        predecessor, predecessor_receipt_identity = self._preparation_predecessor(
+                            request, records
                         )
-                        if predecessor_record is not None:
-                            if (
-                                predecessor_record.outcome != "target"
-                                or predecessor_record.observation is None
-                                or predecessor_record.observation.category != "target"
-                            ):
-                                raise AuthorityServiceError(
-                                    "journal_conflict", reason="predecessor_not_target"
-                                )
-                            predecessor_receipt_identity = (
-                                predecessor_record.observation.composite_state
-                            )
-                            predecessor = request.model_copy(
-                                update={
-                                    "authority_id": predecessor_record.authority_id,
-                                    "generation": predecessor_record.generation,
-                                    "attempt_id": predecessor_record.attempt_id,
-                                    "operation_identity": predecessor_record.operation_identity,
-                                    "operation_digest": predecessor_record.operation_digest,
-                                    "expected_source_identity": (
-                                        predecessor_record.expected_source_identity
-                                    ),
-                                    "intended_target_identity": (
-                                        predecessor_record.intended_target_identity
-                                    ),
-                                    "recovery_objects": predecessor_record.recovery_objects,
-                                }
-                            )
-                            if not self._operation_matches(predecessor_record, predecessor):
-                                raise AuthorityServiceError(
-                                    "journal_conflict", reason="predecessor_operation_mismatch"
-                                )
-                    if request.purpose == "release" and request.operation in {
-                        AuthorityOperation.RECOVER,
-                        AuthorityOperation.CLEANUP,
-                    }:
-                        prior_release_terminals = self._prior_release_terminals(records, request)
-                        prior_release_phase = (
-                            prior_release_terminals[-1] if prior_release_terminals else None
-                        )
-                        if prior_release_phase is not None:
-                            candidate = request.model_copy(
-                                update={
-                                    "authority_id": prior_release_phase.authority_id,
-                                    "generation": prior_release_phase.generation,
-                                    "attempt_id": prior_release_phase.attempt_id,
-                                    "operation_identity": prior_release_phase.operation_identity,
-                                    "operation_digest": prior_release_phase.operation_digest,
-                                    "expected_source_identity": (
-                                        prior_release_phase.expected_source_identity
-                                    ),
-                                    "intended_target_identity": (
-                                        prior_release_phase.intended_target_identity
-                                    ),
-                                    "recovery_objects": prior_release_phase.recovery_objects,
-                                }
-                            )
-                            expected_outcome = (
-                                "source"
-                                if request.operation is AuthorityOperation.RECOVER
-                                else "absent"
-                            )
-                            if (
-                                prior_release_phase.outcome != expected_outcome
-                                or prior_release_phase.observation is None
-                                or prior_release_phase.observation.category != expected_outcome
-                                or not self._operation_matches(prior_release_phase, candidate)
-                            ):
-                                raise AuthorityServiceError(
-                                    "journal_conflict", reason="release_phase_mismatch"
-                                )
-                            adopted_release_phase = prior_release_phase.observation
+                    adopted_release_phase = self._adopted_release_phase(request, records)
                     unresolved = next(
                         (
                             record
@@ -2016,7 +1947,7 @@ class ExternalBootAuthorityService:
                         binding,
                         journal,
                         records,
-                        self._record(request, records, JournalPhase.ADMITTED),
+                        self._build_journal_record(request, records, JournalPhase.ADMITTED),
                     )
                     lane.active = active
                 await asyncio.sleep(0)
@@ -2026,7 +1957,7 @@ class ExternalBootAuthorityService:
                             binding,
                             journal,
                             records,
-                            self._record(
+                            self._build_journal_record(
                                 request,
                                 records,
                                 JournalPhase.TERMINAL,
@@ -2038,7 +1969,7 @@ class ExternalBootAuthorityService:
                         binding,
                         journal,
                         records,
-                        self._record(request, records, JournalPhase.MUTATION_STARTED),
+                        self._build_journal_record(request, records, JournalPhase.MUTATION_STARTED),
                     )
                     active.phase = JournalPhase.MUTATION_STARTED
                     context = AuthorityCommitContextV1.for_record(records[-1])
@@ -2157,22 +2088,25 @@ class ExternalBootAuthorityService:
                         completion_binding,
                         journal,
                         records,
-                        self._record(request, records, JournalPhase.PROVIDER_RETURNED),
+                        self._build_journal_record(
+                            request, records, JournalPhase.PROVIDER_RETURNED
+                        ),
                     )
                 try:
-                    observation = (
-                        self._teardown_observation(
+                    if (
+                        isinstance(request, AuthorityTeardownMutationRequestV1)
+                        and teardown_snapshot is not None
+                    ):
+                        observation = self._teardown_observation(
                             teardown_proof(
                                 request,
                                 await self._system_teardown_facts(request, context),
                             )
                         )
-                        if isinstance(request, AuthorityTeardownMutationRequestV1)
-                        and teardown_snapshot is not None
-                        else adopted_release_phase
-                        if adopted_release_phase is not None
-                        else await self._adapter.observe(request)
-                    )
+                    elif adopted_release_phase is not None:
+                        observation = adopted_release_phase
+                    else:
+                        observation = await self._adapter.observe(request)
                 except AuthorityServiceError:
                     # Already a bounded category; re-classifying it as provider_conflict would
                     # lose a superseded verdict the adapter is entitled to reach.
@@ -2185,7 +2119,7 @@ class ExternalBootAuthorityService:
                         completion_binding,
                         journal,
                         records,
-                        self._record(
+                        self._build_journal_record(
                             request, records, JournalPhase.OBSERVED, observation=observation
                         ),
                     )
@@ -2198,7 +2132,7 @@ class ExternalBootAuthorityService:
                         completion_binding,
                         journal,
                         records,
-                        self._record(
+                        self._build_journal_record(
                             request,
                             records,
                             JournalPhase.TERMINAL,
@@ -2323,13 +2257,15 @@ class ExternalBootAuthorityService:
                         binding,
                         journal,
                         records,
-                        self._record(mutation, records, JournalPhase.ADMITTED),
+                        self._build_journal_record(mutation, records, JournalPhase.ADMITTED),
                     )
                     records = await self._anchor(
                         binding,
                         journal,
                         records,
-                        self._record(mutation, records, JournalPhase.MUTATION_STARTED),
+                        self._build_journal_record(
+                            mutation, records, JournalPhase.MUTATION_STARTED
+                        ),
                     )
                     anchored_here = True
                 receipt = await self._repository.open_remote_module_attempt(
@@ -2551,7 +2487,9 @@ class ExternalBootAuthorityService:
                         completion_binding,
                         journal,
                         records,
-                        self._record(mutation, records, JournalPhase.PROVIDER_RETURNED),
+                        self._build_journal_record(
+                            mutation, records, JournalPhase.PROVIDER_RETURNED
+                        ),
                     )
                 try:
                     observation = await self._adapter.observe(mutation)
@@ -2565,7 +2503,7 @@ class ExternalBootAuthorityService:
                         completion_binding,
                         journal,
                         records,
-                        self._record(
+                        self._build_journal_record(
                             mutation, records, JournalPhase.OBSERVED, observation=observation
                         ),
                     )
@@ -2578,7 +2516,7 @@ class ExternalBootAuthorityService:
                         completion_binding,
                         journal,
                         records,
-                        self._record(
+                        self._build_journal_record(
                             mutation,
                             records,
                             JournalPhase.TERMINAL,
@@ -2688,19 +2626,21 @@ class ExternalBootAuthorityService:
                     binding,
                     journal,
                     records,
-                    self._record(mutation, records, JournalPhase.PROVIDER_RETURNED),
+                    self._build_journal_record(mutation, records, JournalPhase.PROVIDER_RETURNED),
                 )
                 records = await self._anchor(
                     binding,
                     journal,
                     records,
-                    self._record(mutation, records, JournalPhase.OBSERVED, observation=observation),
+                    self._build_journal_record(
+                        mutation, records, JournalPhase.OBSERVED, observation=observation
+                    ),
                 )
                 await self._anchor(
                     binding,
                     journal,
                     records,
-                    self._record(
+                    self._build_journal_record(
                         mutation,
                         records,
                         JournalPhase.TERMINAL,
@@ -2971,7 +2911,7 @@ class ExternalBootAuthorityService:
                     if lane.active is not None:
                         raise AuthorityServiceError("superseded")
                     _journal, records = self._lane_journal(request.system_id, lane)
-                    await self._observation_head_is_current(trusted, records)
+                    await self._require_current_observation_head(trusted, records)
                     acknowledgements = [
                         record
                         for record in records
@@ -2997,7 +2937,7 @@ class ExternalBootAuthorityService:
                     )
                     if rechecked is None or not self._binding_matches(rechecked, request):
                         raise AuthorityServiceError("superseded")
-                    await self._observation_head_is_current(rechecked, records)
+                    await self._require_current_observation_head(rechecked, records)
                     return observation
             finally:
                 self._release_lane(trusted.system_id, lane)

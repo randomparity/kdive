@@ -922,17 +922,6 @@ WORKER_DEATH_VERIFIER = Setting(
         "disabled/local omit them. Death evidence comes from witness termination rows."
     ),
 )
-DOCKER_DEATH_API = Setting(
-    name="KDIVE_DOCKER_DEATH_API",
-    parse=_nonempty,
-    default="http://worker-death-api:2375",
-    group="worker-death",
-    processes=_SERVER,
-    help=(
-        "Legacy Docker registration-marker endpoint; validated but not contacted. "
-        "Recovery uses witness termination rows."
-    ),
-)
 
 
 def _kubernetes_worker(env: Mapping[str, str]) -> bool:
@@ -1139,7 +1128,6 @@ SETTINGS = [
     WORKER_INCARNATION_KIND,
     WORKER_INCARNATION_ID,
     WORKER_DEATH_VERIFIER,
-    DOCKER_DEATH_API,
     POD_NAMESPACE,
     POD_NAME,
     POD_UID,

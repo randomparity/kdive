@@ -299,9 +299,9 @@ def _require_staging_free_space(
     """Refuse a stage the staging filesystem plainly cannot hold, before the first byte (ADR-0450).
 
     Since the identity path started streaming (#1520) a **rejected** object — a failed checksum, a
-    non-qcow2 base — is written in full and only then rejected. ``UPLOADS_DIR`` and ``ROOTFS_DIR``
-    are hardcoded siblings under ``/var/lib/kdive`` with no provider-side knob to relocate either,
-    so unless an operator separately mounts one of them, those discarded bytes land on the same
+    non-qcow2 base — is written in full and only then rejected. ``UPLOADS_DIR`` and the default
+    System rootfs directory are siblings under ``/var/lib/kdive``. Unless the operator configures
+    or mounts separate filesystems, those discarded bytes land on the same
     filesystem as every live System's qcow2 overlay: an oversized upload degrades *running guests*
     rather than only failing its own provision. This measures ``dest.parent``'s own filesystem, so
     it is correct under either mount layout — only the blast radius differs.

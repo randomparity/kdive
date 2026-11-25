@@ -24,7 +24,7 @@ class SecretRegistry:
     every string).
     """
 
-    _GLOBAL = "__global__"
+    _GLOBAL = object()
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -77,7 +77,7 @@ class SecretRegistry:
 
     def _scope_label(self, key: object) -> str:
         """Map one ``_by_scope`` key to a value-free presence label (never an object repr)."""
-        if key is self._GLOBAL or key == self._GLOBAL:
+        if key is self._GLOBAL:
             return "<process-global>"
         if isinstance(key, str):
             return key

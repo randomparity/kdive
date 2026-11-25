@@ -5,20 +5,20 @@ from collections.abc import Callable, Sequence
 
 import libvirt
 
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_appliance import (
+from kdive.providers.external_boot_authority.module_documents import (
+    RemoteModuleOperationV1,
+    RemoteModuleResultV1,
+)
+from kdive.providers.external_boot_authority.module_protocol import PreparedVolume
+from kdive.providers.ports.module_operation import RemoteDeviceIdentity
+from kdive.providers.remote_libvirt.module_preparation.remote_module_appliance import (
     ApplianceRequest,
     ApplianceStream,
     UnresolvedCallError,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
+from kdive.providers.remote_libvirt.module_preparation.remote_module_attachments import (
     AttachmentInspection,
-    RemoteDeviceIdentity,
 )
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_documents import (
-    RemoteModuleOperationV1,
-    RemoteModuleResultV1,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volumes import PreparedVolume
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 UUID1 = "12345678-1234-4123-8123-123456789abc"

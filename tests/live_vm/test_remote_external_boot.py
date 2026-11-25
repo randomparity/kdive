@@ -10,8 +10,7 @@ from uuid import uuid4
 import libvirt
 import pytest
 
-from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.ports.external_boot import (
+from kdive.domain.external_boot_values import (
     ActivationOwnership,
     BundleSource,
     ExternalBootActivationBinding,
@@ -25,6 +24,7 @@ from kdive.providers.ports.external_boot import (
     RootSource,
     RootSpecV1,
 )
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.remote_libvirt.lifecycle.external_boot import (
     OBSERVATION_PROGRAMS,
     RemoteExternalBootRecovery,

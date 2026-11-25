@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import errno
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -18,6 +19,7 @@ from xml.etree import ElementTree as ET  # noqa: S405 - parses XML this test bui
 
 import libvirt
 import pytest
+from defusedxml.common import EntitiesForbidden
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.traffic import pcap_volume_name
@@ -28,6 +30,7 @@ from kdive.providers.remote_libvirt.lifecycle.traffic_capture import (
     REMOTE_PCAP_VHOST_REMEDIATION,
     REMOTE_PCAP_WRITE_REMEDIATION,
     RemoteLibvirtTrafficCapture,
+    discover_dac_identity,
     discover_netdev_id,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -230,6 +233,76 @@ def test_discover_netdev_on_malformed_xml_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as exc:
         discover_netdev_id("<domain><devices>")  # unclosed
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+@pytest.mark.parametrize(
+    "xml, cause",
+    [
+        ("<domain>", ET.ParseError),
+        ('<!DOCTYPE domain [<!ENTITY uid "107">]><domain>&uid;</domain>', EntitiesForbidden),
+    ],
+)
+@pytest.mark.parametrize(
+    "discover, details, operation",
+    [
+        (discover_dac_identity, {"reason": "dac_xml_parse_failed"}, "DAC"),
+        (discover_netdev_id, {}, "netdev"),
+    ],
+)
+def test_domain_parser_failure_preserves_cause(
+    xml: str,
+    cause: type[Exception],
+    discover: Callable[[str], object],
+    details: dict[str, str],
+    operation: str,
+) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        discover(xml)
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details == details
+    assert isinstance(caught.value.__cause__, cause)
+    assert "XML" in str(caught.value) and operation in str(caught.value)
+
+
+@pytest.mark.parametrize("discover", [discover_dac_identity, discover_netdev_id])
+def test_domain_discovery_does_not_swallow_programming_errors(
+    monkeypatch: pytest.MonkeyPatch, discover: Callable[[str], object]
+) -> None:
+    from kdive.providers.remote_libvirt.lifecycle import traffic_capture
+
+    error = RuntimeError("parser implementation defect")
+
+    def fail_parse(xml: str) -> ET.Element:
+        raise error
+
+    monkeypatch.setattr(traffic_capture, "_safe_fromstring", fail_parse)
+    with pytest.raises(RuntimeError) as caught:
+        discover(_IFACE_XML)
+    assert caught.value is error
+
+
+def test_attach_parser_fault_propagates_without_capture_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kdive.providers.remote_libvirt.lifecycle import traffic_capture
+
+    domain = _FakeDomain()
+    pool = _FakePool()
+    conn = _FakeConn(domain=domain, pool=pool)
+    error = RuntimeError("parser implementation defect")
+
+    def fail_parse(xml: str) -> ET.Element:
+        raise error
+
+    monkeypatch.setattr(traffic_capture, "_safe_fromstring", fail_parse)
+    with pytest.raises(RuntimeError) as caught:
+        _capturer(conn, tmp_path).attach(
+            _DOMAIN, qom_id="kdive-dump-J", dest_path=_DEST, snaplen=128
+        )
+    assert caught.value is error
+    assert conn.closed
+    assert domain.commands == []
+    assert pool.created == []
 
 
 # --- attach / detach --------------------------------------------------------------------------
@@ -676,3 +749,122 @@ def test_reclaim_deletes_the_volume_and_tolerates_absent(tmp_path: Path) -> None
 
 def test_write_remediation_is_the_remote_pool_remedy(tmp_path: Path) -> None:
     assert _capturer(_FakeConn(), tmp_path).write_remediation == REMOTE_PCAP_WRITE_REMEDIATION
+
+
+@pytest.mark.parametrize("operation", ["prepare", "attach"])
+def test_required_capture_predelete_propagates_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    system, job = uuid4(), uuid4()
+    name = pcap_volume_name(system, job) if operation == "prepare" else "cap.pcap"
+    stale = _FakeVolume(name)
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    def fail_delete(flags: int = 0) -> int:
+        raise error
+
+    monkeypatch.setattr(stale, "delete", fail_delete)
+    pool, domain = _FakePool(volumes={name: stale}), _FakeDomain()
+    conn = _FakeConn(pool=pool, domain=domain)
+    capturer = _capturer(conn, tmp_path)
+    with pytest.raises(CategorizedError) as caught:
+        if operation == "prepare":
+            capturer.prepare(system, job)
+        else:
+            capturer.attach(_DOMAIN, qom_id="q", dest_path=_DEST, snaplen=128)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"volume": name}
+    assert caught.value.__cause__ is error
+    assert pool.created == []
+    assert not any(command["execute"] == "object-add" for command in domain.commands)
+    assert conn.closed
+
+
+def test_reclaim_warns_about_volume_delete_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    def fail_delete(self: _FakeVolume, flags: int = 0) -> int:
+        raise error
+
+    monkeypatch.setattr(_FakeVolume, "delete", fail_delete)
+    volume = _FakeVolume("cap.pcap")
+    capturer = _capturer(_FakeConn(pool=_FakePool(volumes={"cap.pcap": volume})), tmp_path)
+    capturer.reclaim(_DEST)
+    assert "remote pcap reclaim failed" in caplog.text and "cap.pcap" in caplog.text
+    assert not volume.deleted
+
+
+@pytest.mark.parametrize(
+    "primary",
+    [
+        CategorizedError(
+            "attach refused",
+            category=ErrorCategory.CONTROL_FAILURE,
+            details={"reason": "capture_filter_rejected"},
+        ),
+        KeyboardInterrupt("operator interruption"),
+        None,
+    ],
+)
+def test_rollback_delete_failure_keeps_original_attach_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    primary: BaseException | None,
+) -> None:
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    def fail_delete(self: _FakeVolume, flags: int = 0) -> int:
+        raise error
+
+    monkeypatch.setattr(_FakeVolume, "delete", fail_delete)
+    pool, domain = _FakePool(), _FakeDomain()
+    capturer = _capturer(_FakeConn(pool=pool, domain=domain), tmp_path)
+    original_cause = libvirt_error(libvirt.VIR_ERR_SYSTEM_ERROR)
+    if primary is not None:
+        primary.__cause__ = original_cause
+    domain.replies["object-add"] = _error_reply("GenericError", "some other refusal")
+    monitor = domain.monitor
+
+    def fail_monitor(command: str, flags: int) -> str:
+        if primary is not None and json.loads(command)["execute"] == "object-add":
+            raise primary
+        return monitor(command, flags)
+
+    monkeypatch.setattr(domain, "monitor", fail_monitor)
+    with pytest.raises(type(primary) if primary is not None else CategorizedError) as caught:
+        capturer.attach(_DOMAIN, qom_id="q", dest_path=_DEST, snaplen=128)
+    if primary is not None:
+        assert caught.value is primary and caught.value.__cause__ is original_cause
+    else:
+        assert isinstance(caught.value, CategorizedError)
+        assert caught.value.category is ErrorCategory.CONTROL_FAILURE
+        assert caught.value.details["reason"] == "capture_filter_rejected"
+    assert len(pool.created) == 1 and not pool.volumes["cap.pcap"].deleted
+    assert "remote pcap rollback failed" in caplog.text and "cap.pcap" in caplog.text
+
+
+def test_fetch_stream_acquisition_is_categorized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    volume = _FakeVolume("cap.pcap", b"pcap")
+    conn = _FakeConn(pool=_FakePool(volumes={"cap.pcap": volume}))
+    error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    def fail_stream(flags: int = 0) -> _FakeStream:
+        raise error
+
+    monkeypatch.setattr(conn, "newStream", fail_stream)
+    with pytest.raises(CategorizedError) as caught:
+        _capturer(conn, tmp_path).fetch(_DEST, max_bytes=100)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"volume": "cap.pcap"}
+    assert caught.value.__cause__ is error
+    assert not conn.stream.aborted and conn.closed

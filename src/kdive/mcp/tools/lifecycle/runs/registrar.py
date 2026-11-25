@@ -461,6 +461,8 @@ def _register_runs_set(app: FastMCP, pool: AsyncConnectionPool) -> None:
 def _register_runs_complete_build(
     app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
 ) -> None:
+    handlers = _complete_build_handlers()
+
     @app.tool(
         name="runs.complete_build",
         annotations=_docmeta.mutating(),
@@ -553,10 +555,11 @@ def _register_runs_complete_build(
 
         A large bundle can take longer to validate than your client's request timeout. The
         finalize keeps running when your request times out: call `runs.complete_build` again for
-        the same Run. While that finalize still runs on the server, the call waits for it and
-        gets its answer, whatever its own arguments; once it has succeeded, the call returns the
-        recorded result. If the earlier finalize failed, or the server restarted, the call
-        validates the upload again, which takes as long as the first attempt.
+        the same Run. A retry reaching this same server instance joins its running finalize
+        and gets its answer, whatever its own arguments. Another instance may validate
+        independently; publication still records one build. After a successful commit, the call
+        returns the recorded result. If the earlier finalize failed, or this instance restarted,
+        the call validates the upload again, which takes as long as the first attempt.
 
         Do not re-mint while a finalize is still running: re-minting replaces the window that
         finalize is validating, so it is rejected with `reason: "upload_window_replaced"`. Wait
@@ -568,7 +571,7 @@ def _register_runs_complete_build(
             resolver,
             ctx,
             run_id,
-            lambda _runtime: _complete_build_handlers().complete_build(
+            lambda _runtime: handlers.complete_build(
                 pool,
                 ctx,
                 run_id,

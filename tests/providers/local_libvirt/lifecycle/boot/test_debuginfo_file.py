@@ -10,6 +10,12 @@ from typing import Any, cast
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import (
+    AbsentComponentState,
+    ComponentState,
+    ExternalBootActivationBinding,
+    PresentComponentState,
+)
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
     GuestDebuginfoFile,
     debuginfo_file_state,
@@ -18,12 +24,6 @@ from kdive.providers.local_libvirt.lifecycle.boot.guest_free_space import (
     VMLINUX_HEADROOM_BYTES,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import InactiveGuest
-from kdive.providers.ports.external_boot import (
-    AbsentComponentState,
-    ComponentState,
-    ExternalBootActivationBinding,
-    PresentComponentState,
-)
 
 _BINDING = ExternalBootActivationBinding(
     system_id="11111111-1111-1111-1111-111111111111",

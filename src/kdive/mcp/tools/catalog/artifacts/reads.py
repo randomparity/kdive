@@ -98,8 +98,10 @@ _ARTIFACT_ID_DESCRIPTION = "The redacted artifact to fetch (sensitive ids are no
 _FIND_DESCRIPTION = (
     "Optional literal search terms; omit for a plain windowed read. '|' separates alternatives "
     "(e.g. 'BUG: KASAN|Call Trace'); the nearest term in direction is returned with "
-    "data.match_offset, data.match_line, the surrounding data.content, and data.next_offset to "
-    "continue (data.match_found is false when none remain). Per-line literal substring, "
+    "data.match_offset, data.match_line and the surrounding data.content. When present, "
+    "data.next_offset continues beyond the matched line in direction. Stop when "
+    "data.match_found is false or data.next_offset is absent, including on a successful hit. "
+    "Per-line literal substring, "
     "case-sensitive, no regex and no Unicode normalization — match the artifact's exact bytes "
     "(kernel signatures are ASCII). An artifact above the fetch ceiling cannot be searched and "
     "is rejected with configuration_error data.reason=artifact_too_large, never a silent "
@@ -110,7 +112,8 @@ _BYTE_OFFSET_DESCRIPTION = (
     "direction=forward (default) a negative value starts from the beginning; with "
     "direction=backward the window (or search) runs up from this byte and an omitted (0) or "
     "negative value means end-of-artifact. Page with the returned data.next_offset until "
-    "data.content_truncated is false, or — with find — until data.match_found is false."
+    "data.content_truncated is false. With find, stop when data.match_found is false or "
+    "data.next_offset is absent; continuation skips the matched line."
 )
 _MAX_BYTES_DESCRIPTION = (
     "Maximum inline window bytes, or surrounding content bytes on a find match; default "
@@ -207,10 +210,11 @@ async def artifacts_list(
     **not** naturally bounded (#1238): it is keyset-paginated over ``(created_at, id) DESC`` like
     ``runs.list``. ``limit`` is clamped to the shared cap; ``data.truncated`` reports whether a
     further page exists and ``data.next_cursor`` (present iff truncated) is passed back as
-    ``cursor`` to page. A ``cursor`` not minted by this tool is an ``invalid_cursor``
+    ``cursor`` to page. A nonempty ``cursor`` not minted by this tool is an ``invalid_cursor``
     ``configuration_error``, never a silent first page.
     """
     after = None
+    # ADR-0192 treats None and empty text as the first page.
     if request.cursor:
         try:
             after = _decode_ts_uuid_cursor(_ARTIFACTS_LIST_TAG, request.cursor)
@@ -275,8 +279,9 @@ async def artifacts_get(
     With ``find`` set the call jumps to the nearest literal ``|``-OR match in ``direction`` over
     the whole body (#939, ADR-0283): ``data["match_found"]`` plus, on a hit,
     ``data["match_offset"]``, ``data["match_line"]``, the surrounding ``data["content"]`` window,
-    and a direction-relative ``data["next_offset"]`` to continue. Matching is byte-space literal
-    (no regex, no Unicode normalization).
+    and, when present, a direction-relative ``data["next_offset"]`` beyond the matched line.
+    Stop when ``match_found`` is false or ``next_offset`` is absent, including on a hit.
+    Matching is byte-space literal (no regex, no Unicode normalization).
 
     A negative ``byte_offset`` reads from the direction's natural edge and ``max_bytes <= 0``
     floors to a 1-byte window (clamped, never rejected). Objects larger than

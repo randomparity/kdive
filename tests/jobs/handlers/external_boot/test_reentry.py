@@ -14,21 +14,22 @@ from pydantic import SecretStr
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_boot_timing import LocalExternalBootTimingV1
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.authority_sender import AuthorityRequestSender
-from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
-from kdive.jobs.handlers.external_boot.registrar import build_operations
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthoritySuccessV1,
+    RecoveryAttemptResult,
     _FailureResult,
-    _RecoveryAttemptResult,
 )
+from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
+from kdive.jobs.handlers.external_boot.registrar import build_operations
 from kdive.jobs.payloads import RecoveryRequestV1
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityAcknowledgementV1,
+    AuthorityConflictResolutionRequestV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
     AuthorityTakeoverRequestV1,
@@ -69,6 +70,14 @@ class _SenderExecutor:
 
     async def execute(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
         return await self._sender.execute_mutation(request, deadline=123.0)
+
+    async def execute_conflict_resolution(
+        self, request: AuthorityConflictResolutionRequestV1
+    ) -> AuthorityObservationV1:
+        return await self._sender.execute_conflict_resolution(request, deadline=123.0)
+
+    async def observe(self, request: AuthorityMutationRequestV1) -> AuthorityObservationV1:
+        return await self._sender.observe_authority(request, deadline=123.0)
 
 
 @pytest.mark.parametrize(
@@ -116,7 +125,8 @@ def test_sender_disconnect_returns_nonterminal_bound_failure_with_same_operation
                     prepared,
                     incarnation_credential=SecretStr(case.credential),
                 )
-                assert committed_result is not None
+                assert isinstance(committed_result, queue.ExternalBootCommitOutcome)
+                assert committed_result.continue_claim is True
                 with pytest.raises(ExternalBootAuthorityFailure) as caught:
                     await handler(worker, job, marker)
 
@@ -246,7 +256,9 @@ def test_activate_commits_deadline_before_provider_and_reuses_it(
                     result,
                     incarnation_credential=SecretStr(case.credential),
                 )
-                assert isinstance(committed, Job) and committed.state.value == "running"
+                assert isinstance(committed, queue.ExternalBootCommitOutcome)
+                assert committed.job.state.value == "running"
+                assert committed.continue_claim is True
                 replay = await handler(worker, job, marker)
             assert replay.result.operation == "activate"
             assert replay.result.model_dump()["activation_readiness_deadline"] == now + timedelta(
@@ -314,7 +326,9 @@ def test_local_activation_client_starts_after_preparation_and_uses_committed_dea
                     result,
                     incarnation_credential=SecretStr(case.credential),
                 )
-                assert isinstance(committed, Job) and committed.state.value == "running"
+                assert isinstance(committed, queue.ExternalBootCommitOutcome)
+                assert committed.job.state.value == "running"
+                assert committed.continue_claim is True
                 current[0] = admitted + timedelta(seconds=400)
                 before = asyncio.get_running_loop().time()
                 replay = await handler(worker, job, marker)
@@ -510,7 +524,9 @@ def test_recover_commits_attempt_before_provider_and_reuses_it(
                     result,
                     incarnation_credential=SecretStr(case.credential),
                 )
-                assert isinstance(committed, Job) and committed.state.value == "running"
+                assert isinstance(committed, queue.ExternalBootCommitOutcome)
+                assert committed.job.state.value == "running"
+                assert committed.continue_claim is True
                 replay = await handler(worker, job, marker)
             assert replay.result.operation == "recover"
             assert len(executor.requests) == 1
@@ -623,7 +639,7 @@ def test_resolve_conflict_starts_a_fresh_attempt_from_its_own_clock(
             async with await role_connection(authority_role_dsns("kdive_worker")) as worker:
                 result = await handler(worker, job, marker)
                 assert result.result.operation == "recovery-attempt"
-                assert isinstance(result.result, _RecoveryAttemptResult)
+                assert isinstance(result.result, RecoveryAttemptResult)
                 assert result.result.deadline == now + timedelta(seconds=120)
                 assert result.result.attempt_id != case.attempt_id
                 assert executor.requests == []

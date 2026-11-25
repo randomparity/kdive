@@ -1,4 +1,7 @@
-"""Remote-libvirt host-side vmcore capture workflow."""
+"""Remote-libvirt host-side vmcore capture workflow.
+
+Error propagation follows ADR-0848 and ADR-0850.
+"""
 
 from __future__ import annotations
 
@@ -165,18 +168,58 @@ class _HostDumpSpooler:
     def _downloaded_spool(
         self, conn: Any, pool: Any, vol_name: str, system_id: UUID
     ) -> Generator[Path]:
-        pool.refresh(0)
-        volume = self._resolve_volume(pool, vol_name, system_id)
-        self._enforce_ceiling(volume, vol_name, system_id)
-        spool = Path(tempfile.mkdtemp(prefix="kdive-host-dump-")) / vol_name
         try:
+            pool.refresh(0)
+        except libvirt.libvirtError as exc:
+            raise CategorizedError(
+                "host_dump storage-pool refresh failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "operation": "refreshing host_dump storage pool",
+                    "system_id": str(system_id),
+                    "volume": vol_name,
+                },
+            ) from exc
+        volume = self._resolve_volume(pool, vol_name, system_id)
+        spool: Path | None = None
+        try:
+            self._enforce_ceiling(volume, vol_name, system_id)
+            try:
+                spool = Path(tempfile.mkdtemp(prefix="kdive-host-dump-")) / vol_name
+            except OSError as exc:
+                raise CategorizedError(
+                    "host_dump spool creation failed",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={
+                        "operation": "creating host_dump spool",
+                        "system_id": str(system_id),
+                        "volume": vol_name,
+                    },
+                ) from exc
             self._download_to_file(conn, volume, spool, system_id)
             yield spool
         finally:
-            spool.unlink(missing_ok=True)
-            with contextlib.suppress(Exception):
-                spool.parent.rmdir()
-            _delete_volume(volume)
+            if spool is not None:
+                try:
+                    spool.unlink(missing_ok=True)
+                except OSError:
+                    _log.warning(
+                        "host_dump spool unlink failed for system %s at %s", system_id, spool
+                    )
+                try:
+                    spool.parent.rmdir()
+                except OSError:
+                    _log.warning(
+                        "host_dump spool directory removal failed for system %s at %s",
+                        system_id,
+                        spool.parent,
+                    )
+            try:
+                volume.delete(0)
+            except libvirt.libvirtError:
+                _log.warning(
+                    "host_dump volume deletion failed for system %s volume %s", system_id, vol_name
+                )
 
     @staticmethod
     def _lookup_pool(conn: Any, pool_name: str) -> Any:
@@ -233,7 +276,18 @@ class _HostDumpSpooler:
                     "error": type(exc).__name__,
                 },
             ) from exc
-        _delete_volume(stale)
+        try:
+            stale.delete(0)
+        except libvirt.libvirtError as exc:
+            raise CategorizedError(
+                "host_dump stale volume deletion failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "operation": "deleting stale host_dump volume",
+                    "volume": vol_name,
+                    "error": type(exc).__name__,
+                },
+            ) from exc
 
     def _core_dump(self, domain: Any, path: str, system_id: UUID) -> None:
         flags = libvirt.VIR_DUMP_MEMORY_ONLY
@@ -280,8 +334,9 @@ class _HostDumpSpooler:
 
     def _download_to_file(self, conn: Any, volume: Any, spool: Path, system_id: UUID) -> None:
         """Spool the volume to a 0600 temp file; abort+raise if the stream overruns."""
-        stream = conn.newStream(0)
+        stream = None
         try:
+            stream = conn.newStream(0)
             fd = os.open(spool, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "wb") as handle:
                 sink = _SpoolSink(handle, system_id, self._options.max_core_bytes)
@@ -289,12 +344,14 @@ class _HostDumpSpooler:
                 stream.recvAll(sink.recv_all_callback, None)
             stream.finish()
         except CategorizedError:
-            with contextlib.suppress(Exception):
-                stream.abort()
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.abort()
             raise
         except (libvirt.libvirtError, OSError, RuntimeError) as exc:
-            with contextlib.suppress(Exception):
-                stream.abort()
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.abort()
             raise CategorizedError(
                 "host_dump stream download failed",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -345,7 +402,18 @@ class _HostDumpPersister:
                     "error": type(exc).__name__,
                 },
             ) from exc
-        raw_size_bytes = spool.stat().st_size
+        try:
+            raw_size_bytes = spool.stat().st_size
+        except OSError as exc:
+            raise CategorizedError(
+                "host_dump spool size lookup failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "operation": "reading host_dump spool size",
+                    "system_id": str(system_id),
+                    "path": str(spool),
+                },
+            ) from exc
         raw = self._stream_put(run_id, spool, sha256_b64, execution_id=execution_id)
         self._verify_stored(raw.key, sha256_b64, system_id)
         redacted = persist_redacted(
@@ -413,11 +481,6 @@ class _HostDumpPersister:
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id), "key": raw_key},
             )
-
-
-def _delete_volume(volume: Any) -> None:
-    with contextlib.suppress(Exception):
-        volume.delete(0)
 
 
 def pool_type_and_target_strict(

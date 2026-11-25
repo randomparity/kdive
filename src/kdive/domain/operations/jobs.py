@@ -10,7 +10,7 @@ from uuid import UUID
 from pydantic import Field, JsonValue
 
 from kdive.domain._records import DomainModel
-from kdive.domain.capacity.state import JobState
+from kdive.domain.capacity.state import JobState, RunState
 from kdive.domain.errors import ErrorCategory
 
 
@@ -64,6 +64,18 @@ class JobKind(StrEnum):
     # Admin-only forced un-plug (ADR-0828): same payload and handler as UNPLUG_DEVICE, but the
     # handler calls the provider's `force_unplug`. Opt-in destructive; not contributor-cancelable.
     FORCE_UNPLUG_DEVICE = "force_unplug_device"
+
+
+_RUN_FAILURE_STATES = frozenset({RunState.RUNNING})
+_INSTALL_RUN_FAILURE_STATES = _RUN_FAILURE_STATES | {RunState.SUCCEEDED}
+
+
+def run_failure_eligible_states(kind: JobKind) -> frozenset[RunState]:
+    """Fail running Runs, plus build-succeeded Runs for INSTALL (ADR-0230).
+
+    Unstarted Runs cannot transition to failed; preserve them while finalizing the job.
+    """
+    return _INSTALL_RUN_FAILURE_STATES if kind is JobKind.INSTALL else _RUN_FAILURE_STATES
 
 
 RETIRED_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})

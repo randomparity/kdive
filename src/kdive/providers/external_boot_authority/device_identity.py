@@ -215,9 +215,7 @@ class RemoteDeviceIdentityService:
         if capacity < 1 or capacity > 4:
             raise ValueError("identity lookup capacity must be between one and four")
         if identity is None:
-            from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-                HostStatDeviceIdentity,
-            )
+            from kdive.providers.shared.libvirt_attachments import HostStatDeviceIdentity
 
             identity = HostStatDeviceIdentity().identity
         self._identity = identity
@@ -236,7 +234,7 @@ class RemoteDeviceIdentityService:
                 future = self._executor.submit(self._identity, request.path)
             except BaseException:
                 self._admission.release()
-                raise RuntimeError("provider-failure") from None
+                raise
         future.add_done_callback(lambda _future: self._admission.release())
         try:
             result = await asyncio.shield(asyncio.wrap_future(future))

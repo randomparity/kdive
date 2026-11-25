@@ -11,9 +11,8 @@ from uuid import UUID, uuid4
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.retrieve.guestfs import _libvirt_uri, _remove_spool
+from kdive.providers.local_libvirt.retrieve.guestfs import _remove_spool, _retrieve_domain
 from kdive.providers.shared.debug_common.core_file import MAX_CORE_BYTES
-from kdive.providers.shared.runtime_paths import domain_name_for
 
 _HOST_DUMP_ROOT = Path("/var/lib/kdive/host-dump")
 _HOST_DUMP_GROUP = "kdive-live-libvirt"
@@ -106,19 +105,16 @@ def _real_host_dump_capture(system_id: UUID) -> Path | None:  # pragma: no cover
     preparation. Worker-owned 2710 directories and precreated 0660 cores let the separate daemon
     write while preserving worker read/removal rights. The daemon/worker group is trusted with
     core contents; this is not tenant isolation. Missing or unsafe preparation and oversized cores
-    raise CONFIGURATION_ERROR; libvirt dump failures retain INFRASTRUCTURE_FAILURE.
+    raise CONFIGURATION_ERROR; native and metadata failures raise INFRASTRUCTURE_FAILURE (ADR-0859).
+    Ordinary connection-close failures warn without replacing the result.
     """
-    conn = libvirt.open(_libvirt_uri())
+    dest: Path | None = None
+    handed_off = False
     try:
-        try:
-            domain = conn.lookupByName(domain_name_for(system_id))
-        except libvirt.libvirtError:
-            return None
-        if not domain.isActive():
-            return None
-        dest = _prepare_host_dump()
-        completed = False
-        try:
+        with _retrieve_domain(system_id, operation="host_dump_capture") as domain:
+            if domain is None or not domain.isActive():
+                return None
+            dest = _prepare_host_dump()
             try:
                 domain.coreDumpWithFormat(
                     str(dest),
@@ -131,17 +127,22 @@ def _real_host_dump_capture(system_id: UUID) -> Path | None:  # pragma: no cover
                     category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                     details={"system_id": str(system_id)},
                 ) from exc
-            size_bytes = dest.stat().st_size
+            try:
+                size_bytes = dest.stat().st_size
+            except OSError as exc:
+                raise CategorizedError(
+                    "local host_dump metadata read failed; verify host-dump storage and retry",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={"system_id": str(system_id), "operation": "stat_host_dump"},
+                ) from exc
             if size_bytes > MAX_CORE_BYTES:
                 raise CategorizedError(
                     "host_dump core exceeds the single-object ceiling",
                     category=ErrorCategory.CONFIGURATION_ERROR,
                     details={"size_bytes": size_bytes, "max_bytes": MAX_CORE_BYTES},
                 )
-            completed = True
-            return dest
-        finally:
-            if not completed:
-                _remove_spool(dest)
+        handed_off = True
+        return dest
     finally:
-        conn.close()
+        if dest is not None and not handed_off:
+            _remove_spool(dest)

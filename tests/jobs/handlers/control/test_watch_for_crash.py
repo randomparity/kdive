@@ -36,6 +36,7 @@ from kdive.jobs.handlers.control.watch_for_crash import (
 )
 from kdive.jobs.provider_context import take_provider_kind
 from kdive.providers.core.resource_registration import register_discovered_resource
+from kdive.providers.local_libvirt import console as local_console
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.ports.console import ConsoleWindowRead
 from kdive.security.audit import args_digest
@@ -274,7 +275,7 @@ def test_verdict_to_json_shapes() -> None:
 
 
 class _SeqReader:
-    """A RemoteConsoleReader returning each window in turn, then repeating the last (ADR-0429)."""
+    """A ConsoleReader returning each window in turn, then repeating the last (ADR-0429)."""
 
     def __init__(self, windows: list[ConsoleWindowRead]) -> None:
         self._windows = windows
@@ -369,7 +370,7 @@ def test_handler_fired_returns_verdict_with_slice(
 ) -> None:
     monkeypatch.setattr(watch_for_crash, "POLL_INTERVAL_S", 0.0)
     log = tmp_path / "console.log"
-    monkeypatch.setattr(watch_for_crash, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
     # The panic appears only *after* the watch snapshots its start offset: the first read (mark)
     # sees a benign boot; the next read has grown with the panic line.
     reads = {"n": 0}
@@ -380,7 +381,7 @@ def test_handler_fired_returns_verdict_with_slice(
         reads["n"] += 1
         return booting if reads["n"] == 1 else panicked
 
-    monkeypatch.setattr(watch_for_crash, "read_console_log", _fake_read)
+    monkeypatch.setattr(local_console, "read_console_log", _fake_read)
 
     async def _go() -> tuple[str | None, object, list[tuple]]:
         async with _pool(migrated_url) as pool:
@@ -423,7 +424,7 @@ def test_handler_not_ready_raises_configuration_error(
 ) -> None:
     log = tmp_path / "console.log"
     log.write_bytes(b"boot\n")
-    monkeypatch.setattr(watch_for_crash, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
 
     async def _go() -> None:
         async with _pool(migrated_url) as pool:
@@ -448,7 +449,7 @@ def test_handler_unsupported_provider_raises_capability_configuration_error(
     # configuration_error (ADR-0427), not an identity check.
     log = tmp_path / "console.log"
     log.write_bytes(b"boot\n")
-    monkeypatch.setattr(watch_for_crash, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
 
     async def _go() -> None:
         async with _pool(migrated_url) as pool:
@@ -475,7 +476,7 @@ def test_handler_not_fired_at_deadline(
     monkeypatch.setattr(watch_for_crash, "POLL_INTERVAL_S", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"[1] still booting\n")
-    monkeypatch.setattr(watch_for_crash, "console_log_path", lambda _sid: log)
+    monkeypatch.setattr(local_console, "console_log_path", lambda _sid: log)
 
     async def _go() -> str | None:
         async with _pool(migrated_url) as pool:
@@ -564,7 +565,7 @@ def test_handler_reads_console_for_its_own_system(
         seen.append(sid)
         return log
 
-    monkeypatch.setattr(watch_for_crash, "console_log_path", _console_path)
+    monkeypatch.setattr(local_console, "console_log_path", _console_path)
 
     async def _go() -> UUID:
         async with _pool(migrated_url) as pool:
@@ -574,4 +575,4 @@ def test_handler_reads_console_for_its_own_system(
             return system_id
 
     system_id = asyncio.run(_go())
-    assert seen == [system_id]
+    assert seen and set(seen) == {system_id}

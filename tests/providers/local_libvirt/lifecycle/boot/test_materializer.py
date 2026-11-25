@@ -17,22 +17,26 @@ from botocore.exceptions import ReadTimeoutError
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.build_artifacts import validation
-from kdive.providers.local_libvirt.lifecycle.boot import external_boot as external_boot_module
-from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    ExternalBootPlan,
+    OpaqueProviderRef,
+)
+from kdive.providers.local_libvirt.lifecycle.boot import _artifact_staging as staging_module
+from kdive.providers.local_libvirt.lifecycle.boot import kernel_bundle as kernel_bundle_module
+from kdive.providers.local_libvirt.lifecycle.boot._artifact_staging import (
     RealLocalExternalBootMaterializer,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
     TargetProjectionStore,
     TargetProjectionV1,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.session import (
-    ClosedDomainInspection,
     LocalExternalBootSession,
     OverlayIdentity,
+    PersistentDomainInspection,
     _boot_identity,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    ExternalBootPlan,
-    OpaqueProviderRef,
 )
 from kdive.store.objectstore import ObjectStore
 from tests.providers.local_libvirt.external_boot_support import _SOURCE_XML
@@ -345,7 +349,7 @@ def test_materialize_confines_and_closes_conversion_temporaries(
     session = _Session(tmp_path / "activation")
     opened: list[BinaryIO] = []
     directories: list[Path] = []
-    original = external_boot_module.tempfile.TemporaryFile
+    original = kernel_bundle_module.tempfile.TemporaryFile
 
     def observed_temporary_file(*, dir: str | None = None) -> BinaryIO:
         assert dir is not None
@@ -354,7 +358,7 @@ def test_materialize_confines_and_closes_conversion_temporaries(
         opened.append(handle)
         return handle
 
-    monkeypatch.setattr(external_boot_module.tempfile, "TemporaryFile", observed_temporary_file)
+    monkeypatch.setattr(kernel_bundle_module.tempfile, "TemporaryFile", observed_temporary_file)
     result = RealLocalExternalBootMaterializer(
         ObjectStore(_Client({("build/kernel", "kernel-v1"): bundle}), "bucket")
     ).materialize(plan, cast(LocalExternalBootSession, session))
@@ -418,7 +422,7 @@ def test_interrupted_module_conversion_cleans_temporaries_for_new_session_retry(
     client = _Client({("build/kernel", "kernel-v1"): bundle})
     materializer = RealLocalExternalBootMaterializer(ObjectStore(client, "bucket"))
     session = _Session(tmp_path / "activation")
-    original = external_boot_module.convert_kernel_bundle_modules
+    original = staging_module.convert_kernel_bundle_modules
 
     def interrupt_conversion(
         source: BinaryIO,
@@ -431,14 +435,14 @@ def test_interrupted_module_conversion_cleans_temporaries_for_new_session_retry(
         destination.write(b"partial")
         raise OSError("injected module conversion interruption")
 
-    monkeypatch.setattr(external_boot_module, "convert_kernel_bundle_modules", interrupt_conversion)
+    monkeypatch.setattr(staging_module, "convert_kernel_bundle_modules", interrupt_conversion)
     with pytest.raises(OSError, match="conversion interruption"):
         materializer.materialize(plan, cast(LocalExternalBootSession, session))
 
     digest_dirs = [path for path in session.root.iterdir() if path.is_dir()]
     assert len(digest_dirs) == 1
     assert list(digest_dirs[0].iterdir()) == []
-    monkeypatch.setattr(external_boot_module, "convert_kernel_bundle_modules", original)
+    monkeypatch.setattr(staging_module, "convert_kernel_bundle_modules", original)
     result = materializer.materialize(plan, cast(LocalExternalBootSession, _Session(session.root)))
     assert result.plan_identity == plan.identity
 
@@ -499,7 +503,7 @@ def test_inspect_prepare_uses_reopened_bytes_and_preserves_source(tmp_path: Path
     materializer = RealLocalExternalBootMaterializer(ObjectStore(client, "bucket"))
     session = _Session(tmp_path / "activation")
     result = materializer.materialize(plan, cast(LocalExternalBootSession, session))
-    inspection = ClosedDomainInspection(
+    inspection = PersistentDomainInspection(
         xml=_SOURCE_XML.encode(),
         active=True,
         definition_identity="sha256:" + "b" * 64,
@@ -536,7 +540,7 @@ def test_inspect_prepare_preserves_a_decomposed_command_line(tmp_path: Path) -> 
     )
     session = _Session(tmp_path / "activation")
     result = materializer.materialize(plan, cast(LocalExternalBootSession, session))
-    inspection = ClosedDomainInspection(
+    inspection = PersistentDomainInspection(
         xml=_SOURCE_XML.encode(),
         active=True,
         definition_identity="sha256:" + "b" * 64,
@@ -583,7 +587,7 @@ def test_exact_retry_rejects_different_valid_canonical_module_archive(
     projection = session.reopen_projection(result.artifacts.kernel)
     modules = Path(session.projection_artifact_path(projection, "modules"))
     replacement = io.BytesIO()
-    external_boot_module.convert_kernel_bundle_modules(
+    kernel_bundle_module.convert_kernel_bundle_modules(
         io.BytesIO(_bundle(module_data=b"\x7fELFdifferent")),
         replacement,
         release="6.9.0",
@@ -651,3 +655,34 @@ def test_corrupt_final_payload_publishes_no_sidecar_and_clean_retry_succeeds(
     monkeypatch.setattr(materializer, "_validate_local_bundle", original)
     result = materializer.materialize(plan, cast(LocalExternalBootSession, _Session(session.root)))
     assert result.plan_identity == plan.identity
+
+
+@pytest.mark.parametrize("damage", ["missing-trailer", "crc"])
+def test_materialize_rejects_incomplete_gzip_before_publication(
+    damage: str, tmp_path: Path
+) -> None:
+    valid = _bundle(module_data=b"x" * 20000)
+    plan = _plan(valid)
+    if damage == "missing-trailer":
+        corrupt = valid[:-8]
+    else:
+        corrupt = valid[:-8] + bytes([valid[-8] ^ 1]) + valid[-7:]
+    plan = plan.model_copy(
+        update={
+            "bundle": plan.bundle.model_copy(
+                update={"sha256": "sha256:" + hashlib.sha256(corrupt).hexdigest()}
+            )
+        }
+    )
+    client = _Client({("build/kernel", "kernel-v1"): corrupt})
+    materializer = RealLocalExternalBootMaterializer(ObjectStore(client, "bucket"))
+    session = _Session(tmp_path / "activation")
+
+    with pytest.raises(CategorizedError, match="complete readable gzip tar") as exc:
+        materializer.materialize(plan, cast(LocalExternalBootSession, session))
+
+    assert exc.value.category is ErrorCategory.BUILD_FAILURE
+    assert not list(session.root.rglob("target-projection.json"))
+    assert not list(session.root.rglob("kernel"))
+    assert not list(session.root.rglob("modules"))
+    assert all(body.closed_by_store for body in client.bodies)

@@ -386,6 +386,7 @@ async def list_jobs(
         if system_uid is None:
             return _invalid_uuid_error("system_id", request.system_id)
     after = None
+    # ADR-0192 treats None and empty text as the first page.
     if request.cursor:
         try:
             after = _decode_ts_uuid_cursor(_JOBS_LIST_TAG, request.cursor)

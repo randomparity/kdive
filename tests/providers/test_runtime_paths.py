@@ -33,8 +33,8 @@ def _imported_roots(environment: dict[str, str]) -> subprocess.CompletedProcess[
         [
             sys.executable,
             "-c",
-            "from kdive.providers.shared.runtime_paths import (ROOTFS_DIR, UPLOADS_DIR, "
-            "console_log_path); from uuid import UUID; print(ROOTFS_DIR); "
+            "from kdive.providers.shared.runtime_paths import (rootfs_dir, UPLOADS_DIR, "
+            "console_log_path); from uuid import UUID; print(rootfs_dir()); "
             "print(console_log_path(UUID(int=0)).parent); print(UPLOADS_DIR)",
         ],
         env=os.environ | environment,
@@ -84,8 +84,9 @@ def test_runtime_roots_use_the_validated_config_snapshot() -> None:
             "import kdive.config as config; "
             "config.load({'KDIVE_LIBVIRT_ROOTFS_ROOT': '/snapshot/rootfs', "
             "'KDIVE_LIBVIRT_CONSOLE_ROOT': '/snapshot/console'}); "
-            "from kdive.providers.shared.runtime_paths import ROOTFS_DIR, console_log_path; "
-            "from uuid import UUID; print(ROOTFS_DIR); print(console_log_path(UUID(int=0)).parent)",
+            "from kdive.providers.shared.runtime_paths import rootfs_dir, console_log_path; "
+            "from uuid import UUID; print(rootfs_dir()); "
+            "print(console_log_path(UUID(int=0)).parent)",
         ],
         capture_output=True,
         text=True,
@@ -93,6 +94,46 @@ def test_runtime_roots_use_the_validated_config_snapshot() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == ["/snapshot/rootfs", "/snapshot/console"]
+
+
+def test_path_helpers_follow_load_and_reset_after_import() -> None:
+    program = """
+import os
+from uuid import UUID
+import kdive.config as config
+from kdive.providers.shared.runtime_paths import overlay_path, console_log_path
+for name in ('first', 'second'):
+    config.load({'KDIVE_LIBVIRT_ROOTFS_ROOT': f'/{name}/rootfs',
+                 'KDIVE_LIBVIRT_CONSOLE_ROOT': f'/{name}/console'})
+    print(overlay_path(UUID(int=0)))
+    print(console_log_path(UUID(int=0)).parent)
+os.environ['KDIVE_LIBVIRT_ROOTFS_ROOT'] = '/environment/rootfs'
+os.environ['KDIVE_LIBVIRT_CONSOLE_ROOT'] = '/environment/console'
+config.reset()
+print(overlay_path(UUID(int=0)))
+print(console_log_path(UUID(int=0)).parent)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        env=os.environ
+        | {
+            "KDIVE_LIBVIRT_ROOTFS_ROOT": "/initial/rootfs",
+            "KDIVE_LIBVIRT_CONSOLE_ROOT": "/initial/console",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        value
+        for name in ("first", "second", "environment")
+        for value in (
+            f"/{name}/rootfs/{UUID(int=0)}-overlay.qcow2",
+            f"/{name}/console",
+        )
+    ]
 
 
 def test_domain_name_for_uses_kdive_prefix() -> None:

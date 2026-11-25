@@ -13,28 +13,26 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.db import migrate
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import TeardownPayload
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
+    AuthenticatedPeer,
     AuthorityCommitContextV1,
+    AuthorityServiceError,
     AuthorityTeardownMutationRequestV1,
     JournalPhase,
     JournalRecordV1,
     record_digest,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    AuthorityServiceError,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from kdive.providers.external_boot_authority.teardown import (
     AuthoritySystemTeardownFacts,
     AuthorityTeardownReservationV1,
 )
-from kdive.providers.ports.external_boot import OpaqueProviderRef
 from tests.db.external_boot_authority_support import (
     _PLAN,
     _allocate,

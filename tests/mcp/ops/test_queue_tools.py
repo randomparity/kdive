@@ -16,19 +16,30 @@ import json
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.operations.jobs import JobKind
+from kdive.domain.operations.jobs import (
+    DEFAULT_JOB_DISPATCH_LANE,
+    STATE_FENCED_JOB_DISPATCH_LANE,
+    JobKind,
+)
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, InstallPayload, RemoteModuleVolumeReapPayload
+from kdive.jobs.payloads import (
+    Authorizing,
+    InstallPayload,
+    RemoteModuleVolumeReapPayload,
+    SnapshotPayload,
+)
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops import queue as ops_queue
 from kdive.security.authz.rbac import PlatformRole
+from kdive.serialization import JsonValue
 from tests.mcp.json_data import data_int
 from tests.support.worker_fence import register_worker
 
@@ -310,17 +321,23 @@ def test_jobs_list_pages_without_hiding_overflow(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_jobs_list_rejects_invalid_cursor(migrated_url: str) -> None:
+@pytest.mark.parametrize("cursor", ["", "not-a-cursor"])
+def test_jobs_list_rejects_invalid_cursor(
+    migrated_url: str, cursor: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backlog = AsyncMock(side_effect=AssertionError("invalid cursor read backlog"))
+    monkeypatch.setattr(queue, "queued_backlog_by_lane", backlog)
+
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
-            return await ops_queue.jobs_list(
-                pool, _ctx(platform_roles=_OPERATOR), cursor="not-a-cursor"
-            )
+            return await ops_queue.jobs_list(pool, _ctx(platform_roles=_OPERATOR), cursor=cursor)
 
     response = asyncio.run(_run())
     assert response.status == "error"
     assert response.error_category == "configuration_error"
     assert response.data["reason"] == "invalid_cursor"
+    backlog.assert_not_awaited()
+    assert "queued_by_lane" not in response.data
 
 
 def test_jobs_list_renders_failed_job_with_category(migrated_url: str) -> None:
@@ -377,20 +394,34 @@ def test_jobs_list_degrades_failed_job_missing_category(
         asyncio.run(_run())
 
 
-def test_jobs_list_rejects_unknown_state(migrated_url: str) -> None:
+def test_jobs_list_rejects_unknown_state(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backlog = AsyncMock(side_effect=AssertionError("invalid state read backlog"))
+    monkeypatch.setattr(queue, "queued_backlog_by_lane", backlog)
+
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await ops_queue.jobs_list(pool, _ctx(platform_roles=_OPERATOR), states=["bogus"])
+        backlog.assert_not_awaited()
+        assert "queued_by_lane" not in resp.data
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
 
     asyncio.run(_run())
 
 
-def test_jobs_list_denied_for_project_only_token(migrated_url: str) -> None:
+def test_jobs_list_denied_for_project_only_token(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backlog = AsyncMock(side_effect=AssertionError("denied request read backlog"))
+    monkeypatch.setattr(queue, "queued_backlog_by_lane", backlog)
+
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await ops_queue.jobs_list(pool, _ctx(projects=("proj-a",)))
+        backlog.assert_not_awaited()
+        assert "queued_by_lane" not in resp.data
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
         assert await _count_platform_audit(migrated_url) == 0
@@ -417,3 +448,186 @@ def test_admin_satisfies_operator_gate(migrated_url: str) -> None:
         assert resp.status == "error"  # operator gate not satisfied by admin
 
     asyncio.run(_run())
+
+
+def _lane_backlog(response: ToolResponse, lane: str) -> dict[str, JsonValue]:
+    lanes = response.data.get("queued_by_lane")
+    assert isinstance(lanes, dict), "the operator response has no queued lane summary"
+    stats = lanes[lane]
+    assert isinstance(stats, dict)
+    return stats
+
+
+def test_jobs_list_observes_a_lane_without_an_accepting_worker(migrated_url: str) -> None:
+    async def run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                default = await queue.enqueue(
+                    conn, JobKind.INSTALL, _build_payload(), _authorizing("proj-a"), "default-claim"
+                )
+                await queue.enqueue(
+                    conn,
+                    JobKind.SNAPSHOT,
+                    SnapshotPayload(
+                        system_id=str(uuid4()),
+                        snapshot_id=str(uuid4()),
+                        name="snap",
+                        include_memory=False,
+                    ),
+                    _authorizing("proj-b"),
+                    "unserved-fenced",
+                )
+                credential = await register_worker(conn, "default-only-worker")
+                claimed = await queue.dequeue(
+                    conn,
+                    "default-only-worker",
+                    incarnation_credential=credential,
+                    accepted_lanes=(DEFAULT_JOB_DISPATCH_LANE,),
+                )
+                assert claimed is not None and claimed.id == default.id
+                assert (
+                    await queue.dequeue(
+                        conn,
+                        "default-only-worker",
+                        incarnation_credential=credential,
+                        accepted_lanes=(DEFAULT_JOB_DISPATCH_LANE,),
+                    )
+                    is None
+                )
+            response = await ops_queue.jobs_list(
+                pool,
+                _ctx(platform_roles=_OPERATOR, projects=("proj-a",)),
+                states=["running"],
+                limit=1,
+            )
+        assert response.status == "ok"
+        assert response.data["depth_queued"] == response.data["depth_running"] == 1
+        assert [item.object_id for item in response.items] == [str(default.id)]
+        assert _lane_backlog(response, DEFAULT_JOB_DISPATCH_LANE) == {
+            "queued_count": 0,
+            "oldest_queued_age_seconds": None,
+        }
+        fenced = _lane_backlog(response, STATE_FENCED_JOB_DISPATCH_LANE)
+        assert fenced["queued_count"] == 1
+        assert isinstance(fenced["oldest_queued_age_seconds"], float)
+        assert fenced["oldest_queued_age_seconds"] >= 0
+        assert await _count_platform_audit(migrated_url) == 1
+        json.dumps(response.model_dump())
+
+    asyncio.run(run())
+
+
+def test_jobs_list_backlog_spans_projects_filters_pages_and_ineligible_rows(
+    migrated_url: str,
+) -> None:
+    async def run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                old = await queue.enqueue(
+                    conn, JobKind.INSTALL, _build_payload(), _authorizing("proj-b"), "old-queued"
+                )
+                recent = await queue.enqueue(
+                    conn, JobKind.INSTALL, _build_payload(), _authorizing("proj-a"), "recent-queued"
+                )
+                await queue.enqueue(
+                    conn,
+                    JobKind.SNAPSHOT,
+                    SnapshotPayload(
+                        system_id=str(uuid4()),
+                        snapshot_id=str(uuid4()),
+                        name="snap",
+                        include_memory=False,
+                    ),
+                    _authorizing("proj-c"),
+                    "fenced-queued",
+                )
+                running = [
+                    await queue.enqueue(
+                        conn,
+                        JobKind.INSTALL,
+                        _build_payload(),
+                        _authorizing("proj-a"),
+                        f"running-{i}",
+                    )
+                    for i in range(2)
+                ]
+                await register_worker(conn, "running-worker")
+                await conn.execute(
+                    "UPDATE jobs SET created_at=statement_timestamp()-interval '2 "
+                    "hours',attempt=max_attempts WHERE id=%s",
+                    (old.id,),
+                )
+                await conn.execute(
+                    "UPDATE jobs SET created_at=statement_timestamp()-interval '1 hour' WHERE "
+                    "id=%s",
+                    (recent.id,),
+                )
+                await conn.execute(
+                    "UPDATE jobs SET "
+                    "state='running',worker_id='running-worker',created_at=statement_timestamp()-interval"
+                    " '8 hours' WHERE id=ANY(%s)",
+                    ([job.id for job in running],),
+                )
+            cursor: str | None = None
+            seen: set[str] = set()
+            for page in range(2):
+                async with pool.connection() as conn:
+                    before = await (
+                        await conn.execute(
+                            "SELECT EXTRACT(EPOCH FROM statement_timestamp()-created_at) "
+                            "FROM jobs WHERE id=%s",
+                            (old.id,),
+                        )
+                    ).fetchone()
+                response = await ops_queue.jobs_list(
+                    pool,
+                    _ctx(platform_roles=_OPERATOR, projects=("proj-a",)),
+                    states=["running"],
+                    limit=1,
+                    cursor=cursor,
+                )
+                async with pool.connection() as conn:
+                    after = await (
+                        await conn.execute(
+                            "SELECT EXTRACT(EPOCH FROM statement_timestamp()-created_at) "
+                            "FROM jobs WHERE id=%s",
+                            (old.id,),
+                        )
+                    ).fetchone()
+                assert response.status == "ok"
+                stats = _lane_backlog(response, DEFAULT_JOB_DISPATCH_LANE)
+                assert type(stats["queued_count"]) is int and stats["queued_count"] == 2
+                age = stats["oldest_queued_age_seconds"]
+                assert isinstance(age, float)
+                assert before is not None and after is not None
+                assert float(before[0]) <= age <= float(after[0])
+                assert _lane_backlog(response, STATE_FENCED_JOB_DISPATCH_LANE)["queued_count"] == 1
+                assert response.data["depth_queued"] == 3 and response.data["depth_running"] == 2
+                assert response.data["truncated"] is (page == 0)
+                assert len(response.items) == 1 and response.items[0].status == "running"
+                assert response.items[0].object_id not in seen
+                seen.add(response.items[0].object_id)
+                next_cursor = response.data["next_cursor"]
+                if page == 0:
+                    assert isinstance(next_cursor, str)
+                else:
+                    assert next_cursor is None
+                cursor = next_cursor
+            assert seen == {str(job.id) for job in running}
+        assert await _count_platform_audit(migrated_url) == 2
+
+    asyncio.run(run())
+
+
+def test_jobs_list_empty_queue_keeps_both_routed_lanes(migrated_url: str) -> None:
+    async def run() -> None:
+        async with _pool(migrated_url) as pool:
+            response = await ops_queue.jobs_list(pool, _ctx(platform_roles=_OPERATOR))
+        assert response.status == "ok" and response.items == []
+        for lane in (DEFAULT_JOB_DISPATCH_LANE, STATE_FENCED_JOB_DISPATCH_LANE):
+            assert _lane_backlog(response, lane) == {
+                "queued_count": 0,
+                "oldest_queued_age_seconds": None,
+            }
+
+    asyncio.run(run())

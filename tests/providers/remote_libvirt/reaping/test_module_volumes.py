@@ -9,18 +9,16 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_attachments import (
-    RemoteDeviceIdentity,
-)
-from kdive.providers.remote_libvirt.lifecycle.rootfs.remote_module_volume_names import (
-    ModuleVolumeOwner,
-    render_module_volume_name,
-)
+from kdive.providers.ports.module_operation import RemoteDeviceIdentity
 from kdive.providers.remote_libvirt.reaping.module_volumes import (
     ModuleVolumeReaperConn,
     list_owned_module_volumes,
     reap_orphaned_module_volumes,
     referenced_volume_paths,
+)
+from kdive.providers.shared.module_volume_names import (
+    ModuleVolumeOwner,
+    render_module_volume_name,
 )
 
 POOL = "modules"

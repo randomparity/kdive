@@ -10,8 +10,8 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
+from kdive.domain.external_boot_values import RootSpecV1
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile, profile_digest
-from kdive.providers.ports.external_boot import RootSpecV1
 from kdive.providers.system_authority.protocol import (
     GENESIS_DIGEST,
     AuthoritySystemJournalPhase,

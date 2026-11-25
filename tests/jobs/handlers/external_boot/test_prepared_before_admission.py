@@ -33,9 +33,9 @@ from kdive.db.remote_module_attempt_obligations import (
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
+from kdive.jobs.external_boot_models import ExternalBootAuthorityMarkerV1
 from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
 from kdive.jobs.handlers.external_boot.registrar import build_operations
-from kdive.jobs.models import ExternalBootAuthorityMarkerV1
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,

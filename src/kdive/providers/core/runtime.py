@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
+from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -19,7 +20,7 @@ from kdive.images.planes.base import RootfsBuildPlane
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import RootfsSource
 from kdive.providers.ports.authority import AuthorityCapability
-from kdive.providers.ports.console import ConsoleSnapshotter, RemoteConsoleReader
+from kdive.providers.ports.console import ConsoleReader, ConsoleSnapshotter
 from kdive.providers.ports.debug import (
     AttachSeam,
     GdbMiEngine,
@@ -30,6 +31,7 @@ from kdive.providers.ports.external_boot import (
     ExternalBootRecoveryObjectPorts,
 )
 from kdive.providers.ports.fault_injection import FaultInjectionInspector
+from kdive.providers.ports.handles import SystemHandle
 from kdive.providers.ports.lifecycle import (
     Booter,
     Connector,
@@ -51,13 +53,14 @@ from kdive.providers.ports.retrieve import (
 from kdive.providers.ports.traffic import TrafficCaptureOperationPorts, TrafficCapturer
 from kdive.serialization import JsonValue
 
+type SystemHandleResolver = Callable[[UUID, str | None], SystemHandle]
 type DiscoveryRegistrar = Callable[[AsyncConnectionPool], Awaitable[None]]
 type RootfsValidator = Callable[[RootfsSource], None]
 type StagedVolumeProbe = Callable[[list[str]], Awaitable[dict[str, str]]]
 type ResourceDetailProjector = Callable[
     [AsyncConnectionPool, tuple[str, ...]], Awaitable[dict[str, JsonValue]]
 ]
-type ConsoleReaderFactory = Callable[[], RemoteConsoleReader]
+type ConsoleReaderFactory = Callable[[], ConsoleReader]
 
 
 def _unconfigured_component_sources() -> ComponentSourceCapabilities:
@@ -126,14 +129,11 @@ class ResourceDetailCapabilities:
 
 @dataclass(frozen=True, slots=True)
 class ConsoleCapabilities:
-    """Provider-managed console artifact capture support."""
+    """Provider-managed console reads and artifact snapshots."""
 
     snapshotter: ConsoleSnapshotter
-    # Strict worker-side console read for a running System, used by tools whose whole output is the
-    # console they just read (post-SysRq capture, crash watch) — remote-libvirt only (ADR-0429/0433,
-    # #1435). A factory so the reader (which reaches the S3 object store) is built lazily at job
-    # time, keeping composition buildable without S3 config (ADR-0076); a provider whose console is
-    # a worker-local file (local-libvirt) leaves it None and the handler reads the file directly.
+    # Construct readers lazily so assembly needs no configured object store (ADR-0076).
+    # Required when SysRq or crash-watch is advertised; absence never selects local storage.
     reader_factory: ConsoleReaderFactory | None = None
 
 
@@ -182,6 +182,7 @@ class ProviderRuntime:
     crash_postmortem: CrashPostmortem
     vmcore_introspector: VmcoreIntrospector
     live_introspector: LiveIntrospector
+    system_handle: SystemHandleResolver
     # The platform-owned root device cmdline (ADR-0183). ``"root=/dev/vda"`` for direct-kernel
     # boot (local-libvirt's whole-disk-ext4 overlay); ``None`` when the in-guest bootloader owns
     # the root device (remote-libvirt inherits ``root=UUID=…`` via ``grubby --copy-default``).
@@ -205,8 +206,8 @@ class ProviderRuntime:
     traffic_capture_operation: TrafficCaptureOperationPorts | None = None
     # Device hot-plug port (ADR-0823); ``None`` when ``support.hotplug_devices`` is empty.
     device_hotplug: DeviceHotplugger | None = None
-    # Provider-neutral external Run-boot operations (ADR-0583). Existing providers leave this
-    # absent until their adapter issues land; legacy install and boot remain unchanged.
+    # Provider-neutral external Run-boot operations (ADR-0583); None when this runtime does not
+    # expose direct lifecycle mutation ports. Authority-backed execution uses its separate route.
     external_boot: ExternalBootPorts | None = None
     # Server-owned materialize/prepare receipt seam (ADR-0595). Kept separate from worker
     # lifecycle mutation ports so composition can fail closed for providers without receipts.
@@ -222,6 +223,10 @@ class ProviderRuntime:
     fault_injection: FaultInjectionInspector | None = None
 
     def __post_init__(self) -> None:
+        if (self.support.supports_diagnostic_sysrq or self.support.supports_crash_watch) and (
+            self.console is None or self.console.reader_factory is None
+        ):
+            raise ValueError("advertised console operations require a console reader")
         _require_capability_port_parity(
             advertised=self.support.supports_snapshots,
             port=self.snapshot,

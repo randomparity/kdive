@@ -1,7 +1,10 @@
 """Typed worker-boundary contracts for external boot authority results."""
 
 import asyncio
+import subprocess
+import sys
 from contextlib import AbstractAsyncContextManager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast, get_type_hints
 from unittest.mock import AsyncMock
@@ -13,14 +16,16 @@ from pydantic import SecretStr, TypeAdapter, ValidationError
 from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.external_boot.ports import ExternalBootAuthorityExecutor
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
+    DeadlineResult,
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureContext,
     ExternalBootAuthorityFailureV1,
+    ExternalBootAuthorityResultV1,
     ExternalBootAuthoritySuccessV1,
     ExternalBootDerivedTeardownCompletion,
 )
+from kdive.jobs.handlers.external_boot.ports import ExternalBootAuthorityExecutor
 from kdive.jobs.worker import Worker
 from kdive.jobs.worker_telemetry import JobSpan
 from kdive.providers.external_boot_authority.protocol import (
@@ -181,8 +186,11 @@ class _Pool:
 
 
 class _RecordingCursor(AbstractAsyncContextManager["_RecordingCursor"]):
-    def __init__(self) -> None:
+    def __init__(self, rows: list[dict[str, object] | None] | None = None) -> None:
         self.params: tuple[object, ...] | None = None
+        self.rows = iter(
+            [{"status": "superseded", "job_state": "running"}] if rows is None else rows
+        )
 
     async def __aenter__(self) -> _RecordingCursor:
         return self
@@ -193,13 +201,13 @@ class _RecordingCursor(AbstractAsyncContextManager["_RecordingCursor"]):
     async def execute(self, _query: str, params: tuple[object, ...]) -> None:
         self.params = params
 
-    async def fetchone(self) -> dict[str, str]:
-        return {"status": "superseded", "job_state": "running"}
+    async def fetchone(self) -> dict[str, object] | None:
+        return next(self.rows, None)
 
 
 class _RecordingConnection:
-    def __init__(self) -> None:
-        self.recording_cursor = _RecordingCursor()
+    def __init__(self, rows: list[dict[str, object] | None] | None = None) -> None:
+        self.recording_cursor = _RecordingCursor(rows)
 
     def transaction(self) -> _ConnectionContext:
         return _ConnectionContext()
@@ -214,6 +222,8 @@ def _job(marker: object = ...) -> Job:
         payload["external_boot_authority_v1"] = marker
     return Job.model_construct(
         id=uuid4(),
+        created_at=datetime(2026, 9, 4, tzinfo=UTC),
+        updated_at=datetime(2026, 9, 4, tzinfo=UTC),
         kind=JobKind.BOOT,
         payload=payload,
         state=JobState.RUNNING,
@@ -244,12 +254,37 @@ def _marker(
 
 
 def _success(operation: str = "deadline") -> ExternalBootAuthoritySuccessV1:
+    if operation == "activate":
+        activation_id, system_id = uuid4(), uuid4()
+        data = _carrier(
+            {
+                "schema": "external-boot-authority-result-v1",
+                "operation": "activate",
+                "result_ref": None,
+                "activation_readiness_deadline": "2026-08-29T00:01:00Z",
+                "evidence": {
+                    "schema": "external-boot-terminal-evidence-v1",
+                    "activation_id": activation_id,
+                    "system_id": system_id,
+                    "outcome": "active",
+                    "composite_state": _DIGEST,
+                    "objects": [],
+                    "observed_at": "2026-08-29T00:00:00Z",
+                },
+            }
+        )
+        data.update(activation_id=activation_id, system_id=system_id)
+        return ExternalBootAuthoritySuccessV1.model_validate(data)
     result: dict[str, object] = {
         "schema": "external-boot-authority-result-v1",
         "operation": operation,
         "deadline": "2026-08-29T00:01:00Z",
     }
-    return ExternalBootAuthoritySuccessV1.model_validate(_carrier(result))
+    data = _carrier(result)
+    if operation == "recovery-attempt":
+        result.update(attempt_id=uuid4(), recovery_basis="recovery_point")
+        data.update(purpose="recover", admitted_operation="recover")
+    return ExternalBootAuthoritySuccessV1.model_validate(data)
 
 
 def test_queue_serializes_schema_alias_and_canonical_utc_timestamp() -> None:
@@ -417,11 +452,14 @@ def test_worker_routes_success_and_stale_result_through_authority_adapter(monkey
     asyncio.run(exercise())
 
 
-def test_worker_continues_only_an_applied_authenticated_deadline(monkeypatch) -> None:
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+def test_worker_continues_only_an_applied_authenticated_checkpoint(
+    monkeypatch, operation: str
+) -> None:
     async def exercise() -> None:
-        carrier = _success()
+        carrier = _success(operation)
         job = _job(_marker(carrier))
-        complete = AsyncMock(return_value=job)
+        complete = AsyncMock(return_value=queue.ExternalBootCommitOutcome(job, continue_claim=True))
         monkeypatch.setattr(queue, "complete_external_boot", complete)
 
         continued = await _worker()._finalize_handler(job, _span(), _task_result(carrier))
@@ -432,9 +470,12 @@ def test_worker_continues_only_an_applied_authenticated_deadline(monkeypatch) ->
     asyncio.run(exercise())
 
 
-def test_worker_does_not_continue_a_mismatched_or_superseded_deadline(monkeypatch) -> None:
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+def test_worker_does_not_continue_a_mismatched_or_superseded_checkpoint(
+    monkeypatch, operation: str
+) -> None:
     async def exercise() -> None:
-        carrier = _success()
+        carrier = _success(operation)
         marker = _marker(carrier)
         marker["operation_identity"] = "different"
         complete = AsyncMock(return_value=queue.ExternalBootCommitStatus.SUPERSEDED)
@@ -455,25 +496,21 @@ def test_worker_does_not_continue_a_mismatched_or_superseded_deadline(monkeypatc
     asyncio.run(exercise())
 
 
-def test_worker_bounds_same_claim_deadline_continuation(monkeypatch) -> None:
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+def test_worker_bounds_same_claim_checkpoint_continuation(monkeypatch, operation: str) -> None:
     async def exercise() -> None:
         worker = _worker()
-        invoke = AsyncMock(return_value=_success())
-        finalized = 0
-
-        async def finalize(_job: Job, _span: JobSpan, handler_task: asyncio.Task[object]) -> bool:
-            nonlocal finalized
-            finalized += 1
-            await handler_task
-            return True
-
+        carrier = _success(operation)
+        job = _job(_marker(carrier))
+        invoke = AsyncMock(return_value=carrier)
+        complete = AsyncMock(return_value=queue.ExternalBootCommitOutcome(job, continue_claim=True))
         monkeypatch.setattr(worker, "_invoke_handler", invoke)
-        monkeypatch.setattr(worker, "_finalize_handler", finalize)
+        monkeypatch.setattr(queue, "complete_external_boot", complete)
 
-        await worker._run_handler(_job(), cast(Any, object()), _span())
+        await worker._run_handler(job, cast(Any, object()), _span())
 
         assert invoke.await_count == 2
-        assert finalized == 2
+        assert complete.await_count == 2
 
     asyncio.run(exercise())
 
@@ -927,3 +964,234 @@ def test_worker_survives_an_unreadable_attempt_state(monkeypatch, caplog) -> Non
         f"external boot job {job.id} commit superseded; attempt state unreadable; result dropped"
     ) in caplog.messages
     assert not any("was reclaimed" in message for message in caplog.messages)
+
+
+def test_authority_models_import_without_loading_generic_registry() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys\n"
+            "import kdive.jobs.external_boot_models\n"
+            "if 'kdive.jobs.models' in sys.modules:\n"
+            "    raise SystemExit('authority data import loaded the generic job registry')\n",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_typed_payload_still_checks_carrier_operation() -> None:
+    payload = DeadlineResult(operation="deadline", deadline=datetime(2026, 8, 29, tzinfo=UTC))
+    data = _carrier(payload.model_dump(mode="json", by_alias=True))
+    data.update({"purpose": "release", "admitted_operation": "release", "result": payload})
+    with pytest.raises(ValidationError, match="result operation does not match authority purpose"):
+        ExternalBootAuthoritySuccessV1.model_validate(data)
+
+
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+@pytest.mark.parametrize("state", [JobState.SUCCEEDED, JobState.FAILED])
+def test_worker_does_not_continue_a_terminal_checkpoint(monkeypatch, operation, state) -> None:
+    async def exercise() -> None:
+        carrier = _success(operation)
+        job = _job(_marker(carrier))
+        completed = job.model_copy(update={"state": state})
+        monkeypatch.setattr(
+            queue,
+            "complete_external_boot",
+            AsyncMock(
+                return_value=queue.ExternalBootCommitOutcome(completed, continue_claim=False)
+            ),
+        )
+        assert await _worker()._finalize_handler(job, _span(), _task_result(carrier)) is False
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+def test_worker_stops_on_missing_checkpoint_commit(monkeypatch, operation) -> None:
+    async def exercise() -> None:
+        carrier = _success(operation)
+        monkeypatch.setattr(queue, "complete_external_boot", AsyncMock(return_value=None))
+        assert (
+            await _worker()._finalize_handler(
+                _job(_marker(carrier)),
+                _span(),
+                _task_result(carrier),
+            )
+            is False
+        )
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+@pytest.mark.parametrize(
+    "status",
+    [
+        queue.ExternalBootCommitStatus.OBSERVED_IDENTITY_STALE,
+        queue.ExternalBootCommitStatus.RESERVATION_NOT_READY,
+        queue.ExternalBootCommitStatus.AUTHORITY_SUPERSEDED,
+    ],
+)
+@pytest.mark.parametrize("applied_failure", [True, False])
+def test_worker_never_continues_a_classified_checkpoint_refusal(
+    monkeypatch,
+    operation,
+    status,
+    applied_failure,
+) -> None:
+    async def exercise() -> None:
+        carrier = _success(operation)
+        job = _job(_marker(carrier))
+        monkeypatch.setattr(queue, "complete_external_boot", AsyncMock(return_value=status))
+        fail = AsyncMock(return_value=job if applied_failure else None)
+        monkeypatch.setattr(queue, "fail_external_boot", fail)
+        assert await _worker()._finalize_handler(job, _span(), _task_result(carrier)) is False
+        fail.assert_awaited_once()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt", "activate"])
+@pytest.mark.parametrize(
+    "state", [JobState.RUNNING, JobState.SUCCEEDED, JobState.FAILED, JobState.QUEUED]
+)
+def test_queue_returns_the_committed_job_and_explicit_continuation(operation, state) -> None:
+    async def exercise() -> None:
+        carrier = _success(operation)
+        job = _job(_marker(carrier)).model_copy(update={"state": state})
+        conn = _RecordingConnection(
+            [{"status": "applied", "job_state": state.value}, job.model_dump()]
+        )
+        committed = await queue.complete_external_boot(
+            cast(Any, conn), job, carrier, incarnation_credential=SecretStr("credential")
+        )
+        assert isinstance(committed, queue.ExternalBootCommitOutcome)
+        assert committed.job == job
+        assert committed.continue_claim is (
+            state is JobState.RUNNING and operation in {"deadline", "recovery-attempt"}
+        )
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("status", "classified_state"),
+    [
+        ("observed_identity_stale", "failed"),
+        ("reservation_not_ready", "queued"),
+        ("authority_superseded", "failed"),
+    ],
+)
+def test_queue_classified_reread_stops_even_when_the_row_is_running(
+    status, classified_state
+) -> None:
+    async def exercise() -> None:
+        carrier = _success()
+        job = _job(_marker(carrier))
+        conn = _RecordingConnection(
+            [{"status": status, "job_state": classified_state}, job.model_dump()]
+        )
+        committed = await queue.complete_external_boot(
+            cast(Any, conn), job, carrier, incarnation_credential=SecretStr("credential")
+        )
+        assert isinstance(committed, queue.ExternalBootCommitOutcome)
+        assert committed.job == job
+        assert committed.continue_claim is False
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("status", list(queue.ExternalBootCommitStatus))
+def test_queue_preserves_unapplied_commit_status(status) -> None:
+    async def exercise() -> None:
+        carrier = _success()
+        conn = _RecordingConnection([{"status": status.value, "job_state": None}])
+        assert (
+            await queue.complete_external_boot(
+                cast(Any, conn),
+                _job(_marker(carrier)),
+                carrier,
+                incarnation_credential=SecretStr("credential"),
+            )
+            is status
+        )
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("missing", ["status", "job"])
+def test_queue_preserves_superseded_for_missing_commit_rows(missing) -> None:
+    async def exercise() -> None:
+        carrier = _success()
+        rows: list[dict[str, object] | None] = (
+            [None] if missing == "status" else [{"status": "applied", "job_state": "running"}, None]
+        )
+        conn = _RecordingConnection(rows)
+        assert (
+            await queue.complete_external_boot(
+                cast(Any, conn),
+                _job(_marker(carrier)),
+                carrier,
+                incarnation_credential=SecretStr("credential"),
+            )
+            is queue.ExternalBootCommitStatus.SUPERSEDED
+        )
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_failure_adapter_retains_the_job_return_contract(terminal) -> None:
+    async def exercise() -> None:
+        carrier = _failure(terminal=terminal)
+        state = JobState.FAILED if terminal else JobState.QUEUED
+        job = _job(_marker(carrier)).model_copy(update={"state": state})
+        conn = _RecordingConnection(
+            [{"status": "applied", "job_state": state.value}, job.model_dump()]
+        )
+        committed = await queue.fail_external_boot(
+            cast(Any, conn), job, carrier, incarnation_credential=SecretStr("credential")
+        )
+        assert isinstance(committed, Job) and committed == job
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+def test_worker_consumes_an_explicit_stop_for_a_running_checkpoint(monkeypatch, operation) -> None:
+    async def exercise() -> None:
+        carrier = _success(operation)
+        job = _job(_marker(carrier))
+        complete = AsyncMock(
+            return_value=queue.ExternalBootCommitOutcome(job, continue_claim=False)
+        )
+        monkeypatch.setattr(queue, "complete_external_boot", complete)
+        assert await _worker()._finalize_handler(job, _span(), _task_result(carrier)) is False
+        complete.assert_awaited_once()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("operation", ["deadline", "recovery-attempt"])
+def test_queue_requires_a_typed_success_carrier_to_continue(operation) -> None:
+    async def exercise() -> None:
+        success = _success(operation)
+        carrier = ExternalBootAuthorityResultV1.model_validate(success.model_dump(by_alias=True))
+        job = _job(_marker(success))
+        conn = _RecordingConnection(
+            [{"status": "applied", "job_state": "running"}, job.model_dump()]
+        )
+        committed = await queue.commit_external_boot_authority_result(
+            cast(Any, conn), job, carrier, incarnation_credential=SecretStr("credential")
+        )
+        assert isinstance(committed, queue.ExternalBootCommitOutcome)
+        assert committed.job == job
+        assert committed.continue_claim is False
+
+    asyncio.run(exercise())

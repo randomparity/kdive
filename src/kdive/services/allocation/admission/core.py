@@ -29,7 +29,7 @@ from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.lease import resolve_window_hours
 from kdive.domain.lifecycle.records import Allocation
-from kdive.domain.pcie import MatchOutcome, PCIeClaim, PCIeDescriptor
+from kdive.domain.pcie import MatchOutcome, PCIeClaim, PCIeDescriptor, resolve_multiset
 from kdive.security import audit
 from kdive.services.accounting import ledger as accounting
 from kdive.services.allocation.admission.affinity import project_may_place
@@ -336,9 +336,9 @@ async def _resolve_pcie_claim(
     """
     if not request.pcie_specs:
         return _PCIeClaimResult(denial=None, devices=[])
-    descriptors = pcie_claim.descriptors_for(request.resource)
+    descriptors = request.resource.capability_view.pcie_descriptors()
     claims = await pcie_claim.active_claims(conn, request.resource.id)
-    resolution = pcie_claim.resolve_union(list(request.pcie_specs), descriptors, claims=claims)
+    resolution = resolve_multiset(list(request.pcie_specs), descriptors, claims=claims)
     if resolution.outcome is MatchOutcome.MATCHED:
         return _PCIeClaimResult(denial=None, devices=_claims_from(resolution.devices))
     category = (

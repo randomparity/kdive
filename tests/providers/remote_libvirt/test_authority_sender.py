@@ -18,10 +18,23 @@ import pytest
 from pydantic import SecretStr
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    ExternalBootPreparationObservation,
+    OpaqueProviderRef,
+)
 from kdive.providers.external_boot_authority import protocol, transport
 from kdive.providers.external_boot_authority.device_identity import (
     DeviceIdentityInodeV1,
     DeviceIdentityRequestV1,
+)
+from kdive.providers.external_boot_authority.module_protocol import (
+    RemoteModuleLifecycleRequestV1,
+    RemoteModuleLifecycleResponseV1,
+    RemoteModulePreparationBeginRequestV1,
+    RemoteModulePreparationBeginResponseV1,
+    RemoteModuleTerminalPreparationResponseV1,
+    RemoteModuleVolumePreparationRequestV1,
 )
 from kdive.providers.external_boot_authority.module_volume_sweep import (
     ModuleVolumeSweepRequestV1,
@@ -29,29 +42,16 @@ from kdive.providers.external_boot_authority.module_volume_sweep import (
 )
 from kdive.providers.external_boot_authority.network_client import _AuthorityNetworkTransport
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityObservationV1,
     AuthorityPreparationMutationRequestV1,
     AuthorityPreparationResponseV1,
-)
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    ExternalBootPreparationObservation,
-    OpaqueProviderRef,
 )
 from kdive.providers.remote_libvirt import composition
 from kdive.providers.remote_libvirt.config import (
     RemoteAuthorityBinding,
     RemoteLibvirtConfig,
     TlsCertRefs,
-)
-from kdive.providers.remote_libvirt.external_boot_authority import (
-    RemoteModuleLifecycleRequestV1,
-    RemoteModuleLifecycleResponseV1,
-    RemoteModulePreparationBeginRequestV1,
-    RemoteModulePreparationBeginResponseV1,
-    RemoteModuleTerminalPreparationResponseV1,
-    RemoteModuleVolumePreparationRequestV1,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend
@@ -409,7 +409,7 @@ async def test_authority_material_failure_does_not_block_rebinding_power_or_tear
     material: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from kdive.domain.operations.jobs import PowerAction
-    from kdive.providers.assembly.authority import authority_sender_factory
+    from kdive.jobs.assembly import authority_sender_factory
     from kdive.providers.remote_libvirt.connection import transport as libvirt_transport
     from kdive.providers.remote_libvirt.diagnostics.authority import AuthorityReadinessCheck
     from kdive.providers.remote_libvirt.lifecycle import control
@@ -473,7 +473,7 @@ async def test_authority_material_failure_does_not_block_rebinding_power_or_tear
 async def test_standing_route_retains_only_references_and_materializes_each_typed_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from kdive.providers.assembly import authority as authority_sender
+    from kdive.jobs import assembly as authority_sender
 
     backend = FileRefBackend(tmp_path, SecretRegistry())
     binding = RemoteAuthorityBinding("authority-a", "192.0.2.1", 9443, "ca", "cert", "key")

@@ -1,164 +1,184 @@
-"""An authority activation records the ``boot`` run step the attach gate requires (#3135)."""
+"""Authority activation publishes the boot step inside its fenced result commit (ADR-0835)."""
 
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
-from typing import Any
+from collections.abc import Callable
+from datetime import UTC, datetime
 
 import psycopg
-import pytest
-from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
+import kdive.config as config
 from kdive.db.repositories import JOBS, RUNS
 from kdive.domain.capacity.state import JobState
+from kdive.domain.external_boot_values import OpaqueProviderRef
 from kdive.domain.lifecycle.records import System
-from kdive.jobs import queue
-from kdive.jobs import worker as worker_module
-from kdive.jobs.models import ExternalBootAuthoritySuccessV1, HandlerRegistry
+from kdive.domain.operations.jobs import Job
+from kdive.jobs.external_boot_models import (
+    ExternalBootAuthorityMarkerV1,
+    ExternalBootAuthoritySuccessV1,
+)
+from kdive.jobs.handlers.external_boot.lifecycle import activate_handler
+from kdive.jobs.handlers.external_boot.ports import ExternalBootHandlerPorts
+from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.worker import Worker
-from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug.sessions.lifecycle import _attach_preconditions, _succeeded_boot_result
+from kdive.mcp.tools.lifecycle.runs.steps import boot_run
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.jobs.handlers.external_boot.seeding import seed_case
-from tests.jobs.handlers.external_boot.vehicle import Vehicle, build_vehicle
+from tests.jobs.handlers.external_boot.conftest import resolver_for, role_connection
+from tests.jobs.handlers.external_boot.seeding import (
+    AUTHORITY_INSTANCE,
+    RecordingAcknowledger,
+    SeededCase,
+    seed_case,
+)
+from tests.jobs.handlers.external_boot.support import RecordingExecutor
+from tests.jobs.handlers.external_boot.vehicle import build_vehicle
+from tests.mcp.lifecycle.runs_support import LOCAL_PROFILE_POLICY, ctx, mark_authority_owned
+from tests.mcp.systems_support import provider_resolver
+from tests.support.object_store import INERT_OBJECT_STORE
 
 
-def _result(vehicle: Vehicle, operation: str) -> ExternalBootAuthoritySuccessV1:
-    """A success result carrying only the fields the step recorder reads."""
-    return ExternalBootAuthoritySuccessV1.model_construct(
-        run_id=vehicle.run_id,
-        system_id=vehicle.system_id,
-        activation_id=vehicle.activation_id,
-        result=SimpleNamespace(operation=operation),
-    )
-
-
-async def _commit(
-    migrated_url: str,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    operation: str = "activate",
-    job_state: JobState = JobState.SUCCEEDED,
-    activation_state: str = "active",
-) -> tuple[Any, Any, Vehicle]:
-    """Drive the worker's commit path; return the recorded step, the attach gate, the vehicle."""
+async def _prepared_activation(
+    migrated_url: str, dsns: Callable[[str], str]
+) -> tuple[SeededCase, Job, ExternalBootAuthoritySuccessV1]:
     vehicle = build_vehicle()
+    # The external provider boundary has already activated the prepared vehicle.
+    vehicle.port.activate(vehicle.recovery_point, OpaqueProviderRef(ref="fixture/activated"))
     async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as seed:
-        case = await seed_case(seed, vehicle, purpose="activate", activation_state=activation_state)
+        case = await seed_case(seed, vehicle, purpose="activate", activation_state="activating")
         job = await JOBS.get(seed, case.job_id)
     assert job is not None
-    committed = job.model_copy(update={"state": job_state})
-
-    async def fake_commit(*_a: Any, **_k: Any) -> Any:
-        return committed
-
-    monkeypatch.setattr(queue, "complete_external_boot", fake_commit)
-    async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
-        worker = Worker(
-            pool,
-            HandlerRegistry(),
-            worker_id="w1",
-            incarnation_credential=SecretStr("x"),
+    handler = activate_handler(
+        ExternalBootHandlerPorts(
+            resolver=resolver_for(vehicle),
+            incarnation_credential=SecretStr(case.credential),
             secret_registry=SecretRegistry(),
+            acknowledger=RecordingAcknowledger(dsns("kdive_provider_authority")),
+            authority_executor=RecordingExecutor("target"),
+            artifact_store=INERT_OBJECT_STORE,
+            clock=lambda: datetime(2026, 9, 4, tzinfo=UTC),
         )
-        await worker._commit_external_result(job, _result(vehicle, operation))
-        async with pool.connection() as conn:
-            step = await _succeeded_boot_result(conn, vehicle.run_id)
-            run = await RUNS.get(conn, vehicle.run_id)
-            assert run is not None
-            gate = await _attach_preconditions(conn, run, "drgn-live")
-    return step, gate, vehicle
+    )
+    async with await role_connection(dsns("kdive_worker")) as worker:
+        result = await handler(
+            worker, job, ExternalBootAuthorityMarkerV1.model_validate(case.marker)
+        )
+    assert isinstance(result, ExternalBootAuthoritySuccessV1)
+    return case, job, result
+
+
+def _worker(
+    pool: AsyncConnectionPool, case: SeededCase, *, credential: str | None = None
+) -> Worker:
+    return Worker(
+        pool,
+        HandlerRegistry(),
+        worker_id=case.worker_incarnation,
+        incarnation_credential=SecretStr(case.credential if credential is None else credential),
+        secret_registry=SecretRegistry(),
+    )
 
 
 def test_committed_activation_records_succeeded_boot_step(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
-    step, gate, vehicle = asyncio.run(_commit(migrated_url, monkeypatch))
-    assert step == {"system_id": str(vehicle.system_id), "boot_outcome": "ready"}
-    assert isinstance(gate, System)
+    async def run() -> None:
+        case, job, result = await _prepared_activation(migrated_url, authority_role_dsns)
+        async with AsyncConnectionPool(
+            authority_role_dsns("kdive_worker"), min_size=1, max_size=5, open=False
+        ) as pool:
+            assert await _worker(pool, case)._commit_external_result(job, result) is False
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as observer:
+            step = await _succeeded_boot_result(observer, case.vehicle.run_id)
+            persisted = await JOBS.get(observer, job.id)
+            built_run = await RUNS.get(observer, case.vehicle.run_id)
+            assert built_run is not None
+            gate = await _attach_preconditions(observer, built_run, "drgn-live")
+        assert step == {"system_id": str(case.vehicle.system_id), "boot_outcome": "ready"}
+        assert persisted is not None and persisted.state is JobState.SUCCEEDED
+        assert isinstance(gate, System)
+
+    asyncio.run(run())
 
 
-@pytest.mark.parametrize(
-    ("operation", "job_state", "activation_state"),
-    [
-        ("activate", JobState.FAILED, "active"),
-        ("activate", JobState.QUEUED, "active"),
-        ("deadline", JobState.RUNNING, "active"),
-        ("activate", JobState.SUCCEEDED, "recovered"),
-    ],
-    ids=["failed", "queued", "deadline", "superseded-activation"],
-)
-def test_unfinished_or_superseded_activation_records_no_boot_step(
-    migrated_url: str,
-    monkeypatch: pytest.MonkeyPatch,
-    operation: str,
-    job_state: JobState,
-    activation_state: str,
+def test_worker_with_wrong_incarnation_cannot_publish_boot_readiness(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
-    step, gate, _vehicle = asyncio.run(
-        _commit(
-            migrated_url,
-            monkeypatch,
-            operation=operation,
-            job_state=job_state,
-            activation_state=activation_state,
-        )
-    )
-    assert step is None
-    assert isinstance(gate, ToolResponse)
-    assert gate.data["reason"] == "boot_first"
+    async def run() -> None:
+        case, job, result = await _prepared_activation(migrated_url, authority_role_dsns)
+        async with AsyncConnectionPool(
+            authority_role_dsns("kdive_worker"), min_size=1, max_size=5, open=False
+        ) as pool:
+            assert (
+                await _worker(pool, case, credential="wrong")._commit_external_result(job, result)
+                is False
+            )
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as observer:
+            assert await _succeeded_boot_result(observer, case.vehicle.run_id) is None
+            persisted = await JOBS.get(observer, job.id)
+        assert persisted is not None and persisted.state is JobState.RUNNING
+
+    asyncio.run(run())
 
 
-def test_transient_step_write_failure_is_retried(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+def test_force_boot_preserves_active_authority_admission_and_readiness(
+    migrated_url: str, authority_role_dsns: Callable[[str], str]
 ) -> None:
-    real = worker_module._activation_is_active
-    calls = 0
+    async def run() -> None:
+        case, job, result = await _prepared_activation(migrated_url, authority_role_dsns)
+        async with AsyncConnectionPool(
+            authority_role_dsns("kdive_worker"), min_size=1, max_size=5, open=False
+        ) as pool:
+            await _worker(pool, case)._commit_external_result(job, result)
+        config.load({"KDIVE_EXTERNAL_BOOT_AUTHORITY_INSTANCE": AUTHORITY_INSTANCE})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as admin:
+            async with admin.connection() as seed:
+                await seed.execute(
+                    "UPDATE resources SET name='authority-host' WHERE id=("
+                    "SELECT a.resource_id FROM allocations a "
+                    "JOIN systems s ON s.allocation_id=a.id "
+                    "WHERE s.id=%s)",
+                    (case.vehicle.system_id,),
+                )
+                await seed.execute(
+                    "INSERT INTO run_steps (run_id,step,state,result) "
+                    "VALUES (%s,'install','succeeded','{}'::jsonb)",
+                    (case.vehicle.run_id,),
+                )
+                before = await (
+                    await seed.execute(
+                        "SELECT to_jsonb(rs) FROM run_steps rs WHERE run_id=%s AND step='boot'",
+                        (case.vehicle.run_id,),
+                    )
+                ).fetchone()
+            await mark_authority_owned(admin, str(case.vehicle.system_id), AUTHORITY_INSTANCE)
+            async with AsyncConnectionPool(
+                authority_role_dsns("kdive_server"), min_size=1, max_size=2, open=False
+            ) as server:
+                response = await boot_run(
+                    server,
+                    ctx(),
+                    str(case.vehicle.run_id),
+                    force=True,
+                    resolver=provider_resolver(profile_policy=LOCAL_PROFILE_POLICY),
+                )
+            async with admin.connection() as observer:
+                after = await (
+                    await observer.execute(
+                        "SELECT to_jsonb(rs) FROM run_steps rs WHERE run_id=%s AND step='boot'",
+                        (case.vehicle.run_id,),
+                    )
+                ).fetchone()
+        assert response.error_category == "conflict"
+        assert response.data["reason"] == "external_boot_restricted"
+        assert before is not None and isinstance(before[0], dict)
+        assert before[0]["result"] == {
+            "system_id": str(case.vehicle.system_id),
+            "boot_outcome": "ready",
+        }
+        assert after == before
 
-    async def flaky(*args: Any, **kwargs: Any) -> Any:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise RuntimeError("transient")
-        return await real(*args, **kwargs)
-
-    monkeypatch.setattr(worker_module, "_activation_is_active", flaky)
-    monkeypatch.setattr(worker_module, "_BOOT_STEP_RETRY_DELAY_S", 0.0)
-    step, _gate, vehicle = asyncio.run(_commit(migrated_url, monkeypatch))
-    assert calls == 2
-    assert step == {"system_id": str(vehicle.system_id), "boot_outcome": "ready"}
-
-
-def test_exhausted_step_write_logs_and_leaves_no_step(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    async def broken(*_a: Any, **_k: Any) -> Any:
-        raise RuntimeError("down")
-
-    monkeypatch.setattr(worker_module, "_activation_is_active", broken)
-    monkeypatch.setattr(worker_module, "_BOOT_STEP_RETRY_DELAY_S", 0.0)
-    step, _gate, _vehicle = asyncio.run(_commit(migrated_url, monkeypatch))
-    assert step is None
-    assert "boot step was not recorded" in caplog.text
-
-
-def test_existing_step_for_another_system_is_left_unchanged(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    real = worker_module._activation_is_active
-
-    async def seed_foreign_step(conn: Any, activation_id: Any, run_id: Any, system_id: Any) -> Any:
-        await conn.execute(
-            "INSERT INTO run_steps (run_id, step, state, result) "
-            "VALUES (%s, 'boot', 'succeeded', %s)",
-            (run_id, Jsonb({"system_id": "other", "boot_outcome": "ready"})),
-        )
-        return await real(conn, activation_id, run_id, system_id)
-
-    monkeypatch.setattr(worker_module, "_activation_is_active", seed_foreign_step)
-    step, _gate, _vehicle = asyncio.run(_commit(migrated_url, monkeypatch))
-    assert step == {"system_id": "other", "boot_outcome": "ready"}
-    assert "already has a boot step" in caplog.text
+    asyncio.run(run())

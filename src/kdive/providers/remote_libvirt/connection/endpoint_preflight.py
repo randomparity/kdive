@@ -33,8 +33,21 @@ def _host_of(endpoint: str) -> str:
     ``localhost:9000`` parses with the host in ``path``. Default the scheme so both spellings
     resolve to the same host.
     """
-    parsed = urlsplit(endpoint if "//" in endpoint else f"//{endpoint}")
-    return (parsed.hostname or "").strip()
+    try:
+        parsed = urlsplit(endpoint if "//" in endpoint else f"//{endpoint}")
+        host = parsed.hostname
+        _ = parsed.port  # urllib validates the port only when this property is read.
+    except ValueError as exc:
+        raise CategorizedError(
+            f"{S3_ENDPOINT_URL.name} has malformed endpoint syntax",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={
+                "env_var": S3_ENDPOINT_URL.name,
+                "configured_endpoint": endpoint,
+                "next_action": f"set {S3_ENDPOINT_URL.name} to a valid object-store endpoint URI",
+            },
+        ) from exc
+    return (host or "").strip()
 
 
 def _is_loopback(host: str) -> bool:
@@ -51,10 +64,10 @@ def validate_guest_routable_endpoint() -> None:
     """Reject a loopback/localhost ``KDIVE_S3_ENDPOINT_URL`` before it reaches a remote guest.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when ``KDIVE_S3_ENDPOINT_URL`` resolves to a
-            loopback host (``localhost``, ``127.0.0.0/8``, ``::1``). ``details`` carries
-            ``env_var``, ``next_action`` (a literal remediation naming the var), and the offending
-            ``configured_endpoint``. An unset endpoint is a no-op here (owned by
+        CategorizedError: ``CONFIGURATION_ERROR`` when ``KDIVE_S3_ENDPOINT_URL`` is malformed
+            or resolves to a loopback host (``localhost``, ``127.0.0.0/8``, ``::1``).
+            ``details`` carries ``env_var``, ``next_action`` (a literal remediation naming the var),
+            and the offending ``configured_endpoint``. An unset endpoint is a no-op here (owned by
             ``object_store_from_env``); a blank endpoint is rejected earlier at
             ``config.validate`` (ADR-0337).
     """

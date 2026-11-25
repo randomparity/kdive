@@ -30,36 +30,35 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg import Error as PsycopgError
 from psycopg.errors import InsufficientPrivilege
-from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr, ValidationError
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS
-from kdive.domain.capacity.state import JobState, RunState
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
-from kdive.domain.lifecycle.run_steps import (
-    BOOT_OUTCOME_READY,
-    RUN_STEP_SUCCEEDED,
-    BootStepResult,
+from kdive.domain.operations.jobs import (
+    ACTIVE_JOB_KINDS,
+    Job,
+    JobKind,
+    dispatch_lane_for_kind,
+    run_failure_eligible_states,
 )
-from kdive.domain.operations.jobs import ACTIVE_JOB_KINDS, Job, JobKind, dispatch_lane_for_kind
 from kdive.health.heartbeat import Heartbeat, tick_until_stop
 from kdive.jobs import queue
 from kdive.jobs.capture_operations.supervisor import capture_authority_scope
-from kdive.jobs.models import (
+from kdive.jobs.external_boot_models import (
     ExternalBootAuthorityConflictV1,
     ExternalBootAuthorityFailure,
     ExternalBootAuthorityFailureV1,
+    ExternalBootAuthorityHandlerResult,
     ExternalBootAuthorityMarkerV1,
     ExternalBootAuthorityResultV1,
     ExternalBootAuthoritySuccessV1,
     ExternalBootDerivedReleaseCompletion,
     ExternalBootDerivedTeardownCompletion,
-    HandlerRegistry,
-    JobHandler,
-    JobHandlerResult,
 )
+from kdive.jobs.models import HandlerRegistry, JobHandler, JobHandlerResult
 from kdive.jobs.payloads import PayloadValidationError, run_id_from_payload
 from kdive.jobs.worker_telemetry import JobSpan, WorkerTelemetry
 from kdive.providers.system_authority.protocol import (
@@ -71,8 +70,6 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 
 _log = logging.getLogger(__name__)
 
-_BOOT_STEP_ATTEMPTS = 3
-_BOOT_STEP_RETRY_DELAY_S = 0.5
 
 # The worker never writes a marked job's row (ADR-0620): only a receipt commit, the public teardown
 # recycle, or the reconciler's unowned-job dead-letter can move it, so logs say so.
@@ -83,8 +80,6 @@ _MARKED_JOB_LEFT_RUNNING = (
 )
 _CONTEXT_VALUE_MAX = 1000
 _CONTEXT_KEY = re.compile(r"[^a-zA-Z0-9_.-]+")
-_RUN_COMPENSATION_STATES = frozenset({RunState.CREATED, RunState.RUNNING})
-_INSTALL_RUN_COMPENSATION_STATES = _RUN_COMPENSATION_STATES | {RunState.SUCCEEDED}
 _CLAIM_LOOP_FAILURE_REASON = re.compile(
     r"(?:pool-timeout|timeout|postgres-(?:[A-Z0-9]{5}|unknown)|unexpected)"
 )
@@ -404,7 +399,8 @@ class Worker:
         ]
         try:
             done, pending = await asyncio.wait(loops, return_when=asyncio.FIRST_COMPLETED)
-            if pending and not stop.is_set():
+            draining = stop.is_set()
+            if pending and not draining:
                 _log.error(
                     "claim loop ended while the worker was still running; stopping the "
                     "remaining %d lane loop(s) so the process is restarted rather than "
@@ -417,8 +413,9 @@ class Worker:
                 # On the stop path this waits out each lane's in-flight job; on the death path
                 # the cancellations above have already landed.
                 await asyncio.gather(*pending, return_exceptions=True)
-            # Re-raise whatever ended a loop, after the siblings are down.
-            for task in done:
+            # Observe drained lanes too; cancelled siblings belong only to early-death cleanup.
+            completed = loops if draining else done
+            for task in completed:
                 task.result()
         finally:
             for task in loops:
@@ -527,7 +524,7 @@ class Worker:
                 return
             if continuation == 1:
                 _log.warning(
-                    "external boot job %s returned a repeated intermediate deadline; "
+                    "external boot job %s returned a repeated intermediate checkpoint; "
                     "leaving its claimed lease for recovery",
                     job.id,
                 )
@@ -571,6 +568,17 @@ class Worker:
             span.set_outcome("error")
             category = _failure_category(exc)
             terminal = _is_terminal(exc, category)
+            failure_context = _failure_context(exc, self._secret_registry)
+            if job.kind is JobKind.TEARDOWN:
+                # Category alone loses terminal escalation; persist the actual decision (ADR-0843).
+                reason = "teardown_terminal_failure"
+                if not terminal:
+                    reason = (
+                        "teardown_automatic_replay_exhausted"
+                        if job.payload.get("automatic_teardown_replay_v1") is not None
+                        else "teardown_automatic_replay_available"
+                    )
+                failure_context["teardown_recovery_reason"] = reason
             async with self._pool.connection() as conn:
                 failed_job = await _fail_job_and_run(
                     conn,
@@ -578,7 +586,7 @@ class Worker:
                     category,
                     incarnation_credential=self._incarnation_credential,
                     terminal=terminal,
-                    failure_context=_failure_context(exc, self._secret_registry),
+                    failure_context=failure_context,
                 )
             self._telemetry.record_job_failure(failed_job, category)
             if failed_job.state is JobState.QUEUED:
@@ -606,9 +614,14 @@ class Worker:
                     job.id,
                 )
                 return False
-            if isinstance(result_ref, ExternalBootAuthorityResultV1) and _authority_binding_matches(
-                marker, result_ref
-            ):
+            if isinstance(
+                result_ref,
+                (
+                    ExternalBootAuthoritySuccessV1,
+                    ExternalBootAuthorityFailureV1,
+                    ExternalBootAuthorityConflictV1,
+                ),
+            ) and _authority_binding_matches(marker, result_ref):
                 return await self._commit_external_result(job, result_ref)
             else:
                 _log.warning(
@@ -638,7 +651,7 @@ class Worker:
         return False
 
     async def _commit_external_result(
-        self, job: Job, result: ExternalBootAuthorityResultV1
+        self, job: Job, result: ExternalBootAuthorityHandlerResult
     ) -> bool:
         async with self._pool.connection() as conn:
             if isinstance(result, ExternalBootAuthoritySuccessV1):
@@ -656,18 +669,12 @@ class Worker:
             else:
                 _log.warning("external boot job %s returned an untyped result variant", job.id)
                 return False
+        if isinstance(committed, queue.ExternalBootCommitOutcome):
+            return committed.continue_claim
         if not isinstance(committed, queue.ExternalBootCommitStatus):
             if committed is None:
                 _log.warning("external boot job %s was reclaimed; result dropped", job.id)
-                return False
-            if _is_committed_activation(result, committed):
-                await self._record_authority_boot_step(result)
-            return (
-                isinstance(committed, Job)
-                and isinstance(result, ExternalBootAuthoritySuccessV1)
-                and result.result.operation == "deadline"
-                and committed.state is JobState.RUNNING
-            )
+            return False
         if committed is queue.ExternalBootCommitStatus.SUPERSEDED:
             await self._log_superseded_commit(job)
             return False
@@ -686,71 +693,6 @@ class Worker:
                 job.id,
             )
         return False
-
-    async def _record_authority_boot_step(self, result: ExternalBootAuthorityResultV1) -> None:
-        """Record the ``boot`` run step an authority activation stands in for.
-
-        The fixed-worker ``boot`` handler writes this row; ``debug.start_session`` and
-        ``introspect.script`` refuse a Run without it (``boot_first``). The authority commit is a
-        database function that never touches ``run_steps``, so the step is written after the
-        activation committed, never before: a failed or superseded activation records none.
-        """
-        for attempt in range(1, _BOOT_STEP_ATTEMPTS + 1):
-            try:
-                await self._write_boot_step(result)
-                return
-            except Exception:
-                if attempt == _BOOT_STEP_ATTEMPTS:
-                    _log.error(
-                        "activation of run %s committed but its boot step was not recorded; "
-                        "debug attach will refuse with boot_first until it is",
-                        result.run_id,
-                        exc_info=True,
-                    )
-                    return
-                await asyncio.sleep(_BOOT_STEP_RETRY_DELAY_S * attempt)
-
-    async def _write_boot_step(self, result: ExternalBootAuthorityResultV1) -> None:
-        run_id, system_id = result.run_id, result.system_id
-        async with (
-            self._pool.connection() as conn,
-            conn.transaction(),
-            advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
-            advisory_xact_lock(conn, LockScope.RUN, run_id),
-        ):
-            if not await _activation_is_active(conn, result.activation_id, run_id, system_id):
-                _log.warning(
-                    "activation %s of run %s is no longer its active activation; "
-                    "boot step not recorded",
-                    result.activation_id,
-                    run_id,
-                )
-                return
-            boot_result: BootStepResult = {
-                "system_id": str(system_id),
-                "boot_outcome": BOOT_OUTCOME_READY,
-            }
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO run_steps (run_id, step, state, result) "
-                    "VALUES (%s, 'boot', %s, %s) ON CONFLICT (run_id, step) DO NOTHING "
-                    "RETURNING 1",
-                    (run_id, RUN_STEP_SUCCEEDED, Jsonb(boot_result)),
-                )
-                if await cur.fetchone() is not None:
-                    return
-                await cur.execute(
-                    "SELECT result ->> 'system_id' FROM run_steps "
-                    "WHERE run_id = %s AND step = 'boot'",
-                    (run_id,),
-                )
-                row = await cur.fetchone()
-            _log.warning(
-                "run %s already has a boot step (system %s), not recording system %s",
-                run_id,
-                None if row is None else row[0],
-                system_id,
-            )
 
     async def _log_superseded_commit(self, job: Job) -> None:
         """Separate a real reclaim from a refused commit on the attempt that still holds the job."""
@@ -850,32 +792,6 @@ def _classified_external_boot_failure(
         "terminal": terminal,
     }
     return ExternalBootAuthorityFailureV1.model_validate(carrier)
-
-
-def _is_committed_activation(result: ExternalBootAuthorityResultV1, committed: Job) -> bool:
-    """Whether ``committed`` is the job a successful ``activate`` result just finished."""
-    return (
-        isinstance(result, ExternalBootAuthoritySuccessV1)
-        and result.result.operation == "activate"
-        and committed.state is JobState.SUCCEEDED
-    )
-
-
-async def _activation_is_active(
-    conn: AsyncConnection, activation_id: UUID, run_id: UUID, system_id: UUID
-) -> bool:
-    """Whether ``activation_id`` is still ``run_id``'s committed, active activation.
-
-    A forced re-boot supersedes the activation this write belongs to; the check runs under the
-    System and Run locks so a stale step cannot land after the re-boot deleted it.
-    """
-    async with conn.cursor() as cur:
-        await cur.execute(
-            "SELECT 1 FROM external_boot_activations "
-            "WHERE id = %s AND run_id = %s AND system_id = %s AND state = 'active'",
-            (activation_id, run_id, system_id),
-        )
-        return await cur.fetchone() is not None
 
 
 def _external_marker(job: Job) -> ExternalBootAuthorityMarkerV1 | None:
@@ -1055,17 +971,12 @@ async def _mark_run_failed(
     """
     if job.state is not JobState.FAILED:
         return
-    eligible_states = (
-        _INSTALL_RUN_COMPENSATION_STATES
-        if job.kind is JobKind.INSTALL
-        else _RUN_COMPENSATION_STATES
-    )
     changed = await RUNS.record_terminal_failure(
         conn,
         run_id,
         category,
         job.id,
-        eligible_states=eligible_states,
+        eligible_states=run_failure_eligible_states(job.kind),
     )
     if changed:
         _log.info("job %s terminal failure compensated run %s", job.id, run_id)

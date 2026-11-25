@@ -84,7 +84,8 @@ def test_explicit_enable_builds_and_discovery_never_touches_pool() -> None:
     )
     assert resolver.registered_kinds() == frozenset({ResourceKind.BYO_HOST})
     runtime = resolver.resolve(ResourceKind.BYO_HOST)
-    assert byo.discovery_registration().creates is False
+    registrar = runtime.discovery_registrar
+    assert registrar is None
     asyncio.run(runtime.register_discovery(cast("AsyncConnectionPool", object())))
 
 

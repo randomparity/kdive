@@ -373,3 +373,79 @@ def test_resume_surfaces_a_missing_worker_update_grant(
             await owner_pool.close()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", [PowerAction.RESUME, PowerAction.OFF])
+@pytest.mark.parametrize("provider_fails", [False, True])
+async def test_cancelled_power_drains_provider_under_system_fence(
+    migrated_url: str,
+    authority_role_dsns: Callable[[str], str],
+    action: PowerAction,
+    provider_fails: bool,
+) -> None:
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = threading.Event()
+    provider_error = RuntimeError("power failed after cancellation")
+    metric_tags: list[str | None] = []
+
+    selected_action = action
+
+    class BlockedControl(_FakeControl):
+        def power(self, domain_name: str, action: PowerAction) -> None:
+            assert action is selected_action
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5)
+            super().power(domain_name, action)
+
+    control = BlockedControl(error=provider_error if provider_fails else None)
+    resolver = provider_resolver(controller=control)
+    initial = SystemState.PAUSED if action is PowerAction.RESUME else SystemState.READY
+    async with (
+        _pool(migrated_url) as owner_pool,
+        _pool(authority_role_dsns("kdive_worker")) as worker_pool,
+    ):
+        sid = await _seed_system(owner_pool, initial)
+        job = _resume_job(sid).model_copy(
+            update={"payload": {"system_id": str(sid), "action": action.value}}
+        )
+        async with worker_pool.connection() as conn:
+            assert not conn.autocommit
+
+            async def run_power() -> None:
+                try:
+                    await power_handler(conn, job, resolver=resolver)
+                finally:
+                    metric_tags.append(take_provider_kind())
+
+            task = asyncio.create_task(run_power())
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                for message in ("cancel power", "cancel power again"):
+                    task.cancel(message)
+                    await asyncio.sleep(0)
+                    assert not task.done()
+                    assert conn.autocommit
+                    async with owner_pool.connection() as probe, probe.transaction():
+                        assert not await try_advisory_xact_lock(probe, LockScope.SYSTEM, sid)
+                release.set()
+                with pytest.raises(asyncio.CancelledError) as raised:
+                    await asyncio.wait_for(task, 5)
+                assert raised.value.args == ("cancel power",)
+                assert not conn.autocommit
+                async with owner_pool.connection() as probe, probe.transaction():
+                    assert await try_advisory_xact_lock(probe, LockScope.SYSTEM, sid)
+                    expected = (
+                        SystemState.READY
+                        if action is PowerAction.RESUME and not provider_fails
+                        else initial
+                    )
+                    assert await _sys_state(probe, sid) is expected
+                assert metric_tags == ["local-libvirt"]
+                assert control.calls == [("kdive-x", action)]
+                expected_audits = int(action is PowerAction.RESUME and not provider_fails)
+                assert len(await _fetch_audit(owner_pool, sid)) == expected_audits
+            finally:
+                release.set()
+                await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)

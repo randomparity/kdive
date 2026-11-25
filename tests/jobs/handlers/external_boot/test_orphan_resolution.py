@@ -20,6 +20,13 @@ from kdive.db.external_boot_authority_journal import AuthorityBinding
 from kdive.db.external_boot_recovery_quarantine import record_cleanup_quarantine
 from kdive.domain.capacity.state import ExternalBootActivationState
 from kdive.domain.errors import CategorizedError
+from kdive.domain.external_boot_values import (
+    ExternalBootActivationBinding,
+    OpaqueProviderRef,
+    RecoveryObjectBinding,
+    RecoveryObjectObservation,
+    RecoveryPoint,
+)
 from kdive.domain.operations.jobs import DEFAULT_JOB_DISPATCH_LANE, JobKind
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.jobs.handlers.external_boot.orphan import resolve_recovery_orphan_handler
@@ -29,6 +36,7 @@ from kdive.mcp.tools.external_boot.recovery_requests import resolve_recovery_orp
 from kdive.providers.external_boot_authority.journal import record_digest
 from kdive.providers.external_boot_authority.orphan import RecoveryOrphanAuthorityService
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityCommitContextV1,
     AuthorityMutationRequestV1,
     AuthorityObservationV1,
@@ -39,7 +47,6 @@ from kdive.providers.external_boot_authority.protocol import (
 )
 from kdive.providers.external_boot_authority.repository import DatabaseAuthorityRepository
 from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
     AuthorityMutationAdapter,
     ExternalBootAuthorityService,
 )
@@ -49,18 +56,14 @@ from kdive.providers.local_libvirt.external_boot_authority import (
     LocalExternalBootAuthorityAdapter,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.external_boot import (
-    FinalizeCleanupProof,
     LocalLibvirtExternalBoot,
     RealLocalExternalBootIO,
+)
+from kdive.providers.local_libvirt.lifecycle.boot.recovery_store import (
+    FinalizeCleanupProof,
     RecoveryMetadataStore,
     recovery_directory_name,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootActivationBinding,
-    OpaqueProviderRef,
-    RecoveryObjectBinding,
-    RecoveryObjectObservation,
-    RecoveryPoint,
+    recovery_point_digest,
 )
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
@@ -282,7 +285,7 @@ async def _publish_local_quarantine(
     )
     point = _local_point(metadata)
     proof = FinalizeCleanupProof(
-        point_digest=LocalLibvirtExternalBoot.point_digest(point),
+        point_digest=recovery_point_digest(point),
         binding=binding,
         operation_id=cleanup_identity,
         attempt_id=str(attempt_id),

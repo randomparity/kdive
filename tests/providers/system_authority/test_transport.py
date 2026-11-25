@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -12,7 +12,7 @@ from pydantic import SecretStr
 from kdive.domain.errors import CategorizedError
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.providers.external_boot_authority import transport
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
+from kdive.providers.external_boot_authority.protocol import AuthenticatedPeer
 from kdive.providers.system_authority.protocol import (
     AuthoritySystemAcknowledgementV1,
     AuthoritySystemExecutionV1,
@@ -217,3 +217,40 @@ async def test_unexpected_system_failure_is_logged_without_reaching_the_peer(
     assert "execute-system-operation" in record.getMessage()
     assert record.exc_info
     assert record.exc_info[0] is RuntimeError
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("category", ["unauthenticated", "superseded", "journal-conflict"])
+@pytest.mark.parametrize("operation", ["acknowledge-system-takeover", "execute-system-operation"])
+async def test_system_service_error_categories_cross_the_protocol_boundary(
+    category: Literal["unauthenticated", "superseded", "journal-conflict"],
+    operation: transport.Operation,
+) -> None:
+    from kdive.providers.system_authority.protocol import AuthoritySystemServiceError
+
+    request = _takeover()
+
+    async def authenticate(_credential: SecretStr) -> AuthenticatedPeer:
+        return AuthenticatedPeer("worker-a")
+
+    class Service:
+        async def begin(self, *_args: object) -> Any:
+            raise AuthoritySystemServiceError(category)
+
+        async def execute(self, *_args: object) -> Any:
+            raise AuthoritySystemServiceError(category)
+
+    value = (
+        request
+        if operation == "acknowledge-system-takeover"
+        else AuthoritySystemExecutionV1(
+            request=_mutation(request), acknowledgement=_acknowledgement(request)
+        )
+    )
+    envelope = transport.encode_request_envelope(
+        operation, value.model_dump(mode="json", by_alias=True), "credential"
+    )
+    result = await transport._dispatch(
+        envelope, authenticate, None, system_service=cast(Any, Service())
+    )
+    assert json.loads(result) == {"category": category, "status": "error"}

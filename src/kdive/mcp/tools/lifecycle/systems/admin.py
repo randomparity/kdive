@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from functools import partial
-from hashlib import sha256
 from typing import LiteralString
 from uuid import UUID
 
@@ -27,12 +26,10 @@ from kdive.domain.capacity.state import (
 )
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.external_boot_activation import ExternalBootActivation
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
-from kdive.jobs.payloads import ReprovisionPayload, TeardownPayload, dump_payload
+from kdive.jobs.payloads import ReprovisionPayload, TeardownPayload
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse, validate_stored
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -40,7 +37,7 @@ from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import authz_denied as _authz_denied
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import external_boot_denial as _external_boot_denial
-from kdive.mcp.tools._common import job_envelope
+from kdive.mcp.tools._common import job_envelope, teardown_routing_failure
 from kdive.mcp.tools._common import stale_handle as _stale_handle
 from kdive.mcp.tools.lifecycle.support._device_ops import device_job_active, device_op_in_flight
 from kdive.mcp.tools.lifecycle.support._idempotency import (
@@ -73,6 +70,10 @@ from kdive.services.systems.authority_owned import (
     authority_system_binding,
     enqueue_preactivation_teardown,
 )
+from kdive.services.systems.teardown import (
+    TeardownRoutingDenied,
+    route_external_boot_teardown,
+)
 from kdive.services.systems.validation import (
     RootfsValidator,
     validate_profile_for_provider,
@@ -85,7 +86,6 @@ _TEARDOWN = JobKind.TEARDOWN
 # Idempotency-store kinds (the registered tool names); ADR-0193.
 _REPROVISION_KIND = "systems.reprovision"
 _TEARDOWN_KIND = "systems.teardown"
-_AUTHORITY_MARKER = "external_boot_authority_v1"
 _EXTERNAL_BOOT_ACTIVATIONS = ExternalBootActivationRepository()
 # A ready System's re-admission of a profile it applied before recycles that profile's settled
 # dedup row (#3008), and a recycle resets the attempt counter, which a still-running handler of
@@ -100,15 +100,6 @@ _REPROVISION_SETTLING_SQL: LiteralString = (
     "SELECT id FROM jobs WHERE dedup_key = %s AND (state = ANY(%s) "
     "    OR ((state = %s OR error_category = %s OR attempt > 1) AND updated_at > now() - %s))"
 )
-_SYSTEM_TEARDOWN_AUTHORITY_SQL: LiteralString = (
-    "SELECT activation_id, run_id, plan_identity, provider_kind, authority_instance "
-    "FROM resolve_external_boot_system_teardown_dispatch_binding(%s)"
-)
-
-
-# `jobs.cancel` never clears `worker_id`, so a claimed, canceled row's last write is compared with
-# the settlement that proved the authority lane quiescent (ADR-0816 amendment, #3551).
-_WRITTEN_SINCE_SQL: LiteralString = "SELECT updated_at >= %s FROM jobs WHERE id = %s"
 
 
 def _reprovision_key_kind(system_id: UUID, profile: ProvisioningProfile) -> str:
@@ -264,7 +255,7 @@ async def _reprovision_in_lock(
         if investigation is None or investigation.state in TERMINAL_INVESTIGATION_STATES:
             state = investigation.state.value if investigation is not None else "missing"
             return _config_error(str(system_id), data={"investigation_state": state})
-    if await _authority_system_binding(conn, system_id) is not None:
+    if await authority_system_binding(conn, system_id) is not None:
         return ToolResponse.failure(
             str(system_id),
             ErrorCategory.CONFLICT,
@@ -409,12 +400,6 @@ async def _settling_reprovision_job(conn: AsyncConnection, dedup_key: str) -> UU
     return None if row is None else row[0]
 
 
-async def _authority_system_binding(
-    conn: AsyncConnection, system_id: UUID
-) -> AuthoritySystemBinding | None:
-    return await authority_system_binding(conn, system_id)
-
-
 async def _admit_reprovision(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -523,11 +508,39 @@ async def _teardown_locked(
         except RoleDenied:
             await _audit_destructive_denied(conn, ctx, system, _TEARDOWN, ["admin_role"])
             return _authz_denied(system_id, ["admin_role"])
-        routed = await route_external_boot_teardown(
-            conn, ctx, system, system_id, idempotency_key, resolver
-        )
+
+        async def record_routed_job(
+            connection: AsyncConnection, job: Job, skip_matching_key: bool
+        ) -> None:
+            if idempotency_key is None:
+                return
+            envelope = job_envelope(job, "system_id", system.id)
+            if skip_matching_key and await _key_names_job(
+                connection, ctx, system.id, idempotency_key, envelope.object_id
+            ):
+                return
+            await record_envelope(
+                connection,
+                principal=ctx.principal,
+                key=idempotency_key,
+                project=system.project,
+                kind=object_scoped_kind(_TEARDOWN_KIND, system.id),
+                envelope=envelope,
+            )
+
+        try:
+            routed = await route_external_boot_teardown(
+                conn,
+                system,
+                job_authorizing(ctx, system.project),
+                resolver,
+                on_recycle=partial(_audit_teardown_recycle, conn, ctx, system),
+                recorder=record_routed_job if idempotency_key is not None else None,
+            )
+        except TeardownRoutingDenied as exc:
+            return teardown_routing_failure(system_id, exc.error, ctx)
         if routed is not None:
-            return routed
+            return job_envelope(routed, "system_id", system.id)
         if idempotency_key is not None:
             replay = await resolve_envelope_replay(
                 conn,
@@ -561,7 +574,7 @@ async def _teardown_locked(
                 suggested_next_actions=["systems.get"],
                 data={"current_status": system.state.value},
             )
-        authority_binding = await _authority_system_binding(conn, uid)
+        authority_binding = await authority_system_binding(conn, uid)
         if authority_binding is not None:
             return await _enqueue_preactivation_authority_teardown(
                 conn,
@@ -581,9 +594,12 @@ async def _teardown_locked(
         )
         if replay is not None:
             return job_envelope(replay, "system_id", uid)
-        denial = await ordinary_teardown_denial(conn, ctx, system, system_id)
-        if denial is not None:
-            return denial
+        try:
+            await check_external_boot_admission(
+                conn, system.id, ExternalBootOperation.SYSTEM_TEARDOWN, project=system.project
+            )
+        except ExternalBootDenied as exc:
+            return teardown_routing_failure(system_id, exc, ctx)
         prior = await queue.get_by_dedup_key(conn, _teardown_dedup_key(uid))
         job, changed = await queue.enqueue_with_status(
             conn,
@@ -607,125 +623,6 @@ async def _teardown_locked(
                 envelope=envelope,
             )
         return envelope
-
-
-async def route_external_boot_teardown(
-    conn: AsyncConnection,
-    ctx: RequestContext,
-    system: System,
-    system_id: str,
-    idempotency_key: str | None,
-    resolver: ProviderResolver | None,
-    *,
-    audit_recycle: bool = True,
-) -> ToolResponse | None:
-    """Route a System with any external-boot activation to its authority teardown, else ``None``.
-
-    The caller holds the System advisory lock. Shared by `systems.teardown` and break-glass
-    `ops.force_teardown` (#3007): the worker refuses an ordinary teardown for such a System (#2966).
-    A latest activation the stranded-activation settlement ended is read first, before the
-    authority binding, and goes to the worker's ordinary teardown (ADR-0816 amendment, #3551).
-    """
-    activation = await _EXTERNAL_BOOT_ACTIVATIONS.get_latest_for_system(conn, system.id)
-    if activation is None:
-        return None
-    settled = await _EXTERNAL_BOOT_ACTIVATIONS.settled_at(conn, activation.id)
-    if settled is not None:
-        return await _route_settled_teardown(
-            conn, ctx, system, system_id, idempotency_key, settled, audit_recycle=audit_recycle
-        )
-    return await _enqueue_authority_teardown(
-        conn,
-        ctx,
-        system,
-        activation,
-        system_id,
-        idempotency_key,
-        resolver,
-        audit_recycle=audit_recycle,
-    )
-
-
-async def _route_settled_teardown(
-    conn: AsyncConnection,
-    ctx: RequestContext,
-    system: System,
-    system_id: str,
-    idempotency_key: str | None,
-    settled: datetime,
-    *,
-    audit_recycle: bool,
-) -> ToolResponse | None:
-    """Send a settled System to its worker's ordinary teardown; ``None`` is the caller's own path.
-
-    Each caller's ordinary path handles a missing or ordinary prior row and a `torn_down` or
-    `reprovisioning` System, but they differ on an authority-marked row, so it is decided here: a
-    live one, or one canceled after a worker claimed it and written since settlement, may still be
-    running and replays; any other is replaced with the ordinary payload.
-    """
-    key = _teardown_dedup_key(system.id)
-    prior = await queue.get_by_dedup_key(conn, key)
-    if (
-        prior is None
-        or not _is_authority_marked(prior)
-        or system.state in {SystemState.TORN_DOWN, SystemState.REPROVISIONING}
-    ):
-        return None
-    if prior.state in _LIVE_JOB_STATES or (
-        prior.state is JobState.CANCELED
-        and prior.worker_id is not None
-        and await _written_since(conn, prior.id, settled)
-    ):
-        return job_envelope(prior, "system_id", system.id)
-    denial = await ordinary_teardown_denial(conn, ctx, system, system_id)
-    if denial is not None:
-        return denial
-    job, changed = await queue.enqueue_with_status(
-        conn,
-        JobKind.TEARDOWN,
-        TeardownPayload(system_id=str(system.id)),
-        job_authorizing(ctx, system.project),
-        key,
-        recycle=queue.JobRecyclePolicy.TERMINAL_OR_CANCELED,
-    )
-    if changed and audit_recycle:
-        await _audit_teardown_recycle(conn, ctx, system, job)
-    envelope = job_envelope(job, "system_id", system.id)
-    if idempotency_key is not None and not await _key_names_job(
-        conn, ctx, system.id, idempotency_key, envelope.object_id
-    ):
-        await record_envelope(
-            conn,
-            principal=ctx.principal,
-            key=idempotency_key,
-            project=system.project,
-            kind=object_scoped_kind(_TEARDOWN_KIND, system.id),
-            envelope=envelope,
-        )
-    return envelope
-
-
-async def _written_since(conn: AsyncConnection, job_id: UUID, moment: datetime) -> bool:
-    cursor = await conn.execute(_WRITTEN_SINCE_SQL, (moment, job_id))
-    row = await cursor.fetchone()
-    return row is not None and bool(row[0])
-
-
-async def ordinary_teardown_denial(
-    conn: AsyncConnection, ctx: RequestContext, system: System, system_id: str
-) -> ToolResponse | None:
-    """Run the admission matrix ahead of an ordinary teardown: the typed denial, or ``None``.
-
-    No activation exists at the caller's System-locked read. The call keeps this reverse operation
-    inside the shared admission inventory if the matrix later gains another restriction source.
-    """
-    try:
-        await check_external_boot_admission(
-            conn, system.id, ExternalBootOperation.SYSTEM_TEARDOWN, project=system.project
-        )
-    except ExternalBootDenied as exc:
-        return _external_boot_denial(system_id, exc, ctx)
-    return None
 
 
 async def _enqueue_preactivation_authority_teardown(
@@ -802,149 +699,3 @@ async def _key_names_job(
         conn, principal=ctx.principal, key=key, kind=object_scoped_kind(_TEARDOWN_KIND, system_id)
     )
     return stored is not None and stored.object_id == job_id
-
-
-def _is_authority_marked(job: Job) -> bool:
-    return _AUTHORITY_MARKER in job.payload or "authority_system_v1" in job.payload
-
-
-def _is_settled_ordinary_teardown(job: Job | None) -> bool:
-    """Whether ``job`` is an unmarked teardown no worker attempt can still be running.
-
-    A canceled row qualifies only if no worker ever claimed it: `jobs.cancel` is cooperative, and
-    a recycled row restarts at attempt 1, which a still-running canceled attempt would match.
-    """
-    return (
-        job is not None
-        and not _is_authority_marked(job)
-        and (
-            job.state is JobState.FAILED
-            or (job.state is JobState.CANCELED and job.worker_id is None)
-        )
-    )
-
-
-async def _enqueue_authority_teardown(
-    conn: AsyncConnection,
-    ctx: RequestContext,
-    system: System,
-    activation: ExternalBootActivation,
-    system_id: str,
-    idempotency_key: str | None,
-    resolver: ProviderResolver | None,
-    *,
-    audit_recycle: bool = True,
-) -> ToolResponse:
-    """Route every durable external-boot history through its exact authority marker."""
-    if resolver is None:
-        return ToolResponse.failure(
-            system_id,
-            ErrorCategory.CONFIGURATION_ERROR,
-            detail="external-boot teardown requires the configured authority resolver",
-            suggested_next_actions=["systems.get"],
-            data={"reason": "external_boot_teardown_authority_unresolved"},
-        )
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(_SYSTEM_TEARDOWN_AUTHORITY_SQL, (system.id,))
-        bindings = await cur.fetchall()
-    if len(bindings) != 1 or UUID(str(bindings[0]["activation_id"])) != activation.id:
-        return ToolResponse.failure(
-            system_id,
-            ErrorCategory.CONFIGURATION_ERROR,
-            detail="the newest external-boot activation has no unambiguous authority route",
-            suggested_next_actions=["systems.get"],
-            data={"reason": "external_boot_teardown_authority_unresolved"},
-        )
-    prior = await dedup_replay(conn, _teardown_dedup_key(system.id))
-    # The worker refuses an ordinary teardown for external-boot history before any provider call,
-    # so a settled ordinary job is replaced by the authority teardown (ADR-0620 amendment, #2966).
-    replaces_ordinary = _is_settled_ordinary_teardown(prior)
-    if prior is not None and not replaces_ordinary:
-        marker = prior.payload.get(_AUTHORITY_MARKER)
-        if not isinstance(marker, dict) or marker.get("activation_id") != str(activation.id):
-            return ToolResponse.failure(
-                system_id,
-                ErrorCategory.CONFLICT,
-                detail="an ordinary teardown job cannot be replayed for external-boot history",
-                suggested_next_actions=["jobs.wait", "systems.get"],
-                data={"reason": "ordinary_teardown_fenced_by_external_boot"},
-            )
-        final_attempt_running = (
-            prior.state is JobState.RUNNING and prior.attempt >= prior.max_attempts
-        )
-        if prior.state is not JobState.FAILED and not final_attempt_running:
-            return job_envelope(prior, "system_id", system.id)
-    operation_identity = (
-        "sha256:"
-        + sha256(
-            f"{activation.id}\0system-teardown\0{activation.plan_identity}\0{_teardown_dedup_key(system.id)}".encode()
-        ).hexdigest()
-    )
-    binding = bindings[0]
-    try:
-        kind, payload = await build_external_boot_payload(
-            conn,
-            activation_id=activation.id,
-            purpose="teardown",
-            operation="teardown",
-            provider_kind=str(binding["provider_kind"]),
-            authority_instance=str(binding["authority_instance"]),
-            operation_identity=operation_identity,
-            resolver=resolver,
-        )
-    except CategorizedError as exc:
-        if prior is not None and prior.state is JobState.RUNNING:
-            return job_envelope(prior, "system_id", system.id)
-        return ToolResponse.failure(
-            system_id,
-            ErrorCategory.CONFIGURATION_ERROR,
-            detail=f"the external-boot teardown authority cannot be dispatched: {exc}",
-            suggested_next_actions=["systems.get"],
-            data={"reason": "external_boot_teardown_authority_unresolved"},
-        )
-    if (
-        prior is not None
-        and not replaces_ordinary
-        and dump_payload(kind, payload).get(_AUTHORITY_MARKER)
-        != prior.payload.get(_AUTHORITY_MARKER)
-    ):
-        return job_envelope(prior, "system_id", system.id)
-    # A failed authority teardown, or one whose final attempt's lease lapsed, with the identical
-    # marker is re-run (ADR-0620 amendments). The lapse is judged only by enqueue's UPDATE on the
-    # database clock, so a final attempt that is still live comes back unchanged and replays.
-    if prior is None:
-        recycle = queue.JobRecyclePolicy.NEVER
-    elif replaces_ordinary:
-        # The row is failed, or canceled and never claimed, as read under the System lock.
-        recycle = queue.JobRecyclePolicy.TERMINAL_OR_CANCELED
-    else:
-        recycle = queue.JobRecyclePolicy.FAILED_OR_LAPSED_EXHAUSTED
-    job, changed = await queue.enqueue_with_status(
-        conn,
-        kind,
-        payload,
-        job_authorizing(ctx, system.project),
-        _teardown_dedup_key(system.id),
-        recycle=recycle,
-    )
-    # A recycle keeps the first enqueuer as `job.authorizing` (ADR-0447, ADR-0435, ADR-0620); the
-    # requester is audited here. Break-glass is already recorded in `platform_audit_log`, and
-    # its platform admin need not hold the System's project.
-    if prior is not None and changed and audit_recycle:
-        await _audit_teardown_recycle(conn, ctx, system, job)
-    envelope = job_envelope(job, "system_id", system.id)
-    # A key already recorded for the replaced ordinary job names this same job row; recording it
-    # again would raise and roll the replacement back behind a stale replay.
-    if idempotency_key is not None and not (
-        replaces_ordinary
-        and await _key_names_job(conn, ctx, system.id, idempotency_key, envelope.object_id)
-    ):
-        await record_envelope(
-            conn,
-            principal=ctx.principal,
-            key=idempotency_key,
-            project=system.project,
-            kind=object_scoped_kind(_TEARDOWN_KIND, system.id),
-            envelope=envelope,
-        )
-    return envelope

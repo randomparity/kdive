@@ -28,7 +28,6 @@ from kdive.domain.external_boot_activation import Digest
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.handlers.external_boot.admission import build_external_boot_payload
 from kdive.jobs.payloads import ResolveRecoveryOrphanPayload
 from kdive.log import bind_context
 from kdive.mcp.platform_auth import audit_platform_denial
@@ -63,6 +62,7 @@ from kdive.services.external_boot import (
     check_external_boot_admission,
 )
 from kdive.services.external_boot.local_timing import local_external_boot_timing
+from kdive.services.external_boot.payloads import build_external_boot_payload
 from kdive.services.external_boot.routing import server_authority_instance
 
 RELEASE_TOOL = "runs.release_external_boot"

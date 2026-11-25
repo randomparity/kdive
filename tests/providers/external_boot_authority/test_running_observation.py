@@ -5,13 +5,13 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from kdive.domain.external_boot_values import KernelIdentity, RunningKernelObservation
 from kdive.jobs.authority_sender import AuthorityRequestSender
 from kdive.providers.external_boot_authority.protocol import (
     AuthorityMutationRequestV1,
     AuthorityRunningObservationV1,
 )
 from kdive.providers.external_boot_authority.transport import _dispatch
-from kdive.providers.ports.external_boot import KernelIdentity, RunningKernelObservation
 from tests.providers.external_boot_authority.service_support import _mutation, _service
 
 
@@ -75,7 +75,7 @@ async def test_running_read_uses_current_authority_without_journal_writes(
 async def test_running_read_rejects_supersession_after_provider_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from kdive.providers.external_boot_authority.service import AuthorityServiceError
+    from kdive.providers.external_boot_authority.protocol import AuthorityServiceError
 
     service, repository, adapter, peer, takeover = _service(tmp_path)
 

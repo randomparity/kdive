@@ -28,9 +28,15 @@ from kdive.db.external_boot_authority_journal import (
     resolve_current_release_phase_authority_binding,
 )
 from kdive.domain.external_boot_activation import ExternalBootReleaseEvidenceV1
+from kdive.domain.external_boot_values import (
+    ExternalBootPlan,
+    OpaqueProviderRef,
+    RecoveryObjectObservation,
+)
 from kdive.domain.remote_module_attempt_preparation import ModuleAttemptPreparationRequestV1
 from kdive.providers.external_boot_authority.journal import record_digest
 from kdive.providers.external_boot_authority.protocol import (
+    AuthenticatedPeer,
     AuthorityAcknowledgementV1,
     AuthorityCleanupEvidenceContextV1,
     AuthorityMutationRequestV1,
@@ -40,15 +46,9 @@ from kdive.providers.external_boot_authority.protocol import (
     AuthorityTeardownMutationRequestV1,
     JournalRecordV1,
 )
-from kdive.providers.external_boot_authority.service import AuthenticatedPeer
 from kdive.providers.external_boot_authority.teardown import (
     AuthorityTeardownReservationV1,
     AuthorityTeardownSnapshot,
-)
-from kdive.providers.ports.external_boot import (
-    ExternalBootPlan,
-    OpaqueProviderRef,
-    RecoveryObjectObservation,
 )
 
 

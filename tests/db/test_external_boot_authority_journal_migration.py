@@ -19,6 +19,7 @@ from kdive.db.external_boot_authority_journal import _suspended
 from kdive.providers.external_boot_authority.journal import FileAuthorityJournal
 from kdive.providers.external_boot_authority.protocol import (
     GENESIS_DIGEST,
+    AuthenticatedPeer,
     AuthorityAcknowledgementV1,
     AuthorityMutationRequestV1,
     AuthorityOperation,
@@ -29,10 +30,7 @@ from kdive.providers.external_boot_authority.protocol import (
     canonical_record_bytes,
     record_digest,
 )
-from kdive.providers.external_boot_authority.service import (
-    AuthenticatedPeer,
-    ExternalBootAuthorityService,
-)
+from kdive.providers.external_boot_authority.service import ExternalBootAuthorityService
 from tests.db.external_boot_authority_support import (
     _allocate,
     _RoleDsns,

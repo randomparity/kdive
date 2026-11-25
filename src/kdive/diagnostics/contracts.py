@@ -13,4 +13,10 @@ WORKER_UNAVAILABLE_DETAIL = (
 class WorkerCheckDispatcher(Protocol):
     """Run worker-vantage checks and return their three-state results."""
 
-    async def run_worker_checks(self) -> list[CheckResult]: ...
+    async def run_worker_checks(self, *, deadline: float | None = None) -> list[CheckResult]:
+        """Use the shared report deadline in event-loop monotonic seconds, when supplied.
+
+        Expiry returns attributed errors for unfinished checks; callers can retry diagnostics
+        after worker readiness is restored. None retains the dispatcher's local budget.
+        """
+        ...
