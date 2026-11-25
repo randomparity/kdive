@@ -16,9 +16,11 @@ inspection. It does not use the HTTP proxy.
 ## Decision
 
 Remove the proxy service, its private network, server dependency and endpoint override. Remove
-the proxy-only HTTP implementation and executable entry point. Retain `WorkerLifecycleGate`
-at its existing import path, the Docker marker constructor, and the legacy endpoint setting
-and validation. These compatibility surfaces do not supply termination evidence.
+the proxy-only HTTP implementation and executable entry point. Remove the
+`KDIVE_DOCKER_DEATH_API` setting, its `http://` validation and the Docker marker's unread
+endpoint field: nothing contacted that endpoint. `WorkerLifecycleGate` moves to
+`kdive.processes.lifecycle.compose.worker_lifecycle_gate`, a module named for what remains.
+`KDIVE_WORKER_DEATH_VERIFIER` keeps its values; `docker` still registers the recovery tools.
 
 ## Consequences
 
@@ -26,6 +28,8 @@ The reference graph needs no inspect listener or socket-mounted proxy container.
 registration and exact-holder witness enforcement remain. Existing supported upgrades use
 `just compose-stop` before selecting the new configuration and image; its gated teardown
 removes orphans and preserves named volumes. This does not authorize protocol-3 upgrades.
+A deployment environment that still sets `KDIVE_DOCKER_DEATH_API` is unaffected: the variable is
+no longer read.
 
 ## Considered & rejected
 
@@ -33,7 +37,9 @@ removes orphans and preserves named volumes. This does not authorize protocol-3 
   `docker compose -f docker-compose.yml --profile managed-worker config --format json` includes
   the root proxy and its socket mount. ADR-0722's recovery amendment identifies the durable
   witness as the active proof; the proxy serves no recovery caller.
-- **Remove the marker endpoint contract too.** judgment: unrelated API churn is unnecessary for
-  retiring the service. Preserve the existing constructor and endpoint validation.
+- **Keep the endpoint setting and its validation for compatibility.** verified: at `b7f08f30f`
+  no caller reads the Docker marker's endpoint, and its default names the removed service. A test
+  with a stale `KDIVE_DOCKER_DEATH_API` in the environment builds the same marker, so an
+  upgraded deployment that still sets the variable starts unchanged.
 - **Replace the lifecycle gate with direct teardown.** verified: ADR-0533 requires registration and
   retained terminal evidence before container removal. Removing that gate would weaken recovery.

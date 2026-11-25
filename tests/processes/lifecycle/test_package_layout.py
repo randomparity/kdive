@@ -7,7 +7,7 @@ from kdive.worker_lifecycle.worker_incarnation import worker_incarnation_id
 
 _LIFECYCLE_MODULES = (
     "compose.compose_worker_lifecycle",
-    "compose.docker_death_api",
+    "compose.worker_lifecycle_gate",
     "kubernetes.kubernetes_credential_broker",
     "kubernetes.kubernetes_credential_init",
     "kubernetes.kubernetes_termination_witness",

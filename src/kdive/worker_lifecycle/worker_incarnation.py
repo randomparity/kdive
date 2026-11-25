@@ -12,7 +12,6 @@ from pydantic import SecretStr
 
 import kdive.config as config
 from kdive.config.core_settings import (
-    DOCKER_DEATH_API,
     POD_NAME,
     POD_NAMESPACE,
     POD_UID,
@@ -111,8 +110,6 @@ class LocalWorkerDeathVerifier(WorkerDeathVerifier):
 class DockerWorkerDeathVerifier(WorkerDeathVerifier):
     """Docker configuration marker enabling recovery-tool registration, not death proof."""
 
-    endpoint: str = "http://worker-death-api:2375"
-
 
 @dataclass(frozen=True, slots=True)
 class KubernetesWorkerDeathVerifier(WorkerDeathVerifier):
@@ -120,7 +117,7 @@ class KubernetesWorkerDeathVerifier(WorkerDeathVerifier):
 
 
 def worker_death_verifier_from_env() -> WorkerDeathVerifier | None:
-    """Build the registration marker, preserving the existing configuration validation.
+    """Build the registration marker selected by ``KDIVE_WORKER_DEATH_VERIFIER``.
 
     ADR-0722's recovery-evidence amendment assigns death proof to the witness's
     exact-holder termination row. These markers never verify a worker directly.
@@ -131,10 +128,7 @@ def worker_death_verifier_from_env() -> WorkerDeathVerifier | None:
     if kind == "local":
         return LocalWorkerDeathVerifier()
     if kind == "docker":
-        endpoint = config.require(DOCKER_DEATH_API)
-        if not endpoint.startswith("http://"):
-            raise RuntimeError("KDIVE_DOCKER_DEATH_API must use http:// on a private network")
-        return DockerWorkerDeathVerifier(endpoint=endpoint)
+        return DockerWorkerDeathVerifier()
     if kind == "kubernetes":
         return KubernetesWorkerDeathVerifier()
     raise RuntimeError(f"unsupported KDIVE_WORKER_DEATH_VERIFIER: {kind}")

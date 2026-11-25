@@ -53,6 +53,9 @@ _NOT_ENV: frozenset[str] = frozenset(
         # Removed by ADR-0723 (#3121); tests/scripts/test_kdive_drgn_helper.py sets it to prove
         # the helper ignores it.
         "KDIVE_BTF_PATH",
+        # Removed by ADR-0849; tests set it to prove a stale value is ignored and that no
+        # setting or Compose service carries the name.
+        "KDIVE_DOCKER_DEATH_API",
         # A config-validation error message token in tests/mcp/core/test_app.py.
         "KDIVE_S3_ENDPOINT",
         # Internal bash array constants in scripts/live-stack/lib.sh (unconditional assignment,

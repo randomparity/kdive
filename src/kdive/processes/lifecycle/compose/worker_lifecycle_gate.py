@@ -1,7 +1,4 @@
-"""Evidence-preserving Docker lifecycle gate for Compose (ADR-0849).
-
-The established module path remains the gate's import surface.
-"""
+"""Evidence-preserving Docker lifecycle gate for Compose (ADR-0849)."""
 
 from __future__ import annotations
 

@@ -4,7 +4,6 @@ import pytest
 
 import kdive.config as config
 from kdive.config.core_settings import (
-    DOCKER_DEATH_API,
     KUBERNETES_WITNESS_ORDINAL_CEILING,
     POD_NAME,
     POD_NAMESPACE,
@@ -20,10 +19,14 @@ def test_worker_death_settings_have_fail_closed_defaults() -> None:
     config.load({})
     assert config.require(WORKER_INCARNATION_KIND) == "local"
     assert config.require(WORKER_DEATH_VERIFIER) == "disabled"
-    assert config.require(DOCKER_DEATH_API) == "http://worker-death-api:2375"
     assert config.get(POD_NAMESPACE) is None
     assert config.get(POD_NAME) is None
     assert config.get(POD_UID) is None
+
+
+def test_retired_docker_endpoint_is_not_a_setting() -> None:
+    """The proxy endpoint left with its service; no registered setting keeps the name (ADR-0849)."""
+    assert "KDIVE_DOCKER_DEATH_API" not in {setting.name for setting in config.all_settings()}
 
 
 @pytest.mark.parametrize(
