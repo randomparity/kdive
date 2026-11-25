@@ -1,5 +1,5 @@
 [build-system]
-requires = ["uv_build==0.13.7"]
+requires = ["uv_build==0.13.9"]
 build-backend = "uv_build"
 
 [project]
@@ -12,7 +12,7 @@ readme = "README.md"
 requires-python = "==3.14.*"
 dependencies = [
   "fastmcp-slim[server,client]==3.4.4",
-  "psycopg[binary]==3.3.8",
+  "psycopg[binary]==3.3.9",
   "psycopg-pool==3.3.3",
   "boto3==1.43.21",
   "botocore==1.43.126",
@@ -41,8 +41,8 @@ Changelog = "https://github.com/randomparity/kdive/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
-  "ruff==0.17.4",
-  "ty==0.0.99",
+  "ruff==0.17.5",
+  "ty==0.0.107",
   "pytest==9.2.0",
   "pytest-xdist==3.8.0",
   "testcontainers==4.15.0",
