@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 # Test image for `just test-linux` (ADR-0717). It builds at the engine's native architecture,
 # so it has no --platform. The bases reuse the root Dockerfile's pins; dependabot keeps both.
-FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.10@sha256:a3ea1357342c1a4bf9a0c53a3deb1b55379aefa037338d8113d5771efa01774f AS uv
 
-FROM python:3.14.6-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30
+FROM python:3.15.1-slim-bookworm@sha256:575f8bc12ec26542e0678bc6b60e385218248019d433157ec327264a78c3a853
 COPY --from=uv /uv /uvx /usr/local/bin/
 # libvirt-dev and the build tools compile libvirt-python. The slim base lacks tools that CI's
 # runner has and tests call: `ss` (iproute2), `ps`/`pgrep` (procps), `ssh-keygen`

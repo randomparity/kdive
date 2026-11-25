@@ -18,7 +18,7 @@
 # them natively on the amd64 CI runner instead of running Maven's JVM under qemu-user
 # emulation — which segfaults for ppc64le (ADR-0355). The runtime stage below is the only
 # arch-specific layer, and it merely COPYs jars, so no target-arch code executes at build.
-FROM --platform=$BUILDPLATFORM maven:3-eclipse-temurin-26@sha256:d5617b9a6307e1b51dc7c55edf09bacb66f1c91fb861949c34a3a0d4e16bd241 AS builder
+FROM --platform=$BUILDPLATFORM maven:3-eclipse-temurin-26@sha256:69a6c37f0a91fca2c9d0cdd684c9c0ea7b1bc00d4196749c24440b2e02ad163d AS builder
 
 # The one version pin that drives the image; keep in lockstep with pom.xml.
 ARG MOCK_OAUTH2_SERVER_VERSION=3.0.3
